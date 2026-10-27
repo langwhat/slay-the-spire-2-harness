@@ -25,7 +25,7 @@ def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_p
         waits = asyncio.Queue[None]()
         start = asyncio.Event()
 
-        async def wait() -> None:
+        async def wait(seconds: float) -> None:
             await waits.put(None)
             await start.wait()
 
@@ -494,7 +494,7 @@ def test_native_control_reply_is_durable_while_start_is_still_waiting(tmp_path: 
         release = asyncio.Event()
         paused = True
 
-        async def wait() -> None:
+        async def wait(seconds: float) -> None:
             waiting.set()
             await release.wait()
 
@@ -912,7 +912,7 @@ def test_pause_retry_diagnostics_and_durable_children_without_reply_history(tmp_
                 json={"status": "completed", "observation": observation.model_dump(mode="json")},
             )
 
-        async def wait() -> None:
+        async def wait(seconds: float) -> None:
             nonlocal waits
             waits += 1
             lines = [json.loads(line) for line in console.getvalue().splitlines()]
@@ -961,5 +961,101 @@ def test_pause_retry_diagnostics_and_durable_children_without_reply_history(tmp_
             ("state", 2),
         ]
         assert all(line["event"] != "recording_recovered" for line in lines)
+
+    asyncio.run(scenario())
+
+
+def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
+    tmp_path: Path,
+) -> None:
+    from sts2_harness.game import Endpoint
+
+    observation = native.Observation.model_validate_json(RUN)
+    busy = observation.model_copy(
+        update={
+            "input_readiness": native.InputReadiness.BUSY,
+            "state": observation.state.model_copy(update={"control": native.StateControl.BUSY}),
+        }
+    )
+    durations: list[float] = []
+    status_index = 0
+    state_index = 0
+    operation_id = ""
+
+    async def wait(seconds: float) -> None:
+        durations.append(seconds)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal status_index, state_index, operation_id
+        if request.url.path == "/state":
+            state_index += 1
+            return httpx.Response(
+                200,
+                content=native.StateCompleted(
+                    status=native.ResultStatus.COMPLETED,
+                    observation=busy if state_index == 1 else observation,
+                ).to_json(),
+            )
+        if request.url.path == "/control":
+            return httpx.Response(200, json={"mode": "paused"})
+        if request.url.path == "/action":
+            operation_id = native.StepRequest.model_validate_json(request.content).operation_id
+            return httpx.Response(200, json={"operation_id": operation_id, "status": "pending"})
+        assert request.url.path == "/status"
+        status_index += 1
+        if status_index == 8:
+            return httpx.Response(503)
+        receipt = None
+        if status_index in (5, 6):
+            receipt = {
+                "operation_id": operation_id,
+                "status": "pending" if status_index == 5 else "completed",
+            }
+            if status_index == 6:
+                receipt["boundary"] = "ready"
+        return httpx.Response(
+            200,
+            json={
+                "location": observation.location.model_dump(mode="json"),
+                "control_intent": "paused" if status_index in (1, 5, 6, 7) else "running",
+                "input_readiness": "busy" if status_index in (2, 5) else "ready",
+                "receipt": receipt,
+            },
+        )
+
+    async def scenario() -> None:
+        archive = Journal.create(
+            tmp_path / "archive.sqlite",
+            Manifest(
+                recording_id="polling", core_version="test", game_instance_id="game", run_id="run"
+            ),
+        )
+        async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+            game = RecordedGame(
+                LiveGame(
+                    client,
+                    namespace="polling",
+                    audit=archive,
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                    wait=wait,
+                ),
+                archive,
+            )
+            await game.admit()
+            await game.settle(
+                native.RouteKey.model_validate(observation.location.model_dump()),
+                native.Interact(kind=native.StepKind.INTERACT, action="travel"),
+            )
+            await game.pause_until_resumed(
+                Reason(code=ReasonCode.QUERY_FAILED, message="Required read unavailable.")
+            )
+        assert durations == [1.0, 0.1, 0.1, 0.1, 1.0, 0.1]
+        assert [len(record.attempts) for record in archive.operations()] == [6, 3, 5]
+        assert [
+            attempt.endpoint for record in archive.operations() for attempt in record.attempts
+        ].count(Endpoint.STATUS) == 9
+        archive.close()
 
     asyncio.run(scenario())

@@ -256,7 +256,7 @@ class BattleHTTP:
     def current(self) -> native.Observation:
         return self.ending if len(self.actions) >= self.steps_to_end else self.opening
 
-    async def wait(self) -> None:
+    async def wait(self, seconds: float) -> None:
         self.waiting.set()
         await self.release.wait()
         self.release.clear()

@@ -186,10 +186,6 @@ class GameIO(Protocol):
     async def pause_until_resumed(self, reason: Reason) -> GameReply[Resumed]: ...
 
 
-async def _poll_wait() -> None:
-    await asyncio.sleep(0.1)
-
-
 class GameReadError(Exception):
     pass
 
@@ -229,7 +225,7 @@ class LiveGame:
         game_instance_id: str,
         run_id: str,
         wait_for_start: bool = False,
-        wait: Callable[[], Awaitable[None]] = _poll_wait,
+        wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not namespace:
             raise ValueError("A game session namespace is required.")
@@ -382,7 +378,7 @@ class LiveGame:
                 native.InputReadiness.SELECTION,
             ):
                 return True
-            await self._wait()
+            await self._wait(1.0 if status.control_intent is native.ControlIntent.PAUSED else 0.1)
 
     async def _fresh_observation(self) -> native.Observation:
         observation = await self._observe()
@@ -395,7 +391,7 @@ class LiveGame:
                 native.InputReadiness.SELECTION,
             )
         ):
-            await self._wait()
+            await self._wait(0.1)
             status = await self._status()
             if status.location.run_id is None:
                 raise GameLifetimeEnded(status.location)
@@ -450,9 +446,9 @@ class LiveGame:
                         raise GameLifetimeEnded(observation.location)
                     return observation
             except (ClientUnavailable, GameReadError):
-                await self._wait()
+                await self._wait(0.1)
                 continue
-            await self._wait()
+            await self._wait(1.0)
 
     async def _settle(self, request: native.StepRequest) -> SettledReceipt | None:
         try:
@@ -483,4 +479,4 @@ class LiveGame:
                 return None
             if not isinstance(receipt, native.ReceiptPending):
                 return receipt
-            await self._wait()
+            await self._wait(0.1)

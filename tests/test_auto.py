@@ -407,7 +407,7 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
             )
         return http.model(request)
 
-    async def wait() -> None:
+    async def wait(seconds: float) -> None:
         nonlocal paused
         assert len(http.actions) == 1
         paused = False
@@ -492,7 +492,7 @@ def test_unknown_language_uses_strategy_and_shop_stays_with_strategy_after_resum
             )
         return http.model(request)
 
-    async def wait() -> None:
+    async def wait(seconds: float) -> None:
         nonlocal paused
         assert http.actions == []
         http.current = http.current.model_copy(update={"game_language": "zhs"})

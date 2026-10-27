@@ -1,8 +1,9 @@
 # STS2 Harness
 
-The no-save/load gameplay core provides an offline startup configuration check and a
-Responses model client. The startup CLI does not contact game or model services; the
-gameplay loop is not implemented yet.
+The no-save/load gameplay core provides a programmatic single-run gameplay loop through
+`RunSession` and `DefaultFlow`, with a Responses model client and recorded game IO.
+The current CLI offers offline configuration checks and archive inspection; ordinary user
+startup, the external facade, and software replay are not implemented yet.
 
 Install Python 3.12+ and [uv](https://docs.astral.sh/uv/), then run:
 
@@ -172,8 +173,31 @@ receipts, queries, and material reads. Sequence and confirmed game cursor expres
 they do not imply that an adjacent action was caused by a particular model request.
 
 Reopening provides offline inspection only. Schema versions are validated without archive
-migration. Production session launching, software replay, native restoration, and evaluation
-remain unsupported; the manifest does not claim exact replay.
+migration. Ordinary user startup, the external facade, software replay, native restoration,
+and evaluation remain unsupported; the manifest does not claim exact replay.
+
+## Single-run sessions
+
+`sts2_harness.session.RunSession` assembles `ModClient`, `Llm`, `Manifest`, and an archive
+path into one run. The manifest supplies the bound game/run identities and the unique
+initial notes value; `initial_notes` must be explicit, including `""` for known empty notes.
+Pass resources that the session may own and close:
+
+```python
+from sts2_harness.session import RunSession
+
+async with RunSession(client, manifest, archive_path, model=model) as session:
+    ended = await session.run()
+```
+
+The session owns and releases the supplied client and optional model, creates and closes
+its Journal, and shares one Notes owner and recovery budget. `DefaultFlow` waits for Start,
+schedules Run and Combat, completes pending battle handoffs before creating the next
+Combat, rebuilds Run context at act boundaries, and returns on termination or run change.
+It does not launch a game or select a character. Run chooses automatic progression or
+strategy within the same execution path; shop entry actions remain separate units and
+purchases and departure remain strategy decisions. Validation uses fake HTTP and local
+archives; this does not establish complete real-game acceptance.
 
 ## Run decisions and strategy notes
 

@@ -341,7 +341,7 @@ def test_act_initialization_waits_for_start_and_rechecks_lifetime_without_replay
             )
         return campaign.mod(request)
 
-    async def wait() -> None:
+    async def wait(seconds: float) -> None:
         waiting.set()
         await release.wait()
 
@@ -534,7 +534,7 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
             paused = True
         return result
 
-    async def wait() -> None:
+    async def wait(seconds: float) -> None:
         waiting.set()
         await release.wait()
 

@@ -455,7 +455,7 @@ def test_pause_waits_for_the_next_unit_and_explicit_start_after_programmatic_pau
         steps: list[native.StepRequest] = []
         controls: list[str] = []
 
-        async def wait() -> None:
+        async def wait(seconds: float) -> None:
             waiting.set()
             await start.wait()
 
@@ -744,7 +744,7 @@ def test_unconfirmed_pending_work_blocks_the_next_decision_until_native_readines
         waiting = asyncio.Event()
         release = asyncio.Event()
 
-        async def wait() -> None:
+        async def wait(seconds: float) -> None:
             waiting.set()
             await release.wait()
 
@@ -903,7 +903,7 @@ def test_fresh_observation_readiness_and_pending_settlement_precede_new_decision
         paused = False
         operation: str | None = None
 
-        async def wait() -> None:
+        async def wait(seconds: float) -> None:
             waiting.set()
             await release.wait()
 
@@ -1078,7 +1078,7 @@ def test_recovery_pause_keeps_waiting_through_status_and_started_observation_fai
         controls = 0
         wait_count = 0
 
-        async def wait() -> None:
+        async def wait(seconds: float) -> None:
             nonlocal wait_count
             wait_count += 1
             await waits.put(wait_count)

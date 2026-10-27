@@ -35,10 +35,6 @@ type RoleFactory = Callable[
 type FlowFactory = Callable[[Execution, ToolRecoveryBudget, Notes, RunRole, CombatFactory], RunFlow]
 
 
-async def _wait() -> None:
-    await asyncio.sleep(0.1)
-
-
 class RunSession:
     def __init__(
         self,
@@ -53,7 +49,7 @@ class RunSession:
         run_factory: RunFactory | None = None,
         combat_factory: RoleFactory | None = None,
         flow_factory: FlowFactory = DefaultFlow,
-        wait: Callable[[], Awaitable[None]] = _wait,
+        wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if manifest.initial_notes is None:
             raise ValueError("A run session requires explicit initial notes in its manifest.")

@@ -158,8 +158,19 @@ class ToolCatalog:
             )
         if not isinstance(task, ActTask):
             return QueryToolResult(
-                _problem(
-                    ReasonCode.WRONG_ROLE, "Complete this maintenance task without game actions."
+                Rejected(
+                    reason=Reason(
+                        code=ReasonCode.WRONG_ROLE,
+                        message="Complete this maintenance task without game actions.",
+                    ),
+                    suggested_actions=(
+                        Suggestion(
+                            message=(
+                                "Finish this task with a concise text response; "
+                                "it does not take game actions."
+                            )
+                        ),
+                    ),
                 ),
                 None,
             )
