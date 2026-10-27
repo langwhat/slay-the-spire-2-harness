@@ -244,6 +244,7 @@ class ErrorCode(StrEnum):
     DISPATCH_FAILED = "dispatch_failed"
     EXECUTION_UNCERTAIN = "execution_uncertain"
     INTERNAL_ERROR = "internal_error"
+    CONTROL_UNAVAILABLE = "control_unavailable"
 
 
 class NamedDefinition(WireModel):
@@ -1292,3 +1293,79 @@ type NativeMatch = CardMatch | NonCardMatch
 
 
 type CatalogReply = CatalogCompleted | CatalogError
+
+
+class RouteKey(WireModel):
+    game_instance_id: Nonempty
+    run_id: Nonempty
+    node_id: Nonempty
+    owner: DecisionOwner
+
+
+class StepKind(StrEnum):
+    PLAY_CARD = "play_card"
+    USE_POTION = "use_potion"
+    DISCARD_POTION = "discard_potion"
+    END_TURN = "end_turn"
+    INTERACT = "interact"
+    SELECT = "select"
+
+
+class PlayCard(WireModel):
+    kind: Literal[StepKind.PLAY_CARD]
+    card: Nonempty
+    target: Nonempty | MISSING = MISSING
+
+
+class UsePotion(WireModel):
+    kind: Literal[StepKind.USE_POTION]
+    potion: Nonempty
+    target: Nonempty | MISSING = MISSING
+
+
+class DiscardPotion(WireModel):
+    kind: Literal[StepKind.DISCARD_POTION]
+    potion: Nonempty
+
+
+class EndTurn(WireModel):
+    kind: Literal[StepKind.END_TURN]
+
+
+class Interact(WireModel):
+    kind: Literal[StepKind.INTERACT]
+    action: Nonempty
+
+
+class Select(WireModel):
+    kind: Literal[StepKind.SELECT]
+    refs: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)]
+
+
+type NativeStep = Annotated[
+    PlayCard | UsePotion | DiscardPotion | EndTurn | Interact | Select, Field(discriminator="kind")
+]
+
+
+class StepRequest(WireModel):
+    operation_id: Nonempty
+    expected_route: RouteKey
+    step: NativeStep
+
+
+class ControlRequest(WireModel):
+    mode: ControlIntent
+
+
+class ControlReply(WireModel):
+    mode: ControlIntent
+
+
+class ControlFailure(WireModel):
+    code: Literal[ErrorCode.CONTROL_UNAVAILABLE]
+    message: str
+
+
+class ControlFailed(WireModel):
+    status: Literal[ResultStatus.FAILED]
+    error: ControlFailure

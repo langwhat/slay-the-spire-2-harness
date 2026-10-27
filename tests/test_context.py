@@ -21,29 +21,27 @@ from sts2_harness.client.models import (
 )
 from sts2_harness.context import (
     ActionToolResult,
-    ActTask,
+    CombatActInput,
+    CombatReviewInput,
     Context,
     QueryToolResult,
     ReadCompleted,
-    ReviewTask,
 )
 from sts2_harness.context.models import (
     ActContent,
-    BattleLocation,
-    BattleReport,
-    BoundaryValues,
     ResultMessage,
     ReviewContent,
     TaskMessage,
 )
-from sts2_harness.context.results import ActionCompleted, Failed, Reason, ReasonCode, Suggestion
+from sts2_harness.decisions import BattleLocation, BattleReport, BoundaryValues
 from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall
+from sts2_harness.results import ActionCompleted, Failed, Reason, ReasonCode, Suggestion
 
 
 def test_task_delivers_complete_state_and_latest_details_without_rewriting_history() -> None:
     observation = Observation.model_validate_json(COMBAT)
     context = Context(DecisionOwner.COMBAT)
-    context.append_task(ActTask(), observation)
+    context.append_task(CombatActInput(), observation)
     first_input = context.model_input()
     assert len(first_input) == 1
     first = first_input[0]
@@ -53,7 +51,7 @@ def test_task_delivers_complete_state_and_latest_details_without_rewriting_histo
     assert first.content.observation.state.piles.hand == ("c2", "c1")
     assert first.content.observation.updates.objects is not MISSING
     assert first.content.observation.updates.objects["c1"].name == "牌"
-    context.append_task(ActTask(), observation)
+    context.append_task(CombatActInput(), observation)
     assert context.model_input() == first_input
 
 
@@ -330,11 +328,11 @@ def test_task_omission_uses_only_the_actual_tail_and_preserves_native_assistant(
     context.append_tool_result(
         call, ActionToolResult(ActionCompleted(completed_steps=1), observation)
     )
-    context.append_task(ActTask(), observation)
+    context.append_task(CombatActInput(), observation)
     assert len(context.model_input()) == 1
-    context.append_task(ActTask(opening_notes="固定开场笔记"), observation)
+    context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
     assert len(context.model_input()) == 2
-    context.append_task(ActTask(opening_notes="固定开场笔记"), observation)
+    context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
     assert len(context.model_input()) == 2
     assistant = AssistantMessage(
         ResponsesReply.from_json(
@@ -343,18 +341,18 @@ def test_task_omission_uses_only_the_actual_tail_and_preserves_native_assistant(
         )
     )
     context.append_reply(assistant)
-    context.append_task(ActTask(opening_notes="固定开场笔记"), observation)
+    context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
     assert context.model_input()[-2] is assistant
     assert len(context.model_input()) == 4
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     assert isinstance(context.model_input()[-1], ResultMessage)
-    context.append_task(ActTask(), observation)
+    context.append_task(CombatActInput(), observation)
     assert len(context.model_input()) == 6
     # Technical acquisition identity does not create a different gameplay observation.
     refreshed = observation.model_copy(
         update={"stamp": observation.stamp.model_copy(update={"observation_sequence": 99})}
     )
-    context.append_task(ActTask(), refreshed)
+    context.append_task(CombatActInput(), refreshed)
     assert len(context.model_input()) == 6
 
 
@@ -362,7 +360,7 @@ def test_review_appends_its_actual_report_without_unrelated_live_state() -> None
 
     observation = Observation.model_validate_json(COMBAT)
     context = Context(DecisionOwner.COMBAT)
-    context.append_task(ActTask(opening_notes="固定开场笔记"), observation)
+    context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
     report = BattleReport(
         location=BattleLocation(act=1, floor=1, room_type="monster"),
         result=TerminalResult.VICTORY,
@@ -370,7 +368,7 @@ def test_review_appends_its_actual_report_without_unrelated_live_state() -> None
         before=BoundaryValues(hp=10, max_hp=10, gold=0),
         after=BoundaryValues(hp=8, max_hp=10, gold=0),
     )
-    context.append_task(ReviewTask(report))
+    context.append_task(CombatReviewInput(report))
     review = context.model_input()[-1]
     assert isinstance(review, TaskMessage)
     assert isinstance(review.content, ReviewContent)

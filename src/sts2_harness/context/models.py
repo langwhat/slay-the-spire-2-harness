@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Literal
 
-from pydantic import MISSING, Field
+from pydantic import MISSING
 
 from sts2_harness.client import models as native
-from sts2_harness.context.results import ContextValue, Outcome, QueryData, ToolResult
+from sts2_harness.decisions import BattleReport
 from sts2_harness.llm.messages import TextMessage, ToolResultMessage
+from sts2_harness.results import Outcome, QueryData, SemanticValue, ToolResult
 
 
 class TaskKind(StrEnum):
@@ -17,11 +18,11 @@ class TaskKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class ActTask:
+class CombatActInput:
     opening_notes: str | MISSING = MISSING
 
 
-class Updates(ContextValue):
+class Updates(SemanticValue):
     objects: native.Directory[native.ObjectEntry] | MISSING = MISSING
     descriptions: native.Directory[str | None] | MISSING = MISSING
     modifier_descriptions: native.Directory[native.ModifierDescriptions] | MISSING = MISSING
@@ -31,7 +32,7 @@ class Updates(ContextValue):
     map: native.PublicMap | MISSING = MISSING
 
 
-class ForeignState(ContextValue):
+class ForeignState(SemanticValue):
     control: native.StateControl
     progress: native.Progress
     relics: tuple[str, ...]
@@ -71,7 +72,7 @@ class FinishedState(ForeignState):
 type ShortState = native.State | ForeignRunState | ForeignCombatState | FinishedState
 
 
-class VisibleObservation(ContextValue):
+class VisibleObservation(SemanticValue):
     state: ShortState
     objects: native.Directory[native.ObjectEntry]
     descriptions: native.Directory[str | None]
@@ -82,45 +83,24 @@ class VisibleObservation(ContextValue):
     map: native.PublicMap | MISSING = MISSING
 
 
-class ActObservation(ContextValue):
+class ActObservation(SemanticValue):
     state: ShortState
     updates: Updates
 
 
-class ActContent(ContextValue):
+class ActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     instruction: str = "Make the next battle decision using combat_act."
     observation: ActObservation
     opening_notes: str | MISSING = MISSING
 
 
-class BattleLocation(ContextValue):
-    act: Annotated[int, Field(ge=0)] | None
-    floor: Annotated[int, Field(ge=0)] | None
-    room_type: str | None
-
-
-class BoundaryValues(ContextValue):
-    hp: Annotated[int, Field(ge=0)]
-    max_hp: Annotated[int, Field(ge=0)]
-    gold: Annotated[int, Field(ge=0)]
-
-
-class BattleReport(ContextValue):
-    location: BattleLocation
-    result: native.TerminalResult
-    last_observed_turn: Annotated[int, Field(ge=0)] | None
-    before: BoundaryValues
-    after: BoundaryValues
-    encounter: native.NamedDefinition | MISSING = MISSING
-
-
 @dataclass(frozen=True, slots=True)
-class ReviewTask:
+class CombatReviewInput:
     battle_report: BattleReport
 
 
-class ReviewContent(ContextValue):
+class ReviewContent(SemanticValue):
     task: Literal[TaskKind.REVIEW] = TaskKind.REVIEW
     instruction: str = (
         "Review this battle for Run using its retained history and the supplied report. "
@@ -129,17 +109,17 @@ class ReviewContent(ContextValue):
     battle_report: BattleReport
 
 
-type DecisionTask = ActTask | ReviewTask
+type CombatInput = CombatActInput | CombatReviewInput
 
 
 @dataclass(frozen=True, slots=True)
 class TaskMessage(TextMessage):
     content: ActContent | ReviewContent
-    task: DecisionTask
+    task: CombatInput
     observation: native.Observation | None
 
 
-class ProjectedResult(ContextValue):
+class ProjectedResult(SemanticValue):
     outcome: Outcome
     state: ShortState | None
     updates: Updates

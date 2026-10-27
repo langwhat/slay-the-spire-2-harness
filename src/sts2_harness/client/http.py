@@ -1,4 +1,4 @@
-"""Single read requests to the Mod, without retries or retained game state."""
+"""Single requests to the Mod, without retries or retained game state."""
 
 import json
 from enum import StrEnum
@@ -17,6 +17,10 @@ from sts2_harness.client.models import (
     CatalogMode,
     CatalogReply,
     CatalogRequest,
+    ControlFailed,
+    ControlIntent,
+    ControlReply,
+    ControlRequest,
     DetailData,
     ErrorCode,
     HistoryData,
@@ -33,9 +37,14 @@ from sts2_harness.client.models import (
     SearchData,
     StateReply,
     Status,
+    StepReceipt,
+    StepRequest,
     TechnicalError,
     WireModel,
 )
+
+type ActionResult = StepReceipt | InvalidRequestReply | TechnicalError
+type ControlResult = ControlReply | ControlFailed | InvalidRequestReply | TechnicalError
 
 type StatusResult = Status | InvalidRequestReply | TechnicalError
 type StateResult = StateReply | InvalidRequestReply | TechnicalError
@@ -43,6 +52,8 @@ type InspectResult = InspectReply | InvalidRequestReply | TechnicalError
 type CatalogResult = CatalogReply | InvalidRequestReply | TechnicalError
 type QueryResult = StateResult | InspectResult
 
+_ACTION = TypeAdapter(StepReceipt)
+_CONTROL = TypeAdapter(ControlReply | ControlFailed)
 _STATUS = TypeAdapter(Status)
 _STATE = TypeAdapter(StateReply)
 _INSPECT = TypeAdapter(InspectReply)
@@ -63,7 +74,7 @@ class ClientUnavailable(Exception):
 
     def __init__(self, reason: ClientFailureKind) -> None:
         self.reason = reason
-        super().__init__(f"Mod read unavailable: {reason.value}.")
+        super().__init__(f"Mod request unavailable: {reason.value}.")
 
 
 class _UnknownNativeCategory(Exception):
@@ -105,14 +116,20 @@ class ModClient:
     ) -> None:
         await self._http.aclose()
 
+    async def submit(self, request: StepRequest) -> ActionResult:
+        return await self._request("POST", "/action", _ACTION, request)
+
+    async def control(self, mode: ControlIntent) -> ControlResult:
+        return await self._request("POST", "/control", _CONTROL, ControlRequest(mode=mode))
+
     async def status(self) -> StatusResult:
-        return await self._read("GET", "/status", _STATUS)
+        return await self._request("GET", "/status", _STATUS)
 
     async def state(self) -> StateResult:
-        return await self._read("GET", "/state", _STATE)
+        return await self._request("GET", "/state", _STATE)
 
     async def inspect(self, query: InspectQuery) -> InspectResult:
-        result = await self._read("POST", "/inspect", _INSPECT, InspectRequest(query=query))
+        result = await self._request("POST", "/inspect", _INSPECT, InspectRequest(query=query))
         if not isinstance(result, InspectCompleted):
             return result
         expected = (
@@ -132,7 +149,7 @@ class ModClient:
 
     async def catalog(self, request: CatalogRequest) -> CatalogResult:
         try:
-            result = await self._read("POST", "/catalog", _CATALOG, request)
+            result = await self._request("POST", "/catalog", _CATALOG, request)
         except _UnknownNativeCategory:
             return CatalogFailed(
                 status=ResultStatus.FAILED,
@@ -169,7 +186,7 @@ class ModClient:
                 raise ClientUnavailable(ClientFailureKind.PROTOCOL)
         return result
 
-    async def _read[T](
+    async def _request[T](
         self, method: str, path: str, adapter: TypeAdapter[T], request: WireModel | None = None
     ) -> T | InvalidRequestReply | TechnicalError:
         try:

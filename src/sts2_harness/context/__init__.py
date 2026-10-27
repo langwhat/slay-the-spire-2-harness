@@ -7,23 +7,17 @@ from pydantic import MISSING
 from sts2_harness.client import models as native
 from sts2_harness.context.models import (
     ActContent,
-    ActTask,
-    DecisionTask,
+    CombatActInput,
+    CombatInput,
+    CombatReviewInput,
     ProjectedResult,
     ResultMessage,
     ReviewContent,
-    ReviewTask,
     ShortState,
     TaskMessage,
     Updates,
 )
 from sts2_harness.context.projection import Delivery
-from sts2_harness.context.results import (
-    ActionToolResult,
-    QueryToolResult,
-    ReadCompleted,
-    ToolResult,
-)
 from sts2_harness.context.view import visible_observation
 from sts2_harness.llm.messages import (
     AssistantMessage,
@@ -33,10 +27,16 @@ from sts2_harness.llm.messages import (
     ToolCall,
     ToolResultMessage,
 )
+from sts2_harness.results import (
+    ActionToolResult,
+    QueryToolResult,
+    ReadCompleted,
+    ToolResult,
+)
 
 __all__ = [
-    "ActTask",
-    "ReviewTask",
+    "CombatActInput",
+    "CombatReviewInput",
     "Context",
     "QueryToolResult",
     "ReadCompleted",
@@ -54,18 +54,16 @@ class Context:
         return tuple(self._history)
 
     @overload
-    def append_task(self, task: ActTask, observation: native.Observation) -> None: ...
+    def append_task(self, task: CombatActInput, observation: native.Observation) -> None: ...
 
     @overload
-    def append_task(self, task: ReviewTask) -> None: ...
+    def append_task(self, task: CombatReviewInput) -> None: ...
 
-    def append_task(
-        self, task: DecisionTask, observation: native.Observation | None = None
-    ) -> None:
+    def append_task(self, task: CombatInput, observation: native.Observation | None = None) -> None:
         """Append approved Combat tasks; Run message assembly has its own contract."""
         if self._role is not native.DecisionOwner.COMBAT:
             raise ValueError("Combat tasks require a Combat context.")
-        if isinstance(task, ReviewTask):
+        if isinstance(task, CombatReviewInput):
             if self._history and isinstance(last := self._history[-1], TaskMessage):
                 if last.task == task:
                     return

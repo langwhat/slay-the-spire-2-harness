@@ -9,7 +9,7 @@ from pydantic import MISSING, Field
 from sts2_harness.client import models as native
 
 
-class ContextValue(native.WireModel):
+class SemanticValue(native.WireModel):
     def to_json(self) -> str:
         return self.model_dump_json()
 
@@ -36,12 +36,12 @@ class ReasonCode(StrEnum):
     CONTENT_UNAVAILABLE = "content_unavailable"
 
 
-class Reason(ContextValue):
+class Reason(SemanticValue):
     code: ReasonCode
     message: str
 
 
-class Suggestion(ContextValue):
+class Suggestion(SemanticValue):
     message: str
 
 
@@ -50,16 +50,16 @@ type StepCount = Annotated[int, Field(ge=0)]
 type StepPosition = Annotated[int, Field(ge=1)]
 
 
-class ReadCompleted(ContextValue):
+class ReadCompleted(SemanticValue):
     status: Literal[OutcomeStatus.COMPLETED] = OutcomeStatus.COMPLETED
 
 
-class ActionCompleted(ContextValue):
+class ActionCompleted(SemanticValue):
     status: Literal[OutcomeStatus.COMPLETED] = OutcomeStatus.COMPLETED
     completed_steps: StepCount
 
 
-class ActionStopped(ContextValue):
+class ActionStopped(SemanticValue):
     status: Literal[OutcomeStatus.STOPPED] = OutcomeStatus.STOPPED
     completed_steps: StepCount
     next_step: StepPosition
@@ -67,19 +67,19 @@ class ActionStopped(ContextValue):
     suggested_actions: Suggestions
 
 
-class Rejected(ContextValue):
+class Rejected(SemanticValue):
     status: Literal[OutcomeStatus.REJECTED] = OutcomeStatus.REJECTED
     reason: Reason
     suggested_actions: Suggestions
 
 
-class Failed(ContextValue):
+class Failed(SemanticValue):
     status: Literal[OutcomeStatus.FAILED] = OutcomeStatus.FAILED
     reason: Reason
     suggested_actions: Suggestions
 
 
-class ActionUnknown(ContextValue):
+class ActionUnknown(SemanticValue):
     status: Literal[OutcomeStatus.UNKNOWN] = OutcomeStatus.UNKNOWN
     confirmed_steps: StepCount
     uncertain_step: StepPosition
@@ -87,7 +87,7 @@ class ActionUnknown(ContextValue):
     suggested_actions: Suggestions
 
 
-class WriteUnknown(ContextValue):
+class WriteUnknown(SemanticValue):
     status: Literal[OutcomeStatus.UNKNOWN] = OutcomeStatus.UNKNOWN
     reason: Reason
     suggested_actions: Suggestions
