@@ -37,6 +37,7 @@ def _non_card_category(value: str) -> str:
 
 
 type Nonempty = Annotated[str, Field(min_length=1)]
+type Number = int | float
 
 
 def _freeze_directory[T](values: Mapping[str, T]) -> Mapping[str, T]:
@@ -291,8 +292,8 @@ class Progress(WireModel):
 class Power(WireModel):
     name: Nonempty
     definition_id: Nonempty
-    amount: float | None | MISSING = MISSING
-    display_amount: float | None | MISSING = MISSING
+    amount: Number | None | MISSING = MISSING
+    display_amount: Number | None | MISSING = MISSING
     type: Nonempty | None | MISSING = MISSING
 
 
@@ -305,7 +306,7 @@ class PublicIntent(WireModel):
     name: str | MISSING = MISSING
     damage_per_hit: Annotated[int, Field(ge=0)] | None | MISSING = MISSING
     hits: Annotated[int, Field(ge=0)] | None | MISSING = MISSING
-    amount: float | None | MISSING = MISSING
+    amount: Number | None | MISSING = MISSING
     description: str | None | MISSING = MISSING
 
 
@@ -371,8 +372,8 @@ class Ally(WireModel):
 
 class Orb(WireModel):
     name: Nonempty
-    passive: float | None
-    evoke: float | None
+    passive: Number | None
+    evoke: Number | None
     definition_id: Nonempty | MISSING = MISSING
 
 
@@ -404,7 +405,7 @@ class Offer(WireModel):
     price: Annotated[int, Field(ge=0)] | None | MISSING = MISSING
     stocked: bool | None | MISSING = MISSING
     on_sale: bool | None | MISSING = MISSING
-    amount: float | None | MISSING = MISSING
+    amount: Number | None | MISSING = MISSING
 
 
 class EventState(WireModel):
@@ -479,7 +480,7 @@ class TerminalState(WireModel):
 class Modifier(WireModel):
     definition_id: Nonempty
     name: Nonempty
-    amount: float | None
+    amount: Number | None
     status: Nonempty | MISSING = MISSING
 
 
@@ -536,7 +537,7 @@ class RelicEntry(WireModel):
     kind: Literal[ObjectKind.RELIC]
     definition_id: Nonempty
     name: Nonempty
-    counter: float | None | MISSING = MISSING
+    counter: Number | None | MISSING = MISSING
     status: Nonempty | None | MISSING = MISSING
     is_used_up: bool | None | MISSING = MISSING
     is_melted: bool | None | MISSING = MISSING
@@ -631,11 +632,11 @@ class MechanismView(WireModel):
 
 
 class MapOdds(WireModel):
-    monster: Annotated[float, Field(ge=0, le=1)] | MISSING = MISSING
-    elite: Annotated[float, Field(ge=0, le=1)] | MISSING = MISSING
-    event: Annotated[float, Field(ge=0, le=1)] | MISSING = MISSING
-    shop: Annotated[float, Field(ge=0, le=1)] | MISSING = MISSING
-    treasure: Annotated[float, Field(ge=0, le=1)] | MISSING = MISSING
+    monster: Annotated[Number, Field(ge=0, le=1)] | MISSING = MISSING
+    elite: Annotated[Number, Field(ge=0, le=1)] | MISSING = MISSING
+    event: Annotated[Number, Field(ge=0, le=1)] | MISSING = MISSING
+    shop: Annotated[Number, Field(ge=0, le=1)] | MISSING = MISSING
+    treasure: Annotated[Number, Field(ge=0, le=1)] | MISSING = MISSING
 
     @model_validator(mode="after")
     def require_probability(self) -> Self:

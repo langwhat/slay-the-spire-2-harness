@@ -27,6 +27,7 @@ from sts2_harness.client.models import (
     InspectRequest,
     InvalidRequestReply,
     LookupData,
+    LookupQuery,
     MapData,
     ResultStatus,
     SearchData,
@@ -149,6 +150,23 @@ class ModClient:
         }[request.mode]
         if type(result.data) is not expected:
             raise ClientUnavailable(ClientFailureKind.PROTOCOL)
+        if isinstance(request, LookupQuery) and isinstance(result.data, LookupData):
+            found_ids = tuple(entry.definition_id for entry in result.data.entries)
+            missing_ids = result.data.missing_ids
+            accounted_ids = found_ids + missing_ids
+            ids_complete = len(accounted_ids) == len(set(accounted_ids)) and set(
+                accounted_ids
+            ) == set(request.ids)
+            ids_ordered = found_ids == tuple(
+                definition_id for definition_id in request.ids if definition_id in found_ids
+            ) and missing_ids == tuple(
+                definition_id for definition_id in request.ids if definition_id in missing_ids
+            )
+            native_ids_match = all(
+                entry.definition_id == entry.native.definition_id for entry in result.data.entries
+            )
+            if not ids_complete or not ids_ordered or not native_ids_match:
+                raise ClientUnavailable(ClientFailureKind.PROTOCOL)
         return result
 
     async def _read[T](
@@ -165,6 +183,8 @@ class ModClient:
             raise ClientUnavailable(ClientFailureKind.TIMEOUT) from None
         except httpx.TransportError:
             raise ClientUnavailable(ClientFailureKind.CONNECTION) from None
+        except httpx.DecodingError:
+            raise ClientUnavailable(ClientFailureKind.PROTOCOL) from None
         if response.status_code not in {200, 400, 500}:
             raise ClientUnavailable(ClientFailureKind.HTTP)
         try:

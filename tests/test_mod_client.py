@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import MutableMapping
 
 import httpx2 as httpx
@@ -105,6 +106,10 @@ COMBAT = """{
 }""".replace("CARD_VALUE", CARD).replace("PREVIEW_VALUE", PREVIEW)
 
 
+def _canonical_json(payload: str) -> str:
+    return json.dumps(TypeAdapter(JsonValue).validate_json(payload), sort_keys=True)
+
+
 def test_combat_raw_preserves_source_details_nulls_and_membership() -> None:
     async def read() -> None:
         async with ModClient(
@@ -131,9 +136,7 @@ def test_combat_raw_preserves_source_details_nulls_and_membership() -> None:
         assert observation.generated["c1"][0].source.definition_id == "CARD.ONE"
         assert observation.generated["c2"] == ()
         assert tuple(mechanism.text for mechanism in observation.mechanisms) == ("甲", "乙")
-        assert TypeAdapter(JsonValue).validate_json(observation.to_json()) == TypeAdapter(
-            JsonValue
-        ).validate_json(COMBAT)
+        assert _canonical_json(observation.to_json()) == _canonical_json(COMBAT)
 
     asyncio.run(read())
 
@@ -260,9 +263,7 @@ def test_status_keeps_control_intent_separate_from_native_input(
         assert isinstance(result, Status)
         assert result.control_intent is ControlIntent.PAUSED
         assert result.input_readiness is InputReadiness(readiness)
-        assert TypeAdapter(JsonValue).validate_json(result.to_json()) == TypeAdapter(
-            JsonValue
-        ).validate_json(payload)
+        assert _canonical_json(result.to_json()) == _canonical_json(payload)
 
     asyncio.run(read())
 
@@ -322,7 +323,7 @@ def test_lookup_decodes_each_concrete_native_category(category: NativeCategory) 
         NativeCategory.POWER: ',"type":null',
     }.get(category, "")
     native = (
-        PREVIEW
+        PREVIEW.replace("CARD.ONE", "NATIVE.ONE")
         if category is NativeCategory.CARD
         else ('{"definition_id":"NATIVE.ONE","name":"原生","text":"完整原生规则。"' + extra + "}")
     )
@@ -349,9 +350,67 @@ def test_lookup_decodes_each_concrete_native_category(category: NativeCategory) 
         assert isinstance(result, CatalogCompleted) and isinstance(result.data, LookupData)
         assert result.data.entries[0].category is category
         assert result.data.missing_ids == ("NATIVE.MISSING",)
-        assert TypeAdapter(JsonValue).validate_json(result.to_json()) == TypeAdapter(
-            JsonValue
-        ).validate_json(payload)
+        assert _canonical_json(result.to_json()) == _canonical_json(payload)
+
+    asyncio.run(read())
+
+
+@pytest.mark.parametrize(
+    ("found", "missing", "valid"),
+    [
+        ((("A", "A"), ("C", "C")), ("B", "D"), True),
+        ((("A", "A"),), ("B",), False),
+        ((("A", "A"), ("C", "C"), ("E", "E")), ("B", "D"), False),
+        ((("A", "A"), ("C", "C")), ("B", "D", "E"), False),
+        ((("A", "A"), ("A", "A"), ("C", "C")), ("B", "D"), False),
+        ((("A", "A"), ("C", "C")), ("B", "B", "D"), False),
+        ((("A", "A"), ("C", "C")), ("A", "B", "D"), False),
+        ((("C", "C"), ("A", "A")), ("B", "D"), False),
+        ((("A", "A"), ("C", "C")), ("D", "B"), False),
+        ((("A", "Z"), ("C", "C")), ("B", "D"), False),
+    ],
+)
+def test_lookup_accounts_for_requested_ids_in_order_with_matching_native_identity(
+    found: tuple[tuple[str, str], ...], missing: tuple[str, ...], valid: bool
+) -> None:
+    payload = json.dumps(
+        {
+            "status": "completed",
+            "data": {
+                "entries": [
+                    {
+                        "category": "relic",
+                        "definition_id": outer_id,
+                        "name": "Relic",
+                        "native": {
+                            "definition_id": native_id,
+                            "name": "Native relic",
+                            "text": None,
+                            "rarity": None,
+                        },
+                    }
+                    for outer_id, native_id in found
+                ],
+                "missing_ids": missing,
+            },
+        }
+    )
+
+    async def read() -> None:
+        async with ModClient(
+            "http://mod.test",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload)),
+        ) as client:
+            query = LookupQuery(mode=CatalogMode.LOOKUP, ids=("A", "B", "C", "D"))
+            if not valid:
+                with pytest.raises(ClientUnavailable) as failure:
+                    await client.catalog(query)
+                assert failure.value.reason is ClientFailureKind.PROTOCOL
+                return
+            result = await client.catalog(query)
+        assert isinstance(result, CatalogCompleted) and isinstance(result.data, LookupData)
+        assert tuple(entry.definition_id for entry in result.data.entries) == ("A", "C")
+        assert result.data.missing_ids == ("B", "D")
 
     asyncio.run(read())
 
@@ -590,6 +649,27 @@ def test_transport_failures_do_not_implicitly_repeat_reads(
     asyncio.run(read())
 
 
+def test_invalid_compression_is_a_safe_protocol_failure_without_another_read() -> None:
+    attempts = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200, headers={"content-encoding": "gzip"}, stream=httpx.ByteStream(b"secret")
+        )
+
+    async def read() -> None:
+        async with ModClient("http://mod.test", transport=httpx.MockTransport(handler)) as client:
+            with pytest.raises(ClientUnavailable) as failure:
+                await client.status()
+        assert failure.value.reason is ClientFailureKind.PROTOCOL
+        assert attempts == 1
+        assert "secret" not in str(failure.value)
+
+    asyncio.run(read())
+
+
 @pytest.mark.parametrize(
     "observation",
     [
@@ -604,6 +684,63 @@ def test_transport_failures_do_not_implicitly_repeat_reads(
     ],
 )
 def test_untrustworthy_observation_is_not_success(observation: str) -> None:
+    async def read() -> None:
+        async with ModClient(
+            "http://mod.test",
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, content='{"status":"completed","observation":' + observation + "}"
+                )
+            ),
+        ) as client:
+            with pytest.raises(ClientUnavailable) as failure:
+                await client.state()
+        assert failure.value.reason is ClientFailureKind.PROTOCOL
+
+    asyncio.run(read())
+
+
+@pytest.mark.parametrize(
+    ("amount", "valid"),
+    [
+        ("3", True),
+        ("3.0", True),
+        ("3.5", True),
+        ("true", False),
+        ("NaN", False),
+        ("Infinity", False),
+    ],
+)
+def test_raw_numbers_preserve_integer_and_decimal_forms_without_accepting_non_numbers(
+    amount: str, valid: bool
+) -> None:
+    observation = COMBAT.replace('"amount":0', '"amount":' + amount)
+
+    async def read() -> None:
+        async with ModClient(
+            "http://mod.test",
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, content='{"status":"completed","observation":' + observation + "}"
+                )
+            ),
+        ) as client:
+            if not valid:
+                with pytest.raises(ClientUnavailable) as failure:
+                    await client.state()
+                assert failure.value.reason is ClientFailureKind.PROTOCOL
+                return
+            result = await client.state()
+        assert isinstance(result, StateCompleted)
+        assert _canonical_json(result.observation.to_json()) == _canonical_json(observation)
+
+    asyncio.run(read())
+
+
+@pytest.mark.parametrize("odds", ["-0.1", "1.1"])
+def test_raw_map_odds_retain_probability_bounds(odds: str) -> None:
+    observation = COMBAT.replace('"monster":1', '"monster":' + odds)
+
     async def read() -> None:
         async with ModClient(
             "http://mod.test",
