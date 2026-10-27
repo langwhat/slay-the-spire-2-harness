@@ -1,8 +1,6 @@
 """One battle's model role, execution units, trustworthy facts, and optional review."""
 
 import logging
-from dataclasses import dataclass
-from enum import StrEnum
 
 from pydantic import MISSING
 
@@ -23,7 +21,7 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import Interrupted, ModelFailure, ToolRecoveryBudget
-from sts2_harness.game import GameLifetimeEnded
+from sts2_harness.game import GameLifetimeEnded, RunEnded
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
@@ -86,18 +84,6 @@ class CombatAgent(Agent):
         self._opening_delivered = True
 
 
-class CombatEndReason(StrEnum):
-    TERMINAL = "terminal"
-    RUN_CHANGED = "run_changed"
-    NO_RUN = "no_run"
-
-
-@dataclass(frozen=True, slots=True)
-class CombatEnded:
-    reason: CombatEndReason
-    observation: native.Observation | None
-
-
 class CombatTask:
     def __init__(
         self,
@@ -120,15 +106,6 @@ class CombatTask:
             location.game_instance_id == self._opening.location.game_instance_id
             and location.run_id == self._opening.location.run_id
         )
-
-    def _ended(self, observation: native.Observation) -> CombatEnded | None:
-        if observation.location.run_id is None:
-            return CombatEnded(CombatEndReason.NO_RUN, observation)
-        if not self._same_run(observation.location):
-            return CombatEnded(CombatEndReason.RUN_CHANGED, observation)
-        if observation.state.phase is native.Phase.TERMINAL:
-            return CombatEnded(CombatEndReason.TERMINAL, observation)
-        return None
 
     def _remember(self, observation: native.Observation) -> None:
         self._last = observation
@@ -163,9 +140,10 @@ class CombatTask:
             last_observed_turn=self._last_turn,
             before=BoundaryValues(hp=before.hp, max_hp=before.max_hp, gold=before.gold),
             after=BoundaryValues(hp=after.hp, max_hp=after.max_hp, gold=after.gold),
+            encounter=self._opening.encounter,
         )
 
-    async def run(self) -> CombatHandoff | CombatEnded:
+    async def run(self) -> CombatHandoff | RunEnded:
         try:
             while True:
                 route = native.RouteKey.model_validate(self._last.location.model_dump())
@@ -181,7 +159,7 @@ class CombatTask:
                 )
                 battle_finished = False
                 if observation is not None:
-                    ended = self._ended(observation)
+                    ended = self._execution.run_ended(observation)
                     if ended is not None:
                         return ended
                     new_battle = (
@@ -214,7 +192,7 @@ class CombatTask:
                 if isinstance(reviewed, Interrupted) and not reviewed.pause_required:
                     continue
                 if isinstance(reviewed, RouteChanged):
-                    ended = self._ended(reviewed.observation)
+                    ended = self._execution.run_ended(reviewed.observation)
                     if ended is not None:
                         return ended
                 reason = (
@@ -230,12 +208,4 @@ class CombatTask:
                 self._recovery.reset()
                 return CombatHandoff(report)
         except GameLifetimeEnded as error:
-            if error.location is None or error.location.run_id is None:
-                kind = CombatEndReason.NO_RUN
-            else:
-                kind = (
-                    CombatEndReason.TERMINAL
-                    if self._same_run(error.location)
-                    else CombatEndReason.RUN_CHANGED
-                )
-            return CombatEnded(kind, None)
+            return RunEnded(self._execution.end_reason(error.location), None)

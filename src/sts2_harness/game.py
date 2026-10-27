@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
 
@@ -11,6 +12,18 @@ from sts2_harness.client import ClientUnavailable, ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import CatalogResult, ClientFailureKind, InspectResult
 from sts2_harness.results import Reason, ReasonCode
+
+
+class RunEndReason(StrEnum):
+    TERMINAL = "terminal"
+    RUN_CHANGED = "run_changed"
+    NO_RUN = "no_run"
+
+
+@dataclass(frozen=True, slots=True)
+class RunEnded:
+    reason: RunEndReason
+    observation: native.Observation | None
 
 
 class OperationKind(StrEnum):

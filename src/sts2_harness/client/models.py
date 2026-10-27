@@ -712,6 +712,7 @@ class Observation(WireModel):
     state: State
     upgrades: Directory[UpgradePreview]
     map: PublicMap | MISSING = MISSING
+    encounter: NamedDefinition | MISSING = MISSING
 
     @model_validator(mode="after")
     def check_publication(self) -> Self:

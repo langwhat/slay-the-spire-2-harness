@@ -1,6 +1,8 @@
 """One run's model role retains notes while its act contexts are replaceable."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from pydantic import MISSING
 
@@ -8,7 +10,7 @@ from sts2_harness.agent import Agent, MaterialReader
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.models import RunActInput, RunHandoffInput
-from sts2_harness.decisions import ActTask, DecisionTask, HandoffTask
+from sts2_harness.decisions import ActTask, DecisionSource, DecisionTask, HandoffTask
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
@@ -23,10 +25,14 @@ class ActStart:
     observation: native.Observation
 
 
+class RunRole(DecisionSource, Protocol):
+    async def enter_act(self, start: ActStart) -> None: ...
+
+
 class RunAgent(Agent):
     def __init__(
         self,
-        llm: ModelClient,
+        client: Callable[[], ModelClient],
         tools: ToolCatalog,
         recovery: ToolRecoveryBudget,
         *,
@@ -35,7 +41,8 @@ class RunAgent(Agent):
     ) -> None:
         if tools.notes is None:
             raise ValueError("Run requires the run's notes owner.")
-        super().__init__(llm, tools, recovery, materials=materials)
+        super().__init__(None, tools, recovery, materials=materials)
+        self._client = client
         self._notes = tools.notes
         self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._notes_delivered = False
@@ -52,8 +59,17 @@ class RunAgent(Agent):
             raise DecisionInterrupted(
                 Reason(code=ReasonCode.CONTENT_UNAVAILABLE, message=str(error)), True
             ) from error
+        client = self._client()
+        self._llm = client
         self._context = context
         self._notes_delivered = False
+
+    async def _prepare(self, observation: native.Observation) -> Context:
+        if self._context is None:
+            await self.enter_act(ActStart(observation))
+            assert self._context is not None
+            return self._context
+        return await super()._prepare(observation)
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
         blocks = tuple(

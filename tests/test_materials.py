@@ -276,7 +276,7 @@ def test_skill_queries_reject_unadvertised_reads_and_report_real_io_failure(tmp_
             ToolCall("io", "run_skill", '{"mode":"read","id":"missing"}')
         )
         assert isinstance(failed.outcome, Failed)
-        assert failed.outcome.reason.message == "The configured material could not be read."
+        assert failed.outcome.reason.message == "Document 'missing' could not be read."
         assert failed.observation is None
 
     asyncio.run(scenario())
@@ -421,5 +421,36 @@ def test_initial_guidance_and_explicit_reads_share_actual_delivery_without_losin
         assert json.loads(wire[2]["content"])["guidance"][0]["text"] == "Version B"
         assert json.loads(wire[3]["content"])["guidance"][0]["text"] == "Version A"
         assert json.loads(wire[5]["content"])["guidance"][0]["name"] == "Renamed guide"
+
+    asyncio.run(scenario())
+
+
+def test_document_failures_identify_the_logical_source_for_reads_and_lookup(tmp_path: Path) -> None:
+    import pytest
+
+    from sts2_harness.knowledge import SkillRead, SubjectId, UnknownDocument
+    from sts2_harness.material_text import MaterialUnavailable
+
+    subject = SubjectId(category="encounter", definition_id="ENCOUNTER.TEST")
+    documents = FileDocuments(
+        (
+            DocumentSource(
+                "boss-guide", "Boss", "Guidance", tmp_path / "private.txt", subjects=(subject,)
+            ),
+        )
+    )
+
+    async def scenario() -> None:
+        for lookup in (False, True):
+            with pytest.raises(MaterialUnavailable) as failure:
+                if lookup:
+                    await documents.lookup((subject,))
+                else:
+                    await documents.read(SkillRead("boss-guide"))
+            assert str(failure.value) == "Document 'boss-guide' could not be read."
+            assert isinstance(failure.value.__cause__, MaterialUnavailable)
+            assert str(tmp_path) not in str(failure.value)
+        with pytest.raises(UnknownDocument, match="unknown-guide"):
+            await documents.read(SkillRead("unknown-guide"))
 
     asyncio.run(scenario())

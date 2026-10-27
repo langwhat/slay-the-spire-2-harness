@@ -25,6 +25,8 @@ from sts2_harness.game import (
 )
 from sts2_harness.game import (
     GameIO,
+    RunEnded,
+    RunEndReason,
     unwrap,
 )
 from sts2_harness.game import (
@@ -86,6 +88,20 @@ class Execution:
         self._run_id = run_id
         self._observed: Callable[[native.Observation], None] | None = None
 
+    def end_reason(self, location: native.Location | None) -> RunEndReason:
+        """Classify a confirmed lifetime end against this execution's bound run."""
+        if location is None or location.run_id is None:
+            return RunEndReason.NO_RUN
+        if location.game_instance_id != self._game_instance_id or location.run_id != self._run_id:
+            return RunEndReason.RUN_CHANGED
+        return RunEndReason.TERMINAL
+
+    def run_ended(self, observation: native.Observation) -> RunEnded | None:
+        reason = self.end_reason(observation.location)
+        if reason is not RunEndReason.TERMINAL or observation.state.phase is native.Phase.TERMINAL:
+            return RunEnded(reason, observation)
+        return None
+
     async def observe(self) -> native.Observation:
         result = unwrap(await self._game.observe())
         self._record_observation(result.observation)
@@ -122,8 +138,8 @@ class Execution:
         finally:
             self._observed = None
 
-    async def _run_unit(self, source: DecisionSource, task: DecisionTask) -> UnitResult:
-        """Close feedback; no-run raises GameLifetimeEnded without retry cost."""
+    async def admit(self) -> native.Observation | RouteChanged | Rejected | Interrupted:
+        """Admit initialization or routing with the shared gate and read-failure budget."""
         try:
             admission = await self._game.admit()
             for observation in admission.observations:
@@ -143,13 +159,17 @@ class Execution:
                 Reason(code=ReasonCode.QUERY_FAILED, message=str(error)),
                 self._recovery.record_failure() if self._recovery is not None else False,
             )
-        location = observation.location
-        if (
-            location.game_instance_id != self._game_instance_id
-            or location.run_id != self._run_id
-            or observation.state.phase is native.Phase.TERMINAL
-        ):
+        if self.run_ended(observation) is not None:
             return RouteChanged(observation)
+        return observation
+
+    async def _run_unit(self, source: DecisionSource, task: DecisionTask) -> UnitResult:
+        """Close feedback; no-run raises GameLifetimeEnded without retry cost."""
+        admitted = await self.admit()
+        if not isinstance(admitted, native.Observation):
+            return admitted
+        observation = admitted
+        location = observation.location
         if isinstance(task, ActTask) and location != native.Location.model_validate(
             task.expected_route.model_dump()
         ):

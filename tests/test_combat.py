@@ -11,7 +11,7 @@ from test_responses import configuration
 from sts2_harness.agent import MaterialReader
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
-from sts2_harness.combat import CombatAgent, CombatEnded, CombatEndReason, CombatTask
+from sts2_harness.combat import CombatAgent, CombatTask
 from sts2_harness.decisions import (
     ActionDecision,
     ActionKind,
@@ -26,7 +26,7 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.game import LiveGame
+from sts2_harness.game import LiveGame, RunEnded, RunEndReason
 from sts2_harness.knowledge import DocumentView, SkillRead
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import DocumentSource, FileDocuments
@@ -353,7 +353,7 @@ class BattleHTTP:
         *,
         materials: MaterialReader | None = None,
         source: DecisionSource | None = None,
-    ) -> CombatHandoff | CombatEnded:
+    ) -> CombatHandoff | RunEnded:
         async with ModClient("http://mod", transport=httpx.MockTransport(self.mod)) as client:
             assert self.opening.location.run_id is not None
             game = LiveGame(
@@ -642,13 +642,13 @@ def test_changed_run_ends_without_review_or_old_run_stats(tmp_path: Path, mode: 
             }
         )
     result = asyncio.run(battle.run(tmp_path))
-    assert isinstance(result, CombatEnded)
+    assert isinstance(result, RunEnded)
     assert result.reason is (
-        CombatEndReason.TERMINAL
+        RunEndReason.TERMINAL
         if mode == "terminal"
-        else CombatEndReason.NO_RUN
+        else RunEndReason.NO_RUN
         if no_run
-        else CombatEndReason.RUN_CHANGED
+        else RunEndReason.RUN_CHANGED
     )
     assert len(battle.inputs) == 1
 
@@ -678,7 +678,7 @@ def test_query_lifetime_change_precedes_exhausted_failure_budget(tmp_path: Path)
     for _ in range(3):
         battle.budget.record_failure()
     result = asyncio.run(battle.run(tmp_path))
-    assert isinstance(result, CombatEnded) and result.reason is CombatEndReason.RUN_CHANGED
+    assert isinstance(result, RunEnded) and result.reason is RunEndReason.RUN_CHANGED
     assert len(battle.inputs) == 1 and battle.actions == []
 
 

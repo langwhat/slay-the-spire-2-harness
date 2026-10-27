@@ -16,7 +16,7 @@ from sts2_harness.knowledge import (
     SubjectId,
     UnknownDocument,
 )
-from sts2_harness.material_text import MaterialText
+from sts2_harness.material_text import MaterialText, MaterialUnavailable
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +60,7 @@ class FileDocuments:
     async def read(self, request: SkillRead) -> DocumentView:
         source = self._sources.get(request.id)
         if source is None:
-            raise UnknownDocument("The requested document is not configured.")
+            raise UnknownDocument(f"Document {request.id!r} is not configured.")
         path = source.path
         identity = f"document:{quote(source.id, safe='')}:text"
         if request.resource is not None:
@@ -68,15 +68,24 @@ class FileDocuments:
                 (item for item in source.resources if item.key == request.resource), None
             )
             if resource is None:
-                raise UnknownDocument("The requested resource is not advertised by this document.")
+                raise UnknownDocument(
+                    f"Resource {request.resource!r} is not advertised by document {source.id!r}."
+                )
             path = resource.path
             identity = (
                 f"document:{quote(source.id, safe='')}:resource:{quote(resource.key, safe='')}:text"
             )
+        label = f"Document {source.id!r}"
+        if request.resource is not None:
+            label += f" resource {request.resource!r}"
+        try:
+            text = MaterialText.read(identity, path)
+        except MaterialUnavailable as error:
+            raise MaterialUnavailable(f"{label} could not be read.") from error
         return DocumentView(
             id=source.id,
             name=MaterialText.create(f"document:{quote(source.id, safe='')}:name", source.name),
-            text=MaterialText.read(identity, path),
+            text=text,
             resources=tuple(
                 Resource(
                     key=item.key,

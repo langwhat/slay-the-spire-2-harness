@@ -184,7 +184,9 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
                 configuration(tmp_path), transport=httpx.MockTransport(http.model)
             ) as llm:
                 agent = RunAgent(
-                    RecordedLlm(llm, journal, role=native.DecisionOwner.RUN, stream="run:1"),
+                    lambda: RecordedLlm(
+                        llm, journal, role=native.DecisionOwner.RUN, stream="run:1"
+                    ),
                     tools,
                     budget,
                     materials=materials,
@@ -367,7 +369,7 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
                 configuration(tmp_path), transport=httpx.MockTransport(http.model)
             ) as llm:
                 result = await execution.run_unit(
-                    RunAgent(llm, tools, budget), HandoffTask(handoff())
+                    RunAgent(lambda: llm, tools, budget), HandoffTask(handoff())
                 )
         assert isinstance(result, TaskComplete)
         assert notes.read() == "Use the next shop deliberately."
@@ -498,7 +500,7 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
             async with Llm(
                 configuration(tmp_path), transport=httpx.MockTransport(http.model)
             ) as llm:
-                agent = RunAgent(llm, tools, budget, materials=materials)
+                agent = RunAgent(lambda: llm, tools, budget, materials=materials)
                 first = await execution.run_unit(agent, HandoffTask(handoff()))
                 assert isinstance(first, TaskComplete)
                 notes.replace("Notes persist across acts.")

@@ -36,7 +36,7 @@ type MaterialReader = Callable[[native.Observation], Awaitable[tuple[DocumentVie
 class Agent(ABC):
     def __init__(
         self,
-        llm: ModelClient,
+        llm: ModelClient | None,
         tools: ToolCatalog,
         recovery: ToolRecoveryBudget,
         *,
@@ -97,6 +97,7 @@ class Agent(ABC):
         self._append_task(context, task, observation)
         while True:
             try:
+                assert self._llm is not None
                 reply = await self._llm.complete(context.model_input(), self._tools.definitions)
             except ModelUnavailable as error:
                 raise DecisionInterrupted(ModelFailure(error.reason), True) from error
