@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Self
+from typing import Protocol, Self
 
 from openai.types.responses import ResponseOutputItem
 from pydantic import BaseModel, TypeAdapter
+
+from sts2_harness.knowledge import GuidanceContent
+from sts2_harness.material_text import MaterialParts, MaterialText
 
 _NATIVE_OUTPUT = TypeAdapter(tuple[ResponseOutputItem, ...])
 
@@ -20,19 +23,31 @@ class TextRole(StrEnum):
 @dataclass(frozen=True, slots=True)
 class TextMessage:
     role: TextRole
-    text: str
+    value: str | MaterialText | MaterialParts | GuidanceContent
+
+    @property
+    def text(self) -> str:
+        return self.value if isinstance(self.value, str) else self.value.body
+
+
+class StructuredText(Protocol):
+    def to_json(self) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultMessage:
     call_id: str
-    text: str
+    content: StructuredText
+
+    @property
+    def text(self) -> str:
+        return self.content.to_json()
 
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     name: str
-    description: str
+    description: MaterialText
     parameters: type[BaseModel]
 
 

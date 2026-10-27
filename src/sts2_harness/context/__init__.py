@@ -19,6 +19,7 @@ from sts2_harness.context.models import (
 )
 from sts2_harness.context.projection import Delivery
 from sts2_harness.context.view import visible_observation
+from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
 from sts2_harness.llm.messages import (
     AssistantMessage,
     ModelInput,
@@ -49,6 +50,28 @@ class Context:
         self._role = role
         self._history: list[TextMessage | AssistantMessage | ToolResultMessage] = list(system)
         self._delivery = Delivery.empty()
+        self._documents: dict[tuple[str, str | None], DocumentView] = {}
+        for message in system:
+            if isinstance(message.value, GuidanceContent):
+                self._record_documents(message.value.guidance)
+
+    def _record_documents(self, documents: tuple[DocumentView, ...]) -> None:
+        for document in documents:
+            key = (document.id, None if document.resource is MISSING else document.resource)
+            self._documents[key] = document
+
+    def append_materials(self, documents: tuple[DocumentView, ...]) -> None:
+        candidates = {
+            (document.id, None if document.resource is MISSING else document.resource): document
+            for document in documents
+        }
+        changed = tuple(
+            document for key, document in candidates.items() if self._documents.get(key) != document
+        )
+        if not changed:
+            return
+        self._history.append(TextMessage(TextRole.USER, GuidanceContent(guidance=changed)))
+        self._record_documents(changed)
 
     def model_input(self) -> ModelInput:
         return tuple(self._history)
@@ -120,6 +143,15 @@ class Context:
             updates=updates,
             data=result.data if isinstance(result, QueryToolResult) else MISSING,
         )
-        message = ResultMessage(call.id, content.to_json(), content, result)
+        message = ResultMessage(call.id, content, result)
         self._history.append(message)
         self._delivery = delivered
+
+        if not isinstance(result, QueryToolResult):
+            return
+        data = result.data
+        if isinstance(data, DocumentView):
+            self._record_documents((data,))
+        elif isinstance(data, KnowledgeLookup):
+            for entry in data.entries:
+                self._record_documents(entry.supplements)

@@ -86,10 +86,16 @@ def _encode(input: ModelInput) -> list[dict[str, JsonValue]]:
     encoded: list[dict[str, JsonValue]] = []
     for message in input:
         match message:
-            case TextMessage(role, text):
-                encoded.append({"role": role.value, "content": text})
-            case ToolResultMessage(call_id, text):
-                encoded.append({"type": "function_call_output", "call_id": call_id, "output": text})
+            case TextMessage():
+                encoded.append({"role": message.role.value, "content": message.text})
+            case ToolResultMessage(call_id, content):
+                encoded.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": content.to_json(),
+                    }
+                )
             case AssistantMessage(native):
                 # Retain omitted/null distinctions and opaque continuation blocks exactly once.
                 encoded.extend(_NATIVE_WIRE.validate_json(native.to_json(), strict=True))
@@ -105,7 +111,7 @@ def _tools(tools: tuple[ToolDefinition, ...]) -> list[ToolParam]:
                 {
                     "type": "function",
                     "name": tool.name,
-                    "description": tool.description,
+                    "description": tool.description.body,
                     "parameters": tool.parameters.model_json_schema(),
                     # Preserve optional fields; tools own strict local argument decoding.
                     "strict": False,

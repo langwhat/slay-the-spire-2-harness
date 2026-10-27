@@ -1,24 +1,35 @@
 """Supplementary documents keep their identity separate from native subjects."""
 
+from dataclasses import dataclass
 from typing import Protocol
 
-from pydantic import JsonValue, TypeAdapter, model_serializer
+from pydantic import MISSING, JsonValue, TypeAdapter, model_serializer
 
 from sts2_harness.client import models as native
+from sts2_harness.material_text import MaterialText, MaterialUnavailable
 
 _JSON = TypeAdapter(dict[str, JsonValue])
 
 
 class Resource(native.WireModel):
     key: native.Nonempty
-    description: str
+    description: MaterialText
 
 
 class DocumentView(native.WireModel):
     id: native.Nonempty
-    name: native.Nonempty
-    text: str
+    name: MaterialText
+    text: MaterialText
     resources: tuple[Resource, ...]
+    resource: native.Nonempty | MISSING = MISSING
+
+
+class GuidanceContent(native.WireModel):
+    guidance: tuple[DocumentView, ...]
+
+    @property
+    def body(self) -> str:
+        return self.model_dump_json()
 
 
 class SubjectId(native.WireModel):
@@ -33,7 +44,7 @@ class Document(DocumentView):
         return DocumentView(id=self.id, name=self.name, text=self.text, resources=self.resources)
 
 
-class SupplementUnavailable(Exception):
+class SupplementUnavailable(MaterialUnavailable):
     """An enabled supplementary source could not supply its requested documents."""
 
 
@@ -59,3 +70,28 @@ class KnowledgeEntry(native.WireModel):
 class KnowledgeLookup(native.WireModel):
     entries: tuple[KnowledgeEntry, ...]
     missing_ids: tuple[native.Nonempty, ...]
+
+
+class UnknownDocument(Exception):
+    """The public document identity or advertised resource does not exist."""
+
+
+@dataclass(frozen=True, slots=True)
+class SkillRead:
+    id: str
+    resource: str | None = None
+
+
+class SkillSummary(native.WireModel):
+    id: native.Nonempty
+    name: MaterialText
+    description: MaterialText
+
+
+class SkillList(native.WireModel):
+    skills: tuple[SkillSummary, ...]
+
+
+class SkillProvider(Protocol):
+    async def list(self, role: native.DecisionOwner) -> tuple[SkillSummary, ...]: ...
+    async def read(self, request: SkillRead) -> DocumentView: ...

@@ -12,6 +12,7 @@ from sts2_harness.context.models import ResultMessage
 from sts2_harness.execution import Execution
 from sts2_harness.game import LiveGame
 from sts2_harness.llm.messages import ToolCall
+from sts2_harness.material_text import MaterialText
 from sts2_harness.results import ReadCompleted
 from sts2_harness.tools import ToolCatalog
 
@@ -46,7 +47,7 @@ def test_state_dispatch_delivers_current_state_without_query_data() -> None:
             assert isinstance(message, ResultMessage)
             assert message.content.state is not None
             assert message.content.data is MISSING
-            assert len(tools.definitions) == 2
+            assert len(tools.definitions) == 3
 
     asyncio.run(run())
 
@@ -270,9 +271,11 @@ def test_supplements_keep_document_identity_and_explicit_reads_and_failures() ->
                 raise self.failure
             doc = Document(
                 id="guide",
-                name="Guide",
-                text="Complete supplemental text.",
-                resources=(Resource(key="rules", description="Rules"),),
+                name=MaterialText.create("guide:name", "Guide"),
+                text=MaterialText.create("guide:text", "Complete supplemental text."),
+                resources=(
+                    Resource(key="rules", description=MaterialText.create("guide:rules", "Rules")),
+                ),
                 subjects=subjects,
             )
             return (doc, doc)

@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx2 as httpx
@@ -20,6 +21,15 @@ from sts2_harness.llm.messages import (
     ToolResultMessage,
     Usage,
 )
+from sts2_harness.material_text import MaterialText
+
+
+@dataclass(frozen=True)
+class PlainResult:
+    text: str
+
+    def to_json(self) -> str:
+        return self.text
 
 
 class InspectArguments(BaseModel):
@@ -140,7 +150,11 @@ def test_complete_and_continue_native_reply_once(tmp_path: Path) -> None:
                 TextMessage(TextRole.SYSTEM, "Use available tools."),
                 TextMessage(TextRole.USER, "Inspect card c1."),
             )
-            tools = (ToolDefinition("inspect", "Inspect a card.", InspectArguments),)
+            tools = (
+                ToolDefinition(
+                    "inspect", MaterialText.create("inspect", "Inspect a card."), InspectArguments
+                ),
+            )
             pending = asyncio.create_task(llm.complete(history, tools))
             await intermediate.wait()
             assert not pending.done()
@@ -165,7 +179,7 @@ def test_complete_and_continue_native_reply_once(tmp_path: Path) -> None:
             assert reply.assistant.tool_calls[0].arguments == '{"reference":"c1"}'
             restored = AssistantMessage(ResponsesReply.from_json(retained))
             await llm.complete(
-                (*history, restored, ToolResultMessage("call_1", "card info")), tools
+                (*history, restored, ToolResultMessage("call_1", PlainResult("card info"))), tools
             )
         wire = json.loads(requests[1].content)
         assert wire["input"][:2] == [

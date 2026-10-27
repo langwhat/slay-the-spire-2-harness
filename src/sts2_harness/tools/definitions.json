@@ -478,5 +478,89 @@
         }
       ]
     }
+  },
+  {
+    "name": "run_skill",
+    "description": "Read task guidance and associated resources relevant to non-combat decisions and run planning. Request guidance when needed and reuse already available guidance while it remains applicable. Reading guidance does not select a route, execute game actions, or start another agent. The result includes the current state and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "list"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "read"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "resource": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Resource key advertised by this skill; never a filesystem path."
+            }
+          },
+          "required": [
+            "mode",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "combat_skill",
+    "description": "Read battle-related task guidance and associated resources. Request guidance when it is needed for the current decision and reuse already available guidance while it remains applicable. Reading guidance does not execute actions or start another agent. The result includes the current state and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "list"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "read"
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "resource": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Resource key advertised by this skill; never a filesystem path."
+            }
+          },
+          "required": [
+            "mode",
+            "id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
   }
 ]

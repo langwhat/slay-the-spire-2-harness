@@ -4,7 +4,7 @@ import json
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 
-from pydantic import ValidationError
+from pydantic import MISSING, ValidationError
 
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
@@ -14,11 +14,15 @@ from sts2_harness.knowledge import (
     DocumentView,
     KnowledgeEntry,
     KnowledgeLookup,
+    SkillList,
+    SkillProvider,
+    SkillRead,
     SubjectId,
     SupplementProvider,
-    SupplementUnavailable,
+    UnknownDocument,
 )
 from sts2_harness.llm.messages import ToolCall, ToolDefinition
+from sts2_harness.material_text import MaterialText, MaterialUnavailable
 from sts2_harness.results import (
     Failed,
     QueryToolResult,
@@ -28,10 +32,19 @@ from sts2_harness.results import (
     Rejected,
     Suggestion,
 )
-from sts2_harness.tools.inputs import DEFINITIONS, InspectInput, KnowledgeInput, StateQuery
+from sts2_harness.tools.inputs import (
+    DEFINITIONS,
+    InspectInput,
+    KnowledgeInput,
+    SkillInput,
+    SkillListInput,
+    StateQuery,
+)
 
 
 class ToolName(StrEnum):
+    RUN_SKILL = "run_skill"
+    COMBAT_SKILL = "combat_skill"
     RUN_INSPECT = "run_inspect"
     RUN_KNOWLEDGE = "run_knowledge"
     COMBAT_INSPECT = "combat_inspect"
@@ -76,24 +89,61 @@ class ToolCatalog:
         inspect: Callable[[native.InspectQuery], Awaitable[InspectResult]],
         catalog: Callable[[native.CatalogRequest], Awaitable[CatalogResult]],
         supplements: SupplementProvider | None = None,
+        skills: SkillProvider | None = None,
     ) -> None:
         self._role = role
         self._observe = observe
         self._inspect = inspect
         self._catalog = catalog
         self._supplements = supplements
+        self._skills = skills
         self.definitions = tuple(
             ToolDefinition(
                 item.name,
-                item.description,
+                MaterialText.create(f"tool:{item.name}:description", item.description),
                 InspectInput
                 if ToolName(item.name) in (ToolName.RUN_INSPECT, ToolName.COMBAT_INSPECT)
+                else SkillInput
+                if ToolName(item.name) in (ToolName.RUN_SKILL, ToolName.COMBAT_SKILL)
                 else KnowledgeInput,
             )
             for item in DEFINITIONS
             if item.name.startswith(role.value + "_")
         )
         self._names = frozenset(item.name for item in self.definitions)
+
+    async def _read_skill(self, call: ToolCall) -> QueryToolResult:
+        observation = await self._current()
+        try:
+            json.loads(call.arguments, object_pairs_hook=_unique_fields)
+            query = SkillInput.model_validate_json(call.arguments, strict=True).root
+        except (ValueError, ValidationError):
+            return QueryToolResult(
+                _problem(ReasonCode.INVALID_ARGUMENTS, "The query does not match the tool schema."),
+                observation,
+            )
+        try:
+            if isinstance(query, SkillListInput):
+                summaries = await self._skills.list(self._role) if self._skills is not None else ()
+                return QueryToolResult(ReadCompleted(), observation, SkillList(skills=summaries))
+            if self._skills is None:
+                raise UnknownDocument("The requested document is not configured.")
+            resource = query.resource if query.resource is not MISSING else None
+            document = await self._skills.read(SkillRead(query.id, resource))
+            return QueryToolResult(ReadCompleted(), observation, document)
+        except UnknownDocument as error:
+            return QueryToolResult(_problem(ReasonCode.INVALID_ARGUMENTS, str(error)), observation)
+        except (MaterialUnavailable, OSError) as error:
+            return QueryToolResult(
+                _problem(
+                    ReasonCode.CONTENT_UNAVAILABLE,
+                    str(error)
+                    if isinstance(error, MaterialUnavailable)
+                    else "The enabled document source could not be read.",
+                    failed=True,
+                ),
+                observation,
+            )
 
     async def _current(self) -> native.Observation | None:
         try:
@@ -107,6 +157,8 @@ class ToolCatalog:
                 _problem(ReasonCode.WRONG_ROLE, "This tool is not available to the current role."),
                 await self._current(),
             )
+        if ToolName(call.name) in (ToolName.RUN_SKILL, ToolName.COMBAT_SKILL):
+            return await self._read_skill(call)
         try:
             json.loads(call.arguments, object_pairs_hook=_unique_fields)
             query = (
@@ -139,12 +191,12 @@ class ToolCatalog:
             if isinstance(data, native.LookupData):
                 try:
                     data = await self._supplement(data)
-                except (SupplementUnavailable, OSError) as error:
+                except (MaterialUnavailable, OSError) as error:
                     return QueryToolResult(
                         _problem(
                             ReasonCode.CONTENT_UNAVAILABLE,
                             str(error)
-                            if isinstance(error, SupplementUnavailable)
+                            if isinstance(error, MaterialUnavailable)
                             else "The enabled supplementary source could not be read.",
                             failed=True,
                         ),
