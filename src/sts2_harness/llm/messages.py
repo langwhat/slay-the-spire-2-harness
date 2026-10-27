@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, Self
@@ -12,6 +13,7 @@ from pydantic import BaseModel, TypeAdapter
 from sts2_harness.config import Protocol as ModelProtocol
 from sts2_harness.knowledge import GuidanceContent
 from sts2_harness.llm.chat_native import ChatCompletionsReply
+from sts2_harness.llm.messages_native import MessagesReply
 from sts2_harness.material_text import MaterialParts, MaterialText
 
 _NATIVE_OUTPUT = TypeAdapter(tuple[ResponseOutputItem, ...])
@@ -92,7 +94,7 @@ class ResponsesReply:
         return cls(payload)
 
 
-type NativeReply = ResponsesReply | ChatCompletionsReply
+type NativeReply = ResponsesReply | ChatCompletionsReply | MessagesReply
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +105,10 @@ class AssistantMessage:
     def text(self) -> str:
         if isinstance(self.native, ChatCompletionsReply):
             return self.native.completion.choices[0].message.content or ""
+        if isinstance(self.native, MessagesReply):
+            return "".join(
+                block.text for block in self.native.message.content if block.type == "text"
+            )
         return "".join(
             content.text
             for item in self.native.items
@@ -118,6 +124,16 @@ class AssistantMessage:
                 ToolCall(call.id, call.function.name, call.function.arguments)
                 for call in self.native.completion.choices[0].message.tool_calls or ()
                 if call.type == "function"
+            )
+        if isinstance(self.native, MessagesReply):
+            return tuple(
+                ToolCall(
+                    block.id,
+                    block.name,
+                    json.dumps(block.input, ensure_ascii=False, separators=(",", ":")),
+                )
+                for block in self.native.message.content
+                if block.type == "tool_use"
             )
         return tuple(
             ToolCall(item.call_id, item.name, item.arguments)

@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ def cli(
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,
     )
 
 
@@ -255,21 +257,40 @@ def test_resident_external_start_validates_tool_port_without_connecting(tmp_path
     assert not (tmp_path / "runs").exists()
 
 
-def test_resident_start_rejects_unimplemented_protocol_before_game_connection(
+@pytest.mark.parametrize("command", ["start", "headless"])
+def test_start_rejects_unsupported_messages_options_before_game_connection(
     tmp_path: Path,
+    command: str,
 ) -> None:
-    result = cli(
-        tmp_path,
-        "start",
-        "--set",
-        "LLM_MODEL=local",
-        "--set",
-        "LLM_AUTH=none",
-        "--set",
-        "LLM_PROTOCOL=messages",
-    )
+    with socket.socket() as owned_endpoint:
+        owned_endpoint.bind(("127.0.0.1", 0))
+        port = owned_endpoint.getsockname()[1]
+        result = cli(
+            tmp_path,
+            command,
+            *(
+                (
+                    "--game",
+                    str(tmp_path / "absent-game"),
+                    "--template",
+                    str(tmp_path / "absent-template"),
+                )
+                if command == "headless"
+                else ()
+            ),
+            "--mod-url",
+            f"http://127.0.0.1:{port}",
+            "--set",
+            "LLM_MODEL=local",
+            "--set",
+            "LLM_AUTH=none",
+            "--set",
+            "LLM_PROTOCOL=messages",
+            "--set",
+            "LLM_REASONING_EFFORT=unsupported",
+        )
     assert result.returncode == 2
-    assert "configured model protocol is not implemented" in result.stderr
+    assert "Model request unavailable: configuration." in result.stderr
     assert not (tmp_path / "runs").exists()
 
 

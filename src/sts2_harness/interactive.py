@@ -56,8 +56,8 @@ async def run_interactive(
         raise ConfigurationError("Resident startup requires a configured model.")
     try:
         Llm.validate_configuration(model)
-    except ModelUnavailable:
-        raise ConfigurationError("The configured model protocol is not implemented.") from None
+    except ModelUnavailable as error:
+        raise ConfigurationError(str(error)) from None
     port = validate_mod_url(options.mod_url)
     control_endpoint = options.mod_url.rstrip("/") + "/control"
     directory = options.output_directory.resolve()

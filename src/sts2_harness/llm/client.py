@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from types import TracebackType
 from typing import Self
 
+import anthropic
 import httpx2 as httpx
 from openai import (
     APIConnectionError,
@@ -16,6 +17,8 @@ from openai import (
 from pydantic import ValidationError
 
 from sts2_harness.config import ModelConfiguration, Protocol
+from sts2_harness.llm.anthropic_boundary import classify_error as classify_anthropic_error
+from sts2_harness.llm.anthropic_messages import MessagesAdapter
 from sts2_harness.llm.chat_completions import ChatCompletionsAdapter
 from sts2_harness.llm.messages import (
     FailureKind,
@@ -38,18 +41,27 @@ class Llm:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.validate_configuration(configuration)
-        self._adapter = (
-            ChatCompletionsAdapter(configuration, transport)
-            if configuration.protocol is Protocol.CHAT_COMPLETIONS
-            else ResponsesAdapter(configuration, transport)
-        )
+        self._adapter: ResponsesAdapter | ChatCompletionsAdapter | MessagesAdapter
+        match configuration.protocol:
+            case Protocol.RESPONSES:
+                self._adapter = ResponsesAdapter(configuration, transport)
+            case Protocol.CHAT_COMPLETIONS:
+                self._adapter = ChatCompletionsAdapter(configuration, transport)
+            case Protocol.MESSAGES:
+                self._adapter = MessagesAdapter(configuration, transport)
         self._configuration = configuration
         self._sleep = sleep
 
     @staticmethod
     def validate_configuration(configuration: ModelConfiguration) -> None:
-        if configuration.protocol not in {Protocol.RESPONSES, Protocol.CHAT_COMPLETIONS}:
+        if configuration.protocol not in {
+            Protocol.RESPONSES,
+            Protocol.CHAT_COMPLETIONS,
+            Protocol.MESSAGES,
+        }:
             raise ModelUnavailable(FailureKind.CONFIGURATION)
+        if configuration.protocol is Protocol.MESSAGES:
+            MessagesAdapter.request_options(configuration)
 
     @property
     def configuration(self) -> ModelConfiguration:
@@ -79,12 +91,23 @@ class Llm:
             try:
                 async with asyncio.timeout(self._configuration.timeout_seconds):
                     return await self._adapter.complete(input, tools, evidence=evidence)
-            except (TimeoutError, APITimeoutError, httpx.TimeoutException):
+            except (
+                TimeoutError,
+                APITimeoutError,
+                anthropic.APITimeoutError,
+                httpx.TimeoutException,
+            ):
                 reason = FailureKind.TIMEOUT
-            except (APIConnectionError, httpx.TransportError):
+            except (APIConnectionError, anthropic.APIConnectionError, httpx.TransportError):
                 reason = FailureKind.CONNECTION
             except APIStatusError as error:
                 reason = classify_error(error.code, error.status_code)
+            except anthropic.APIStatusError as error:
+                reason = classify_anthropic_error(error.body, error.status_code)
+            except anthropic.APIResponseValidationError:
+                reason = FailureKind.PROTOCOL
+            except anthropic.APIError as error:
+                reason = classify_anthropic_error(error.body)
             except APIResponseValidationError:
                 reason = FailureKind.PROTOCOL
             except APIError as error:

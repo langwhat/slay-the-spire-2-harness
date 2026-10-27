@@ -62,7 +62,7 @@ owned child processes; no real game or model provider is required.
 
 The Python `sts2_harness.llm.client.Llm` client accepts a `ModelConfiguration` snapshot
 and implements `complete(input, tools)` as an async context manager. It currently supports
-Responses and Chat Completions. Callers own the immutable `ModelInput` message tuple;
+Responses, Chat Completions, and Messages. Callers own the immutable `ModelInput` message tuple;
 the client retains
 no conversation. Tool definitions use concrete Pydantic argument models. Provider
 schemas use `strict=False` to preserve optional-field semantics; tools remain responsible
@@ -73,7 +73,11 @@ usage, and separate requested/response model metadata. `ResponsesReply.to_json()
 `from_json()` preserve the complete ordered native output, including encrypted reasoning
 and assistant phases in one immutable encoded snapshot. Decoded SDK items are independent
 copies. `ChatCompletionsReply` retains a complete native completion and continues with its
-native assistant message, including opaque continuation fields. Histories from another
+native assistant message, including opaque continuation fields. `MessagesReply` retains the
+complete native Message and continues with its ordered content blocks, including thinking,
+signatures, redacted thinking, explicit nulls, and opaque fields. Thinking is not exposed
+in the normalized text view. Messages groups tool results in the immediately following
+user message before auxiliary text. Histories from another
 protocol are rejected; protocol switching does not migrate existing context. Append the
 returned assistant message and associated tool-result
 messages to the caller's input; native output is sent once, without `previous_response_id`.
@@ -81,6 +85,9 @@ The adapter does not execute tools or return intermediate streamed argument frag
 
 Responses requires `response.completed`; Chat Completions requires a complete `stop` or
 `tool_calls` choice after consuming the stream, including any final usage chunk.
+Messages requires closed, ordered content blocks and an explicit `message_stop` after
+a supported `end_turn` or `tool_use` outcome. Server-tool blocks, `pause_turn`, `refusal`,
+and unconfigured `stop_sequence` outcomes are unsupported.
 Premature clean EOF,
 connection failures, timeouts, rate limits, and overload are retried. Each attempt gets its
 own configured timeout covering request start through final decoding. SDK retries are
@@ -88,6 +95,17 @@ disabled; the default 25 additional attempts wait 2, 4, 8, 16, then 32 seconds, 
 702 seconds of backoff. Explicit output truncation, authentication, permission, quota,
 model/configuration errors, and malformed terminal responses raise a typed
 `ModelUnavailable` without automatic regeneration. Cancellation propagates to the caller.
+
+Messages uses the official Anthropic SDK with an internal `max_tokens=16000` policy;
+this is not a universal model maximum. Thinking is omitted to preserve the server default.
+Nonempty effort accepts `low`, `medium`, `high`, `xhigh`, or `max`; service tier accepts
+`auto` or `standard_only`. Unsupported target options fail explicitly without fallback.
+Top-level ephemeral automatic caching uses the default five-minute TTL, without warmup
+requests or additional block breakpoints. Total input includes uncached input plus actual
+cache creation and read counts; missing counts remain unknown. Messages appends
+`/v1/messages` to the configured base URL, preserving its path prefix. Each custom target
+requires its own finite protocol acceptance check; passing fake HTTP tests does not
+establish compatibility with a live provider.
 
 Missing usage counters remain `None`. Cache hit ratio uses cache-read tokens divided by
 all input tokens, including cache writes. `Usage.summarize_cache()` sums comparable token

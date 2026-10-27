@@ -55,6 +55,7 @@ from sts2_harness.llm.messages import (
     TextRole,
     ToolDefinition,
 )
+from sts2_harness.llm.messages_native import MessagesReply
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.results import NotesText, NotesUpdated, Outcome
 
@@ -393,7 +394,7 @@ class NativeSnapshot(native.WireModel):
             case Protocol.CHAT_COMPLETIONS:
                 return ChatCompletionsReply.from_json(self.native_output)
             case Protocol.MESSAGES:
-                raise ValueError("The archived native protocol is unsupported.")
+                return MessagesReply.from_json(self.native_output)
 
     @model_validator(mode="after")
     def validate_native(self) -> Self:

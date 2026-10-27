@@ -536,8 +536,8 @@ async def run_headless(
     model = configuration.model
     try:
         Llm.validate_configuration(model)
-    except ModelUnavailable:
-        raise ConfigurationError("The configured model protocol is not implemented.") from None
+    except ModelUnavailable as error:
+        raise ConfigurationError(str(error)) from None
     if stop_requested.is_set():
         return None
     try:
