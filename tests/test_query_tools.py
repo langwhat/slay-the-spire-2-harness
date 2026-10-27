@@ -10,6 +10,7 @@ from sts2_harness.client.models import DecisionOwner
 from sts2_harness.context import Context
 from sts2_harness.context.models import ResultMessage
 from sts2_harness.execution import Execution
+from sts2_harness.game import LiveGame
 from sts2_harness.llm.messages import ToolCall
 from sts2_harness.results import ReadCompleted
 from sts2_harness.tools import ToolCatalog
@@ -24,12 +25,16 @@ def test_state_dispatch_delivers_current_state_without_query_data() -> None:
             )
 
         async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
             tools = ToolCatalog(
                 DecisionOwner.COMBAT,
                 observe=execution.observe,
                 inspect=execution.inspect,
-                catalog=client.catalog,
+                catalog=execution.catalog,
             )
             call = ToolCall("state", "combat_inspect", '{"area":"state"}')
             result = await tools.dispatch(call)
@@ -95,12 +100,16 @@ def test_inspection_keeps_full_details_and_rejects_bad_arguments_and_foreign_men
             )
 
         async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
             tools = ToolCatalog(
                 DecisionOwner.COMBAT,
                 observe=execution.observe,
                 inspect=execution.inspect,
-                catalog=client.catalog,
+                catalog=execution.catalog,
             )
             context = Context(DecisionOwner.COMBAT)
             call = ToolCall(
@@ -182,12 +191,16 @@ def test_knowledge_preserves_native_matches_pagination_and_lookup_order() -> Non
             return httpx.Response(200, content='{"status":"completed","data":' + data + "}")
 
         async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
             tools = ToolCatalog(
                 DecisionOwner.RUN,
                 observe=execution.observe,
                 inspect=execution.inspect,
-                catalog=client.catalog,
+                catalog=execution.catalog,
             )
             result = await tools.dispatch(
                 ToolCall("catalog", "run_knowledge", '{"mode":"catalog"}')
@@ -283,12 +296,16 @@ def test_supplements_keep_document_identity_and_explicit_reads_and_failures() ->
             )
 
         async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
             tools = ToolCatalog(
                 DecisionOwner.COMBAT,
                 observe=execution.observe,
                 inspect=execution.inspect,
-                catalog=client.catalog,
+                catalog=execution.catalog,
                 supplements=provider,
             )
             context = Context(DecisionOwner.COMBAT)
@@ -366,12 +383,16 @@ def test_failed_reads_preserve_trustworthy_state_without_reusing_old_observation
             )
 
         async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
             tools = ToolCatalog(
                 DecisionOwner.COMBAT,
                 observe=execution.observe,
                 inspect=execution.inspect,
-                catalog=client.catalog,
+                catalog=execution.catalog,
             )
             failed = await tools.dispatch(ToolCall("detail", "combat_inspect", '{"area":"hand"}'))
             assert isinstance(failed.outcome, Failed)
@@ -423,12 +444,16 @@ def test_inspect_failure_without_observation_refreshes_state_or_ends_the_run(
             )
 
         async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
             tools = ToolCatalog(
                 DecisionOwner.COMBAT,
                 observe=execution.observe,
                 inspect=execution.inspect,
-                catalog=client.catalog,
+                catalog=execution.catalog,
             )
             call = ToolCall("detail", "combat_inspect", '{"area":"hand"}')
             if not state_available:

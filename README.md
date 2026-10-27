@@ -86,3 +86,62 @@ belongs to the protocol adapter; no separate cache settings or warmup calls are 
 Responses validation uses the official SDK with fake HTTP and controlled waits. It does
 not establish real endpoint compatibility or game behavior. Inject an HTTP transport and
 sleep callable into `Llm` to exercise these public boundaries without network calls.
+
+Game/control recordings are local SQLite archives. Compose `RecordedGame` around the
+logical `LiveGame` dependency; pass the same Journal as the live native audit receiver.
+The caller supplies the recording identity and genuinely known initial conditions:
+
+```python
+journal = Journal.create(archive_path, manifest)
+live = LiveGame(
+    client,
+    namespace=manifest.recording_id,
+    audit=journal,
+    game_instance_id=manifest.game_instance_id,
+    run_id=manifest.run_id,
+    wait_for_start=True,
+)
+execution = Execution(
+    RecordedGame(live, journal),
+    game_instance_id=manifest.game_instance_id,
+    run_id=manifest.run_id,
+    recovery=ToolRecoveryBudget(),
+)
+# Use Execution's run_unit, observe, inspect, catalog, and pause_until_resumed operations.
+journal.close()  # After the last operation has finished.
+```
+
+These classes live in `sts2_harness.game`, `sts2_harness.execution`, and
+`sts2_harness.journal`. Built-in admission waits for Start; external admission uses
+`wait_for_start=False` and omits the recovery budget. Each dependency is sequential.
+Use one live dependency and one Journal owner for a recording; reopening an archive
+provides a read-only evidence view, not session continuation.
+
+Each logical operation has one sequence. Native polls are child audit attempts whose
+complete typed replies are compressed and deduplicated as they arrive. Catalog queries
+and their subsequent current-state reads remain separate logical operations. A submitted
+operation ID does not establish completion: only confirmed completed receipts advance
+the game-operation cursor. Unfinished operations retain their request and arrived
+attempts with an explicit incomplete result. Ordinary archive failures preserve gameplay
+and report recording gaps; unwritable gaps remain in memory until storage recovers.
+`journal.availability` distinguishes an unpersisted initial manifest from a usable archive;
+initial disk failures also preserve gameplay and retry the same owned archive when writable.
+Existing archives and invalid recording paths are rejected rather than overwritten.
+Diagnostics default to the archive directory, with `diagnostics.jsonl`, two rotated
+backups of at most 10 MiB each, and a `status.json` updated at operation transitions.
+The Journal is never rotated with diagnostics. Keep archives outside the repository.
+
+Inspect recorded facts without startup configuration or network access:
+
+```sh
+uv run sts2 journal --archive /path/to/journal.sqlite
+uv run sts2 journal --archive /path/to/journal.sqlite --kind settle --around 12 --window 2
+uv run sts2 journal --archive /path/to/journal.sqlite --view operation --sequence 12 --expand
+uv run sts2 journal --archive /path/to/journal.sqlite --around 12 --expand --export evidence.json
+```
+
+The default timeline shows the latest 20 matching operations. Expanded views include
+full historical replies and observations; exports always include the manifest and gaps.
+These archives cover game/control IO only. They do not yet include model requests,
+material versions, a production session launcher, or enough evidence for exact replay.
+Model request inspection reports unsupported rather than substituting current files.

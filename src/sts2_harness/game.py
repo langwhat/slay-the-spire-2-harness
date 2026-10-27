@@ -1,0 +1,473 @@
+"""Logical game/control IO; native retries and waiting have one owner."""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from enum import StrEnum
+from typing import Annotated, Literal, Protocol
+
+from pydantic import Field
+
+from sts2_harness.client import ClientUnavailable, ModClient
+from sts2_harness.client import models as native
+from sts2_harness.client.http import CatalogResult, ClientFailureKind, InspectResult
+from sts2_harness.results import Reason, ReasonCode
+
+
+class OperationKind(StrEnum):
+    ADMIT = "admit"
+    OBSERVE = "observe"
+    INSPECT = "inspect"
+    CATALOG = "catalog"
+    SETTLE = "settle"
+    PAUSE = "pause"
+
+
+class Admit(native.WireModel):
+    kind: Literal[OperationKind.ADMIT] = OperationKind.ADMIT
+
+
+class Observe(native.WireModel):
+    kind: Literal[OperationKind.OBSERVE] = OperationKind.OBSERVE
+
+
+class Inspect(native.WireModel):
+    kind: Literal[OperationKind.INSPECT] = OperationKind.INSPECT
+    query: native.InspectQuery
+
+
+class Catalog(native.WireModel):
+    kind: Literal[OperationKind.CATALOG] = OperationKind.CATALOG
+    request: native.CatalogRequest
+
+
+class Settle(native.WireModel):
+    kind: Literal[OperationKind.SETTLE] = OperationKind.SETTLE
+    route: native.RouteKey
+    step: native.NativeStep
+
+
+class Pause(native.WireModel):
+    kind: Literal[OperationKind.PAUSE] = OperationKind.PAUSE
+    reason: Reason
+
+
+type GameRequest = Annotated[
+    Admit | Observe | Inspect | Catalog | Settle | Pause, Field(discriminator="kind")
+]
+type SettledReceipt = (
+    native.ReceiptCompleted | native.ReceiptRejected | native.ReceiptFailed | native.ReceiptUnknown
+)
+
+
+class Admitted(native.WireModel):
+    kind: Literal[OperationKind.ADMIT] = OperationKind.ADMIT
+    allowed: bool
+
+
+class Observed(native.WireModel):
+    kind: Literal[OperationKind.OBSERVE] = OperationKind.OBSERVE
+    observation: native.Observation
+
+
+class Inspected(native.WireModel):
+    kind: Literal[OperationKind.INSPECT] = OperationKind.INSPECT
+    result: InspectResult
+
+
+class Cataloged(native.WireModel):
+    kind: Literal[OperationKind.CATALOG] = OperationKind.CATALOG
+    result: CatalogResult
+
+
+class Settlement(native.WireModel):
+    kind: Literal[OperationKind.SETTLE] = OperationKind.SETTLE
+    request: native.StepRequest
+    receipt: SettledReceipt | None
+
+
+class Resumed(native.WireModel):
+    kind: Literal[OperationKind.PAUSE] = OperationKind.PAUSE
+    observation: native.Observation
+
+
+class FailureKind(StrEnum):
+    IO = "io"
+    READ = "read"
+    CONTROL = "control"
+    LIFETIME = "lifetime"
+
+
+class IOFailure(native.WireModel):
+    kind: Literal[FailureKind.IO] = FailureKind.IO
+    reason: ClientFailureKind
+
+
+class ReadFailure(native.WireModel):
+    kind: Literal[FailureKind.READ] = FailureKind.READ
+    message: str
+
+
+class ControlFailure(native.WireModel):
+    kind: Literal[FailureKind.CONTROL] = FailureKind.CONTROL
+    reason: Reason
+
+
+class LifetimeEnded(native.WireModel):
+    kind: Literal[FailureKind.LIFETIME] = FailureKind.LIFETIME
+    location: native.Location | None
+
+
+type GameSuccess = Annotated[
+    Admitted | Observed | Inspected | Cataloged | Settlement | Resumed, Field(discriminator="kind")
+]
+type GameFailure = Annotated[
+    IOFailure | ReadFailure | ControlFailure | LifetimeEnded, Field(discriminator="kind")
+]
+
+
+class Endpoint(StrEnum):
+    STATE = "state"
+    STATUS = "status"
+    INSPECT = "inspect"
+    CATALOG = "catalog"
+    SUBMIT = "submit"
+    CONTROL = "control"
+
+
+type NativeReply = (
+    native.Status
+    | native.StateCompleted
+    | native.ReadError
+    | InspectResult
+    | CatalogResult
+    | native.StepReceipt
+    | native.ControlReply
+    | native.ControlFailed
+    | IOFailure
+)
+
+
+class NativeAttempt(native.WireModel):
+    endpoint: Endpoint
+    reply: NativeReply
+
+
+class GameReply[T](native.WireModel):
+    outcome: T | GameFailure
+    observations: tuple[native.Observation, ...] = ()
+
+
+class NativeAudit(Protocol):
+    def submitting(self, operation_id: str) -> None: ...
+    def received(self, attempt: NativeAttempt) -> None: ...
+
+
+class GameIO(Protocol):
+    async def admit(self) -> GameReply[Admitted]: ...
+    async def observe(self) -> GameReply[Observed]: ...
+    async def inspect(self, query: native.InspectQuery) -> GameReply[Inspected]: ...
+    async def catalog(self, request: native.CatalogRequest) -> GameReply[Cataloged]: ...
+    async def settle(
+        self, route: native.RouteKey, step: native.NativeStep
+    ) -> GameReply[Settlement]: ...
+    async def pause_until_resumed(self, reason: Reason) -> GameReply[Resumed]: ...
+
+
+async def _poll_wait() -> None:
+    await asyncio.sleep(0.1)
+
+
+class GameReadError(Exception):
+    pass
+
+
+class ControlWriteError(Exception):
+    def __init__(self, reason: Reason) -> None:
+        self.reason = reason
+        super().__init__(reason.message)
+
+
+class GameLifetimeEnded(Exception):
+    def __init__(self, location: native.Location | None) -> None:
+        self.location = location
+        super().__init__("The bound run has ended or changed.")
+
+
+def unwrap[T](reply: GameReply[T]) -> T:
+    outcome = reply.outcome
+    if isinstance(outcome, IOFailure):
+        raise ClientUnavailable(outcome.reason)
+    if isinstance(outcome, ReadFailure):
+        raise GameReadError(outcome.message)
+    if isinstance(outcome, ControlFailure):
+        raise ControlWriteError(outcome.reason)
+    if isinstance(outcome, LifetimeEnded):
+        raise GameLifetimeEnded(outcome.location)
+    return outcome
+
+
+class LiveGame:
+    def __init__(
+        self,
+        client: ModClient,
+        *,
+        namespace: str,
+        audit: NativeAudit | None = None,
+        game_instance_id: str,
+        run_id: str,
+        wait_for_start: bool = False,
+        wait: Callable[[], Awaitable[None]] = _poll_wait,
+    ) -> None:
+        if not namespace:
+            raise ValueError("A game session namespace is required.")
+        self._client = client
+        self._audit = audit
+        self._namespace = namespace
+        self._step_number = 0
+        self._game_instance_id = game_instance_id
+        self._run_id = run_id
+        self._wait_for_start = wait_for_start
+        self._wait = wait
+        self._observations: list[native.Observation] = []
+        self._inflight = False
+
+    async def admit(self) -> GameReply[Admitted]:
+        return await self._run(self._admission_result)
+
+    async def _admission_result(self) -> Admitted:
+        allowed = await self._admit()
+        if allowed:
+            await self._fresh_observation()
+        return Admitted(allowed=allowed)
+
+    async def observe(self) -> GameReply[Observed]:
+        return await self._run(self._observation_result)
+
+    async def _observation_result(self) -> Observed:
+        return Observed(observation=await self._observe())
+
+    async def inspect(self, query: native.InspectQuery) -> GameReply[Inspected]:
+        return await self._run(lambda: self._inspection_result(query))
+
+    async def _inspection_result(self, query: native.InspectQuery) -> Inspected:
+        return Inspected(result=await self._inspect(query))
+
+    async def catalog(self, request: native.CatalogRequest) -> GameReply[Cataloged]:
+        return await self._run(lambda: self._catalog_result(request))
+
+    async def _catalog_result(self, request: native.CatalogRequest) -> Cataloged:
+        return Cataloged(
+            result=await self._attempt(Endpoint.CATALOG, self._client.catalog(request))
+        )
+
+    async def settle(
+        self, route: native.RouteKey, step: native.NativeStep
+    ) -> GameReply[Settlement]:
+        return await self._run(lambda: self._settlement_result(route, step))
+
+    async def _settlement_result(
+        self, route: native.RouteKey, step: native.NativeStep
+    ) -> Settlement:
+        self._step_number += 1
+        submission = native.StepRequest(
+            operation_id=f"{self._namespace}:{self._step_number}", expected_route=route, step=step
+        )
+        if self._audit is not None:
+            self._audit.submitting(submission.operation_id)
+        return Settlement(request=submission, receipt=await self._settle(submission))
+
+    async def pause_until_resumed(self, reason: Reason) -> GameReply[Resumed]:
+        return await self._run(lambda: self._resume_result(reason))
+
+    async def _resume_result(self, reason: Reason) -> Resumed:
+        return Resumed(observation=await self._pause_until_resumed(reason))
+
+    async def _run[T](self, operation: Callable[[], Awaitable[T]]) -> GameReply[T]:
+        if self._inflight:
+            raise RuntimeError("Game operations must be sequential.")
+        self._inflight = True
+        self._observations = []
+        try:
+            outcome: T | GameFailure
+            try:
+                outcome = await operation()
+            except ClientUnavailable as error:
+                outcome = IOFailure(reason=error.reason)
+            except GameReadError as error:
+                outcome = ReadFailure(message=str(error))
+            except ControlWriteError as error:
+                outcome = ControlFailure(reason=error.reason)
+            except GameLifetimeEnded as error:
+                outcome = LifetimeEnded(location=error.location)
+            return GameReply[T](
+                outcome=outcome,
+                observations=tuple(self._observations),
+            )
+        finally:
+            self._inflight = False
+
+    async def _attempt[T: NativeReply](self, endpoint: Endpoint, response: Awaitable[T]) -> T:
+        try:
+            reply = await response
+        except ClientUnavailable as error:
+            self._received(NativeAttempt(endpoint=endpoint, reply=IOFailure(reason=error.reason)))
+            raise
+        self._received(NativeAttempt(endpoint=endpoint, reply=reply))
+        if isinstance(reply, native.StateCompleted):
+            self._observations.append(reply.observation)
+        elif (
+            isinstance(
+                reply, (native.InspectCompleted, native.InspectRejected, native.InspectFailed)
+            )
+            and reply.observation is not None
+        ):
+            self._observations.append(reply.observation)
+        return reply
+
+    def _received(self, attempt: NativeAttempt) -> None:
+        if self._audit is not None:
+            self._audit.received(attempt)
+
+    async def _observe(self) -> native.Observation:
+        result = await self._attempt(Endpoint.STATE, self._client.state())
+        if isinstance(result, native.ReadError) and result.error.code is native.ErrorCode.NO_RUN:
+            raise GameLifetimeEnded(None)
+        if not isinstance(result, native.StateCompleted):
+            raise GameReadError(result.error.message)
+        return result.observation
+
+    async def _inspect(self, query: native.InspectQuery) -> InspectResult:
+        result = await self._attempt(Endpoint.INSPECT, self._client.inspect(query))
+        return result
+
+    async def _status(self) -> native.Status:
+        result = await self._attempt(Endpoint.STATUS, self._client.status())
+        if not isinstance(result, native.Status):
+            raise GameReadError(result.error.message)
+        return result
+
+    def _same_run(self, location: native.Location) -> bool:
+        return (
+            location.game_instance_id == self._game_instance_id and location.run_id == self._run_id
+        )
+
+    async def _admit(self) -> bool:
+        while True:
+            status = await self._status()
+            if status.location.run_id is None:
+                raise GameLifetimeEnded(status.location)
+            if (
+                not self._same_run(status.location)
+                or status.input_readiness is native.InputReadiness.TERMINAL
+            ):
+                return True
+            if status.control_intent is native.ControlIntent.PAUSED:
+                if not self._wait_for_start:
+                    return False
+            elif status.input_readiness in (
+                native.InputReadiness.READY,
+                native.InputReadiness.SELECTION,
+            ):
+                return True
+            await self._wait()
+
+    async def _fresh_observation(self) -> native.Observation:
+        observation = await self._observe()
+        while (
+            self._same_run(observation.location)
+            and observation.state.phase is not native.Phase.TERMINAL
+            and observation.input_readiness
+            not in (
+                native.InputReadiness.READY,
+                native.InputReadiness.SELECTION,
+            )
+        ):
+            await self._wait()
+            status = await self._status()
+            if status.location.run_id is None:
+                raise GameLifetimeEnded(status.location)
+            if not self._same_run(status.location):
+                return await self._observe()
+            if status.input_readiness in (
+                native.InputReadiness.BUSY,
+                native.InputReadiness.UNAVAILABLE,
+            ):
+                continue
+            observation = await self._observe()
+        return observation
+
+    async def _pause_until_resumed(self, reason: Reason) -> native.Observation:
+        """Write Pause, await explicit Start, then refresh; a dead run raises GameLifetimeEnded."""
+        try:
+            result = await self._attempt(
+                Endpoint.CONTROL, self._client.control(native.ControlIntent.PAUSED)
+            )
+        except ClientUnavailable as error:
+            raise ControlWriteError(
+                Reason(
+                    code=ReasonCode.CONTROL_UNAVAILABLE,
+                    message=f"Recovery Pause could not be confirmed: {error}",
+                )
+            ) from error
+        if not isinstance(result, native.ControlReply):
+            raise ControlWriteError(
+                Reason(code=ReasonCode.CONTROL_UNAVAILABLE, message=result.error.message)
+            )
+        if result.mode is not native.ControlIntent.PAUSED:
+            raise ControlWriteError(
+                Reason(
+                    code=ReasonCode.CONTROL_UNAVAILABLE,
+                    message="The Mod did not confirm the requested Pause control intent.",
+                )
+            )
+        while True:
+            try:
+                status = await self._status()
+                if (
+                    not self._same_run(status.location)
+                    or status.input_readiness is native.InputReadiness.TERMINAL
+                ):
+                    raise GameLifetimeEnded(status.location)
+                if status.control_intent is native.ControlIntent.RUNNING:
+                    observation = await self._observe()
+                    if (
+                        not self._same_run(observation.location)
+                        or observation.state.phase is native.Phase.TERMINAL
+                    ):
+                        raise GameLifetimeEnded(observation.location)
+                    return observation
+            except (ClientUnavailable, GameReadError):
+                await self._wait()
+                continue
+            await self._wait()
+
+    async def _settle(self, request: native.StepRequest) -> SettledReceipt | None:
+        try:
+            reply = await self._attempt(Endpoint.SUBMIT, self._client.submit(request))
+        except ClientUnavailable:
+            reply = None
+        if isinstance(reply, native.InvalidRequestReply):
+            return native.ReceiptRejected(
+                operation_id=request.operation_id,
+                status=native.ResultStatus.REJECTED,
+                error=reply.error,
+            )
+        if isinstance(reply, native.TechnicalError):
+            reply = None
+        if reply is not None and reply.operation_id != request.operation_id:
+            reply = None
+        if reply is not None and not isinstance(reply, native.ReceiptPending):
+            return reply
+        while True:
+            try:
+                status = await self._attempt(Endpoint.STATUS, self._client.status())
+            except ClientUnavailable:
+                return None
+            if not isinstance(status, native.Status):
+                return None
+            receipt = status.receipt
+            if receipt is None or receipt.operation_id != request.operation_id:
+                return None
+            if not isinstance(receipt, native.ReceiptPending):
+                return receipt
+            await self._wait()

@@ -17,6 +17,7 @@ from sts2_harness.decisions import (
     SelectStep,
 )
 from sts2_harness.execution import Executed, Execution, ToolRecoveryBudget
+from sts2_harness.game import LiveGame
 from sts2_harness.results import ActionCompleted, ActionToolResult
 
 
@@ -97,7 +98,17 @@ def test_anticipated_selection_finishes_and_accepts_the_complete_unit() -> None:
             )
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=False,
+                ),
+                game_instance_id="game",
+                run_id="run",
+            )
             route = native.RouteKey(
                 game_instance_id="game",
                 run_id="run",
@@ -260,7 +271,18 @@ def test_partial_failure_and_lost_responses_never_resubmit_or_execute_the_tail(m
             )
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run", recovery=budget)
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                ),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
+            )
             result = await execution.run_unit(source, ActTask(route))
         assert isinstance(result, Executed)
         outcome = result.outcome.outcome
@@ -341,7 +363,17 @@ def test_route_and_task_permissions_are_checked_before_actions() -> None:
             )
 
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run")
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=False,
+                ),
+                game_instance_id="game",
+                run_id="run",
+            )
             source = Source(ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "x"),))))
             mismatch = route.model_copy(update={"node_id": "old"})
             assert isinstance(await execution.run_unit(source, ActTask(mismatch)), RouteChanged)
@@ -473,7 +505,17 @@ def test_pause_waits_for_the_next_unit_and_explicit_start_after_programmatic_pau
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
             budget = ToolRecoveryBudget()
             execution = Execution(
-                client, game_instance_id="game", run_id="run", recovery=budget, wait=wait
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                    wait=wait,
+                ),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
             )
             source = PausingSource(proposal)
             admitted = asyncio.create_task(execution.run_unit(source, ActTask(route)))
@@ -495,7 +537,18 @@ def test_pause_waits_for_the_next_unit_and_explicit_start_after_programmatic_pau
             assert budget.failures == 0
             assert controls == []
             mode = native.ControlIntent.PAUSED
-            external = Execution(client, game_instance_id="game", run_id="run", wait=wait)
+            external = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=False,
+                    wait=wait,
+                ),
+                game_instance_id="game",
+                run_id="run",
+            )
             assert isinstance(await external.run_unit(following, ActTask(route)), Rejected)
             budget.record_failure()
             start.clear()
@@ -624,7 +677,18 @@ def test_shared_budget_counts_failures_once_after_feedback_and_preserves_read_su
         proposal = ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "x"),)))
         source = AccountingSource(proposal)
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run", recovery=budget)
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                ),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
+            )
             for expected_pause in (False, False, False, True):
                 result = await execution.run_unit(source, ActTask(route))
                 assert isinstance(result, Executed) and result.pause_required is expected_pause
@@ -733,7 +797,18 @@ def test_unconfirmed_pending_work_blocks_the_next_decision_until_native_readines
 
         source = Source(ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "x"),))))
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run", wait=wait)
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=False,
+                    wait=wait,
+                ),
+                game_instance_id="game",
+                run_id="run",
+            )
             result = await execution.run_unit(source, ActTask(route))
             assert isinstance(result, Executed) and isinstance(
                 result.outcome.outcome, ActionUnknown
@@ -793,7 +868,18 @@ def test_recovery_pause_reports_write_failure_or_run_end_without_reset(failure: 
             )
 
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run", recovery=budget)
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                ),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
+            )
             expected_error = GameLifetimeEnded if failure == "changed_run" else ControlWriteError
             with pytest.raises(expected_error):
                 await execution.pause_until_resumed(
@@ -874,7 +960,18 @@ def test_fresh_observation_readiness_and_pending_settlement_precede_new_decision
             ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "x"),)))
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run", wait=wait)
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=False,
+                    wait=wait,
+                ),
+                game_instance_id="game",
+                run_id="run",
+            )
             pending = asyncio.create_task(execution.run_unit(source, ActTask(route)))
             waiter = asyncio.create_task(waiting.wait())
             done, _ = await asyncio.wait((pending, waiter), return_when=asyncio.FIRST_COMPLETED)
@@ -943,7 +1040,18 @@ def test_no_run_ends_the_old_lifetime_without_observation_or_recovery_failure(
             )
 
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(client, game_instance_id="game", run_id="run", recovery=budget)
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                ),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
+            )
             with pytest.raises(GameLifetimeEnded):
                 await execution.run_unit(source, ActTask(route))
         assert source.observations == [] and source.outcomes == []
@@ -1035,7 +1143,17 @@ def test_recovery_pause_keeps_waiting_through_status_and_started_observation_fai
 
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
             execution = Execution(
-                client, game_instance_id="game", run_id="run", recovery=budget, wait=wait
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                    wait=wait,
+                ),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
             )
             paused = asyncio.create_task(
                 execution.pause_until_resumed(
