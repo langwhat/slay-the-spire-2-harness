@@ -443,3 +443,241 @@ def test_owned_listener_with_mismatched_public_route_is_not_admitted(tmp_path: P
     with pytest.raises(ProcessLookupError):
         os.kill(status["game_process_id"], 0)
     assert not (directory / "archive.sqlite").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+@pytest.mark.parametrize("descriptor", [1, 2])
+def test_probe_overflow_reaps_child_even_after_valid_markers(
+    tmp_path: Path, descriptor: int
+) -> None:
+    import asyncio
+    import os
+
+    from sts2_harness.headless import HeadlessError, HeadlessOptions, OwnedHeadlessInstance
+
+    game, template = game_fixture(tmp_path)
+    game.write_text(
+        game.read_text().replace(
+            "    sys.exit(0)",
+            '    pathlib.Path(os.environ["HOME"], "probe.pid").write_text(str(os.getpid()))\n'
+            "    sys.stdout.flush()\n"
+            f"    os.write({descriptor}, b'\\xff' * 65537)\n"
+            "    import time; time.sleep(30)\n"
+            "    sys.exit(0)",
+        )
+    )
+    directory = tmp_path / "instance"
+
+    async def exercise() -> None:
+        with pytest.raises(HeadlessError, match="output limit"):
+            async with OwnedHeadlessInstance(
+                HeadlessOptions(
+                    game, template, tmp_path / "runs", directory, startup_timeout_seconds=5
+                )
+            ):
+                pytest.fail("An overflowing probe must not launch the game.")
+
+    asyncio.run(exercise())
+    pid = int((directory / "home/probe.pid").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert all(
+        (directory / f"probe.{stream}.log").stat().st_size <= 65536
+        for stream in ("stdout", "stderr")
+    )
+    assert not (directory / "game.stdout.log").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+@pytest.mark.parametrize("during_cleanup", [False, True])
+def test_cancelling_owned_context_finishes_pipes_and_removes_alias(
+    tmp_path: Path, during_cleanup: bool
+) -> None:
+    import asyncio
+    import os
+
+    from sts2_harness.headless import HeadlessOptions, OwnedHeadlessInstance, StandardRunRecipe
+    from sts2_harness.journal import StandardCharacter
+
+    game, template = game_fixture(tmp_path)
+    game.write_text(
+        game.read_text().replace(
+            "server = http.server.HTTPServer",
+            "import signal, time\n"
+            "def stop(signum, frame): time.sleep(0.3); sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\n"
+            "data = b'\\xff' * 65536\n"
+            "for _ in range(176):\n    os.write(1, data); os.write(2, data)\n"
+            "server = http.server.HTTPServer",
+        )
+    )
+    directory = tmp_path / "instance"
+
+    async def exercise() -> tuple[int, Path]:
+        entered = asyncio.Event()
+        close_requested = asyncio.Event()
+        instance = OwnedHeadlessInstance(
+            HeadlessOptions(
+                game,
+                template,
+                tmp_path / "runs",
+                directory,
+                recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="OUTPUT"),
+            )
+        )
+
+        async def own() -> None:
+            async with instance:
+                entered.set()
+                await close_requested.wait()
+
+        owner = asyncio.create_task(own())
+        async with asyncio.timeout(10):
+            await entered.wait()
+        assert instance.process is not None
+        pid, alias = instance.process.pid, instance.alias
+        if during_cleanup:
+            close_requested.set()
+            await asyncio.sleep(0.1)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+        return pid, alias
+
+    pid, alias = asyncio.run(exercise())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert not alias.is_symlink()
+    for stream in ("stdout", "stderr"):
+        assert (directory / f"game.{stream}.log.1").stat().st_size == 10 * 1024**2
+        assert (directory / f"game.{stream}.log").stat().st_size == 1024**2
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+def test_port_retry_reaps_previous_child_and_reuses_output_history(tmp_path: Path) -> None:
+    import asyncio
+    import os
+
+    from sts2_harness.headless import HeadlessOptions, OwnedHeadlessInstance, StandardRunRecipe
+    from sts2_harness.journal import StandardCharacter
+
+    game, template = game_fixture(tmp_path)
+    game.write_text(
+        game.read_text().replace(
+            "server = http.server.HTTPServer",
+            "import signal, time\n"
+            'attempt = pathlib.Path(os.environ["HOME"], "first-attempt.pid")\n'
+            "data = b'\\xff' * 65536\n"
+            "for _ in range(176):\n    os.write(1, data); os.write(2, data)\n"
+            "if not attempt.exists():\n"
+            "    attempt.write_text(str(os.getpid()))\n"
+            "    listener = os.fork()\n"
+            "    if listener:\n"
+            "        def stop(signum, frame):\n"
+            "            os.kill(listener, signal.SIGTERM)\n"
+            "            os.waitpid(listener, 0)\n"
+            "            sys.exit(0)\n"
+            "        signal.signal(signal.SIGTERM, stop)\n"
+            "        while True: time.sleep(0.01)\n"
+            "server = http.server.HTTPServer",
+        )
+    )
+    directory = tmp_path / "instance"
+
+    async def exercise() -> None:
+        async with OwnedHeadlessInstance(
+            HeadlessOptions(
+                game,
+                template,
+                tmp_path / "runs",
+                directory,
+                recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="OUTPUT"),
+                startup_timeout_seconds=10,
+            )
+        ) as instance:
+            assert instance.process is not None
+            previous = int((directory / "home/first-attempt.pid").read_text())
+            assert previous != instance.process.pid
+            with pytest.raises(ProcessLookupError):
+                os.kill(previous, 0)
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    asyncio.run(exercise())
+    for stream in ("stdout", "stderr"):
+        assert [
+            (directory / f"game.{stream}.log{suffix}").stat().st_size for suffix in (".2", ".1", "")
+        ] == [10 * 1024**2, 10 * 1024**2, 2 * 1024**2]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+@pytest.mark.parametrize("external_cancel", [False, True])
+def test_probe_termination_survives_timeout_or_cancellation(
+    tmp_path: Path, external_cancel: bool
+) -> None:
+    import asyncio
+    import os
+
+    from sts2_harness.headless import HeadlessError, HeadlessOptions, OwnedHeadlessInstance
+
+    game, template = game_fixture(tmp_path)
+    game.write_text(
+        game.read_text().replace(
+            "    sys.exit(0)",
+            "    import signal, time\n"
+            "    def ignore(signum, frame):\n"
+            '        with pathlib.Path(os.environ["HOME"], "terminated").open("a") as signals:\n'
+            '            signals.write("TERM\\n")\n'
+            "    signal.signal(signal.SIGTERM, ignore)\n"
+            "    sys.stdout.flush()\n"
+            "    os.write(2, b'x' * 65537)\n"
+            "    time.sleep(60)\n"
+            "    sys.exit(0)",
+        )
+    )
+    directory = tmp_path / "instance"
+
+    async def exercise() -> None:
+        instance = OwnedHeadlessInstance(
+            HeadlessOptions(
+                game,
+                template,
+                tmp_path / "runs",
+                directory,
+                startup_timeout_seconds=2,
+            )
+        )
+
+        async def own() -> None:
+            async with instance:
+                pytest.fail("The overflowing probe must not be admitted.")
+
+        owner = asyncio.create_task(own())
+        child: asyncio.subprocess.Process | None = None
+        try:
+            async with asyncio.timeout(5):
+                while not (directory / "home/terminated").exists():
+                    await asyncio.sleep(0.01)
+            child = instance.process
+            assert child is not None
+            if external_cancel:
+                owner.cancel()
+            done, _ = await asyncio.wait((owner,), timeout=13)
+            assert owner in done, "Termination lost its KILL/reap budget after cancellation."
+            with pytest.raises(asyncio.CancelledError if external_cancel else HeadlessError):
+                await owner
+            with pytest.raises(ProcessLookupError):
+                os.kill(child.pid, 0)
+            assert instance.process is None
+            assert (directory / "home/terminated").read_text() == "TERM\n"
+            assert asyncio.all_tasks() == {asyncio.current_task()}
+            assert (directory / "probe.stderr.log").stat().st_size == 65536
+        finally:
+            # Rescue only this test's known child when the regression is present.
+            if child is not None and child.returncode is None:
+                child.kill()
+                await child.wait()
+            await asyncio.gather(owner, return_exceptions=True)
+            await instance.aclose()
+
+    asyncio.run(exercise())

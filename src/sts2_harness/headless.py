@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from sts2_harness.child_output import BoundedChildOutput, ChildStream, capture_probe
 from sts2_harness.client import ClientUnavailable, ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind, ControlResult, StateResult, StatusResult
@@ -98,8 +99,9 @@ class OwnedHeadlessInstance:
         self.process: asyncio.subprocess.Process | None = None
         self.diagnostics: Diagnostics | None = None
         self._alias: Path | None = None
-        self._stdout = None
-        self._stderr = None
+        self._outputs: tuple[BoundedChildOutput, ...] = ()
+        self._drains: tuple[asyncio.Task[None], ...] = ()
+        self._captures: tuple[asyncio.Task[bytes], ...] = ()
 
     async def __aenter__(self) -> Self:
         try:
@@ -189,10 +191,7 @@ class OwnedHeadlessInstance:
                     start_new_session=True,
                 )
                 self.process = probe_process
-                probe_out, probe_err = await probe_process.communicate()
-            (self.directory / "probe.stdout.log").write_bytes(probe_out)
-            (self.directory / "probe.stderr.log").write_bytes(probe_err)
-            self.process = None
+                probe_out = await self._probe_output(probe_process)
             lines = probe_out.decode("utf-8", errors="replace").splitlines()
             paths = [
                 line.removeprefix("HARNESS_USER_DATA=")
@@ -230,8 +229,9 @@ class OwnedHeadlessInstance:
                     "STS2AGENT_GRACEFUL_HEADLESS_EXIT": "1",
                 }
             )
-            self._stdout = (self.directory / "game.stdout.log").open("wb")
-            self._stderr = (self.directory / "game.stderr.log").open("wb")
+            self._outputs = tuple(
+                BoundedChildOutput(self.directory, stream) for stream in ChildStream
+            )
             for attempt in range(3 if self.options.port is None else 1):
                 self.port = initial_port if attempt == 0 else _candidate_port(None)
                 self.environment["STS2AGENT_PORT"] = str(self.port)
@@ -239,9 +239,16 @@ class OwnedHeadlessInstance:
                     *arguments,
                     env=self.environment,
                     cwd=game.parent,
-                    stdout=self._stdout,
-                    stderr=self._stderr,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                     start_new_session=True,
+                )
+                assert self.process.stdout is not None and self.process.stderr is not None
+                self._drains = tuple(
+                    asyncio.create_task(output.drain(reader))
+                    for output, reader in zip(
+                        self._outputs, (self.process.stdout, self.process.stderr), strict=True
+                    )
                 )
                 self.diagnostics.headless_instance(
                     self.directory, self.user_directory, self.alias, self.process.pid, self.port
@@ -373,34 +380,88 @@ class OwnedHeadlessInstance:
                 BootstrapAttempt(endpoint=endpoint, reply=reply, error=error).to_json() + "\n"
             )
 
+    async def _probe_output(self, process: asyncio.subprocess.Process) -> bytes:
+        assert process.stdout is not None and process.stderr is not None
+        overflow = asyncio.Event()
+        self._captures = tuple(
+            asyncio.create_task(capture_probe(reader, overflow))
+            for reader in (process.stdout, process.stderr)
+        )
+        exited = asyncio.create_task(process.wait())
+        exceeded = asyncio.create_task(overflow.wait())
+        captures = self._captures
+        try:
+            await asyncio.wait((exited, exceeded), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            exited.cancel()
+            exceeded.cancel()
+            await asyncio.gather(exited, exceeded, return_exceptions=True)
+            await self._stop_child()
+        if overflow.is_set():
+            raise HeadlessError("The native isolation probe exceeded its output limit.")
+        return captures[0].result()
+
     async def _stop_child(self) -> None:
-        if self.process is None:
-            return
-        if self.process.returncode is None:
-            self.process.terminate()
+        cleanup = asyncio.create_task(self._reap_child())
+        cancellation: asyncio.CancelledError | None = None
+        while not cleanup.done():
             try:
-                await asyncio.wait_for(self.process.wait(), timeout=10.0)
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as error:
+                cancellation = error
+        cleanup.result()
+        if cancellation is not None:
+            raise cancellation
+
+    async def _reap_child(self) -> None:
+        process = self.process
+        if process is None:
+            return
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=10.0)
             except TimeoutError:
-                self.process.kill()
-                await self.process.wait()
+                process.kill()
+                await process.wait()
         else:
-            await self.process.wait()
+            await process.wait()
         self.process = None
+        drains, self._drains = self._drains, ()
+        captures, self._captures = self._captures, ()
+        drain_results = await asyncio.gather(*drains, return_exceptions=True)
+        capture_results = await asyncio.gather(*captures, return_exceptions=True)
+        for stream, capture in zip(ChildStream, captures, strict=False):
+            if not capture.cancelled() and capture.exception() is None:
+                (self.directory / f"probe.{stream.value}.log").write_bytes(capture.result())
+        for result in (*drain_results, *capture_results):
+            if isinstance(result, BaseException):
+                raise result
+
+    async def _close(self) -> None:
+        try:
+            await self._stop_child()
+        finally:
+            for output in self._outputs:
+                output.close()
+            try:
+                if (
+                    self._alias is not None
+                    and self._alias.is_symlink()
+                    and self._alias.readlink() == self.user_directory
+                ):
+                    self._alias.unlink()
+            finally:
+                if self.diagnostics is not None:
+                    self.diagnostics.close()
 
     async def aclose(self) -> None:
-        await self._stop_child()
-        if self._stdout is not None:
-            self._stdout.close()
-        if self._stderr is not None:
-            self._stderr.close()
-        if (
-            self._alias is not None
-            and self._alias.is_symlink()
-            and self._alias.readlink() == self.user_directory
-        ):
-            self._alias.unlink()
-        if self.diagnostics is not None:
-            self.diagnostics.close()
+        cleanup = asyncio.create_task(self._close())
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            await cleanup
+            raise
 
     async def __aexit__(
         self,
