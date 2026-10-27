@@ -173,8 +173,9 @@ receipts, queries, and material reads. Sequence and confirmed game cursor expres
 they do not imply that an adjacent action was caused by a particular model request.
 
 Reopening provides offline inspection only. Schema versions are validated without archive
-migration. Ordinary user startup, the external facade, software replay, native restoration,
-and evaluation remain unsupported; the manifest does not claim exact replay.
+migration. Read older archives with the revision that recorded them. Ordinary user startup,
+the external facade, software replay, native restoration, and evaluation remain unsupported;
+the manifest does not claim exact replay.
 
 ## Single-run sessions
 

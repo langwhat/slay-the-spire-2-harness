@@ -1059,3 +1059,30 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
         archive.close()
 
     asyncio.run(scenario())
+
+
+def test_archive_open_rejects_version_two_and_reads_current_version(tmp_path: Path) -> None:
+    import json
+    import sqlite3
+
+    from sts2_harness.journal import ArchiveError
+
+    path = tmp_path / "archive.sqlite"
+    journal = Journal.create(
+        path,
+        Manifest(recording_id="schema", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    journal.close()
+    with sqlite3.connect(path) as connection:
+        manifest = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
+        manifest["schema_version"] = 2
+        connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
+    with pytest.raises(ArchiveError, match="schema is unsupported"):
+        Journal.open(path)
+    with sqlite3.connect(path) as connection:
+        manifest["schema_version"] = 3
+        connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
+    reopened = Journal.open(path)
+    assert reopened.manifest.schema_version == 3
+    assert reopened.operations() == ()
+    reopened.close()

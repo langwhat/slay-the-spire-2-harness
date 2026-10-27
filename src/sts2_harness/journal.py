@@ -65,7 +65,7 @@ from sts2_harness.results import Reason
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
