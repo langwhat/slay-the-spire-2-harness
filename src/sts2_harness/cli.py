@@ -12,6 +12,7 @@ from typing import NoReturn
 
 from pydantic import ValidationError
 
+from sts2_harness.client.models import DecisionOwner
 from sts2_harness.config import Configuration, ConfigurationError, Driver, load_configuration
 from sts2_harness.external_http import run_external
 from sts2_harness.game import ControlWriteError, OperationKind
@@ -82,6 +83,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--kind", choices=[kind.value for kind in (*OperationKind, *DependencyKind)]
     )
+    parser.add_argument("--role", choices=[role.value for role in DecisionOwner])
+    parser.add_argument("--node")
+    parser.add_argument("--errors-only", action="store_true")
     parser.add_argument("--expand", action="store_true")
     parser.add_argument("--export", type=Path)
     try:
@@ -95,6 +99,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             window: int = arguments.window
             kind: str | None = arguments.kind
             expand: bool = arguments.expand
+            role: str | None = arguments.role
+            node_id: str | None = arguments.node
+            errors_only: bool = arguments.errors_only
             destination: Path | None = arguments.export
             if archive is None:
                 raise ArchiveError("Evidence inspection requires --archive PATH.")
@@ -117,6 +124,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 around=around,
                 window=window,
                 sequence=sequence,
+                role=DecisionOwner(role) if role is not None else None,
+                node_id=node_id,
+                errors_only=errors_only,
             )
             text = output.model_dump_json(indent=2)
             if destination is not None:

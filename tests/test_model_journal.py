@@ -416,3 +416,218 @@ def test_material_failures_and_outer_lookup_reads_remain_distinct_evidence(tmp_p
         assert Journal.open(journal.path).manifest.initial_notes is None
 
     asyncio.run(scenario())
+
+
+def test_indexed_model_and_material_summaries_keep_historical_input_and_incomplete_state(
+    tmp_path: Path,
+) -> None:
+    from test_mod_client import RUN
+
+    from sts2_harness.game import GameReply, Observe, Observed, Settle
+    from sts2_harness.journal import DependencyKind, ModelSummary, evidence
+    from sts2_harness.journal_models import (
+        ConfigurationSnapshot,
+        ModelAttempt,
+        PromptRead,
+        ToolSet,
+        archive_input,
+    )
+
+    journal = Journal.create(
+        tmp_path / "selection.sqlite",
+        Manifest(
+            recording_id="selection", core_version="test", game_instance_id="game", run_id="run"
+        ),
+    )
+    observation = native.Observation.model_validate_json(RUN)
+    journal.begin(Observe())
+    journal.finish(
+        GameReply(outcome=Observed(observation=observation), observations=(observation,))
+    )
+    journal.end()
+    messages = archive_input((TextMessage(TextRole.USER, "historical input"),))
+    first = journal.begin_model(
+        native.DecisionOwner.RUN,
+        "run:1",
+        messages,
+        ToolSet(tools=()),
+        ConfigurationSnapshot.of(configuration(tmp_path)),
+    )
+    journal.model_attempt(first, ModelAttempt(index=1, failure=FailureKind.CONNECTION))
+    journal.finish_model(first)
+    journal.end_model()
+    # A potential game write invalidates prior node knowledge before its result exists.
+    route = native.RouteKey.model_validate(observation.location.model_dump())
+    journal.begin(
+        Settle(route=route, step=native.Interact(kind=native.StepKind.INTERACT, action="travel"))
+    )
+    journal.end()
+    unfinished = journal.begin_model(
+        native.DecisionOwner.COMBAT,
+        "combat:1",
+        messages,
+        ToolSet(tools=()),
+        ConfigurationSnapshot.of(configuration(tmp_path)),
+    )
+    from sts2_harness.config import Protocol
+    from sts2_harness.journal_models import ReplySnapshot
+
+    journal.model_attempt(
+        unfinished,
+        ModelAttempt(
+            index=1,
+            reply=ReplySnapshot(
+                protocol=Protocol.RESPONSES,
+                native_output=json.dumps(OUTPUT),
+                input_tokens=1,
+                output_tokens=1,
+                cache_read_tokens=None,
+                cache_write_tokens=None,
+                requested_model="synthetic",
+                requested_effort="low",
+                response_model="synthetic",
+                response_service_tier=None,
+            ),
+        ),
+    )
+    journal.end_model()
+    material = journal.begin_material(PromptRead(name="guide"))
+    journal.finish_material(material, MaterialFailed(failure=MaterialFailure.UNAVAILABLE))
+    journal.close()
+    reader = Journal.open(journal.path)
+    selected = evidence(
+        reader,
+        kind=DependencyKind.MODEL,
+        role=native.DecisionOwner.RUN,
+        node_id=observation.location.node_id,
+    )
+    assert len(selected.records) == 1
+    summary = selected.records[0]
+    assert isinstance(summary, ModelSummary)
+    assert summary.input_messages == 1 and summary.physical_attempts == 1 and summary.delivered
+    pending = evidence(reader, sequence=unfinished).records[0]
+    assert isinstance(pending, ModelSummary) and pending.failure is None and not pending.delivered
+    assert pending.node_id is None
+    assert [row.sequence for row in evidence(reader, errors_only=True).records] == [
+        3,
+        unfinished,
+        material,
+    ]
+    expanded = evidence(reader, sequence=first, expand=True).records[0]
+    assert isinstance(expanded, ModelRecord) and expanded.input == messages
+    reader.close()
+
+
+def test_summary_storage_failure_preserves_gap_and_allows_later_model_recording(
+    tmp_path: Path,
+) -> None:
+    from sts2_harness.journal import evidence
+    from sts2_harness.journal_models import (
+        ConfigurationSnapshot,
+        ModelAttempt,
+        ToolSet,
+        archive_input,
+    )
+
+    journal = Journal.create(
+        tmp_path / "index-io.sqlite",
+        Manifest(recording_id="io", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    messages = archive_input((TextMessage(TextRole.USER, "Keep playing after archive failure."),))
+    snapshot = ConfigurationSnapshot.of(configuration(tmp_path))
+    # A missing index destination simulates a failed SQLite write, not a model failure.
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute("ALTER TABLE summaries RENAME TO unavailable_summaries")
+    failed = journal.begin_model(
+        native.DecisionOwner.RUN, "run", messages, ToolSet(tools=()), snapshot
+    )
+    assert journal.availability.error is not None
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute("ALTER TABLE unavailable_summaries RENAME TO summaries")
+    journal.model_attempt(failed, ModelAttempt(index=1))
+    journal.finish_model(failed)
+    journal.end_model()
+    recovered = journal.begin_model(
+        native.DecisionOwner.RUN, "run", messages, ToolSet(tools=()), snapshot
+    )
+    journal.finish_model(recovered)
+    journal.end_model()
+    journal.close()
+    reader = Journal.open(journal.path)
+    selected = evidence(reader)
+    assert [row.sequence for row in selected.records] == [recovered]
+    assert [(gap.first_sequence, gap.last_sequence) for gap in selected.gaps] == [(failed, failed)]
+    expanded = evidence(reader, sequence=recovered, expand=True).records[0]
+    assert isinstance(expanded, ModelRecord) and expanded.input == messages
+    reader.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "UPDATE model_requests SET delivered=0,failure='protocol'",
+        "UPDATE model_requests SET cursor=9",
+        "UPDATE model_requests SET role='run'",
+        "UPDATE model_requests SET stream='different'",
+        "UPDATE model_requests SET position=9",
+        "UPDATE records SET cursor=9",
+        "UPDATE records SET kind='pause'",
+        "UPDATE records SET operation_id='different'",
+        "UPDATE materials SET cursor=9",
+        "UPDATE materials SET reply=NULL",
+    ],
+)
+def test_summary_rejects_disagreement_with_authoritative_metadata(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    from test_mod_client import RUN
+
+    from sts2_harness.game import GameReply, Observe, Observed
+    from sts2_harness.journal import ArchiveError, evidence
+    from sts2_harness.journal_models import MaterialSnapshot, PromptRead
+
+    journal = Journal.create(
+        tmp_path / "metadata.sqlite",
+        Manifest(
+            recording_id="metadata", core_version="test", game_instance_id="game", run_id="run"
+        ),
+    )
+
+    async def record() -> None:
+        def provider(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=reply(text="Complete."), headers={"Content-Type": "text/event-stream"}
+            )
+
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(provider)) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.COMBAT, stream="combat:1")
+            await model.complete((TextMessage(TextRole.USER, "Recorded input."),), ())
+
+    asyncio.run(record())
+    observation = native.Observation.model_validate_json(RUN)
+    journal.begin(Observe())
+    journal.finish(
+        GameReply(outcome=Observed(observation=observation), observations=(observation,))
+    )
+    journal.end()
+    material = journal.begin_material(PromptRead(name="synthetic"))
+    journal.finish_material(
+        material,
+        PromptReadResult(
+            prompt=MaterialSnapshot.of(
+                MaterialText.create("prompt:synthetic", "Historical material."),
+            )
+        ),
+    )
+    journal.close()
+    reader = Journal.open(journal.path)
+    assert len(evidence(reader).records) == 3
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute(mutation)
+    with pytest.raises(ArchiveError, match="summary"):
+        Journal.open(journal.path)
+    for expand, errors_only in ((False, False), (False, True), (True, False)):
+        with pytest.raises(ArchiveError, match="summary"):
+            evidence(reader, expand=expand, errors_only=errors_only)
+    reader.close()

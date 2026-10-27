@@ -147,6 +147,7 @@ Inspect recorded facts without startup configuration or network access:
 ```sh
 uv run sts2 journal --archive /path/to/journal.sqlite
 uv run sts2 journal --archive /path/to/journal.sqlite --kind settle --around 12 --window 2
+uv run sts2 journal --archive /path/to/journal.sqlite --role combat --node NODE_ID --errors-only
 uv run sts2 journal --archive /path/to/journal.sqlite --view operation --sequence 12 --expand
 uv run sts2 journal --archive /path/to/journal.sqlite --view request --sequence 15 --expand
 uv run sts2 journal --archive /path/to/journal.sqlite --around 12 --expand --export evidence.json
@@ -174,7 +175,16 @@ Expansion restores named material IDs, versions, and bodies from the archive. A 
 gap cannot become the base of a later input. Source edits never repair or replace history.
 
 The default timeline shows the latest 20 matching dependency records in global sequence
-order; `--kind model` and `--kind material` filter dependencies. `Journal.operations()`
+order; `--kind model` and `--kind material` filter dependencies.
+`--role run|combat`, `--node NODE_ID`, and `--errors-only` combine with those filters.
+With `--around`, all filters apply inside that fixed sequence window; otherwise the
+latest 20 matching rows are selected. Unknown role or node associations remain null:
+they are not inferred from a neighboring model request or a future observation.
+The error filter includes failed, unknown, and incomplete dependencies. A complete
+native model reply that has not been delivered is still incomplete, not a model failure.
+Ordinary rejected actions, manual Pause, and orderly stopping are not errors.
+Summaries use a small index in the same archive without expanding input or response
+blocks; an inconsistent summary index is reported explicitly. `Journal.operations()`
 selects game/control operations, `requests()` selects model anchors, and `materials()`
 selects material reads. `request(sequence)` expands one anchor. Expanded CLI views include
 historical inputs, replies, attempts, and observations; selective exports include the
@@ -182,7 +192,7 @@ manifest and gaps. Use `--around` with the timeline to inspect neighboring actio
 receipts, queries, and material reads. Sequence and confirmed game cursor express ordering;
 they do not imply that an adjacent action was caused by a particular model request.
 
-The current archive schema is version 6 and records each native reply's protocol explicitly.
+The current archive schema is version 7 and records each native reply's protocol explicitly.
 Reopening provides offline inspection only. Schema versions are validated without archive
 migration. Read older archives with the revision that recorded them. Software replay,
 native restoration, and evaluation remain unsupported;

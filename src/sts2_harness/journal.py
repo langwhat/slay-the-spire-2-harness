@@ -59,6 +59,7 @@ from sts2_harness.journal_models import (
     MessageSnapshot,
     ModelAttempt,
     ModelRecord,
+    SkillListing,
     ToolSet,
 )
 from sts2_harness.llm.messages import FailureKind
@@ -93,7 +94,7 @@ class HeadlessInitialConditions(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[6] = 6
+    schema_version: Literal[7] = 7
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -170,6 +171,9 @@ CREATE TABLE IF NOT EXISTS model_attempts (sequence INTEGER NOT NULL, attempt IN
     value TEXT NOT NULL, PRIMARY KEY(sequence,attempt));
 CREATE TABLE IF NOT EXISTS materials (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
     request TEXT NOT NULL, reply TEXT);
+CREATE TABLE IF NOT EXISTS summaries (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
+    kind TEXT NOT NULL, role TEXT, node_id TEXT, is_error INTEGER NOT NULL, value TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS summary_selection ON summaries(kind,role,node_id,is_error,sequence);
 CREATE TABLE IF NOT EXISTS gaps (first_sequence INTEGER PRIMARY KEY,
     last_sequence INTEGER NOT NULL, cause TEXT NOT NULL);
 """
@@ -194,6 +198,7 @@ class Journal:
         self._stream_bases: dict[str, tuple[int, tuple[str, ...]]] = {}
         self._stream_positions: dict[str, int] = {}
         self._cursor = 0
+        self._boundary: tuple[int, native.Location] | None = None
         self._pending_gaps: list[Gap] = []
         self._active_request: GameRequest | None = None
         self._active_sequence: int | None = None
@@ -258,6 +263,7 @@ class Journal:
                 if row is None or not isinstance(row[0], str):
                     raise ArchiveError("The recording manifest is missing.")
                 manifest = Manifest.model_validate_json(row[0])
+                cls._check_summaries(connection)
                 sequence, cursor = connection.execute(
                     "SELECT COALESCE(MAX(sequence),0), COALESCE(MAX(cursor),0) FROM ("
                     "SELECT sequence,cursor FROM records UNION ALL "
@@ -371,6 +377,24 @@ class Journal:
                         self._blob(connection, delta),
                     ),
                 )
+                boundary = self._boundary
+                self._write_summary(
+                    connection,
+                    ModelSummary(
+                        sequence=sequence,
+                        confirmed_operation_cursor=self._cursor,
+                        role=role,
+                        stream=stream,
+                        position=position,
+                        delivered=False,
+                        failure=None,
+                        physical_attempts=0,
+                        input_messages=len(messages),
+                        node_id=boundary[1].node_id
+                        if boundary is not None and boundary[0] == self._cursor
+                        else None,
+                    ),
+                )
         # A failed transaction must never become the base of a later suffix.
         if self._storage_error is None:
             self._stream_bases[stream] = (sequence, digests)
@@ -383,6 +407,11 @@ class Journal:
                     "INSERT OR REPLACE INTO model_attempts VALUES (?,?,?)",
                     (sequence, attempt.index, self._blob(connection, attempt)),
                 )
+                summary = self._read_summary(connection, sequence)
+                if summary is not None:
+                    self._write_summary(
+                        connection, summary.model_copy(update={"physical_attempts": attempt.index})
+                    )
 
     def finish_model(self, sequence: int, *, failure: FailureKind | None = None) -> None:
         with self._storage() as connection:
@@ -391,6 +420,14 @@ class Journal:
                     "UPDATE model_requests SET delivered=?,failure=? WHERE sequence=?",
                     (int(failure is None), failure.value if failure else None, sequence),
                 )
+                summary = self._read_summary(connection, sequence)
+                if summary is not None:
+                    self._write_summary(
+                        connection,
+                        summary.model_copy(
+                            update={"delivered": failure is None, "failure": failure}
+                        ),
+                    )
 
     def end_model(self) -> None:
         self._active_sequence = None
@@ -403,6 +440,17 @@ class Journal:
                     "INSERT INTO materials VALUES (?,?,?,NULL)",
                     (sequence, self._cursor, self._blob(connection, request)),
                 )
+                self._write_summary(
+                    connection,
+                    MaterialSummary(
+                        sequence=sequence,
+                        confirmed_operation_cursor=self._cursor,
+                        operation=request.kind,
+                        complete=False,
+                        failure=None,
+                        role=request.role if isinstance(request, SkillListing) else None,
+                    ),
+                )
         return sequence
 
     def finish_material(self, sequence: int, reply: MaterialReply) -> None:
@@ -412,6 +460,19 @@ class Journal:
                     "UPDATE materials SET reply=? WHERE sequence=?",
                     (self._blob(connection, reply), sequence),
                 )
+                summary = self._read_summary(connection, sequence)
+                if summary is not None:
+                    self._write_summary(
+                        connection,
+                        summary.model_copy(
+                            update={
+                                "complete": True,
+                                "failure": reply.failure.value
+                                if isinstance(reply, MaterialFailed)
+                                else None,
+                            }
+                        ),
+                    )
 
         self._active_sequence = None
 
@@ -542,6 +603,8 @@ class Journal:
             raise RuntimeError("A recording operation is already active.")
         self._allocate()
         self._active_request = request
+        if isinstance(request, (Settle, Pause)):
+            self._boundary = None
         self._active_attempt = 0
         opened = False
         try:
@@ -556,6 +619,18 @@ class Journal:
                             request.kind.value,
                             None,
                             self._blob(connection, request),
+                        ),
+                    )
+                    self._write_summary(
+                        connection,
+                        OperationSummary(
+                            sequence=self._sequence,
+                            kind=request.kind,
+                            confirmed_operation_cursor=self._cursor,
+                            operation_id=None,
+                            result=ResultKind.INCOMPLETE,
+                            physical_attempts=0,
+                            observations=0,
                         ),
                     )
             opened = True
@@ -573,6 +648,11 @@ class Journal:
                     "UPDATE records SET operation_id=? WHERE sequence=?",
                     (operation_id, self._sequence),
                 )
+                summary = self._read_summary(connection, self._sequence)
+                if summary is not None:
+                    self._write_summary(
+                        connection, summary.model_copy(update={"operation_id": operation_id})
+                    )
 
     def received(self, attempt: NativeAttempt) -> None:
         if self._active_request is None:
@@ -634,6 +714,9 @@ class Journal:
             "INSERT OR IGNORE INTO attempts VALUES (?,?,?,?)",
             (self._sequence, index, attempt.endpoint.value, self._blob(connection, attempt.reply)),
         )
+        summary = self._read_summary(connection, self._sequence)
+        if summary is not None:
+            self._write_summary(connection, summary.model_copy(update={"physical_attempts": index}))
 
     def finish[T: GameSuccess](self, reply: GameReply[T]) -> None:
         request = self._active_request
@@ -662,6 +745,38 @@ class Journal:
                         stored.model_dump_json(),
                     ),
                 )
+                location = reply.observations[0].location if reply.observations else None
+                if any(observation.location != location for observation in reply.observations):
+                    location = None
+                self._write_summary(
+                    connection,
+                    OperationSummary(
+                        sequence=self._sequence,
+                        kind=request.kind,
+                        confirmed_operation_cursor=self._cursor,
+                        operation_id=operation_id,
+                        result=_result(outcome)[0],
+                        physical_attempts=self._active_attempt,
+                        observations=len(reply.observations),
+                        role=location.owner if location is not None else None,
+                        node_id=location.node_id if location is not None else None,
+                    ),
+                )
+        if (
+            self._storage_error is not None
+            or isinstance(outcome, (LifetimeEnded, IOFailure, ReadFailure, ControlFailure))
+            or _result(outcome)[0] is ResultKind.UNKNOWN
+        ):
+            self._boundary = None
+        elif reply.observations:
+            location = reply.observations[-1].location
+            if (
+                location.game_instance_id == self.manifest.game_instance_id
+                and location.run_id == self.manifest.run_id
+            ):
+                self._boundary = (self._cursor, location)
+            else:
+                self._boundary = None
         result, error = _result(outcome)
         self.diagnostics.emit(
             Event(
@@ -681,6 +796,7 @@ class Journal:
         self.diagnostics.finished()
 
     def _mark_gap(self) -> None:
+        self._boundary = None
         self._storage_error = GapCause.STORAGE_UNAVAILABLE
         if self._pending_gaps and self._pending_gaps[-1].last_sequence >= self._sequence - 1:
             previous = self._pending_gaps.pop()
@@ -824,6 +940,126 @@ class Journal:
                 return tuple(records)
         except (OSError, sqlite3.Error, ValidationError, ValueError):
             raise ArchiveError("Cannot decode the requested recording evidence.") from None
+
+    @staticmethod
+    def _write_summary(connection: sqlite3.Connection, summary: "Summary") -> None:
+        connection.execute(
+            "INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?)",
+            (
+                summary.sequence,
+                summary.confirmed_operation_cursor,
+                summary.kind.value,
+                summary.role.value if summary.role is not None else None,
+                summary.node_id,
+                int(_summary_failed(summary)),
+                summary.model_dump_json(),
+            ),
+        )
+
+    @staticmethod
+    def _read_summary(connection: sqlite3.Connection, sequence: int) -> "Summary | None":
+        row = connection.execute(
+            "SELECT value FROM summaries WHERE sequence=?", (sequence,)
+        ).fetchone()
+        if row is None:
+            # A failed begin transaction has no parent record or summary to update.
+            parent = connection.execute(
+                "SELECT sequence FROM records WHERE sequence=? UNION ALL "
+                "SELECT sequence FROM model_requests WHERE sequence=? UNION ALL "
+                "SELECT sequence FROM materials WHERE sequence=?",
+                (sequence, sequence, sequence),
+            ).fetchone()
+            if parent is not None:
+                raise sqlite3.DatabaseError("A recording summary is missing.")
+            return None
+        try:
+            return _SUMMARY.validate_json(row[0])
+        except ValidationError as error:
+            raise sqlite3.DatabaseError("A recording summary is corrupt.") from error
+
+    @staticmethod
+    def _check_summaries(connection: sqlite3.Connection) -> None:
+        missing = connection.execute(
+            "WITH dependencies AS (SELECT sequence FROM records UNION ALL "
+            "SELECT sequence FROM model_requests UNION ALL SELECT sequence FROM materials) "
+            "SELECT sequence FROM dependencies WHERE sequence NOT IN "
+            "(SELECT sequence FROM summaries) UNION ALL SELECT sequence FROM summaries "
+            "WHERE sequence NOT IN (SELECT sequence FROM dependencies) LIMIT 1"
+        ).fetchone()
+        if missing is not None:
+            raise ArchiveError("The recording summary index is incomplete or corrupt.")
+        inconsistent = connection.execute(
+            "SELECT sequence FROM summaries WHERE NOT json_valid(value) "
+            "OR sequence IS NOT json_extract(value,'$.sequence') "
+            "OR cursor IS NOT json_extract(value,'$.confirmed_operation_cursor') "
+            "OR kind IS NOT json_extract(value,'$.kind') "
+            "OR role IS NOT json_extract(value,'$.role') "
+            "OR node_id IS NOT json_extract(value,'$.node_id') "
+            "OR is_error IS NOT CASE kind "
+            "WHEN 'model' THEN (json_extract(value,'$.delivered')=0 "
+            "OR json_extract(value,'$.failure') IS NOT NULL) "
+            "WHEN 'material' THEN (json_extract(value,'$.complete')=0 "
+            "OR json_extract(value,'$.failure') IS NOT NULL) "
+            "ELSE json_extract(value,'$.result') IN ('failed','unknown','incomplete') END "
+            "LIMIT 1"
+        ).fetchone()
+        if inconsistent is not None:
+            raise ArchiveError("The recording summary disagrees with its index.")
+        disagreement = connection.execute(
+            "SELECT s.sequence FROM summaries s JOIN model_requests m USING(sequence) "
+            "WHERE s.kind!='model' OR s.cursor IS NOT m.cursor OR s.role IS NOT m.role "
+            "OR json_extract(s.value,'$.stream') IS NOT m.stream "
+            "OR json_extract(s.value,'$.position') IS NOT m.position "
+            "OR json_extract(s.value,'$.delivered') IS NOT m.delivered "
+            "OR json_extract(s.value,'$.failure') IS NOT m.failure "
+            "UNION ALL SELECT s.sequence FROM summaries s JOIN records r USING(sequence) "
+            "WHERE s.kind IS NOT r.kind OR s.cursor IS NOT r.cursor "
+            "OR json_extract(s.value,'$.operation_id') IS NOT r.operation_id "
+            "OR (json_extract(s.value,'$.result')='incomplete') IS NOT (r.reply IS NULL) "
+            "UNION ALL SELECT s.sequence FROM summaries s JOIN materials m USING(sequence) "
+            "WHERE s.kind!='material' OR s.cursor IS NOT m.cursor "
+            "OR json_extract(s.value,'$.complete') IS NOT (m.reply IS NOT NULL) LIMIT 1"
+        ).fetchone()
+        if disagreement is not None:
+            raise ArchiveError("The recording summary disagrees with its authoritative record.")
+
+    def summaries(
+        self,
+        *,
+        kind: OperationKind | DependencyKind | None = None,
+        start: int = 1,
+        stop: int | None = None,
+        limit: int | None = None,
+        role: native.DecisionOwner | None = None,
+        node_id: str | None = None,
+        errors_only: bool = False,
+    ) -> tuple["Summary", ...]:
+        try:
+            with closing(self._read_connection(self.path)) as connection:
+                self._check_summaries(connection)
+                rows = connection.execute(
+                    "SELECT value FROM summaries "
+                    "WHERE sequence>=? AND (? IS NULL OR sequence<=?) "
+                    "AND (? IS NULL OR kind=?) AND (? IS NULL OR role=?) "
+                    "AND (? IS NULL OR node_id=?) AND (?=0 OR is_error=1) "
+                    "ORDER BY sequence DESC LIMIT ?",
+                    (
+                        start,
+                        stop,
+                        stop,
+                        kind.value if kind is not None else None,
+                        kind.value if kind is not None else None,
+                        role.value if role is not None else None,
+                        role.value if role is not None else None,
+                        node_id,
+                        node_id,
+                        int(errors_only),
+                        limit if limit is not None else -1,
+                    ),
+                ).fetchall()
+                return tuple(_SUMMARY.validate_json(value) for (value,) in reversed(rows))
+        except (OSError, sqlite3.Error, ValidationError, ValueError):
+            raise ArchiveError("Cannot decode the requested recording summaries.") from None
 
     def timeline(
         self,
@@ -971,6 +1207,8 @@ class OperationSummary(native.WireModel):
     result: ResultKind
     physical_attempts: int
     observations: int
+    role: native.DecisionOwner | None = None
+    node_id: str | None = None
 
 
 class ModelSummary(native.WireModel):
@@ -984,10 +1222,13 @@ class ModelSummary(native.WireModel):
     failure: FailureKind | None
     physical_attempts: int
     input_messages: int
+    node_id: str | None = None
 
 
 class MaterialSummary(native.WireModel):
     kind: Literal[DependencyKind.MATERIAL] = DependencyKind.MATERIAL
+    role: native.DecisionOwner | None = None
+    node_id: str | None = None
     sequence: int
     confirmed_operation_cursor: int
     operation: MaterialKind
@@ -996,9 +1237,18 @@ class MaterialSummary(native.WireModel):
 
 
 type Summary = OperationSummary | ModelSummary | MaterialSummary
+_SUMMARY = TypeAdapter(Summary)
 
 
-def summarize(record: Record | ModelRecord | MaterialRecord) -> Summary:
+def _summary_failed(summary: "Summary") -> bool:
+    if isinstance(summary, OperationSummary):
+        return summary.result in (ResultKind.FAILED, ResultKind.UNKNOWN, ResultKind.INCOMPLETE)
+    if isinstance(summary, ModelSummary):
+        return not summary.delivered or summary.failure is not None
+    return not summary.complete or summary.failure is not None
+
+
+def summarize(record: Record | ModelRecord | MaterialRecord) -> "Summary":
     if isinstance(record, ModelRecord):
         return ModelSummary(
             sequence=record.sequence,
@@ -1048,11 +1298,17 @@ def evidence(
     around: int | None = None,
     window: int = 2,
     sequence: int | None = None,
+    role: native.DecisionOwner | None = None,
+    node_id: str | None = None,
+    errors_only: bool = False,
 ) -> Evidence:
     if window < 0 or (around is not None and around < 1) or (sequence is not None and sequence < 1):
         raise ArchiveError("Evidence indexes must be positive and the window nonnegative.")
-    records = journal.timeline(
+    summaries = journal.summaries(
         kind=kind,
+        role=role,
+        node_id=node_id,
+        errors_only=errors_only,
         start=sequence
         if sequence is not None
         else max(1, around - window)
@@ -1061,10 +1317,17 @@ def evidence(
         stop=sequence if sequence is not None else around + window if around is not None else None,
         limit=20 if sequence is None and around is None else None,
     )
-    if sequence is not None and not records:
+    if sequence is not None and not summaries:
         raise ArchiveError("No selected evidence at that sequence; inspect the gaps.")
-    return Evidence(
-        manifest=journal.manifest,
-        gaps=journal.gaps,
-        records=records if expand else tuple(summarize(record) for record in records),
+    records = (
+        tuple(
+            record
+            for summary in summaries
+            for record in journal.timeline(
+                kind=summary.kind, start=summary.sequence, stop=summary.sequence
+            )
+        )
+        if expand
+        else summaries
     )
+    return Evidence(manifest=journal.manifest, gaps=journal.gaps, records=records)

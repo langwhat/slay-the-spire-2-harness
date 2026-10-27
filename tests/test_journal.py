@@ -352,6 +352,10 @@ def test_offline_evidence_cli_filters_expands_and_exports_recorded_facts(tmp_pat
                 "journal",
                 "--archive",
                 str(tmp_path / "archive.sqlite"),
+                "--role",
+                "run",
+                "--node",
+                "node",
                 "--around",
                 "2",
                 "--window",
@@ -1061,7 +1065,7 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6])
 def test_archive_open_rejects_old_versions_and_reads_current_version(
     tmp_path: Path, version: int
 ) -> None:
@@ -1083,10 +1087,10 @@ def test_archive_open_rejects_old_versions_and_reads_current_version(
     with pytest.raises(ArchiveError, match="schema is unsupported"):
         Journal.open(path)
     with sqlite3.connect(path) as connection:
-        manifest["schema_version"] = 6
+        manifest["schema_version"] = 7
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     reopened = Journal.open(path)
-    assert reopened.manifest.schema_version == 6
+    assert reopened.manifest.schema_version == 7
     assert reopened.operations() == ()
     reopened.close()
 
@@ -1189,3 +1193,120 @@ def test_resident_diagnostics_preserve_lifecycle_and_control_during_inflight_io(
     assert status["stage"] == Stage.IDLE.value and status["lifecycle"] == "running"
     assert status["recording_id"] == "recording"
     diagnostics.close()
+
+
+def test_evidence_filters_fixed_window_and_latest_matching_summaries(tmp_path: Path) -> None:
+    from sts2_harness.client.http import ClientFailureKind
+    from sts2_harness.game import GameReply, IOFailure, Observe, Observed
+    from sts2_harness.journal import OperationSummary, evidence
+
+    journal = Journal.create(
+        tmp_path / "selection.sqlite",
+        Manifest(
+            recording_id="selection", core_version="test", game_instance_id="game", run_id="run"
+        ),
+    )
+    original = native.Observation.model_validate_json(RUN)
+    for index in range(25):
+        location = original.location.model_copy(
+            update={"node_id": "even" if index % 2 == 0 else "odd"}
+        )
+        observation = original.model_copy(update={"location": location})
+        journal.begin(Observe())
+        journal.finish(
+            GameReply(outcome=Observed(observation=observation), observations=(observation,))
+        )
+        journal.end()
+    journal.begin(Observe())
+    journal.finish(GameReply[Observed](outcome=IOFailure(reason=ClientFailureKind.CONNECTION)))
+    journal.end()
+    journal.begin(Observe())
+    journal.end()
+    journal.close()
+    reader = Journal.open(journal.path)
+    latest = evidence(reader, role=native.DecisionOwner.RUN, node_id="even")
+    assert [row.sequence for row in latest.records] == list(range(1, 26, 2))
+    assert all(isinstance(row, OperationSummary) for row in latest.records)
+    window = evidence(reader, around=12, window=2, node_id="even", role=native.DecisionOwner.RUN)
+    assert [row.sequence for row in window.records] == [11, 13]
+    failures = evidence(reader, errors_only=True)
+    assert [row.sequence for row in failures.records] == [26, 27]
+    assert [row.sequence for row in evidence(reader).records] == list(range(8, 28))
+    reader.close()
+
+
+def test_summary_queries_do_not_expand_bodies_and_detect_hidden_index_damage(
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    from sts2_harness.game import GameReply, Observe, Observed
+    from sts2_harness.journal import ArchiveError, OperationSummary, evidence
+
+    journal = Journal.create(
+        tmp_path / "damage.sqlite",
+        Manifest(recording_id="damage", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    observation = native.Observation.model_validate_json(RUN)
+    journal.begin(Observe())
+    journal.finish(
+        GameReply(outcome=Observed(observation=observation), observations=(observation,))
+    )
+    journal.end()
+    journal.close()
+    reader = Journal.open(journal.path)
+    # Missing body blocks must not force the summary view to decode historical input/state.
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute("DELETE FROM blobs")
+    assert isinstance(evidence(reader).records[0], OperationSummary)
+    with pytest.raises(ArchiveError, match="missing"):
+        evidence(reader, expand=True)
+    # A damaged filter column must not quietly turn matching evidence into an empty result.
+    with sqlite3.connect(journal.path) as connection:
+        connection.execute("UPDATE summaries SET node_id='invented'")
+    with pytest.raises(ArchiveError, match="summary"):
+        evidence(reader, node_id="node")
+    reader.close()
+
+
+def test_error_filter_excludes_normal_pause_stop_and_rejected_receipt(tmp_path: Path) -> None:
+    from sts2_harness.game import Admit, Admitted, GameReply, Pause, Settle, Stopped
+    from sts2_harness.journal import evidence
+
+    journal = Journal.create(
+        tmp_path / "normal.sqlite",
+        Manifest(recording_id="normal", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    journal.begin(Admit())
+    journal.finish(GameReply(outcome=Admitted(allowed=False)))
+    journal.end()
+    journal.begin(Pause())
+    journal.finish(GameReply[Admitted](outcome=Stopped()))
+    journal.end()
+    observation = native.Observation.model_validate_json(RUN)
+    request = native.StepRequest(
+        operation_id="normal:1",
+        expected_route=native.RouteKey.model_validate(observation.location.model_dump()),
+        step=native.Interact(kind=native.StepKind.INTERACT, action="travel"),
+    )
+    journal.begin(Settle(route=request.expected_route, step=request.step))
+    journal.finish(
+        GameReply(
+            outcome=Settlement(
+                request=request,
+                receipt=native.ReceiptRejected(
+                    operation_id="normal:1",
+                    status=native.ResultStatus.REJECTED,
+                    error=native.ActionUnavailable(
+                        code=native.ErrorCode.NATIVE_BUSY, message="Still settling."
+                    ),
+                ),
+            )
+        )
+    )
+    journal.end()
+    journal.close()
+    reader = Journal.open(journal.path)
+    assert len(evidence(reader).records) == 3
+    assert evidence(reader, errors_only=True).records == ()
+    reader.close()

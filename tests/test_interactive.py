@@ -183,7 +183,7 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(tmp_path: Path) 
     for path in archives:
         archive = Journal.open(path)
         assert archive.manifest.initial_notes == ""
-        assert archive.manifest.schema_version == 6
+        assert archive.manifest.schema_version == 7
         assert archive.operations()[0].request.kind.value == "pause"
         assert archive.gaps == ()
         archive.close()
