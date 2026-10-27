@@ -5,12 +5,14 @@ import sqlite3
 import zlib
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import ExitStack, closing, contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, TypeAdapter, ValidationError
 
+from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import Diagnostics, Event, EventKind
 from sts2_harness.game import (
@@ -184,6 +186,13 @@ class DependencyKind(StrEnum):
     MATERIAL = "material"
 
 
+@dataclass
+class _NativeFailures:
+    cause: ClientFailureKind | native.ErrorCode
+    count: int = 1
+    pending: bool = True
+
+
 class Journal:
     def __init__(
         self, path: Path, manifest: Manifest, *, diagnostics: Diagnostics | None = None
@@ -202,7 +211,7 @@ class Journal:
         self._pending_gaps: list[Gap] = []
         self._active_request: GameRequest | None = None
         self._active_sequence: int | None = None
-        self._native_failures: dict[Endpoint, tuple[str, int]] = {}
+        self._native_failures: dict[Endpoint, _NativeFailures] = {}
         self._active_attempt = 0
         self._read_only = False
         self._initialized = False
@@ -664,46 +673,59 @@ class Journal:
                 self._write_attempt(connection, self._active_attempt, attempt)
 
     def _diagnose_attempt(self, attempt: NativeAttempt) -> None:
-        if not isinstance(self._active_request, Pause) or attempt.endpoint not in (
-            Endpoint.STATUS,
-            Endpoint.STATE,
-            Endpoint.CONTROL,
-        ):
-            return
         reply = attempt.reply
         if isinstance(reply, native.ReadError) and reply.error.code is native.ErrorCode.NO_RUN:
             return
+        if isinstance(reply, native.InvalidRequestReply) and not isinstance(
+            self._active_request, Pause
+        ):
+            return
         cause = (
-            reply.reason.value
+            reply.reason
             if isinstance(reply, IOFailure)
-            else reply.error.code.value
+            else reply.error.code
             if isinstance(
-                reply, (native.ReadError, native.TechnicalError, native.InvalidRequestReply)
+                reply,
+                (
+                    native.ReadError,
+                    native.TechnicalError,
+                    native.InvalidRequestReply,
+                    native.InspectFailed,
+                    native.CatalogFailed,
+                    native.ReceiptFailed,
+                    native.ReceiptUnknown,
+                    native.ControlFailed,
+                ),
             )
             else None
         )
         previous = self._native_failures.get(attempt.endpoint)
         if cause is not None:
-            count = previous[1] + 1 if previous is not None else 1
-            self._native_failures[attempt.endpoint] = (cause, count)
+            if previous is None:
+                previous = _NativeFailures(cause)
+                self._native_failures[attempt.endpoint] = previous
+            else:
+                previous.count += 1
+                previous.cause = cause
+                previous.pending = True
             self.diagnostics.emit(
                 Event(
                     event=EventKind.NATIVE_RETRY,
                     sequence=self._sequence,
                     endpoint=attempt.endpoint,
-                    error=cause,
-                    failures=count,
+                    error=cause.value,
+                    failures=previous.count,
                 )
             )
-        elif previous is not None:
-            del self._native_failures[attempt.endpoint]
+        elif previous is not None and previous.pending:
+            previous.pending = False
             self.diagnostics.emit(
                 Event(
                     event=EventKind.NATIVE_RECOVERED,
                     sequence=self._sequence,
                     endpoint=attempt.endpoint,
-                    recovered_from=previous[0],
-                    failures=previous[1],
+                    recovered_from=previous.cause.value,
+                    failures=previous.count,
                 )
             )
 
@@ -777,6 +799,7 @@ class Journal:
                 self._boundary = (self._cursor, location)
             else:
                 self._boundary = None
+        self._finish_native_failures()
         result, error = _result(outcome)
         self.diagnostics.emit(
             Event(
@@ -788,11 +811,26 @@ class Journal:
             )
         )
 
+    def _finish_native_failures(self) -> None:
+        for endpoint, failures in self._native_failures.items():
+            if not failures.pending:
+                continue
+            self.diagnostics.emit(
+                Event(
+                    event=EventKind.NATIVE_FAILED,
+                    sequence=self._sequence,
+                    endpoint=endpoint,
+                    error=failures.cause.value,
+                    failures=failures.count,
+                )
+            )
+        self._native_failures.clear()
+
     def end(self) -> None:
+        self._finish_native_failures()
         self._active_request = None
         self._active_sequence = None
         self._active_attempt = 0
-        self._native_failures.clear()
         self.diagnostics.finished()
 
     def _mark_gap(self) -> None:

@@ -1,19 +1,42 @@
 """Bounded structured diagnostics, independent of durable game evidence."""
 
+import json
 import logging
 import os
 import re
 import sys
 import time
+import traceback
+from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Literal, TextIO
+from typing import Annotated, Literal, TextIO
+
+from pydantic import AfterValidator, Field
 
 from sts2_harness.client import models as native
 from sts2_harness.config import AuthKind, Configuration, Driver, Protocol
-from sts2_harness.game import Endpoint, OperationKind
+from sts2_harness.game import Endpoint, OperationKind, RunEndReason
+from sts2_harness.results import ActionCompleted, Outcome, OutcomeStatus, ReadCompleted, ReasonCode
+from sts2_harness.tools import ToolName
+
+
+def _redact(value: str) -> str:
+    value = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\r\n]+", r"\1[redacted]", value)
+    value = re.sub(
+        r"(?i)((?:api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,;&]+", r"\1[redacted]", value
+    )
+    value = re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", value)
+    return re.sub(r"([?&][^\s=&#]+)=([^\s&#]*)", r"\1=[redacted]", value)
+
+
+def _bounded_text(value: str) -> str:
+    return _redact(value[:2048])[:2048].encode("utf-8", errors="replace").decode("utf-8")
+
+
+type DiagnosticText = Annotated[str, AfterValidator(_bounded_text)]
 
 
 class EventKind(StrEnum):
@@ -23,35 +46,152 @@ class EventKind(StrEnum):
     RECORDING_RECOVERED = "recording_recovered"
     NATIVE_RETRY = "native_retry"
     NATIVE_RECOVERED = "native_recovered"
+    NATIVE_FAILED = "native_failed"
+    DISCOVERY_RETRY = "discovery_retry"
+    DISCOVERY_RECOVERED = "discovery_recovered"
     MODEL_REQUEST_STARTED = "model_request_started"
     MODEL_REQUEST_COMPLETED = "model_request_completed"
     MODEL_RETRY = "model_retry"
     MODEL_RECOVERED = "model_recovered"
     MODEL_EXHAUSTED = "model_exhausted"
     LIFECYCLE_CHANGED = "lifecycle_changed"
+    CONTROL_CHANGED = "control_changed"
+    TOOL_RECOVERY_EXHAUSTED = "tool_recovery_exhausted"
+    MODEL_ENCODING = "model_encoding"
+    TOOL_FINISHED = "tool_finished"
+    BATCH_SUBMITTED = "batch_submitted"
+    BATCH_SETTLED = "batch_settled"
+    AUTO_FINISHED = "auto_finished"
+    ACT_ENTERED = "act_entered"
+    ROLE_CHANGED = "role_changed"
+    BATTLE_STARTED = "battle_started"
+    BATTLE_FINISHED = "battle_finished"
 
 
 class Event(native.WireModel):
     event: EventKind
     sequence: int | None = None
-    operation_id: str | None = None
-    result: str | None = None
-    error: str | None = None
+    operation_id: DiagnosticText | None = None
+    result: DiagnosticText | None = None
+    error: DiagnosticText | None = None
     endpoint: Endpoint | None = None
     failures: int | None = None
-    recovered_from: str | None = None
+    recovered_from: DiagnosticText | None = None
     role: native.DecisionOwner | None = None
     attempt: int | None = None
     elapsed_seconds: float | None = None
 
 
+class RecoveryExhausted(Event):
+    event: EventKind = EventKind.TOOL_RECOVERY_EXHAUSTED
+
+
+class EncodingMetadata(Event):
+    event: EventKind = EventKind.MODEL_ENCODING
+    digest: DiagnosticText
+
+
+class ResultEvent(Event):
+    outcome: OutcomeStatus
+    reason: ReasonCode | None
+
+
+class ExceptionFrame(native.WireModel):
+    file: DiagnosticText
+    function: DiagnosticText
+    line: int
+
+
+class ExceptionDetails(native.WireModel):
+    type: DiagnosticText
+    frames: Annotated[tuple[ExceptionFrame, ...], Field(max_length=8)]
+
+    @classmethod
+    def capture(cls, error: Exception) -> "ExceptionDetails":
+        frames: deque[ExceptionFrame] = deque(maxlen=8)
+        for frame, line in traceback.walk_tb(error.__traceback__):
+            frames.append(
+                ExceptionFrame(
+                    file=Path(frame.f_code.co_filename).name,
+                    function=frame.f_code.co_name,
+                    line=line,
+                )
+            )
+        return cls(type=type(error).__name__, frames=tuple(frames))
+
+
+class ToolFinished(ResultEvent):
+    event: EventKind = EventKind.TOOL_FINISHED
+    tool: ToolName | None
+    exception: ExceptionDetails | None = None
+
+
+class AutoFinished(ResultEvent):
+    event: EventKind = EventKind.AUTO_FINISHED
+    label: DiagnosticText
+
+
+class ActEntered(Event):
+    event: EventKind = EventKind.ACT_ENTERED
+    act: int | None
+
+
+class ControlChanged(Event):
+    event: EventKind = EventKind.CONTROL_CHANGED
+    intent: native.ControlIntent
+
+
+class RoleChanged(Event):
+    event: EventKind = EventKind.ROLE_CHANGED
+
+
+class BattleStarted(Event):
+    event: EventKind = EventKind.BATTLE_STARTED
+    node_id: DiagnosticText | None
+
+
+class BattleEnd(StrEnum):
+    HANDOFF = "handoff"
+    RUN_ENDED = "run_ended"
+    INTERRUPTED = "interrupted"
+    STOPPED = "stopped"
+
+
+class BattleFinished(BattleStarted):
+    event: EventKind = EventKind.BATTLE_FINISHED
+    ending: BattleEnd
+    end_reason: RunEndReason | None
+
+
+class BatchStatus(StrEnum):
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+    UNKNOWN = "unknown"
+    INTERRUPTED = "interrupted"
+
+
+class BatchSubmitted(Event):
+    event: EventKind = EventKind.BATCH_SUBMITTED
+    planned: int
+
+
+class BatchSettled(Event):
+    event: EventKind = EventKind.BATCH_SETTLED
+    planned: int
+    confirmed: int
+    outcome: BatchStatus
+    reason: ReasonCode | None
+    uncertain_step: int | None = None
+
+
 class Level(StrEnum):
+    DEBUG = "DEBUG"
     INFO = "INFO"
     WARNING = "WARNING"
     ERROR = "ERROR"
 
 
-class DiagnosticLine(Event):
+class DiagnosticLine(native.WireModel):
     time: str
     level: Level
     component: Literal["game_control", "model", "session"] = "game_control"
@@ -106,24 +246,74 @@ class Status(native.WireModel):
     sequence: int | None = None
 
 
-class _QuietFile(RotatingFileHandler):
-    def handleError(self, record: logging.LogRecord) -> None:
-        # Logging cannot recursively report a failed diagnostic destination.
-        return
+_SEGMENT_BYTES = 10 * 1024 * 1024
+
+
+class _BoundedFile(logging.Handler):
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self._path = path
+        self._failed = False
+        self._size = path.stat().st_size if path.exists() else 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._failed:
+            return
+        encoded = (self.format(record) + "\n").encode("utf-8")
+        # Fixed, bounded event fields keep a structured line below one segment.
+        if len(encoded) > _SEGMENT_BYTES:
+            return
+        try:
+            if self._size + len(encoded) > _SEGMENT_BYTES:
+                oldest = self._path.with_name(self._path.name + ".2")
+                oldest.unlink(missing_ok=True)
+                previous = self._path.with_name(self._path.name + ".1")
+                if previous.exists():
+                    previous.replace(oldest)
+                if self._path.exists():
+                    self._path.replace(previous)
+                self._size = 0
+            with self._path.open("ab") as stream:
+                stream.write(encoded)
+            self._size += len(encoded)
+        except OSError:
+            self._failed = True
 
 
 class _QuietConsole(logging.StreamHandler[TextIO]):
-    def handleError(self, record: logging.LogRecord) -> None:
-        return
+    def __init__(self, stream: TextIO) -> None:
+        super().__init__(stream)
+        self._failed = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._failed:
+            return
+        text = self.format(record) + self.terminator
+        try:
+            self.stream.write(text)
+            self.flush()
+        except (OSError, UnicodeError, ValueError):
+            self._failed = True
 
 
-def _redact(value: str) -> str:
-    value = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\r\n]+", r"\1[redacted]", value)
-    value = re.sub(
-        r"(?i)((?:api[_-]?key|token|password|secret)\s*[:=]\s*)[^\s,;&]+", r"\1[redacted]", value
-    )
-    value = re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", value)
-    return re.sub(r"([?&][^\s=&#]+)=([^\s&#]*)", r"\1=[redacted]", value)
+class RetryChannel(StrEnum):
+    NATIVE = "native"
+    MODEL = "model"
+    DISCOVERY = "discovery"
+
+
+@dataclass(frozen=True)
+class _RetryKey:
+    channel: RetryChannel
+    sequence: int | None
+    endpoint: Endpoint | None
+
+
+@dataclass
+class _RetryReport:
+    cause: str
+    reported_at: float
+    suppressed: int = 0
 
 
 class Diagnostics:
@@ -134,10 +324,11 @@ class Diagnostics:
         directory: Path | None = None,
         console: TextIO | None = None,
         control_endpoint: str | None = None,
+        level: int = logging.INFO,
     ) -> None:
-        self._recording_id = _redact(recording_id)[:2048] if recording_id is not None else None
+        self._recording_id = _bounded_text(recording_id) if recording_id is not None else None
         self._directory = directory
-        self._logger = logging.Logger("sts2_harness.game_control", logging.INFO)
+        self._logger = logging.Logger("sts2_harness.game_control", level)
         self._logger.propagate = False
         stream = _QuietConsole(console if console is not None else sys.stderr)
         stream.setFormatter(logging.Formatter("%(message)s"))
@@ -145,18 +336,14 @@ class Diagnostics:
         if directory is not None:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                handler = _QuietFile(
-                    directory / "diagnostics.jsonl",
-                    maxBytes=10 * 1024 * 1024,
-                    backupCount=2,
-                    encoding="utf-8",
-                )
+                handler = _BoundedFile(directory / "diagnostics.jsonl")
             except OSError:
                 handler = None
             if handler is not None:
                 handler.setFormatter(logging.Formatter("%(message)s"))
                 self._logger.addHandler(handler)
-        self._retry_reports: dict[Endpoint | int, tuple[str, float, int]] = {}
+        self._retry_reports: dict[_RetryKey, _RetryReport] = {}
+        self._status_failed = False
         self._storage_error: str | None = None
         self._storage_report = 0.0
         self._storage_suppressed = 0
@@ -179,35 +366,50 @@ class Diagnostics:
             and self._status.operation is OperationKind.PAUSE
         ):
             self.lifecycle(Lifecycle.WAITING_GAME)
+        debug = isinstance(event, EncodingMetadata)
+        if debug and not self._logger.isEnabledFor(logging.DEBUG):
+            return
         now = time.monotonic()
-        native_event = event.event in (EventKind.NATIVE_RETRY, EventKind.NATIVE_RECOVERED)
+        native_event = event.event in (
+            EventKind.NATIVE_RETRY,
+            EventKind.NATIVE_RECOVERED,
+            EventKind.NATIVE_FAILED,
+        )
         model_event = event.event in (
             EventKind.MODEL_RETRY,
             EventKind.MODEL_RECOVERED,
             EventKind.MODEL_EXHAUSTED,
         )
-        report_key = event.endpoint if native_event else event.sequence if model_event else None
+        discovery_event = event.event in (EventKind.DISCOVERY_RETRY, EventKind.DISCOVERY_RECOVERED)
+        channel = (
+            RetryChannel.NATIVE
+            if native_event
+            else RetryChannel.MODEL
+            if model_event
+            else RetryChannel.DISCOVERY
+            if discovery_event
+            else None
+        )
         retry_suppressed = 0
-        if report_key is not None:
-            previous = self._retry_reports.get(report_key)
-            if event.error is not None:
-                if (
-                    previous is not None
-                    and previous[0] == event.error
-                    and now - previous[1] < 60
-                    and event.event is not EventKind.MODEL_EXHAUSTED
-                ):
-                    self._retry_reports[report_key] = (
-                        previous[0],
-                        previous[1],
-                        previous[2] + 1,
-                    )
+        if channel is not None:
+            key = _RetryKey(channel, event.sequence, event.endpoint)
+            previous = self._retry_reports.get(key)
+            ending = event.event in (
+                EventKind.NATIVE_RECOVERED,
+                EventKind.NATIVE_FAILED,
+                EventKind.MODEL_RECOVERED,
+                EventKind.MODEL_EXHAUSTED,
+                EventKind.DISCOVERY_RECOVERED,
+            )
+            if previous is not None:
+                if not ending and previous.cause == event.error and now - previous.reported_at < 60:
+                    previous.suppressed += 1
                     return
-                retry_suppressed = previous[2] if previous is not None else 0
-                self._retry_reports[report_key] = (event.error, now, 0)
-            elif previous is not None:
-                retry_suppressed = previous[2]
-                del self._retry_reports[report_key]
+                retry_suppressed = previous.suppressed
+            if ending:
+                self._retry_reports.pop(key, None)
+            elif event.error is not None:
+                self._retry_reports[key] = _RetryReport(event.error, now)
         storage_failure = event.event is EventKind.RECORDING_GAP
         repeated = (
             storage_failure and event.error is not None and event.error == self._storage_error
@@ -218,7 +420,7 @@ class Diagnostics:
         recovering = event.event is EventKind.RECORDING_RECOVERED
         suppressed = (
             retry_suppressed
-            if native_event or model_event
+            if channel is not None
             else self._storage_suppressed
             if repeated or recovering
             else 0
@@ -233,24 +435,66 @@ class Diagnostics:
             self._storage_error = None
             self._storage_suppressed = 0
         # Only selected typed fields enter diagnostics, never native bodies or headers.
-        severe = event.event is EventKind.MODEL_EXHAUSTED or event.error in (
-            "execution_unconfirmed",
-            "execution_unknown",
-            "control_unavailable",
-            "dispatch_failed",
-            "identity_unregistered",
-            "catalog_identity_conflict",
-            "native_preview_failed",
-            "internal_error",
+        ordinary = (
+            isinstance(event, ResultEvent)
+            and event.outcome is OutcomeStatus.REJECTED
+            or event.result in ("rejected", "paused", "stopped")
         )
-        level = Level.ERROR if severe else Level.WARNING if event.error else Level.INFO
+        severe = not ordinary and (
+            event.event in (EventKind.MODEL_EXHAUSTED, EventKind.TOOL_RECOVERY_EXHAUSTED)
+            or isinstance(event, (ResultEvent, BatchSettled))
+            and event.reason is ReasonCode.CONTROL_UNAVAILABLE
+            or isinstance(event, BattleFinished)
+            and event.ending is BattleEnd.INTERRUPTED
+            or event.event is EventKind.LIFECYCLE_CHANGED
+            and event.result == Lifecycle.FAILED.value
+            or isinstance(event, ResultEvent)
+            and event.outcome is OutcomeStatus.UNKNOWN
+            or isinstance(event, BatchSettled)
+            and event.outcome in (BatchStatus.UNKNOWN, BatchStatus.INTERRUPTED)
+            or event.result == "unknown"
+            or event.error
+            in (
+                "execution_unconfirmed",
+                native.ErrorCode.EXECUTION_UNCERTAIN.value,
+                "control_unavailable",
+                "dispatch_failed",
+                "identity_unregistered",
+                "catalog_identity_conflict",
+                "native_preview_failed",
+                "internal_error",
+            )
+        )
+        warning = (
+            event.outcome is OutcomeStatus.FAILED
+            if isinstance(event, ResultEvent)
+            else event.error is not None and event.result not in ("rejected", "paused", "stopped")
+        )
+        level = (
+            Level.DEBUG
+            if debug
+            else Level.ERROR
+            if severe
+            else Level.WARNING
+            if warning
+            else Level.INFO
+        )
         payload = DiagnosticLine(
             time=datetime.now(UTC).isoformat(),
             level=level,
             recording_id=self._recording_id,
-            event=event.event,
-            component="session"
-            if event.event is EventKind.LIFECYCLE_CHANGED
+            component="model"
+            if debug
+            else "session"
+            if event.event
+            in (
+                EventKind.LIFECYCLE_CHANGED,
+                EventKind.CONTROL_CHANGED,
+                EventKind.ROLE_CHANGED,
+                EventKind.ACT_ENTERED,
+                EventKind.BATTLE_STARTED,
+                EventKind.BATTLE_FINISHED,
+            )
             else "model"
             if event.event
             in (
@@ -261,21 +505,50 @@ class Diagnostics:
                 EventKind.MODEL_EXHAUSTED,
             )
             else "game_control",
-            role=event.role,
-            attempt=event.attempt,
-            elapsed_seconds=event.elapsed_seconds,
-            sequence=event.sequence,
-            operation_id=_redact(event.operation_id)[:2048] if event.operation_id else None,
-            result=_redact(event.result)[:2048] if event.result else None,
-            error=_redact(event.error)[:2048] if event.error else None,
             suppressed=suppressed,
-            endpoint=event.endpoint,
-            failures=event.failures,
-            recovered_from=_redact(recovered_from)[:2048] if recovered_from else None,
         )
-        text = payload.model_dump_json(exclude_none=True)
+        if recovered_from is not None:
+            event = event.model_copy(update={"recovered_from": recovered_from})
+        text = json.dumps(
+            payload.model_dump(mode="json", exclude_none=True)
+            | event.model_dump(mode="json", exclude_none=True),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         self._logger.log(
-            logging.ERROR if severe else logging.WARNING if event.error else logging.INFO, text
+            logging.DEBUG
+            if debug
+            else logging.ERROR
+            if severe
+            else logging.WARNING
+            if warning
+            else logging.INFO,
+            text,
+        )
+
+    def tool_finished(
+        self, name: str, outcome: Outcome, *, exception: ExceptionDetails | None = None
+    ) -> None:
+        try:
+            tool = ToolName(name)
+        except ValueError:
+            tool = None
+        reason = (
+            None if isinstance(outcome, (ReadCompleted, ActionCompleted)) else outcome.reason.code
+        )
+        self.emit(
+            ToolFinished(
+                tool=tool,
+                error="internal_error" if exception is not None else None,
+                exception=exception,
+                outcome=outcome.status,
+                reason=reason,
+                role=None
+                if tool is None
+                else native.DecisionOwner.RUN
+                if tool.value.startswith("run_")
+                else native.DecisionOwner.COMBAT,
+            )
         )
 
     def configured(self, configuration: Configuration, port: int) -> None:
@@ -320,7 +593,7 @@ class Diagnostics:
     def bind_recording(
         self, recording_id: str | None, location: native.Location | None, archive_path: Path | None
     ) -> None:
-        self._recording_id = _redact(recording_id)[:2048] if recording_id is not None else None
+        self._recording_id = _bounded_text(recording_id) if recording_id is not None else None
         self._write_status(
             self._status.model_copy(
                 update={
@@ -339,6 +612,7 @@ class Diagnostics:
         self.emit(Event(event=EventKind.LIFECYCLE_CHANGED, result=stage.value))
 
     def native_status(self, status: native.Status, waiting: bool) -> None:
+        changed = self._status.control_intent is not status.control_intent
         self._write_status(
             self._status.model_copy(
                 update={
@@ -346,6 +620,8 @@ class Diagnostics:
                 }
             )
         )
+        if changed:
+            self.emit(ControlChanged(intent=status.control_intent))
         if waiting:
             self.lifecycle(
                 Lifecycle.PAUSED
@@ -368,7 +644,6 @@ class Diagnostics:
         self.emit(Event(event=EventKind.MODEL_REQUEST_STARTED, role=role, sequence=sequence))
 
     def started(self, operation: OperationKind, *, sequence: int | None = None) -> None:
-        self._retry_reports.clear()
         self._write_status(
             self._status.model_copy(
                 update={
@@ -389,7 +664,11 @@ class Diagnostics:
         )
 
     def finished(self) -> None:
-        self._retry_reports.clear()
+        self._retry_reports = {
+            key: report
+            for key, report in self._retry_reports.items()
+            if key.channel is RetryChannel.DISCOVERY or key.sequence != self._status.sequence
+        }
         self._write_status(
             self._status.model_copy(
                 update={
@@ -408,14 +687,14 @@ class Diagnostics:
         if self._status == status:
             return
         self._status = status
-        if self._directory is None:
+        if self._directory is None or self._status_failed:
             return
         try:
             temporary = self._directory / "status.json.tmp"
             temporary.write_text(status.model_dump_json(), encoding="utf-8")
             temporary.replace(self._directory / "status.json")
-        except OSError:
-            return
+        except (OSError, UnicodeError):
+            self._status_failed = True
 
     def close(self) -> None:
         for handler in self._logger.handlers:

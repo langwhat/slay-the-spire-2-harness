@@ -91,11 +91,18 @@ def test_http_state_reads_are_complete_while_paused_without_model() -> None:
 
 
 def test_accepted_query_survives_waiter_cancellation_and_rejects_second_call() -> None:
+    from io import StringIO
+
+    from sts2_harness.diagnostics import Diagnostics
+
+    console = StringIO()
+    diagnostics = Diagnostics("external", console=console)
+
     async def run() -> None:
         mod = FakeMod()
         mod.state_entered = asyncio.Event()
         mod.state_release = asyncio.Event()
-        async with ExternalBackend(mod.client()) as backend:
+        async with ExternalBackend(mod.client(), diagnostics=diagnostics) as backend:
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=create_app(backend)), base_url="http://tools"
             ) as caller:
@@ -114,6 +121,16 @@ def test_accepted_query_survives_waiter_cancellation_and_rejects_second_call() -
                 assert json.loads(second.content)["outcome"]["reason"]["code"] == "busy"
                 mod.state_release.set()
         assert mod.actions == []
+        lines = [json.loads(line) for line in console.getvalue().splitlines()]
+        tools = [line for line in lines if line["event"] == "tool_finished"]
+        assert [(line["tool"], line["outcome"]) for line in tools] == [
+            ("run_inspect", "rejected"),
+            ("run_act", "rejected"),
+            ("run_notes", "rejected"),
+            ("run_inspect", "completed"),
+        ]
+        assert all(line["level"] == "INFO" for line in tools)
+        diagnostics.close()
 
     asyncio.run(run())
 

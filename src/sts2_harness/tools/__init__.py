@@ -17,7 +17,7 @@ from sts2_harness.decisions import (
     DecisionTask,
     SelectStep,
 )
-from sts2_harness.execution import GameReadError
+from sts2_harness.game import GameReadError
 from sts2_harness.knowledge import (
     DocumentView,
     KnowledgeEntry,

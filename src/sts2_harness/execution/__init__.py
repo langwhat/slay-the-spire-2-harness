@@ -19,6 +19,7 @@ from sts2_harness.decisions import (
     SelectStep,
     TaskComplete,
 )
+from sts2_harness.diagnostics import BatchSettled, BatchStatus, BatchSubmitted, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, Interrupted, ToolRecoveryBudget
 from sts2_harness.game import (
     ControlWriteError as ControlWriteError,
@@ -81,7 +82,9 @@ class Execution:
         game_instance_id: str,
         run_id: str,
         recovery: ToolRecoveryBudget | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> None:
+        self._diagnostics = diagnostics
         self._game = game
         self._recovery = recovery
         self._game_instance_id = game_instance_id
@@ -223,60 +226,91 @@ class Execution:
         route: native.RouteKey,
     ) -> tuple[ActionToolResult, bool]:
         steps = tuple(_native_step(step) for step in proposal.steps)
-        outcome: ActionOutcome = ActionCompleted(completed_steps=len(steps))
-        for index, step in enumerate(steps):
-            settled = unwrap(await self._game.settle(route, step))
-            receipt = settled.receipt
-            if isinstance(receipt, native.ReceiptCompleted):
-                continue
-            if receipt is None or isinstance(receipt, native.ReceiptUnknown):
-                outcome = ActionUnknown(
-                    confirmed_steps=index,
-                    uncertain_step=index + 1,
-                    reason=Reason(
-                        code=ReasonCode.EXECUTION_UNCONFIRMED,
-                        message=(
-                            receipt.error.message
-                            if isinstance(receipt, native.ReceiptUnknown)
-                            else "The step's effects could not be confirmed."
-                        ),
-                    ),
-                    suggested_actions=(
-                        Suggestion(
-                            message=(
-                                "Wait for native input to be ready, inspect the current state, "
-                                "and make a new decision; do not blindly replay this step "
-                                "or the remaining batch."
-                            )
-                        ),
-                    ),
-                )
-            else:
-                outcome = ActionStopped(
-                    completed_steps=index,
-                    next_step=index + 1,
-                    reason=Reason(
-                        code=_reason_code(receipt.error.code), message=receipt.error.message
-                    ),
-                    suggested_actions=(
-                        Suggestion(
-                            message=(
-                                "Use the current state to choose a new action; "
-                                "the remaining steps were not run."
-                            )
-                        ),
-                    ),
-                )
-            break
-        final_read_failed = False
+        confirmed = 0
+        status = BatchStatus.INTERRUPTED
+        reason: ReasonCode | None = None
+        uncertain_step: int | None = None
+        if self._diagnostics is not None:
+            self._diagnostics.emit(BatchSubmitted(planned=len(steps)))
         try:
-            final_observation = await self.observe()
-        except GameLifetimeEnded:
-            final_observation = None
-        except (ClientUnavailable, GameReadError):
-            final_observation = None
-            final_read_failed = True
-        return ActionToolResult(outcome, final_observation), final_read_failed
+            outcome: ActionOutcome = ActionCompleted(completed_steps=len(steps))
+            for index, step in enumerate(steps):
+                uncertain_step = index + 1
+                settled = unwrap(await self._game.settle(route, step))
+                receipt = settled.receipt
+                if isinstance(receipt, native.ReceiptCompleted):
+                    confirmed += 1
+                    uncertain_step = None
+                    continue
+                if receipt is None or isinstance(receipt, native.ReceiptUnknown):
+                    outcome = ActionUnknown(
+                        confirmed_steps=index,
+                        uncertain_step=index + 1,
+                        reason=Reason(
+                            code=ReasonCode.EXECUTION_UNCONFIRMED,
+                            message=(
+                                receipt.error.message
+                                if isinstance(receipt, native.ReceiptUnknown)
+                                else "The step's effects could not be confirmed."
+                            ),
+                        ),
+                        suggested_actions=(
+                            Suggestion(
+                                message=(
+                                    "Wait for native input to be ready, inspect the current state, "
+                                    "and make a new decision; do not blindly replay this step "
+                                    "or the remaining batch."
+                                )
+                            ),
+                        ),
+                    )
+                else:
+                    outcome = ActionStopped(
+                        completed_steps=index,
+                        next_step=index + 1,
+                        reason=Reason(
+                            code=_reason_code(receipt.error.code), message=receipt.error.message
+                        ),
+                        suggested_actions=(
+                            Suggestion(
+                                message=(
+                                    "Use the current state to choose a new action; "
+                                    "the remaining steps were not run."
+                                )
+                            ),
+                        ),
+                    )
+                reason = outcome.reason.code
+                status = (
+                    BatchStatus.UNKNOWN
+                    if isinstance(outcome, ActionUnknown)
+                    else BatchStatus.STOPPED
+                )
+                if isinstance(outcome, ActionStopped):
+                    uncertain_step = None
+                break
+            else:
+                status = BatchStatus.COMPLETED
+            final_read_failed = False
+            try:
+                final_observation = await self.observe()
+            except GameLifetimeEnded:
+                final_observation = None
+            except (ClientUnavailable, GameReadError):
+                final_observation = None
+                final_read_failed = True
+            return ActionToolResult(outcome, final_observation), final_read_failed
+        finally:
+            if self._diagnostics is not None:
+                self._diagnostics.emit(
+                    BatchSettled(
+                        planned=len(steps),
+                        confirmed=confirmed,
+                        outcome=status,
+                        reason=reason,
+                        uncertain_step=uncertain_step,
+                    )
+                )
 
 
 def _reason_code(code: native.ErrorCode) -> ReasonCode:

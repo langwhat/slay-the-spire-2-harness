@@ -138,8 +138,16 @@ and report recording gaps; unwritable gaps remain in memory until storage recove
 `journal.availability` distinguishes an unpersisted initial manifest from a usable archive;
 initial disk failures also preserve gameplay and retry the same owned archive when writable.
 Existing archives and invalid recording paths are rejected rather than overwritten.
-Diagnostics default to the archive directory, with `diagnostics.jsonl`, two rotated
-backups of at most 10 MiB each, and a `status.json` updated at operation transitions.
+Diagnostics default to the archive directory. `diagnostics.jsonl` and its two backups
+are each capped at 10 MiB of UTF-8 bytes, including the active segment. `status.json`
+updates on stage changes. INFO includes actual tool, batch, automatic-progression,
+and role/act/battle results; batch summaries distinguish planned, confirmed, and
+uncertain steps. Ordinary rejection and Pause are INFO; unknown effects and exhausted
+failures are ERROR. Same-request retry warnings are combined for up to 60 seconds,
+with cumulative failure totals on recovery or exhaustion. Journal attempts remain complete.
+Embedded callers can temporarily construct `Diagnostics(..., level=logging.DEBUG)`
+to include model encoding digests under the same output cap; prompts and wire bodies
+are not diagnostic metadata. Failed destinations are disabled independently.
 The Journal is never rotated with diagnostics. Keep archives outside the repository.
 
 Inspect recorded facts without startup configuration or network access:

@@ -175,6 +175,12 @@ class CodeCombat:
 def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
     tmp_path: Path, code_combat: bool
 ) -> None:
+    from io import StringIO
+
+    from sts2_harness.diagnostics import Diagnostics
+
+    console = StringIO()
+    diagnostics = Diagnostics("campaign", console=console)
     campaign = Campaign(code_combat=code_combat)
     from sts2_harness.knowledge import SubjectId
     from sts2_harness.materials import DocumentSource, FileDocuments
@@ -235,6 +241,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
             combat_factory=combat if code_combat else None,
             documents=FileDocuments(tuple(sources)),
+            diagnostics=diagnostics,
         ) as session:
             ended = await session.run()
             assert ended.reason is RunEndReason.TERMINAL
@@ -295,6 +302,24 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         assert handoff_task.content.battle_report.encounter == native.NamedDefinition(
             name="Boss", definition_id="ENCOUNTER.BOSS"
         )
+        events = [json.loads(line) for line in console.getvalue().splitlines()]
+        assert [line["act"] for line in events if line["event"] == "act_entered"] == [1, 2]
+        assert [line["role"] for line in events if line["event"] == "role_changed"] == [
+            "run",
+            "combat",
+            "run",
+            "combat",
+        ]
+        assert [line["node_id"] for line in events if line["event"] == "battle_started"] == [
+            "battle1",
+            "battle2",
+        ]
+        finished = [line for line in events if line["event"] == "battle_finished"]
+        assert [(line["node_id"], line["ending"]) for line in finished] == [
+            ("battle1", "handoff"),
+            ("battle2", "run_ended"),
+        ]
+        diagnostics.close()
         archive.close()
 
     asyncio.run(scenario())

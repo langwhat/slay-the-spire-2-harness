@@ -1,17 +1,16 @@
 """Own external gameplay resources independently of built-in roles and histories."""
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
 from uuid import uuid4
 
-from sts2_harness.client import ClientUnavailable, ModClient
+from sts2_harness.client import ClientFailureKind, ClientUnavailable, ModClient
 from sts2_harness.client import models as native
 from sts2_harness.decisions import ActionDecision, ActionProposal, ActTask, DecisionTask
-from sts2_harness.diagnostics import Diagnostics, Event, EventKind, Lifecycle
+from sts2_harness.diagnostics import Diagnostics, Event, EventKind, ExceptionDetails, Lifecycle
 from sts2_harness.execution import Execution, RouteChanged
 from sts2_harness.execution import Rejected as UnitRejected
 from sts2_harness.game import Endpoint, GameLifetimeEnded, GameReadError, LiveGame
@@ -73,6 +72,8 @@ class ExternalBackend:
         self._last_exposed: native.Location | None = None
         self._active: asyncio.Task[ExternalReply] | None = None
         self._closing = False
+        self._discovery_failures = 0
+        self._discovery_cause: ClientFailureKind | ReasonCode | None = None
 
     async def __aenter__(self) -> Self:
         await self._client.__aenter__()
@@ -95,7 +96,10 @@ class ExternalBackend:
 
     def accept(self, name: ToolName, arguments: str) -> asyncio.Task[ExternalReply] | ExternalReply:
         if self._active is not None or self._closing:
-            return reject(ReasonCode.BUSY, "Another call is active or the backend is stopping.")
+            reply = reject(ReasonCode.BUSY, "Another call is active or the backend is stopping.")
+            if self._diagnostics is not None:
+                self._diagnostics.tool_finished(name.value, reply.result.outcome)
+            return reply
         task = asyncio.create_task(self._call_boundary(name, arguments))
         self._active = task
         task.add_done_callback(self._settled)
@@ -116,13 +120,20 @@ class ExternalBackend:
                 try:
                     await self._status()
                 except (ClientUnavailable, GameReadError) as error:
+                    self._discovery_failures += 1
+                    self._discovery_cause = (
+                        error.reason
+                        if isinstance(error, ClientUnavailable)
+                        else ReasonCode.QUERY_FAILED
+                    )
                     if self._diagnostics is not None:
                         self._diagnostics.lifecycle(Lifecycle.WAITING_GAME)
                         self._diagnostics.emit(
                             Event(
-                                event=EventKind.NATIVE_RETRY,
+                                event=EventKind.DISCOVERY_RETRY,
                                 endpoint=Endpoint.STATUS,
-                                error=type(error).__name__,
+                                error=self._discovery_cause.value,
+                                failures=self._discovery_failures,
                             )
                         )
             await self._wait(1.0)
@@ -152,16 +163,37 @@ class ExternalBackend:
                 self._diagnostics.lifecycle(Lifecycle.WAITING_RUN)
             elif status.input_readiness is native.InputReadiness.TERMINAL:
                 self._diagnostics.lifecycle(Lifecycle.TERMINAL)
+        if self._discovery_failures:
+            if self._diagnostics is not None:
+                self._diagnostics.emit(
+                    Event(
+                        event=EventKind.DISCOVERY_RECOVERED,
+                        endpoint=Endpoint.STATUS,
+                        failures=self._discovery_failures,
+                        recovered_from=self._discovery_cause.value
+                        if self._discovery_cause is not None
+                        else None,
+                    )
+                )
+            self._discovery_failures = 0
+            self._discovery_cause = None
         return status
 
     async def _call_boundary(self, name: ToolName, arguments: str) -> ExternalReply:
+        exception: ExceptionDetails | None = None
         try:
-            return await self._call(name, arguments)
+            reply = await self._call(name, arguments)
         except (ClientUnavailable, GameReadError, GameLifetimeEnded):
-            message = "The current game could not be read."
-        except Exception:
-            logging.getLogger(__name__).exception("External tool call failed.")
-            message = "The external tool could not finish."
+            reply = self._failed_call("The current game could not be read.")
+        except Exception as error:
+            exception = ExceptionDetails.capture(error)
+            reply = self._failed_call("The external tool could not finish.")
+        if self._diagnostics is not None:
+            self._diagnostics.tool_finished(name.value, reply.result.outcome, exception=exception)
+        return reply
+
+    @staticmethod
+    def _failed_call(message: str) -> ExternalReply:
         return ExternalReply(
             render(
                 QueryToolResult(
@@ -197,6 +229,7 @@ class ExternalBackend:
             ),
             game_instance_id=identity[0],
             run_id=identity[1],
+            diagnostics=self._diagnostics,
         )
         current = ExternalRun(
             identity,

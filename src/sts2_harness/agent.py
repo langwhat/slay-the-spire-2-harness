@@ -13,6 +13,7 @@ from sts2_harness.decisions import (
     DecisionTask,
     TaskComplete,
 )
+from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ModelFailure, ToolRecoveryBudget
 from sts2_harness.game import GameLifetimeEnded
 from sts2_harness.knowledge import DocumentView
@@ -41,7 +42,9 @@ class Agent(ABC):
         recovery: ToolRecoveryBudget,
         *,
         materials: MaterialReader | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> None:
+        self._diagnostics = diagnostics
         self._llm = llm
         self._tools = tools
         self._recovery = recovery
@@ -121,6 +124,8 @@ class Agent(ABC):
                     observation,
                 )
                 for call in calls:
+                    if self._diagnostics is not None:
+                        self._diagnostics.tool_finished(call.name, result.outcome)
                     context.append_tool_result(call, result)
                 if self._recovery.record_failure():
                     raise DecisionInterrupted(
@@ -142,6 +147,8 @@ class Agent(ABC):
                     return ActionDecision(
                         result, isinstance(task, ActTask) and task.handoff is not None
                     )
+                if self._diagnostics is not None:
+                    self._diagnostics.tool_finished(call.name, result.outcome)
                 context.append_tool_result(call, result)
                 pause = self._recovery.record_outcome(result)
                 if result.observation is not None:
@@ -173,5 +180,7 @@ class Agent(ABC):
     async def accept(self, outcome: ActionToolResult) -> None:
         if self._pending_call is None or self._context is None:
             raise RuntimeError("No model action is awaiting feedback.")
+        if self._diagnostics is not None:
+            self._diagnostics.tool_finished(self._pending_call.name, outcome.outcome)
         self._context.append_tool_result(self._pending_call, outcome)
         self._pending_call = None

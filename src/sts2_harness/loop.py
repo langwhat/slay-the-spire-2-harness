@@ -6,6 +6,7 @@ from typing import Protocol
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatTask
 from sts2_harness.decisions import ActTask, CombatHandoff, DecisionSource, HandoffTask, TaskComplete
+from sts2_harness.diagnostics import ActEntered, Diagnostics, RoleChanged
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import (
     DecisionInterrupted,
@@ -34,7 +35,11 @@ class DefaultFlow:
         notes: Notes,
         run: RunRole,
         combat: CombatFactory,
+        *,
+        diagnostics: Diagnostics | None = None,
     ) -> None:
+        self._diagnostics = diagnostics
+        self._active_role: native.DecisionOwner | None = None
         self._execution = execution
         self._recovery = recovery
         self._notes = notes
@@ -43,6 +48,13 @@ class DefaultFlow:
         self._initialized = False
         self._act: int | None = None
         self._pending: CombatHandoff | None = None
+
+    def _enter_role(self, role: native.DecisionOwner) -> None:
+        if self._active_role is role:
+            return
+        self._active_role = role
+        if self._diagnostics is not None:
+            self._diagnostics.emit(RoleChanged(role=role))
 
     async def _pause(self, reason: InterruptionReason) -> None:
         if isinstance(reason, ModelFailure):
@@ -85,13 +97,21 @@ class DefaultFlow:
                             await self._pause(error.reason)
                         observation = None
                         continue
+                    self._enter_role(native.DecisionOwner.RUN)
+                    if self._diagnostics is not None:
+                        self._diagnostics.emit(ActEntered(act=act))
                     self._act = act
                     self._initialized = True
                 if observation.location.owner is native.DecisionOwner.COMBAT:
                     if self._pending is None:
+                        self._enter_role(native.DecisionOwner.COMBAT)
                         role = self._combat(observation, self._notes.read())
                         result = await CombatTask(
-                            self._execution, role, observation, self._recovery
+                            self._execution,
+                            role,
+                            observation,
+                            self._recovery,
+                            diagnostics=self._diagnostics,
                         ).run()
                         if isinstance(result, RunEnded):
                             return result
@@ -104,6 +124,7 @@ class DefaultFlow:
                         native.RouteKey.model_validate(observation.location.model_dump()),
                         self._pending,
                     )
+                self._enter_role(native.DecisionOwner.RUN)
                 outcome = await self._execution.run_unit(self._run, task)
                 entry_admitted = False
                 if isinstance(outcome, TaskComplete):

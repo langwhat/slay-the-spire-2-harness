@@ -19,9 +19,10 @@ from sts2_harness.decisions import (
     ReviewTask,
     TaskComplete,
 )
+from sts2_harness.diagnostics import BattleEnd, BattleFinished, BattleStarted, Diagnostics
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import Interrupted, ModelFailure, ToolRecoveryBudget
-from sts2_harness.game import GameLifetimeEnded, RunEnded
+from sts2_harness.game import GameLifetimeEnded, RunEnded, SessionStopped
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
@@ -55,8 +56,9 @@ class CombatAgent(Agent):
         opening_notes: str,
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> None:
-        super().__init__(llm, tools, recovery, materials=materials)
+        super().__init__(llm, tools, recovery, materials=materials, diagnostics=diagnostics)
         self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._opening_notes = opening_notes
         self._opening_delivered = False
@@ -91,7 +93,10 @@ class CombatTask:
         role: DecisionSource,
         opening: native.Observation,
         recovery: ToolRecoveryBudget,
+        *,
+        diagnostics: Diagnostics | None = None,
     ) -> None:
+        self._diagnostics = diagnostics
         if not isinstance(opening.state, native.CombatState):
             raise ValueError("A Combat task requires a trustworthy opening battle observation.")
         self._execution = execution
@@ -144,6 +149,35 @@ class CombatTask:
         )
 
     async def run(self) -> CombatHandoff | RunEnded:
+        node = self._opening.location.node_id
+        if self._diagnostics is not None:
+            self._diagnostics.emit(BattleStarted(node_id=node, role=native.DecisionOwner.COMBAT))
+        result: CombatHandoff | RunEnded | None = None
+        stopped = False
+        try:
+            result = await self._run()
+            return result
+        except SessionStopped:
+            stopped = True
+            raise
+        finally:
+            if self._diagnostics is not None:
+                self._diagnostics.emit(
+                    BattleFinished(
+                        node_id=node,
+                        role=native.DecisionOwner.COMBAT,
+                        ending=BattleEnd.STOPPED
+                        if stopped
+                        else BattleEnd.RUN_ENDED
+                        if isinstance(result, RunEnded)
+                        else BattleEnd.HANDOFF
+                        if result is not None
+                        else BattleEnd.INTERRUPTED,
+                        end_reason=result.reason if isinstance(result, RunEnded) else None,
+                    )
+                )
+
+    async def _run(self) -> CombatHandoff | RunEnded:
         try:
             while True:
                 route = native.RouteKey.model_validate(self._last.location.model_dump())

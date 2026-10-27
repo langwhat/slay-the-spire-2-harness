@@ -393,3 +393,59 @@ def test_session_leaving_run_does_not_publish_terminal(tmp_path: Path) -> None:
     ]
     assert events
     assert not any(event.get("result") == "terminal" for event in events)
+
+
+def test_discovery_wait_recovery_reports_actual_cumulative_failures(tmp_path: Path) -> None:
+    from sts2_harness.interactive import InteractiveOptions, run_interactive
+
+    stop = asyncio.Event()
+    observation = ready_run()
+    location = observation.location.model_copy(
+        update={"run_id": None, "node_id": None, "owner": None}
+    )
+    attempts = 0
+    waits = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        if request.url.path == "/control":
+            return httpx.Response(200, json={"mode": "paused"})
+        assert request.url.path == "/status"
+        attempts += 1
+        if attempts <= 2:
+            raise httpx.ConnectError("synthetic unavailable")
+        return httpx.Response(
+            200,
+            content=native.Status(
+                location=location,
+                control_intent=native.ControlIntent.PAUSED,
+                input_readiness=native.InputReadiness.UNAVAILABLE,
+                receipt=None,
+            ).to_json(),
+        )
+
+    async def wait(seconds: float) -> None:
+        nonlocal waits
+        waits += 1
+        if waits == 3:
+            stop.set()
+
+    asyncio.run(
+        run_interactive(
+            InteractiveOptions("http://mod", tmp_path / "resident"),
+            Configuration(Driver.BUILTIN, configuration(tmp_path)),
+            stop_requested=stop,
+            client_factory=lambda: ModClient("http://mod", transport=httpx.MockTransport(respond)),
+            wait=wait,
+        )
+    )
+    lines = [
+        json.loads(line)
+        for line in (tmp_path / "resident" / "diagnostics.jsonl").read_text().splitlines()
+    ]
+    retries = [line for line in lines if line["event"] == "discovery_retry"]
+    recovered = [line for line in lines if line["event"] == "discovery_recovered"]
+    assert len(retries) == len(recovered) == 1
+    assert retries[0]["failures"] == 1
+    assert recovered[0]["failures"] == 2 and recovered[0]["suppressed"] == 1
+    assert recovered[0]["recovered_from"] == "connection"

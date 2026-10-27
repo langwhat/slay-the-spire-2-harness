@@ -1,5 +1,6 @@
 """One run's consecutive tool failures, shared by all actual call boundaries."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sts2_harness.llm.messages import FailureKind
@@ -14,8 +15,9 @@ from sts2_harness.results import (
 
 
 class ToolRecoveryBudget:
-    def __init__(self) -> None:
+    def __init__(self, *, on_exhausted: Callable[[int], None] | None = None) -> None:
         self._failures = 0
+        self._on_exhausted = on_exhausted
 
     @property
     def failures(self) -> int:
@@ -23,6 +25,8 @@ class ToolRecoveryBudget:
 
     def record_failure(self) -> bool:
         self._failures += 1
+        if self._failures == 4 and self._on_exhausted is not None:
+            self._on_exhausted(self._failures)
         return self._failures >= 4
 
     def reset(self) -> None:

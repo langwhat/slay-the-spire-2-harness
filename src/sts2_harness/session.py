@@ -12,7 +12,7 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent
 from sts2_harness.decisions import DecisionSource
-from sts2_harness.diagnostics import Diagnostics
+from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
@@ -49,7 +49,7 @@ class RunSession:
         battle_guidance: tuple[str, ...] = (),
         run_factory: RunFactory | None = None,
         combat_factory: RoleFactory | None = None,
-        flow_factory: FlowFactory = DefaultFlow,
+        flow_factory: FlowFactory | None = None,
         wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
         diagnostics: Diagnostics | None = None,
         stop_requested: Callable[[], bool] | None = None,
@@ -61,7 +61,7 @@ class RunSession:
         if documents is None and (act_guidance or battle_guidance):
             raise ValueError("Configured guidance requires a document provider.")
         self.notes = Notes(manifest.initial_notes)
-        self.recovery = ToolRecoveryBudget()
+        self.recovery = ToolRecoveryBudget(on_exhausted=self._recovery_exhausted)
         self._client = client
         self._model = model
         self._manifest = manifest
@@ -79,6 +79,9 @@ class RunSession:
         self._run_stream = 0
         self._combat_stream = 0
         self._flow: RunFlow | None = None
+
+    def _recovery_exhausted(self, failures: int) -> None:
+        self.journal.diagnostics.emit(RecoveryExhausted(failures=failures))
 
     async def __aenter__(self) -> Self:
         try:
@@ -109,6 +112,7 @@ class RunSession:
                 game_instance_id=self._manifest.game_instance_id,
                 run_id=self._manifest.run_id,
                 recovery=self.recovery,
+                diagnostics=self.journal.diagnostics,
             )
             self._recorded_documents = RecordedDocuments(
                 self._documents if self._documents is not None else FileDocuments(), self.journal
@@ -123,10 +127,20 @@ class RunSession:
                     self.recovery,
                     prompts=self._prompts,
                     materials=self._materials(native.DecisionOwner.RUN),
+                    diagnostics=self.journal.diagnostics,
                 )
             )
-            self._flow = self._flow_factory(
-                self.execution, self.recovery, self.notes, run, self._combat
+            self._flow = (
+                self._flow_factory(self.execution, self.recovery, self.notes, run, self._combat)
+                if self._flow_factory is not None
+                else DefaultFlow(
+                    self.execution,
+                    self.recovery,
+                    self.notes,
+                    run,
+                    self._combat,
+                    diagnostics=self.journal.diagnostics,
+                )
             )
             return self
         except BaseException:
@@ -214,4 +228,5 @@ class RunSession:
             opening_notes=notes,
             prompts=self._prompts,
             materials=self._materials(native.DecisionOwner.COMBAT, opening),
+            diagnostics=self.journal.diagnostics,
         )

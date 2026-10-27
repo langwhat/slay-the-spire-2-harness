@@ -17,6 +17,13 @@ from sts2_harness.results import ActionUnknown, Reason, ReasonCode
 
 def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_path: Path) -> None:
     async def scenario() -> None:
+        import json
+        from io import StringIO
+
+        from sts2_harness.diagnostics import Diagnostics
+
+        console = StringIO()
+        diagnostics = Diagnostics("session", console=console)
         observation = native.Observation.model_validate_json(RUN)
         route = native.RouteKey.model_validate(observation.location.model_dump())
         posts: list[native.StepRequest] = []
@@ -91,6 +98,7 @@ def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_p
                 game_instance_id="game",
                 run_id="run",
                 recovery=ToolRecoveryBudget(),
+                diagnostics=diagnostics,
             )
             source = Source(
                 ActionDecision(
@@ -138,6 +146,18 @@ def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_p
         assert controls == ["paused"]
         assert reopened.manifest == manifest and reopened.gaps == ()
         assert [step.operation_id for step in posts] == ["session:1", "session:2"]
+        lines = [json.loads(line) for line in console.getvalue().splitlines()]
+        submitted = [line for line in lines if line["event"] == "batch_submitted"]
+        settled = [line for line in lines if line["event"] == "batch_settled"]
+        assert len(submitted) == len(settled) == 1
+        assert submitted[0]["planned"] == 3
+        assert (settled[0]["planned"], settled[0]["confirmed"], settled[0]["uncertain_step"]) == (
+            3,
+            1,
+            2,
+        )
+        assert settled[0]["level"] == "ERROR"
+        diagnostics.close()
 
     asyncio.run(scenario())
 

@@ -3,7 +3,7 @@
 import time
 
 from sts2_harness.client import models as native
-from sts2_harness.diagnostics import Event, EventKind
+from sts2_harness.diagnostics import EncodingMetadata, Event, EventKind
 from sts2_harness.journal import Journal
 from sts2_harness.journal_models import (
     ConfigurationSnapshot,
@@ -62,6 +62,7 @@ class _Attempts:
         self._journal.model_attempt(self._sequence, self._attempt)
 
     def encoded(self, digest: str) -> None:
+        self._journal.diagnostics.emit(EncodingMetadata(sequence=self._sequence, digest=digest))
         self._attempt = self._attempt.model_copy(update={"protocol_encoding_digest": digest})
         self._journal.model_attempt(self._sequence, self._attempt)
 
@@ -86,7 +87,7 @@ class _Attempts:
         )
 
     def finished(self, failure: FailureKind | None = None) -> None:
-        if self._failures:
+        if self._failures or failure is not None:
             self._journal.diagnostics.emit(
                 Event(
                     event=EventKind.MODEL_EXHAUSTED if failure else EventKind.MODEL_RECOVERED,

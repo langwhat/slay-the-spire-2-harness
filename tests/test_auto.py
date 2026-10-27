@@ -107,6 +107,12 @@ class AutoHTTP:
 def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
     tmp_path: Path, potion: bool, batch: bool, event: bool
 ) -> None:
+    from io import StringIO
+
+    from sts2_harness.diagnostics import Diagnostics
+
+    console = StringIO()
+    diagnostics = Diagnostics("auto", console=console)
     from sts2_harness.context.models import RunActContent
     from sts2_harness.journal_models import AutomaticSnapshot, RunTaskSnapshot
 
@@ -177,6 +183,7 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
             ),
             tmp_path / "archive.sqlite",
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(http.model)),
+            diagnostics=diagnostics,
         ) as session:
             await session.run()
         archive = Journal.open(tmp_path / "archive.sqlite")
@@ -203,6 +210,16 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
                 and step.potion == "bottle"
                 and step.target is MISSING
             )
+        events = [json.loads(line) for line in console.getvalue().splitlines()]
+        automatic_events = [line for line in events if line["event"] == "auto_finished"]
+        assert [line["label"] for line in automatic_events] == (
+            ["臭药水 (POTION.FOUL_POTION)", "打开商店"] if potion else ["打开商店"]
+        )
+        assert all(line["outcome"] == "completed" for line in automatic_events)
+        assert len([line for line in events if line["event"] == "tool_finished"]) == (
+            1 if batch else 2
+        )
+        diagnostics.close()
         archive.close()
 
     asyncio.run(scenario())

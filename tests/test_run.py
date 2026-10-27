@@ -101,6 +101,12 @@ class RunHTTP:
 def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
     tmp_path: Path,
 ) -> None:
+    from io import StringIO
+
+    from sts2_harness.diagnostics import Diagnostics
+
+    console = StringIO()
+    diagnostics = Diagnostics("run", console=console)
     http = RunHTTP(
         [
             reply(("read", "run_notes", '{"mode":"read"}')),
@@ -189,6 +195,7 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
                     ),
                     tools,
                     budget,
+                    diagnostics=diagnostics,
                     materials=materials,
                     prompts=RecordedPrompts(PackagedPrompts(), journal),
                 )
@@ -273,6 +280,16 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
         assert isinstance(guidance, TextSnapshot) and isinstance(guidance.value, GuidanceText)
         assert guidance.value.documents[0].text.body == "Recorded Run guidance."
         assert archive.gaps == ()
+        events = [json.loads(line) for line in console.getvalue().splitlines()]
+        tools = [event for event in events if event["event"] == "tool_finished"]
+        assert [(event["tool"], event["outcome"]) for event in tools] == [
+            ("run_notes", "completed"),
+            ("run_notes", "completed"),
+            ("run_act", "stopped"),
+            ("run_act", "completed"),
+        ]
+        assert [event["level"] for event in tools] == ["INFO", "INFO", "ERROR", "INFO"]
+        diagnostics.close()
 
     asyncio.run(scenario())
 

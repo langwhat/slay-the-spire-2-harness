@@ -77,7 +77,8 @@ async def run_interactive(
     make_session = session_factory or new_session
     paused_instance: str | None = None
     finished: tuple[str, str] | None = None
-    disconnected = False
+    discovery_failures = 0
+    discovery_cause: ClientFailureKind | native.ErrorCode | None = None
     try:
         diagnostics.lifecycle(Lifecycle.WAITING_GAME)
         async with make_client() as discovery:
@@ -85,30 +86,46 @@ async def run_interactive(
                 try:
                     status = await discovery.status()
                 except ClientUnavailable as error:
+                    discovery_failures += 1
+                    discovery_cause = error.reason
                     diagnostics.lifecycle(Lifecycle.WAITING_GAME)
                     diagnostics.emit(
                         Event(
-                            event=EventKind.NATIVE_RETRY,
+                            event=EventKind.DISCOVERY_RETRY,
                             endpoint=Endpoint.STATUS,
                             error=error.reason.value,
-                            failures=1,
+                            failures=discovery_failures,
                         )
                     )
-                    disconnected = True
                     await wait(1.0)
                     continue
                 if not isinstance(status, native.Status):
+                    discovery_failures += 1
+                    discovery_cause = status.error.code
+                    diagnostics.emit(
+                        Event(
+                            event=EventKind.DISCOVERY_RETRY,
+                            endpoint=Endpoint.STATUS,
+                            error=discovery_cause.value,
+                            failures=discovery_failures,
+                        )
+                    )
                     diagnostics.lifecycle(Lifecycle.WAITING_GAME)
                     await wait(1.0)
                     continue
-                if disconnected:
+                if discovery_failures:
                     diagnostics.emit(
                         Event(
-                            event=EventKind.NATIVE_RECOVERED,
+                            event=EventKind.DISCOVERY_RECOVERED,
                             endpoint=Endpoint.STATUS,
+                            failures=discovery_failures,
+                            recovered_from=discovery_cause.value
+                            if discovery_cause is not None
+                            else None,
                         )
                     )
-                    disconnected = False
+                    discovery_failures = 0
+                    discovery_cause = None
                 diagnostics.native_status(status, False)
                 location = status.location
                 run_id = location.run_id

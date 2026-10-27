@@ -20,6 +20,7 @@ from sts2_harness.decisions import (
     HandoffTask,
     TaskComplete,
 )
+from sts2_harness.diagnostics import AutoFinished, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
@@ -47,10 +48,11 @@ class RunAgent(Agent):
         *,
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
+        diagnostics: Diagnostics | None = None,
     ) -> None:
         if tools.notes is None:
             raise ValueError("Run requires the run's notes owner.")
-        super().__init__(None, tools, recovery, materials=materials)
+        super().__init__(None, tools, recovery, materials=materials, diagnostics=diagnostics)
         self._client = client
         self._notes = tools.notes
         self._prompts = prompts if prompts is not None else PackagedPrompts()
@@ -85,6 +87,17 @@ class RunAgent(Agent):
             self._force_strategy = False
             return
         progress, before = self._pending_auto
+        if self._diagnostics is not None:
+            self._diagnostics.emit(
+                AutoFinished(
+                    label=progress.label,
+                    outcome=outcome.outcome.status,
+                    reason=None
+                    if isinstance(outcome.outcome, ActionCompleted)
+                    else outcome.outcome.reason.code,
+                    role=native.DecisionOwner.RUN,
+                )
+            )
         assert self._context is not None
         self._context.append_automatic(progress, outcome)
         after = outcome.observation
