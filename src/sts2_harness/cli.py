@@ -10,11 +10,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
+from pydantic import ValidationError
+
 from sts2_harness.config import Configuration, ConfigurationError, Driver, load_configuration
 from sts2_harness.external_http import run_external
 from sts2_harness.game import ControlWriteError, OperationKind
+from sts2_harness.headless import HeadlessError, HeadlessOptions, StandardRunRecipe, run_headless
 from sts2_harness.interactive import InteractiveOptions, run_interactive
-from sts2_harness.journal import ArchiveError, DependencyKind, Journal, evidence
+from sts2_harness.journal import ArchiveError, DependencyKind, Journal, StandardCharacter, evidence
 
 
 class _Parser(argparse.ArgumentParser):
@@ -38,16 +41,37 @@ async def _start(options: InteractiveOptions, configuration: Configuration, tool
             loop.remove_signal_handler(name)
 
 
+async def _headless(options: HeadlessOptions, configuration: Configuration) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for name in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(name, stop.set)
+    try:
+        await run_headless(options, configuration, stop_requested=stop)
+    finally:
+        for name in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(name)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _Parser(
         description="Attach a resident backend or inspect configuration and evidence safely."
     )
-    parser.add_argument("command", choices=["start", "check-config", "journal"])
+    parser.add_argument("command", choices=["start", "headless", "check-config", "journal"])
     parser.add_argument("--env-file", default=".env", metavar="PATH")
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--mod-url", default="http://127.0.0.1:17877", metavar="URL")
     parser.add_argument("--tool-port", type=int, default=17878, metavar="PORT")
     parser.add_argument("--output", type=Path, default=Path("runs"), metavar="DIRECTORY")
+    parser.add_argument("--game", type=Path, metavar="EXECUTABLE")
+    parser.add_argument("--template", type=Path, metavar="MANIFEST")
+    parser.add_argument("--instance", type=Path, metavar="NEW_DIRECTORY")
+    parser.add_argument("--port", type=int)
+    parser.add_argument(
+        "--character", choices=[item.value for item in StandardCharacter], default="SILENT"
+    )
+    parser.add_argument("--ascension", type=int, default=0)
+    parser.add_argument("--seed")
     parser.add_argument("--archive", type=Path)
     parser.add_argument(
         "--view", choices=["timeline", "operation", "model", "request"], default="timeline"
@@ -112,12 +136,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ConfigurationError("Startup overrides must use NAME=VALUE.")
             overrides[name] = value
         config = load_configuration(Path(env_file), os.environ, overrides)
+        if command == "headless":
+            game: Path | None = arguments.game
+            template: Path | None = arguments.template
+            if game is None or template is None:
+                raise ConfigurationError("Headless startup requires --game and --template.")
+            instance: Path | None = arguments.instance
+            port: int | None = arguments.port
+            character: str = arguments.character
+            ascension: int = arguments.ascension
+            seed: str | None = arguments.seed
+            try:
+                recipe = StandardRunRecipe(
+                    character=StandardCharacter(character), ascension=ascension, seed=seed
+                )
+            except ValidationError:
+                raise ConfigurationError("Invalid standard headless run recipe.") from None
+            headless_output: Path = arguments.output
+            asyncio.run(
+                _headless(
+                    HeadlessOptions(game, template, headless_output, instance, port, recipe), config
+                )
+            )
+            return 0
         if command == "start":
             mod_url: str = arguments.mod_url
             output_directory: Path = arguments.output
             tool_port: int = arguments.tool_port
             asyncio.run(_start(InteractiveOptions(mod_url, output_directory), config, tool_port))
             return 0
+    except HeadlessError as error:
+        print(f"Headless error: {error}", file=sys.stderr)
+        return 2
     except ControlWriteError:
         print(
             "Control error: The Mod did not confirm Pause; the backend stopped.",

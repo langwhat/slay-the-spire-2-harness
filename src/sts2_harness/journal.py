@@ -7,9 +7,9 @@ from collections.abc import Awaitable, Callable, Generator
 from contextlib import ExitStack, closing, contextmanager
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import Diagnostics, Event, EventKind
@@ -65,8 +65,35 @@ from sts2_harness.llm.messages import FailureKind
 from sts2_harness.results import Reason
 
 
+class StandardCharacter(StrEnum):
+    IRONCLAD = "IRONCLAD"
+    SILENT = "SILENT"
+    REGENT = "REGENT"
+    NECROBINDER = "NECROBINDER"
+    DEFECT = "DEFECT"
+
+
+class NativeStartReceipt(native.WireModel):
+    status: Literal["completed"]
+    effect_verified: Literal[True]
+    reason_code: str | None
+    seed: native.Nonempty
+
+
+class HeadlessInitialConditions(native.WireModel):
+    requested_character: StandardCharacter
+    requested_ascension: Annotated[int, Field(ge=0, le=10)]
+    effective_settings_sha256: str
+    game_assembly_sha256: str
+    mod_version: str
+    mod_sha256: str
+    start_receipt: NativeStartReceipt
+    initial_control: native.ControlReply
+    initial_observation_sha256: str
+
+
 class Manifest(native.WireModel):
-    schema_version: Literal[5] = 5
+    schema_version: Literal[6] = 6
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -78,6 +105,7 @@ class Manifest(native.WireModel):
     template: str | None = None
     initial_notes: str | None = None
     game_version: str | None = None
+    headless: HeadlessInitialConditions | None = None
 
 
 class GapCause(StrEnum):

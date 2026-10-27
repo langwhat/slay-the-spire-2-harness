@@ -87,6 +87,10 @@ class Status(native.WireModel):
     status_path: Path | None = None
     process_id: int | None = None
     mod_port: int | None = None
+    instance_directory: Path | None = None
+    user_data_directory: Path | None = None
+    user_data_alias: Path | None = None
+    game_process_id: int | None = None
     driver: Driver | None = None
     model_protocol: Protocol | None = None
     model_authentication: AuthKind | None = None
@@ -293,6 +297,22 @@ class Diagnostics:
                     "service_tier_configured": bool(model.service_tier)
                     if model is not None
                     else None,
+                }
+            )
+        )
+
+    def headless_instance(
+        self, directory: Path, user_directory: Path, alias: Path, process_id: int, port: int
+    ) -> None:
+        self._write_status(
+            self._status.model_copy(
+                update={
+                    "instance_directory": directory,
+                    "user_data_directory": user_directory,
+                    "user_data_alias": alias,
+                    "game_process_id": process_id,
+                    "mod_port": port,
+                    "control_endpoint": f"http://127.0.0.1:{port}/control",
                 }
             )
         )

@@ -1,0 +1,445 @@
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+
+def template_fixture(directory: Path) -> Path:
+    source = directory / "template"
+    files: list[dict[str, str]] = []
+    for relative in (
+        "default/1/settings.save",
+        "default/1/modded/profile1/saves/progress.save",
+        "default/1/modded/profile1/saves/prefs.save",
+    ):
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(relative.encode())
+        path.chmod(0o444)
+        files.append({"path": relative, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+    manifest = directory / "template.manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "files": files,
+                "game_assembly_sha256": "a" * 64,
+                "generator_sha256": "b" * 64,
+                "epochs": 1,
+                "cards": 1,
+                "relics": 1,
+                "potions": 1,
+                "characters": [
+                    f"CHARACTER.{name}"
+                    for name in ("IRONCLAD", "SILENT", "REGENT", "NECROBINDER", "DEFECT")
+                ],
+                "ascension_total": 50,
+                "runs": 0,
+                "history": 0,
+                "has_run": False,
+                "has_multiplayer_run": False,
+                "tutorials_seen": True,
+                "ascension_ftue_seen": True,
+            }
+        )
+    )
+    return manifest
+
+
+def test_each_instance_copies_the_verified_template_without_reusing_progress(
+    tmp_path: Path,
+) -> None:
+    from sts2_harness.native_template import NativeTemplate
+
+    manifest = template_fixture(tmp_path)
+    template = NativeTemplate(manifest)
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    retained = tmp_path / "archive" / "templates"
+    evidence = template.copy_to(first, retained)
+    progress = Path("default/1/modded/profile1/saves/progress.save")
+    (first / progress).write_text("mutated")
+    assert template.copy_to(second, retained) == evidence
+    assert (second / progress).read_text() == progress.as_posix()
+    assert (tmp_path / "template" / progress).read_text() == progress.as_posix()
+    assert len(list(retained.iterdir())) == 1
+    assert evidence.settings_sha256 == hashlib.sha256(b"default/1/settings.save").hexdigest()
+    with pytest.raises(FileExistsError):
+        template.copy_to(first, retained)
+
+
+def test_corrupt_template_is_rejected_before_creating_a_writable_profile(tmp_path: Path) -> None:
+    from sts2_harness.native_template import NativeTemplate, TemplateError
+
+    manifest = template_fixture(tmp_path)
+    settings = tmp_path / "template/default/1/settings.save"
+    settings.chmod(0o644)
+    settings.write_text("changed")
+    settings.chmod(0o444)
+    with pytest.raises(TemplateError):
+        NativeTemplate(manifest).copy_to(tmp_path / "instance", tmp_path / "archive")
+    assert not (tmp_path / "instance").exists()
+
+
+def game_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    import platform
+
+    from test_interactive import ready_run
+    from test_lifecycle import terminal
+
+    observation = ready_run()
+    observation = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(
+                update={
+                    "player": observation.state.player.model_copy(
+                        update={"definition_id": "CHARACTER.IRONCLAD"}
+                    )
+                }
+            )
+        }
+    )
+    script = """#!/usr/bin/env python3
+import http.server, json, os, pathlib, sys
+if "--script" in sys.argv:
+    override = pathlib.Path(sys.argv[sys.argv.index("--path") + 1], "override.cfg").read_text()
+    names = [line.split("=", 1)[1].strip('"') for line in override.splitlines()
+             if line.startswith("config/custom_user_dir_name=")]
+    name = names[0]
+    user_directory = pathlib.Path(os.environ["HOME"], "Library/Application Support", name)
+    (user_directory / "logs").mkdir(parents=True)
+    (user_directory / "logs/godot.log").write_text("probe startup log")
+    print("HARNESS_USER_DATA=" + str(user_directory))
+    print("HARNESS_SENTRY_PRELAUNCH_CONFIG_OK")
+    sys.exit(0)
+initial = json.loads(INITIAL)
+ended = json.loads(ENDED)
+initial["location"]["game_instance_id"] = str(os.getpid())
+initial["stamp"]["game_instance_id"] = str(os.getpid())
+ended["location"]["game_instance_id"] = str(os.getpid())
+ended["stamp"]["game_instance_id"] = str(os.getpid())
+mode = "paused"
+state = initial
+startup_reads = 0
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        global startup_reads
+        busy = startup_reads in (0, 2)
+        if self.path == "/status":
+            value = {"location": state["location"],
+                     "input_readiness": "busy" if busy else state["input_readiness"],
+                     "control_intent": mode, "receipt": None}
+        else:
+            observation = json.loads(json.dumps(state))
+            if busy:
+                observation["input_readiness"] = "busy"
+                observation["state"]["control"] = "busy"
+                observation["state"]["screen"] = "transition"
+                observation["state"]["actions"] = []
+            value = {"status": "completed", "observation": observation}
+            startup_reads += 1
+        self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(value).encode())
+    def do_POST(self):
+        global mode, state
+        value = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/control":
+            assert value["mode"] == "running"
+            mode = "running"
+            with (start.parent / "control.jsonl").open("a") as control_log:
+                control_log.write(json.dumps(value) + "\\n")
+            result = {"mode": mode}
+        else:
+            state = ended
+            result = {"operation_id": value["operation_id"],
+                      "status": "completed", "boundary": "ready"}
+        self.send_response(200); self.end_headers(); self.wfile.write(json.dumps(result).encode())
+server = http.server.HTTPServer(("127.0.0.1", int(os.environ["STS2AGENT_PORT"])), Handler)
+start = pathlib.Path(os.environ["STS2AGENT_START_RUN_FILE"])
+recipe = json.loads(start.read_text())
+receipt = {"status":"completed", "effect_verified":True,
+           "reason_code":None, "seed":recipe["seed"]}
+pathlib.Path(str(start) + ".result.json").write_text(json.dumps(receipt))
+server.serve_forever()
+"""
+    script = script.replace("INITIAL", repr(observation.to_json())).replace(
+        "ENDED", repr(terminal(observation).to_json())
+    )
+    executable = tmp_path / "Game.app/Contents/MacOS/Game"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(script)
+    executable.chmod(0o755)
+    resources = executable.parent.parent / "Resources"
+    resources.mkdir()
+    (resources / "Game.pck").write_bytes(b"pack")
+    (resources / "release_info.json").write_text('{"version":"test-version"}')
+
+    assembly = resources / f"data_sts2_macos_{platform.machine()}" / "sts2.dll"
+    assembly.parent.mkdir()
+    assembly.write_bytes(b"assembly")
+    mod = executable.parent / "mods/sts2agent"
+    mod.mkdir(parents=True)
+    (mod / "sts2agent.dll").write_bytes(b"mod")
+    (mod / "mod_manifest.json").write_text('{"version":"test-mod"}')
+    template = template_fixture(tmp_path)
+    values = json.loads(template.read_text())
+    values["game_assembly_sha256"] = hashlib.sha256(b"assembly").hexdigest()
+    template.write_text(json.dumps(values))
+    return executable, template
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+def test_headless_owns_two_concurrent_children_and_runs_one_session_each(tmp_path: Path) -> None:
+    import asyncio
+
+    import httpx2 as httpx
+    from test_combat import reply
+    from test_responses import configuration
+
+    from sts2_harness.config import Configuration, Driver
+    from sts2_harness.diagnostics import Diagnostics
+    from sts2_harness.headless import HeadlessOptions, StandardRunRecipe, run_headless
+    from sts2_harness.journal import Journal, Manifest, StandardCharacter
+    from sts2_harness.llm.client import Llm
+    from sts2_harness.session import RunSession
+
+    executable, template = game_fixture(tmp_path)
+    paths: list[Path] = []
+
+    def session(manifest: Manifest, archive: Path, diagnostics: Diagnostics) -> RunSession:
+        from sts2_harness.client import ModClient
+
+        paths.append(archive)
+        status = json.loads((archive.parent / "status.json").read_text())
+        port = status["mod_port"]
+
+        def provider(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=reply(
+                    ("move", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        return RunSession(
+            ModClient(f"http://127.0.0.1:{port}"),
+            manifest,
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(provider)),
+            diagnostics=diagnostics,
+        )
+
+    async def scenario() -> None:
+        outcomes = await asyncio.gather(
+            *(
+                run_headless(
+                    HeadlessOptions(
+                        executable,
+                        template,
+                        tmp_path / "runs",
+                        recipe=StandardRunRecipe(
+                            character=StandardCharacter.IRONCLAD,
+                            ascension=index,
+                            seed=f"SEED{index}",
+                        ),
+                    ),
+                    Configuration(Driver.BUILTIN, configuration(tmp_path)),
+                    stop_requested=asyncio.Event(),
+                    session_factory=session,
+                )
+                for index in range(2)
+            )
+        )
+        assert all(
+            outcome is not None and outcome.reason.value == "terminal" for outcome in outcomes
+        )
+
+    asyncio.run(scenario())
+    assert len(paths) == 2 and paths[0] != paths[1]
+    manifests: list[Manifest] = []
+    for archive in paths:
+        reader = Journal.open(archive)
+        manifests.append(reader.manifest)
+        assert reader.gaps == ()
+        assert reader.manifest.initial_notes == ""
+        assert reader.manifest.headless is not None
+        assert reader.manifest.headless.initial_control.mode.value == "running"
+        opening = json.loads((archive.parent / "initial-observation.json").read_text())
+        assert opening["input_readiness"] == "ready"
+        bootstrap = [
+            json.loads(line)
+            for line in (archive.parent / "bootstrap.jsonl").read_text().splitlines()
+        ]
+        assert bootstrap[0]["reply"]["input_readiness"] == "busy"
+        assert bootstrap[1]["reply"]["observation"]["state"]["screen"] == "transition"
+        assert [
+            attempt["reply"]["observation"]["input_readiness"]
+            for attempt in bootstrap
+            if attempt["endpoint"] == "state"
+        ] == ["busy", "ready", "busy", "ready", "ready"]
+        assert len((archive.parent / "control.jsonl").read_text().splitlines()) == 1
+        reader.close()
+        status = json.loads((archive.parent / "status.json").read_text())
+        assert status["lifecycle"] == "terminal"
+        assert not Path(status["user_data_alias"]).exists()
+        assert (
+            archive.parent / "probe-user-data/logs/godot.log"
+        ).read_text() == "probe startup log"
+        import os
+
+        with pytest.raises(ProcessLookupError):
+            os.kill(status["game_process_id"], 0)
+    assert {manifest.seed for manifest in manifests} == {"SEED0", "SEED1"}
+    assert len({manifest.game_instance_id for manifest in manifests}) == 2
+    assert len(list((tmp_path / "runs/templates").iterdir())) == 1
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+def test_explicit_port_conflict_preserves_the_other_listener_and_cleans_alias(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+    import socket
+
+    from sts2_harness.headless import HeadlessError, HeadlessOptions, OwnedHeadlessInstance
+
+    game, template = game_fixture(tmp_path)
+    directory = tmp_path / "owned"
+    with socket.socket() as other:
+        other.bind(("127.0.0.1", 0))
+        other.listen()
+        port = other.getsockname()[1]
+
+        async def scenario() -> None:
+            with pytest.raises(HeadlessError):
+                async with OwnedHeadlessInstance(
+                    HeadlessOptions(game, template, tmp_path / "runs", directory, port)
+                ):
+                    pytest.fail("An occupied listener must not be adopted.")
+
+        asyncio.run(scenario())
+        assert other.fileno() >= 0
+    assert not list((directory / "home").rglob("STS2-Harness-*"))
+    assert not (directory / "archive.sqlite").exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+def test_owned_game_exit_finishes_the_session_at_a_safe_boundary(tmp_path: Path) -> None:
+    import asyncio
+    import os
+    import signal
+
+    import httpx2 as httpx
+    from test_combat import reply
+    from test_responses import configuration
+
+    from sts2_harness.client import ModClient
+    from sts2_harness.config import Configuration, Driver
+    from sts2_harness.diagnostics import Diagnostics
+    from sts2_harness.headless import (
+        HeadlessError,
+        HeadlessOptions,
+        StandardRunRecipe,
+        run_headless,
+    )
+    from sts2_harness.journal import Journal, Manifest, StandardCharacter
+    from sts2_harness.llm.client import Llm
+    from sts2_harness.session import RunSession
+
+    game, template = game_fixture(tmp_path)
+    archive_path: Path | None = None
+
+    def session(manifest: Manifest, archive: Path, diagnostics: Diagnostics) -> RunSession:
+        nonlocal archive_path
+        archive_path = archive
+        status = json.loads((archive.parent / "status.json").read_text())
+
+        async def provider(request: httpx.Request) -> httpx.Response:
+            os.kill(status["game_process_id"], signal.SIGKILL)
+            await asyncio.sleep(0.1)
+            return httpx.Response(
+                200,
+                content=reply(
+                    ("move", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        return RunSession(
+            ModClient(f"http://127.0.0.1:{status['mod_port']}"),
+            manifest,
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(provider)),
+            diagnostics=diagnostics,
+            stop_requested=stop.is_set,
+        )
+
+    stop = asyncio.Event()
+    with pytest.raises(HeadlessError):
+        asyncio.run(
+            run_headless(
+                HeadlessOptions(
+                    game,
+                    template,
+                    tmp_path / "runs",
+                    recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="EXIT"),
+                ),
+                Configuration(Driver.BUILTIN, configuration(tmp_path)),
+                stop_requested=stop,
+                session_factory=session,
+            )
+        )
+    assert archive_path is not None
+    archive = Journal.open(archive_path)
+    assert archive.gaps == ()
+    assert archive.operations()[-1].reply is not None
+    archive.close()
+    status = json.loads((archive_path.parent / "status.json").read_text())
+    assert status["lifecycle"] == "failed"
+    assert not Path(status["user_data_alias"]).exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+def test_owned_listener_with_mismatched_public_route_is_not_admitted(tmp_path: Path) -> None:
+    import asyncio
+    import os
+
+    from sts2_harness.headless import (
+        HeadlessError,
+        HeadlessOptions,
+        OwnedHeadlessInstance,
+        StandardRunRecipe,
+    )
+    from sts2_harness.journal import StandardCharacter
+
+    game, template = game_fixture(tmp_path)
+    game.write_text(
+        game.read_text().replace(
+            '"location": state["location"],',
+            '"location": state["location"] | {"run_id": "different-run"},',
+        )
+    )
+    directory = tmp_path / "instance"
+
+    async def scenario() -> None:
+        with pytest.raises(HeadlessError):
+            async with OwnedHeadlessInstance(
+                HeadlessOptions(
+                    game,
+                    template,
+                    tmp_path / "runs",
+                    directory,
+                    recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="TEST"),
+                )
+            ):
+                pytest.fail("Mismatched startup facts must not enter gameplay.")
+
+    asyncio.run(scenario())
+    status = json.loads((directory / "status.json").read_text())
+    assert status["lifecycle"] == "failed"
+    assert not Path(status["user_data_alias"]).exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(status["game_process_id"], 0)
+    assert not (directory / "archive.sqlite").exists()

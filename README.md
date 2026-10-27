@@ -4,8 +4,8 @@ The no-save/load gameplay core provides a programmatic single-run gameplay loop 
 `RunSession` and `DefaultFlow`, with Responses and Chat Completions model clients and
 recorded game IO.
 The CLI can attach a resident backend to your running Mod-enabled game, validate
-configuration offline, expose external gameplay tools, and inspect archives. Software replay
-is not implemented yet.
+configuration offline, expose external gameplay tools, launch isolated developer headless
+runs on macOS, and inspect archives. Software replay is not implemented yet.
 
 Install Python 3.12+ and [uv](https://docs.astral.sh/uv/), then run:
 
@@ -57,8 +57,8 @@ Success establishes offline validity only; provider-specific model/effort/tier s
 actual authentication require real endpoint checks.
 
 Run Ruff, strict Pyright, and pytest with `./scripts/check` (requires `uv` on PATH).
-Tests use temporary defaults, fake Mod/provider HTTP, and finite local loopback servers;
-no game or real provider runs.
+Tests use temporary defaults, fake Mod/provider HTTP, finite local loopback servers, and
+owned child processes; no real game or model provider is required.
 
 The Python `sts2_harness.llm.client.Llm` client accepts a `ModelConfiguration` snapshot
 and implements `complete(input, tools)` as an async context manager. It currently supports
@@ -182,7 +182,7 @@ manifest and gaps. Use `--around` with the timeline to inspect neighboring actio
 receipts, queries, and material reads. Sequence and confirmed game cursor express ordering;
 they do not imply that an adjacent action was caused by a particular model request.
 
-The current archive schema is version 5 and records each native reply's protocol explicitly.
+The current archive schema is version 6 and records each native reply's protocol explicitly.
 Reopening provides offline inspection only. Schema versions are validated without archive
 migration. Read older archives with the revision that recorded them. Software replay,
 native restoration, and evaluation remain unsupported;
@@ -248,6 +248,54 @@ while the current game decision belongs to Combat.
 The external agent entry point is [play-sts2](skills/play-sts2/SKILL.md), with separate
 Run and Combat references. Make that skill directory available to the external agent's
 skill loader. The backend serves tools directly and does not install or run an agent.
+
+## Isolated developer headless runs
+
+Install the production Mod once and supply an already verified, fully unlocked clean
+native template generated with its NativeTemplate tools. This command owns one game
+process and one run; it never attaches another running game or changes the installation:
+
+```console
+uv run sts2 headless --game /absolute/Game.app/Contents/MacOS/Game \
+  --template /absolute/template.manifest.json --character SILENT --ascension 1 --seed EXAMPLE
+```
+
+The game executable must be inside its installed macOS application bundle. The resource
+pack, release metadata, architecture-specific game assembly, and `mods/sts2agent` are
+read from that installation. Other platforms are currently rejected. The template's
+game assembly hash must match. Each run copies the three read-only native template files
+into a fresh writable profile; it never reads ordinary player saves or reuses a previous
+run's progress. Template content is retained once under `runs/templates/<manifest-digest>`.
+
+By default the launcher atomically creates `runs/headless-*` and chooses a candidate port.
+Use `--instance NEW_DIRECTORY`, `--output DIRECTORY`, and `--port PORT` for explicit paths
+and port. Existing instance directories and occupied explicit ports fail. A candidate
+port is not a reservation: readiness requires the owned child to be its actual listener,
+a verified isolated native user-data path, a successful native start receipt, and stable
+paused public state for the requested character. Automatic port collisions have at most
+three launch attempts, each with a fresh profile. Startup has a 90-second budget per
+attempt; gameplay, programmatic Pause, and complete admitted units have no such deadline.
+
+After verified startup, the host sends Start once and enters one `RunSession` directly.
+Later programmatic Pause requires an explicit Start through the `control_endpoint` in
+that instance's `status.json` (POST `{"mode":"running"}`); there is no automatic failure
+restart. The status also publishes actual directories, the owned game PID and port, and
+safe effective model configuration. Per-instance `--set` overrides use the same immutable
+configuration loading as ordinary startup; external headless driving is not implemented.
+The game child receives an isolated environment without model credentials.
+
+The manifest records the actual canonical seed, template digest, release version,
+requested character/ascension, verified native start receipt and first control reply,
+settings and installation hashes. Requested difficulty is verified by the native start
+path, not independently reported by the public state. Bootstrap evidence preserves the
+paused initial observation separately from the later first Journal observation after
+Start. No checkpoint sequence or save restoration is collected or promised.
+
+Terminal completion exits the host. Ctrl-C or SIGTERM requests stopping at the existing
+complete-unit boundary. An unexpected child exit also requests that safe boundary and
+reports failure. Cleanup waits for and terminates only the owned child, removing only its
+owned user-data alias; logs, the archive, and native autosaves remain in the instance
+directory. Shared installation files and the source template remain intact.
 
 ## Single-run sessions
 

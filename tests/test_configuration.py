@@ -271,3 +271,12 @@ def test_resident_start_rejects_unimplemented_protocol_before_game_connection(
     assert result.returncode == 2
     assert "configured model protocol is not implemented" in result.stderr
     assert not (tmp_path / "runs").exists()
+
+
+def test_headless_rejects_missing_launch_inputs_without_creating_an_instance(
+    tmp_path: Path,
+) -> None:
+    result = cli(tmp_path, "headless", "--set", "LLM_MODEL=local", "--set", "LLM_AUTH=none")
+    assert result.returncode == 2
+    assert "Headless startup requires --game and --template." in result.stderr
+    assert not (tmp_path / "runs").exists()
