@@ -559,3 +559,107 @@ def test_chat_preserves_choice_extensions_first_seen_in_terminal_chunk(tmp_path:
             assert reply.assistant.text == "Complete."
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("ending", "reason"),
+    [
+        ("close-failure", FailureKind.TIMEOUT),
+        ("read-failure", FailureKind.TIMEOUT),
+        ("late-choice", FailureKind.PROTOCOL),
+        ("bad-usage", FailureKind.PROTOCOL),
+        ("incomplete-eof", FailureKind.INCOMPLETE_EOF),
+    ],
+)
+def test_chat_complete_arrival_is_durable_before_stream_close(
+    tmp_path: Path, ending: str, reason: FailureKind
+) -> None:
+    from collections.abc import AsyncIterator
+
+    from sts2_harness.client import models as native
+    from sts2_harness.journal import Journal, Manifest
+    from sts2_harness.journal_models import ReplySnapshot
+    from sts2_harness.model_journal import RecordedLlm
+
+    async def scenario() -> None:
+        journal = Journal.create(
+            tmp_path / "arrival.sqlite",
+            Manifest(
+                recording_id="arrival", core_version="test", game_instance_id="game", run_id="run"
+            ),
+        )
+        arrivals: list[ReplySnapshot | None] = []
+
+        def checkpoint() -> None:
+            reader = Journal.open(journal.path)
+            arrivals.append(reader.request(1).attempts[0].reply)
+            reader.close()
+
+        class ArrivalStream(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                finish = None if ending == "incomplete-eof" else "tool_calls"
+                chunks = chat_stream(finish=finish).split(b"\n\n")
+                yield b"\n\n".join(chunks[:2]) + b"\n\n"
+                checkpoint()
+                if ending == "incomplete-eof":
+                    return
+                if ending == "read-failure":
+                    raise httpx.ReadTimeout("Synthetic read failure.")
+                tail = json.loads(chunks[2].removeprefix(b"data: "))
+                tail.update(service_tier="flex", tail_opaque={"keep": None})
+                yield f"data: {json.dumps(tail)}\n\n".encode()
+                if ending == "late-choice":
+                    yield chunks[1] + b"\n\n"
+                elif ending == "bad-usage":
+                    tail["usage"]["prompt_tokens"] = -1
+                    yield f"data: {json.dumps(tail)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+            async def aclose(self) -> None:
+                checkpoint()
+                if ending == "close-failure":
+                    raise httpx.ReadTimeout("Synthetic close failure.")
+
+        def provider(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, stream=ArrivalStream(), headers={"content-type": "text/event-stream"}
+            )
+
+        async with Llm(
+            configuration(tmp_path, LLM_PROTOCOL="chat-completions", LLM_EXTRA_RETRIES="0"),
+            transport=httpx.MockTransport(provider),
+        ) as llm:
+            recorded = RecordedLlm(llm, journal, role=native.DecisionOwner.RUN, stream="run")
+            with pytest.raises(ModelUnavailable) as failure:
+                await recorded.complete((), ())
+        assert failure.value.reason is reason
+        first, last = arrivals[0], arrivals[-1]
+        if ending == "incomplete-eof":
+            assert first is None and last is None
+        else:
+            assert first is not None and first.input_tokens is None
+            assert last is not None
+            if ending == "read-failure":
+                assert last == first and last.input_tokens is None
+            else:
+                assert last.input_tokens == 100 and last.output_tokens == 5
+                assert last.cache_read_tokens == 25 and last.response_service_tier == "flex"
+                assert json.loads(last.native_output)["tail_opaque"] == {"keep": None}
+            assert json.loads(last.native_output)["choices"][0]["message"]["tool_calls"][0] == {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "inspect",
+                    "arguments": '{"reference":"c1"}',
+                    "parsed_arguments": "provider-value",
+                },
+            }
+        journal.close()
+        reader = Journal.open(journal.path)
+        record = reader.request(1)
+        assert not record.delivered and record.failure is reason
+        assert len(record.attempts) == 1 and record.attempts[0].failure is reason
+        assert record.attempts[0].reply == last and reader.gaps == ()
+        reader.close()
+
+    asyncio.run(scenario())

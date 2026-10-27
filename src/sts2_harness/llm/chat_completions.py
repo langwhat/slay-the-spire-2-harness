@@ -71,7 +71,7 @@ class _CompletionStream:
         self._provider_parsed: dict[str, JsonValue] = {}
         self._provider_arguments: dict[int, JsonValue] = {}
 
-    def receive(self, chunk: ChatCompletionChunk) -> None:
+    def receive(self, chunk: ChatCompletionChunk) -> ChatCompletionsReply | None:
         raw = _OBJECT.validate_json(chunk.model_dump_json(exclude_unset=True))
         # Usage is intentionally validated separately: proxies may omit individual counts.
         usage = raw.get("usage")
@@ -137,6 +137,7 @@ class _CompletionStream:
         except (TypeError, RuntimeError):
             raise ModelUnavailable(FailureKind.PROTOCOL) from None
         self._seen = True
+        return self.finish() if self._finished else None
 
     def finish(self) -> ChatCompletionsReply:
         if not self._finished:
@@ -261,17 +262,26 @@ class ChatCompletionsAdapter:
             extra_headers=self._headers,
         )
         completed = _CompletionStream()
+        reply: ModelReply | None = None
         async with stream:
             media_type = stream.response.headers.get("content-type", "").partition(";")[0]
             if media_type.strip().lower() != "text/event-stream":
                 raise ModelUnavailable(FailureKind.PROTOCOL)
             async for chunk in stream:
-                completed.receive(chunk)
-        native = completed.finish()
+                native = completed.receive(chunk)
+                if native is not None:
+                    reply = self._reply(native)
+                    if evidence is not None:
+                        evidence.received(reply)
+        if reply is None:
+            raise ModelUnavailable(FailureKind.INCOMPLETE_EOF)
+        return reply
+
+    def _reply(self, native: ChatCompletionsReply) -> ModelReply:
         completion = native.completion
         usage = completion.usage or ChatUsage()
         details = usage.prompt_tokens_details
-        reply = ModelReply(
+        return ModelReply(
             AssistantMessage(native),
             Usage(
                 usage.prompt_tokens,
@@ -286,6 +296,3 @@ class ChatCompletionsAdapter:
                 completion.service_tier,
             ),
         )
-        if evidence is not None:
-            evidence.received(reply)
-        return reply
