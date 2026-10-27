@@ -1051,7 +1051,7 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
             await game.pause_until_resumed(
                 Reason(code=ReasonCode.QUERY_FAILED, message="Required read unavailable.")
             )
-        assert durations == [1.0, 0.1, 0.1, 0.1, 1.0, 0.1]
+        assert durations == [1.0, 0.1, 0.1, 0.1, 1.0, 1.0]
         assert [len(record.attempts) for record in archive.operations()] == [6, 3, 5]
         assert [
             attempt.endpoint for record in archive.operations() for attempt in record.attempts
@@ -1061,7 +1061,7 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
     asyncio.run(scenario())
 
 
-def test_archive_open_rejects_version_two_and_reads_current_version(tmp_path: Path) -> None:
+def test_archive_open_rejects_previous_versions_and_reads_current_version(tmp_path: Path) -> None:
     import json
     import sqlite3
 
@@ -1075,14 +1075,116 @@ def test_archive_open_rejects_version_two_and_reads_current_version(tmp_path: Pa
     journal.close()
     with sqlite3.connect(path) as connection:
         manifest = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
-        manifest["schema_version"] = 2
-        connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
-    with pytest.raises(ArchiveError, match="schema is unsupported"):
-        Journal.open(path)
+        for version in (2, 3):
+            manifest["schema_version"] = version
+            connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
+            connection.commit()
+            with pytest.raises(ArchiveError, match="schema is unsupported"):
+                Journal.open(path)
     with sqlite3.connect(path) as connection:
-        manifest["schema_version"] = 3
+        manifest["schema_version"] = 4
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     reopened = Journal.open(path)
-    assert reopened.manifest.schema_version == 3
+    assert reopened.manifest.schema_version == 4
     assert reopened.operations() == ()
     reopened.close()
+
+
+def test_stopping_start_wait_finishes_the_recorded_operation(tmp_path: Path) -> None:
+    from sts2_harness.game import SessionStopped, Stopped, unwrap
+    from sts2_harness.journal import OperationSummary, ResultKind, summarize
+
+    stop = asyncio.Event()
+    observation = native.Observation.model_validate_json(RUN)
+
+    async def wait(seconds: float) -> None:
+        stop.set()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/status"
+        return httpx.Response(
+            200,
+            json={
+                "location": observation.location.model_dump(mode="json"),
+                "control_intent": "paused",
+                "input_readiness": "ready",
+                "receipt": None,
+            },
+        )
+
+    async def scenario() -> None:
+        journal = Journal.create(
+            tmp_path / "archive.sqlite",
+            Manifest(
+                recording_id="stop", core_version="test", game_instance_id="game", run_id="run"
+            ),
+        )
+        async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+            game = RecordedGame(
+                LiveGame(
+                    client,
+                    namespace="stop",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=True,
+                    audit=journal,
+                    wait=wait,
+                    stop_requested=stop.is_set,
+                ),
+                journal,
+            )
+            reply = await game.admit()
+        assert isinstance(reply.outcome, Stopped)
+        with pytest.raises(SessionStopped):
+            unwrap(reply)
+        journal.close()
+        reopened = Journal.open(journal.path)
+        record = reopened.operation(1)
+        summary = summarize(record)
+        assert isinstance(summary, OperationSummary)
+        assert summary.result is ResultKind.STOPPED
+        assert record.reply is not None and isinstance(record.reply.outcome, Stopped)
+        assert len(record.attempts) == 1
+        assert reopened.gaps == ()
+        reopened.close()
+
+    asyncio.run(scenario())
+
+
+def test_resident_diagnostics_preserve_lifecycle_and_control_during_inflight_io(
+    tmp_path: Path,
+) -> None:
+    import json
+    from io import StringIO
+
+    from sts2_harness.diagnostics import Diagnostics, Lifecycle, Stage
+    from sts2_harness.game import OperationKind
+
+    console = StringIO()
+    diagnostics = Diagnostics(None, directory=tmp_path, console=console)
+    observation = native.Observation.model_validate_json(RUN)
+    diagnostics.bind_recording("recording", observation.location, tmp_path / "archive.sqlite")
+    diagnostics.lifecycle(Lifecycle.RUNNING)
+    diagnostics.started(OperationKind.SETTLE, sequence=3)
+    diagnostics.submitting("recording:1")
+    diagnostics.native_status(
+        native.Status(
+            location=observation.location,
+            control_intent=native.ControlIntent.PAUSED,
+            input_readiness=native.InputReadiness.BUSY,
+            receipt=None,
+        ),
+        False,
+    )
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["lifecycle"] == "running"
+    assert status["control_intent"] == "paused"
+    assert status["stage"] == Stage.INFLIGHT.value
+    assert status["operation"] == "settle" and status["sequence"] == 3
+    assert status["operation_id"] == "recording:1"
+    assert status["started_at"] is not None
+    diagnostics.finished()
+    status = json.loads((tmp_path / "status.json").read_text())
+    assert status["stage"] == Stage.IDLE.value and status["lifecycle"] == "running"
+    assert status["recording_id"] == "recording"
+    diagnostics.close()

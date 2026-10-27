@@ -1,6 +1,7 @@
 """Bounded structured diagnostics, independent of durable game evidence."""
 
 import logging
+import os
 import re
 import sys
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Literal, TextIO
 
 from sts2_harness.client import models as native
+from sts2_harness.config import AuthKind, Configuration, Driver, Protocol
 from sts2_harness.game import Endpoint, OperationKind
 
 
@@ -26,6 +28,7 @@ class EventKind(StrEnum):
     MODEL_RETRY = "model_retry"
     MODEL_RECOVERED = "model_recovered"
     MODEL_EXHAUSTED = "model_exhausted"
+    LIFECYCLE_CHANGED = "lifecycle_changed"
 
 
 class Event(native.WireModel):
@@ -51,8 +54,8 @@ class Level(StrEnum):
 class DiagnosticLine(Event):
     time: str
     level: Level
-    component: Literal["game_control", "model"] = "game_control"
-    recording_id: str
+    component: Literal["game_control", "model", "session"] = "game_control"
+    recording_id: str | None
     suppressed: int
 
 
@@ -61,10 +64,38 @@ class Stage(StrEnum):
     INFLIGHT = "inflight"
 
 
+class Lifecycle(StrEnum):
+    WAITING_GAME = "waiting_game"
+    WAITING_RUN = "waiting_run"
+    PAUSED = "paused"
+    RUNNING = "running"
+    TERMINAL = "terminal"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    FAILED = "failed"
+
+
 class Status(native.WireModel):
-    recording_id: str
+    recording_id: str | None
     stage: Stage
+    lifecycle: Lifecycle | None = None
+    control_intent: native.ControlIntent | None = None
+    game_instance_id: str | None = None
+    run_id: str | None = None
+    archive_path: Path | None = None
+    control_endpoint: str | None = None
+    status_path: Path | None = None
+    process_id: int | None = None
+    mod_port: int | None = None
+    driver: Driver | None = None
+    model_protocol: Protocol | None = None
+    model_authentication: AuthKind | None = None
+    model_timeout_seconds: float | None = None
+    model_extra_retries: int | None = None
+    reasoning_effort_configured: bool | None = None
+    service_tier_configured: bool | None = None
     operation: OperationKind | None = None
+    operation_id: str | None = None
     role: native.DecisionOwner | None = None
     model_request: int | None = None
     started_at: str | None = None
@@ -93,9 +124,14 @@ def _redact(value: str) -> str:
 
 class Diagnostics:
     def __init__(
-        self, recording_id: str, *, directory: Path | None = None, console: TextIO | None = None
+        self,
+        recording_id: str | None,
+        *,
+        directory: Path | None = None,
+        console: TextIO | None = None,
+        control_endpoint: str | None = None,
     ) -> None:
-        self._recording_id = recording_id
+        self._recording_id = _redact(recording_id)[:2048] if recording_id is not None else None
         self._directory = directory
         self._logger = logging.Logger("sts2_harness.game_control", logging.INFO)
         self._logger.propagate = False
@@ -120,13 +156,25 @@ class Diagnostics:
         self._storage_error: str | None = None
         self._storage_report = 0.0
         self._storage_suppressed = 0
-        self._status = Status(recording_id=_redact(self._recording_id)[:2048], stage=Stage.IDLE)
+        self._status = Status(
+            recording_id=self._recording_id,
+            stage=Stage.IDLE,
+            control_endpoint=control_endpoint,
+            status_path=directory / "status.json" if directory is not None else None,
+            process_id=os.getpid(),
+        )
 
     @classmethod
     def console(cls, recording_id: str) -> "Diagnostics":
         return cls(recording_id)
 
     def emit(self, event: Event) -> None:
+        if (
+            event.event is EventKind.NATIVE_RETRY
+            and event.error in ("connection", "timeout")
+            and self._status.operation is OperationKind.PAUSE
+        ):
+            self.lifecycle(Lifecycle.WAITING_GAME)
         now = time.monotonic()
         native_event = event.event in (EventKind.NATIVE_RETRY, EventKind.NATIVE_RECOVERED)
         model_event = event.event in (
@@ -195,9 +243,11 @@ class Diagnostics:
         payload = DiagnosticLine(
             time=datetime.now(UTC).isoformat(),
             level=level,
-            recording_id=_redact(self._recording_id)[:2048],
+            recording_id=self._recording_id,
             event=event.event,
-            component="model"
+            component="session"
+            if event.event is EventKind.LIFECYCLE_CHANGED
+            else "model"
             if event.event
             in (
                 EventKind.MODEL_REQUEST_STARTED,
@@ -224,15 +274,75 @@ class Diagnostics:
             logging.ERROR if severe else logging.WARNING if event.error else logging.INFO, text
         )
 
+    def configured(self, configuration: Configuration, port: int) -> None:
+        model = configuration.model
+        self._write_status(
+            self._status.model_copy(
+                update={
+                    "mod_port": port,
+                    "driver": configuration.driver,
+                    "model_protocol": model.protocol if model is not None else None,
+                    "model_authentication": model.authentication.kind
+                    if model is not None
+                    else None,
+                    "model_timeout_seconds": model.timeout_seconds if model is not None else None,
+                    "model_extra_retries": model.extra_retries if model is not None else None,
+                    "reasoning_effort_configured": bool(model.reasoning_effort)
+                    if model is not None
+                    else None,
+                    "service_tier_configured": bool(model.service_tier)
+                    if model is not None
+                    else None,
+                }
+            )
+        )
+
+    def bind_recording(
+        self, recording_id: str | None, location: native.Location | None, archive_path: Path | None
+    ) -> None:
+        self._recording_id = _redact(recording_id)[:2048] if recording_id is not None else None
+        self._write_status(
+            self._status.model_copy(
+                update={
+                    "recording_id": self._recording_id,
+                    "game_instance_id": location.game_instance_id if location is not None else None,
+                    "run_id": location.run_id if location is not None else None,
+                    "archive_path": archive_path,
+                }
+            )
+        )
+
+    def lifecycle(self, stage: Lifecycle) -> None:
+        if self._status.lifecycle is stage:
+            return
+        self._write_status(self._status.model_copy(update={"lifecycle": stage}))
+        self.emit(Event(event=EventKind.LIFECYCLE_CHANGED, result=stage.value))
+
+    def native_status(self, status: native.Status, waiting: bool) -> None:
+        self._write_status(
+            self._status.model_copy(
+                update={
+                    "control_intent": status.control_intent,
+                }
+            )
+        )
+        if waiting:
+            self.lifecycle(
+                Lifecycle.PAUSED
+                if status.control_intent is native.ControlIntent.PAUSED
+                else Lifecycle.RUNNING
+            )
+
     def started_model(self, role: native.DecisionOwner, sequence: int) -> None:
         self._write_status(
-            Status(
-                recording_id=_redact(self._recording_id)[:2048],
-                stage=Stage.INFLIGHT,
-                role=role,
-                model_request=sequence,
-                started_at=datetime.now(UTC).isoformat(),
-                sequence=sequence,
+            self._status.model_copy(
+                update={
+                    "stage": Stage.INFLIGHT,
+                    "role": role,
+                    "model_request": sequence,
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "sequence": sequence,
+                }
             )
         )
         self.emit(Event(event=EventKind.MODEL_REQUEST_STARTED, role=role, sequence=sequence))
@@ -240,22 +350,38 @@ class Diagnostics:
     def started(self, operation: OperationKind, *, sequence: int | None = None) -> None:
         self._retry_reports.clear()
         self._write_status(
-            Status(
-                recording_id=_redact(self._recording_id)[:2048],
-                stage=Stage.INFLIGHT,
-                operation=operation,
-                started_at=datetime.now(UTC).isoformat(),
-                sequence=sequence,
+            self._status.model_copy(
+                update={
+                    "stage": Stage.INFLIGHT,
+                    "operation": operation,
+                    "started_at": datetime.now(UTC).isoformat(),
+                    "sequence": sequence,
+                }
             )
         )
         self.emit(
             Event(event=EventKind.OPERATION_STARTED, result=operation.value, sequence=sequence)
         )
 
+    def submitting(self, operation_id: str) -> None:
+        self._write_status(
+            self._status.model_copy(update={"operation_id": _redact(operation_id)[:2048]})
+        )
+
     def finished(self) -> None:
         self._retry_reports.clear()
         self._write_status(
-            Status(recording_id=_redact(self._recording_id)[:2048], stage=Stage.IDLE)
+            self._status.model_copy(
+                update={
+                    "stage": Stage.IDLE,
+                    "operation": None,
+                    "operation_id": None,
+                    "role": None,
+                    "model_request": None,
+                    "started_at": None,
+                    "sequence": None,
+                }
+            )
         )
 
     def _write_status(self, status: Status) -> None:

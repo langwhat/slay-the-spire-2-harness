@@ -116,7 +116,7 @@ class Execution:
     async def catalog(self, request: native.CatalogRequest) -> CatalogResult:
         return unwrap(await self._game.catalog(request)).result
 
-    async def pause_until_resumed(self, reason: Reason) -> None:
+    async def pause_until_resumed(self, reason: Reason | None) -> None:
         unwrap(await self._game.pause_until_resumed(reason))
         if self._recovery is not None:
             self._recovery.reset()

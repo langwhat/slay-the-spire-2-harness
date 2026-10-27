@@ -61,7 +61,7 @@ class Settle(native.WireModel):
 
 class Pause(native.WireModel):
     kind: Literal[OperationKind.PAUSE] = OperationKind.PAUSE
-    reason: Reason
+    reason: Reason | None = None
 
 
 type GameRequest = Annotated[
@@ -108,6 +108,7 @@ class FailureKind(StrEnum):
     READ = "read"
     CONTROL = "control"
     LIFETIME = "lifetime"
+    STOPPED = "stopped"
 
 
 class IOFailure(native.WireModel):
@@ -130,11 +131,15 @@ class LifetimeEnded(native.WireModel):
     location: native.Location | None
 
 
+class Stopped(native.WireModel):
+    kind: Literal[FailureKind.STOPPED] = FailureKind.STOPPED
+
+
 type GameSuccess = Annotated[
     Admitted | Observed | Inspected | Cataloged | Settlement | Resumed, Field(discriminator="kind")
 ]
 type GameFailure = Annotated[
-    IOFailure | ReadFailure | ControlFailure | LifetimeEnded, Field(discriminator="kind")
+    IOFailure | ReadFailure | ControlFailure | LifetimeEnded | Stopped, Field(discriminator="kind")
 ]
 
 
@@ -183,7 +188,11 @@ class GameIO(Protocol):
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep
     ) -> GameReply[Settlement]: ...
-    async def pause_until_resumed(self, reason: Reason) -> GameReply[Resumed]: ...
+    async def pause_until_resumed(self, reason: Reason | None) -> GameReply[Resumed]: ...
+
+
+class SessionStopped(Exception):
+    """The backend stopped at a complete execution boundary."""
 
 
 class GameReadError(Exception):
@@ -210,6 +219,8 @@ def unwrap[T](reply: GameReply[T]) -> T:
         raise GameReadError(outcome.message)
     if isinstance(outcome, ControlFailure):
         raise ControlWriteError(outcome.reason)
+    if isinstance(outcome, Stopped):
+        raise SessionStopped
     if isinstance(outcome, LifetimeEnded):
         raise GameLifetimeEnded(outcome.location)
     return outcome
@@ -226,6 +237,8 @@ class LiveGame:
         run_id: str,
         wait_for_start: bool = False,
         wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        stop_requested: Callable[[], bool] | None = None,
+        on_status: Callable[[native.Status, bool], None] | None = None,
     ) -> None:
         if not namespace:
             raise ValueError("A game session namespace is required.")
@@ -237,6 +250,8 @@ class LiveGame:
         self._run_id = run_id
         self._wait_for_start = wait_for_start
         self._wait = wait
+        self._stop_requested = stop_requested
+        self._on_status = on_status
         self._observations: list[native.Observation] = []
         self._inflight = False
 
@@ -285,10 +300,10 @@ class LiveGame:
             self._audit.submitting(submission.operation_id)
         return Settlement(request=submission, receipt=await self._settle(submission))
 
-    async def pause_until_resumed(self, reason: Reason) -> GameReply[Resumed]:
+    async def pause_until_resumed(self, reason: Reason | None) -> GameReply[Resumed]:
         return await self._run(lambda: self._resume_result(reason))
 
-    async def _resume_result(self, reason: Reason) -> Resumed:
+    async def _resume_result(self, reason: Reason | None) -> Resumed:
         return Resumed(observation=await self._pause_until_resumed(reason))
 
     async def _run[T](self, operation: Callable[[], Awaitable[T]]) -> GameReply[T]:
@@ -306,6 +321,8 @@ class LiveGame:
                 outcome = ReadFailure(message=str(error))
             except ControlWriteError as error:
                 outcome = ControlFailure(reason=error.reason)
+            except SessionStopped:
+                outcome = Stopped()
             except GameLifetimeEnded as error:
                 outcome = LifetimeEnded(location=error.location)
             return GameReply[T](
@@ -349,10 +366,12 @@ class LiveGame:
         result = await self._attempt(Endpoint.INSPECT, self._client.inspect(query))
         return result
 
-    async def _status(self) -> native.Status:
+    async def _status(self, *, waiting: bool = False) -> native.Status:
         result = await self._attempt(Endpoint.STATUS, self._client.status())
         if not isinstance(result, native.Status):
             raise GameReadError(result.error.message)
+        if self._on_status is not None and self._same_run(result.location):
+            self._on_status(result, waiting)
         return result
 
     def _same_run(self, location: native.Location) -> bool:
@@ -360,9 +379,14 @@ class LiveGame:
             location.game_instance_id == self._game_instance_id and location.run_id == self._run_id
         )
 
+    def _check_stop(self) -> None:
+        if self._stop_requested is not None and self._stop_requested():
+            raise SessionStopped
+
     async def _admit(self) -> bool:
         while True:
-            status = await self._status()
+            self._check_stop()
+            status = await self._status(waiting=True)
             if status.location.run_id is None:
                 raise GameLifetimeEnded(status.location)
             if (
@@ -405,33 +429,55 @@ class LiveGame:
             observation = await self._observe()
         return observation
 
-    async def _pause_until_resumed(self, reason: Reason) -> native.Observation:
+    async def _pause_until_resumed(self, reason: Reason | None) -> native.Observation:
         """Write Pause, await explicit Start, then refresh; a dead run raises GameLifetimeEnded."""
-        try:
-            result = await self._attempt(
-                Endpoint.CONTROL, self._client.control(native.ControlIntent.PAUSED)
-            )
-        except ClientUnavailable as error:
-            raise ControlWriteError(
-                Reason(
-                    code=ReasonCode.CONTROL_UNAVAILABLE,
-                    message=f"Recovery Pause could not be confirmed: {error}",
-                )
-            ) from error
-        if not isinstance(result, native.ControlReply):
-            raise ControlWriteError(
-                Reason(code=ReasonCode.CONTROL_UNAVAILABLE, message=result.error.message)
-            )
-        if result.mode is not native.ControlIntent.PAUSED:
-            raise ControlWriteError(
-                Reason(
-                    code=ReasonCode.CONTROL_UNAVAILABLE,
-                    message="The Mod did not confirm the requested Pause control intent.",
-                )
-            )
         while True:
+            self._check_stop()
             try:
-                status = await self._status()
+                result = await self._attempt(
+                    Endpoint.CONTROL, self._client.control(native.ControlIntent.PAUSED)
+                )
+            except ClientUnavailable as error:
+                if error.reason not in (ClientFailureKind.CONNECTION, ClientFailureKind.TIMEOUT):
+                    raise ControlWriteError(
+                        Reason(
+                            code=ReasonCode.CONTROL_UNAVAILABLE,
+                            message=f"Pause could not be confirmed: {error}",
+                        )
+                    ) from error
+                while True:
+                    self._check_stop()
+                    await self._wait(1.0)
+                    try:
+                        status = await self._status()
+                    except (ClientUnavailable, GameReadError):
+                        continue
+                    if (
+                        not self._same_run(status.location)
+                        or status.input_readiness is native.InputReadiness.TERMINAL
+                    ):
+                        raise GameLifetimeEnded(status.location) from error
+                    break
+                continue
+            if not isinstance(result, native.ControlReply):
+                raise ControlWriteError(
+                    Reason(
+                        code=ReasonCode.CONTROL_UNAVAILABLE,
+                        message=result.error.message,
+                    )
+                )
+            if result.mode is not native.ControlIntent.PAUSED:
+                raise ControlWriteError(
+                    Reason(
+                        code=ReasonCode.CONTROL_UNAVAILABLE,
+                        message="The Mod did not confirm the requested Pause control intent.",
+                    )
+                )
+            break
+        while True:
+            self._check_stop()
+            try:
+                status = await self._status(waiting=True)
                 if (
                     not self._same_run(status.location)
                     or status.input_readiness is native.InputReadiness.TERMINAL
@@ -446,7 +492,7 @@ class LiveGame:
                         raise GameLifetimeEnded(observation.location)
                     return observation
             except (ClientUnavailable, GameReadError):
-                await self._wait(0.1)
+                await self._wait(1.0)
                 continue
             await self._wait(1.0)
 
@@ -474,6 +520,8 @@ class LiveGame:
                 return None
             if not isinstance(status, native.Status):
                 return None
+            if self._on_status is not None:
+                self._on_status(status, False)
             receipt = status.receipt
             if receipt is None or receipt.operation_id != request.operation_id:
                 return None

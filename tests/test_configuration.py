@@ -246,3 +246,28 @@ def test_basic_unicode_password_and_header_tabs_remain_valid(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.splitlines()[1])["custom_header_count"] == 2
     assert "密碼" not in result.stdout + result.stderr
+
+
+def test_resident_start_rejects_external_driver_without_connecting(tmp_path: Path) -> None:
+    result = cli(tmp_path, "start", "--set", "STS2_DRIVER=external")
+    assert result.returncode == 2
+    assert "Resident external driving is not implemented." in result.stderr
+    assert not (tmp_path / "runs").exists()
+
+
+def test_resident_start_rejects_unimplemented_protocol_before_game_connection(
+    tmp_path: Path,
+) -> None:
+    result = cli(
+        tmp_path,
+        "start",
+        "--set",
+        "LLM_MODEL=local",
+        "--set",
+        "LLM_AUTH=none",
+        "--set",
+        "LLM_PROTOCOL=chat-completions",
+    )
+    assert result.returncode == 2
+    assert "configured model protocol is not implemented" in result.stderr
+    assert not (tmp_path / "runs").exists()

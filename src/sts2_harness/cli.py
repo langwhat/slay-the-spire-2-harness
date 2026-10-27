@@ -1,15 +1,18 @@
-"""Offline configuration and recorded game evidence inspection."""
+"""Resident gameplay startup, offline configuration, and recorded evidence inspection."""
 
 import argparse
+import asyncio
 import json
 import os
+import signal
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from sts2_harness.config import ConfigurationError, load_configuration
-from sts2_harness.game import OperationKind
+from sts2_harness.config import Configuration, ConfigurationError, load_configuration
+from sts2_harness.game import ControlWriteError, OperationKind
+from sts2_harness.interactive import InteractiveOptions, run_interactive
 from sts2_harness.journal import ArchiveError, DependencyKind, Journal, evidence
 
 
@@ -19,11 +22,27 @@ class _Parser(argparse.ArgumentParser):
         raise ConfigurationError("Invalid command line; use sts2 --help.")
 
 
+async def _start(options: InteractiveOptions, configuration: Configuration) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for name in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(name, stop.set)
+    try:
+        await run_interactive(options, configuration, stop_requested=stop)
+    finally:
+        for name in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(name)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = _Parser(description="Validate startup configuration offline without exposing secrets.")
-    parser.add_argument("command", choices=["check-config", "journal"])
+    parser = _Parser(
+        description="Attach a resident backend or inspect configuration and evidence safely."
+    )
+    parser.add_argument("command", choices=["start", "check-config", "journal"])
     parser.add_argument("--env-file", default=".env", metavar="PATH")
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
+    parser.add_argument("--mod-url", default="http://127.0.0.1:17877", metavar="URL")
+    parser.add_argument("--output", type=Path, default=Path("runs"), metavar="DIRECTORY")
     parser.add_argument("--archive", type=Path)
     parser.add_argument(
         "--view", choices=["timeline", "operation", "model", "request"], default="timeline"
@@ -88,6 +107,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ConfigurationError("Startup overrides must use NAME=VALUE.")
             overrides[name] = value
         config = load_configuration(Path(env_file), os.environ, overrides)
+        if command == "start":
+            mod_url: str = arguments.mod_url
+            output_directory: Path = arguments.output
+            asyncio.run(_start(InteractiveOptions(mod_url, output_directory), config))
+            return 0
+    except ControlWriteError:
+        print(
+            "Control error: The Mod did not confirm Pause; the backend stopped.",
+            file=sys.stderr,
+        )
+        return 2
     except ArchiveError as error:
         print(f"Archive error: {error}", file=sys.stderr)
         return 2

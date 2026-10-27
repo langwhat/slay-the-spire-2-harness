@@ -826,7 +826,9 @@ def test_unconfirmed_pending_work_blocks_the_next_decision_until_native_readines
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", ("semantic", "mismatch", "connection", "changed_run"))
+@pytest.mark.parametrize(
+    "failure", ("semantic", "mismatch", "protocol", "connection", "changed_run")
+)
 def test_recovery_pause_reports_write_failure_or_run_end_without_reset(failure: str) -> None:
     async def scenario() -> None:
         from sts2_harness.execution import ControlWriteError, GameLifetimeEnded, ToolRecoveryBudget
@@ -853,6 +855,8 @@ def test_recovery_pause_reports_write_failure_or_run_end_without_reset(failure: 
                     )
                 if failure == "mismatch":
                     return httpx.Response(200, json={"mode": "running"})
+                if failure == "protocol":
+                    return httpx.Response(200, content=b"invalid control reply")
                 if failure == "connection":
                     raise httpx.ConnectError("disconnected", request=request)
                 return httpx.Response(200, json={"mode": "paused"})
@@ -880,13 +884,17 @@ def test_recovery_pause_reports_write_failure_or_run_end_without_reset(failure: 
                 run_id="run",
                 recovery=budget,
             )
-            expected_error = GameLifetimeEnded if failure == "changed_run" else ControlWriteError
+            expected_error = (
+                GameLifetimeEnded if failure in ("changed_run", "connection") else ControlWriteError
+            )
             with pytest.raises(expected_error):
                 await execution.pause_until_resumed(
                     Reason(code=ReasonCode.QUERY_FAILED, message="A required read failed.")
                 )
         assert budget.failures == 1
-        assert calls == (["/control", "/status"] if failure == "changed_run" else ["/control"])
+        assert calls == (
+            ["/control", "/status"] if failure in ("changed_run", "connection") else ["/control"]
+        )
 
     asyncio.run(scenario())
 

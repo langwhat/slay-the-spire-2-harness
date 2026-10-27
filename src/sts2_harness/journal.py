@@ -4,7 +4,7 @@ import hashlib
 import sqlite3
 import zlib
 from collections.abc import Awaitable, Callable, Generator
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal
@@ -39,6 +39,7 @@ from sts2_harness.game import (
     Resumed,
     Settle,
     Settlement,
+    Stopped,
 )
 from sts2_harness.journal_models import (
     MATERIAL_REPLY,
@@ -65,7 +66,7 @@ from sts2_harness.results import Reason
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -157,7 +158,10 @@ class Journal:
     ) -> None:
         self.path = path
         self.manifest = manifest
+        self._resources = ExitStack()
         self.diagnostics = diagnostics or Diagnostics.console(manifest.recording_id)
+        if diagnostics is None:
+            self._resources.callback(self.diagnostics.close)
         self._sequence = 0
         self._stream_bases: dict[str, tuple[int, tuple[str, ...]]] = {}
         self._stream_positions: dict[str, int] = {}
@@ -182,11 +186,11 @@ class Journal:
             raise ArchiveError("A recording archive already exists at that path.")
         if path.parent.exists() and not path.parent.is_dir():
             raise ArchiveError("The recording parent must be a directory.")
-        journal = cls(
-            path,
-            manifest,
-            diagnostics=diagnostics or Diagnostics(manifest.recording_id, directory=path.parent),
-        )
+        supplied = diagnostics
+        diagnostics = diagnostics or Diagnostics(manifest.recording_id, directory=path.parent)
+        journal = cls(path, manifest, diagnostics=diagnostics)
+        if supplied is None:
+            journal._resources.callback(diagnostics.close)
         try:
             journal._initialize()
         except (OSError, sqlite3.OperationalError):
@@ -534,6 +538,7 @@ class Journal:
     def submitting(self, operation_id: str) -> None:
         if not isinstance(self._active_request, Settle):
             raise RuntimeError("A native submission requires an active settlement operation.")
+        self.diagnostics.submitting(operation_id)
         with self._storage() as connection:
             if connection is not None:
                 connection.execute(
@@ -554,6 +559,7 @@ class Journal:
         if not isinstance(self._active_request, Pause) or attempt.endpoint not in (
             Endpoint.STATUS,
             Endpoint.STATE,
+            Endpoint.CONTROL,
         ):
             return
         reply = attempt.reply
@@ -819,7 +825,7 @@ class Journal:
         if self._active_sequence is not None:
             raise RuntimeError("Cannot close an active recording operation.")
         self._read_only = True
-        self.diagnostics.close()
+        self._resources.close()
 
     @property
     def storage(self) -> "StorageSummary":
@@ -884,7 +890,7 @@ class RecordedGame:
             Settle(route=route, step=step), lambda: self._live.settle(route, step)
         )
 
-    async def pause_until_resumed(self, reason: Reason) -> GameReply[Resumed]:
+    async def pause_until_resumed(self, reason: Reason | None) -> GameReply[Resumed]:
         return await self._record(
             Pause(reason=reason), lambda: self._live.pause_until_resumed(reason)
         )
@@ -898,6 +904,7 @@ class ResultKind(StrEnum):
     PAUSED = "paused"
     LIFETIME_ENDED = "lifetime_ended"
     INCOMPLETE = "incomplete"
+    STOPPED = "stopped"
 
 
 def _result(outcome: GameSuccess | GameFailure) -> tuple[ResultKind, str | None]:
@@ -907,6 +914,8 @@ def _result(outcome: GameSuccess | GameFailure) -> tuple[ResultKind, str | None]
         return ResultKind.FAILED, "read_unavailable"
     if isinstance(outcome, ControlFailure):
         return ResultKind.FAILED, outcome.reason.code.value
+    if isinstance(outcome, Stopped):
+        return ResultKind.STOPPED, None
     if isinstance(outcome, LifetimeEnded):
         return ResultKind.LIFETIME_ENDED, None
     if isinstance(outcome, Admitted):

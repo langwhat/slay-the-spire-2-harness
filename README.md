@@ -2,8 +2,9 @@
 
 The no-save/load gameplay core provides a programmatic single-run gameplay loop through
 `RunSession` and `DefaultFlow`, with a Responses model client and recorded game IO.
-The current CLI offers offline configuration checks and archive inspection; ordinary user
-startup, the external facade, and software replay are not implemented yet.
+The CLI can attach a resident backend to your running Mod-enabled game, validate
+configuration offline, and inspect archives. The external facade and software replay
+are not implemented yet.
 
 Install Python 3.12+ and [uv](https://docs.astral.sh/uv/), then run:
 
@@ -173,9 +174,36 @@ receipts, queries, and material reads. Sequence and confirmed game cursor expres
 they do not imply that an adjacent action was caused by a particular model request.
 
 Reopening provides offline inspection only. Schema versions are validated without archive
-migration. Read older archives with the revision that recorded them. Ordinary user startup,
-the external facade, software replay, native restoration, and evaluation remain unsupported;
+migration. Read older archives with the revision that recorded them. The external facade,
+software replay, native restoration, and evaluation remain unsupported;
 the manifest does not claim exact replay.
+
+## Ordinary gameplay startup
+
+Start your Mod-enabled game and select a character, then run:
+
+```console
+uv run sts2 start
+```
+
+The backend reads the configured model defaults once. If the game is not ready, it waits
+without calling a model. On connection to a run it sets Pause, then waits for the in-game
+Start control; it does not inherit a previous running state. Start/Pause controls AI
+admission, not the game's scene pause. Manual Pause retains the current session and notes.
+After a terminal result the backend stays resident, waiting for a new user-started run.
+Every new run has fresh notes, contexts, recovery state, and an archive directory.
+
+The default Mod URL is `http://127.0.0.1:17877`. Use `--mod-url URL` and `--output DIRECTORY`
+to override the connection and output directory; the default output directory is `runs`.
+`status.json` publishes the control endpoint, current lifecycle, identities, archive path,
+and in-flight operation or model request. `control_intent` describes the native Start/Pause
+intent separately from in-flight work. Diagnostics share a bounded log in the output
+directory, while each run keeps its own `archive.sqlite`.
+
+Ctrl-C or SIGTERM requests shutdown after the admitted decision, its action batch,
+settlement, and feedback finish. Waiting has no fixed deadline. The backend closes its own
+resources and never launches or terminates your game. External driving and model protocols
+not yet implemented by the model adapter fail explicitly before connection.
 
 ## Single-run sessions
 
@@ -188,6 +216,7 @@ Pass resources that the session may own and close:
 from sts2_harness.session import RunSession
 
 async with RunSession(client, manifest, archive_path, model=model) as session:
+    await session.start()
     ended = await session.run()
 ```
 
@@ -195,6 +224,8 @@ The session owns and releases the supplied client and optional model, creates an
 its Journal, and shares one Notes owner and recovery budget. `DefaultFlow` waits for Start,
 schedules Run and Combat, completes pending battle handoffs before creating the next
 Combat, rebuilds Run context at act boundaries, and returns on termination or run change.
+`start()` records a real Pause and waits for explicit Start before `run()` enters gameplay.
+A supplied process Diagnostics instance is borrowed and remains open across run sessions.
 It does not launch a game or select a character. Run chooses automatic progression or
 strategy within the same execution path; shop entry actions remain separate units and
 purchases and departure remain strategy decisions. Validation uses fake HTTP and local

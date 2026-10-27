@@ -12,6 +12,7 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent
 from sts2_harness.decisions import DecisionSource
+from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
@@ -50,6 +51,8 @@ class RunSession:
         combat_factory: RoleFactory | None = None,
         flow_factory: FlowFactory = DefaultFlow,
         wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        diagnostics: Diagnostics | None = None,
+        stop_requested: Callable[[], bool] | None = None,
     ) -> None:
         if manifest.initial_notes is None:
             raise ValueError("A run session requires explicit initial notes in its manifest.")
@@ -70,6 +73,8 @@ class RunSession:
         self._combat_factory = combat_factory
         self._flow_factory = flow_factory
         self._wait = wait
+        self._diagnostics = diagnostics
+        self._stop_requested = stop_requested
         self._resources = AsyncExitStack()
         self._run_stream = 0
         self._combat_stream = 0
@@ -80,7 +85,9 @@ class RunSession:
             await self._resources.enter_async_context(self._client)
             if self._model is not None:
                 await self._resources.enter_async_context(self._model)
-            self.journal = Journal.create(self._archive_path, self._manifest)
+            self.journal = Journal.create(
+                self._archive_path, self._manifest, diagnostics=self._diagnostics
+            )
             self._resources.callback(self.journal.close)
             self.execution = Execution(
                 RecordedGame(
@@ -92,6 +99,10 @@ class RunSession:
                         wait_for_start=True,
                         audit=self.journal,
                         wait=self._wait,
+                        stop_requested=self._stop_requested,
+                        on_status=self._diagnostics.native_status
+                        if self._diagnostics is not None
+                        else None,
                     ),
                     self.journal,
                 ),
@@ -129,6 +140,11 @@ class RunSession:
         traceback: TracebackType | None,
     ) -> None:
         await self._resources.aclose()
+
+    async def start(self) -> None:
+        if self._flow is None:
+            raise RuntimeError("Enter the run session before starting it.")
+        await self.execution.pause_until_resumed(None)
 
     async def run(self) -> RunEnded:
         if self._flow is None:

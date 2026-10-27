@@ -35,11 +35,15 @@ class Llm:
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
-        if configuration.protocol is not Protocol.RESPONSES:
-            raise ModelUnavailable(FailureKind.CONFIGURATION)
+        self.validate_configuration(configuration)
         self._adapter = ResponsesAdapter(configuration, transport)
         self._configuration = configuration
         self._sleep = sleep
+
+    @staticmethod
+    def validate_configuration(configuration: ModelConfiguration) -> None:
+        if configuration.protocol is not Protocol.RESPONSES:
+            raise ModelUnavailable(FailureKind.CONFIGURATION)
 
     @property
     def configuration(self) -> ModelConfiguration:
