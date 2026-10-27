@@ -1,0 +1,482 @@
+[
+  {
+    "name": "run_inspect",
+    "description": "Read public details or upgrade previews relevant to the current non-combat decision, such as owned cards, relics, potions, map options, rewards, shop offers, or event choices. Use the latest state and observed history first; query when a missing detail could change your plan. Use supplied references and supported areas. This tool does not purchase, claim, upgrade, or advance the game. Upgrade previews are hypothetical; current observations take precedence over old details. The result includes the current state and requested details in data. Use area=state to read the current public state, without refs or upgrade; this returns no separate query data. To reread details, inspect the relevant area and supplied references; requested content is returned in data even if previously read. Omit refs to inspect the whole area. Use options for offered operations and selection candidates. A detail request whose public state changes while it is read fails rather than combining mismatched observations. Unknown or unavailable values are not zero. No hidden order or hidden values are revealed. Public query areas are shared by Run and Combat; availability follows the current game state. An explicit upgrade inspection returns the current live details and a separate data.upgrades entry keyed by the card reference, containing the complete hypothetical next-upgrade version. Compare those entries directly; no separate before copy or numeric difference is supplied. Not upgradable and unavailable preview are distinct. A read failure is reported as a failure, not hidden as missing data. Hypothetical values never replace current live values. Requested refs must be distinct current public members of the requested area. If any reference is not in that area, the entire detail query fails and identifies the invalid references; it does not omit entries, change areas, or match by name. A trustworthy current state is still returned when available. Omit refs to read the whole area; an empty list is invalid. state, map, combat_history, and powers do not accept refs. Unknown fields on a valid object remain distinct from an invalid reference. Areas are state, map, combat_history, hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, and enemies. combat_history reads the current battle public card history, not cross-battle reports. Upgrade previews apply to cards in a card-containing area; other object details remain current facts. For powers, omit refs; the result covers all currently relevant holders. Use enemies with enemy references to inspect particular enemies.",
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "enum": [
+                "state",
+                "map",
+                "combat_history"
+              ]
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "enum": [
+                "hand",
+                "draw",
+                "discard",
+                "exhaust",
+                "other",
+                "deck",
+                "options",
+                "rewards",
+                "shop"
+              ]
+            },
+            "refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "upgrade": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "enum": [
+                "relics",
+                "potions",
+                "enemies"
+              ]
+            },
+            "refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "const": "powers"
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "run_knowledge",
+    "description": "Look up native game definitions and any configured supplementary knowledge relevant to run planning, including objects not currently owned. Use this for rules and explanations; use run_inspect for current offers, instances, or upgrade previews. Generic definitions do not override live prices, eligibility, or instance effects. This is a read-only query. The result includes the current state and requested knowledge in data. Use mode=catalog to discover supported categories and filter values, mode=search for concise matches, and mode=lookup for full entries. Search filters apply to base definitions, not live objects. Combine different card filters with AND and alternatives within a filter with OR. An empty matches list means no match; missing lookup IDs are reported individually. Explicit lookups always return their text. Query pagination does not preserve a snapshot across catalog changes. This tool never advances the game. Search uses case-insensitive substring matching of whitespace-separated terms against native IDs, localized names, and base definition text; every term must match. Without spaces, a phrase is one substring. Exact ID or name matches rank first, then matches whose terms all occur in the ID or name, then text matches; ties use native ID order. Filters are not relaxed, and supplementary text does not select native matches. Search defaults to 5 results and accepts at most 20; use a larger limit for broad screening. total reports the match count; next_offset is null when no next page exists. Each search match includes the native definition ID, localized name, and complete native base description. Card matches also include confirmed base type, rarity, and cost. Search does not add private strategy text or generated summaries; use lookup for complete entries and configured supplements. Search category is optional: omit it to search all supported categories, or supply it to restrict results strictly. Each match includes its category. Card filters require category=card. Card filters use pools, types, rarities, and energy_costs. Pool, type, and rarity values come from catalog; they are not assumed to be native definition IDs. Catalog identifies each character's own card pool; this does not mean every card that character could obtain. energy_costs matches unupgraded base energy costs, using non-negative integers or \"X\", never current combat costs. Different dimensions combine with AND; alternatives within a dimension combine with OR. Omit a dimension to leave it unconstrained. Empty lists, duplicates, and unknown filter values are input errors, not empty matches. lookup accepts 1 to 20 distinct native IDs. entries contains found full entries in request order; missing_ids lists IDs absent from the native catalog in request order. Missing supplementary knowledge does not make a native definition missing. Catalog or enabled-extension failures are reported as failures, not missing IDs or empty supplements. A card lookup includes its complete base definition after the next upgrade, without recursively expanding further upgrades. Search still returns the base version. These encyclopedia values exclude live instance modifiers; inspect supplies actual instance values. Non-card entries have no upgrade version. A native definition that cannot upgrade is distinguished from an unavailable preview; actual read failures remain failures.",
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "catalog"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "search"
+            },
+            "category": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Supported category from catalog; omitted searches all categories."
+            },
+            "text": {
+              "type": "string",
+              "description": "Whitespace-separated, case-insensitive substring terms; all terms must match."
+            },
+            "filters": {
+              "type": "object",
+              "properties": {
+                "pools": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "types": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "rarities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "energy_costs": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "const": "X"
+                      }
+                    ]
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": false,
+              "description": "Card filters use pools, types, rarities, and energy_costs. Pool, type, and rarity values come from catalog; they are not assumed to be native definition IDs. Catalog identifies each character's own card pool; this does not mean every card that character could obtain. energy_costs matches unupgraded base energy costs, using non-negative integers or \"X\", never current combat costs. Different dimensions combine with AND; alternatives within a dimension combine with OR. Omit a dimension to leave it unconstrained. Empty lists, duplicates, and unknown filter values are input errors, not empty matches."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 5
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "filters"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "category": {
+                    "const": "card"
+                  }
+                },
+                "required": [
+                  "category"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "lookup"
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "mode",
+            "ids"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "combat_inspect",
+    "description": "Read public details or upgrade previews for battle-relevant objects or an area such as the hand, draw pile, discard pile, enemies, powers, or relics. Use the current state and observed history first; query when a missing detail could change your plan. Use supplied references and supported areas. This tool performs no game actions and cannot reveal hidden draw order. An upgrade preview is hypothetical. Values apply to their observed state and shown target scope. The result includes the current state and requested details in data. Use area=state to read the current public state, without refs or upgrade; this returns no separate query data. To reread details, inspect the relevant area and supplied references; requested content is returned in data even if previously read. Omit refs to inspect the whole area. Use options for offered operations and selection candidates. A detail request whose public state changes while it is read fails rather than combining mismatched observations. Unknown or unavailable values are not zero. No hidden order or hidden values are revealed. Public query areas are shared by Run and Combat; availability follows the current game state. An explicit upgrade inspection returns the current live details and a separate data.upgrades entry keyed by the card reference, containing the complete hypothetical next-upgrade version. Compare those entries directly; no separate before copy or numeric difference is supplied. Not upgradable and unavailable preview are distinct. A read failure is reported as a failure, not hidden as missing data. Hypothetical values never replace current live values. Requested refs must be distinct current public members of the requested area. If any reference is not in that area, the entire detail query fails and identifies the invalid references; it does not omit entries, change areas, or match by name. A trustworthy current state is still returned when available. Omit refs to read the whole area; an empty list is invalid. state, map, combat_history, and powers do not accept refs. Unknown fields on a valid object remain distinct from an invalid reference. Areas are state, map, combat_history, hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, and enemies. combat_history reads the current battle public card history, not cross-battle reports. Upgrade previews apply to cards in a card-containing area; other object details remain current facts. For powers, omit refs; the result covers all currently relevant holders. Use enemies with enemy references to inspect particular enemies.",
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "enum": [
+                "state",
+                "map",
+                "combat_history"
+              ]
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "enum": [
+                "hand",
+                "draw",
+                "discard",
+                "exhaust",
+                "other",
+                "deck",
+                "options",
+                "rewards",
+                "shop"
+              ]
+            },
+            "refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "upgrade": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "enum": [
+                "relics",
+                "potions",
+                "enemies"
+              ]
+            },
+            "refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "area": {
+              "const": "powers"
+            }
+          },
+          "required": [
+            "area"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  {
+    "name": "combat_knowledge",
+    "description": "Look up native game definitions and any configured supplementary knowledge relevant to battle, including objects not currently owned. Use this for rules and explanations; use combat_inspect for live objects and previews. Definition values do not override current live costs or effects. This is a read-only query. The result includes the current state and requested knowledge in data. Use mode=catalog to discover supported categories and filter values, mode=search for concise matches, and mode=lookup for full entries. Search filters apply to base definitions, not live objects. Combine different card filters with AND and alternatives within a filter with OR. An empty matches list means no match; missing lookup IDs are reported individually. Explicit lookups always return their text. Query pagination does not preserve a snapshot across catalog changes. This tool never advances the game. Search uses case-insensitive substring matching of whitespace-separated terms against native IDs, localized names, and base definition text; every term must match. Without spaces, a phrase is one substring. Exact ID or name matches rank first, then matches whose terms all occur in the ID or name, then text matches; ties use native ID order. Filters are not relaxed, and supplementary text does not select native matches. Search defaults to 5 results and accepts at most 20; use a larger limit for broad screening. total reports the match count; next_offset is null when no next page exists. Each search match includes the native definition ID, localized name, and complete native base description. Card matches also include confirmed base type, rarity, and cost. Search does not add private strategy text or generated summaries; use lookup for complete entries and configured supplements. Search category is optional: omit it to search all supported categories, or supply it to restrict results strictly. Each match includes its category. Card filters require category=card. Card filters use pools, types, rarities, and energy_costs. Pool, type, and rarity values come from catalog; they are not assumed to be native definition IDs. Catalog identifies each character's own card pool; this does not mean every card that character could obtain. energy_costs matches unupgraded base energy costs, using non-negative integers or \"X\", never current combat costs. Different dimensions combine with AND; alternatives within a dimension combine with OR. Omit a dimension to leave it unconstrained. Empty lists, duplicates, and unknown filter values are input errors, not empty matches. lookup accepts 1 to 20 distinct native IDs. entries contains found full entries in request order; missing_ids lists IDs absent from the native catalog in request order. Missing supplementary knowledge does not make a native definition missing. Catalog or enabled-extension failures are reported as failures, not missing IDs or empty supplements. A card lookup includes its complete base definition after the next upgrade, without recursively expanding further upgrades. Search still returns the base version. These encyclopedia values exclude live instance modifiers; inspect supplies actual instance values. Non-card entries have no upgrade version. A native definition that cannot upgrade is distinguished from an unavailable preview; actual read failures remain failures.",
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "catalog"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "search"
+            },
+            "category": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Supported category from catalog; omitted searches all categories."
+            },
+            "text": {
+              "type": "string",
+              "description": "Whitespace-separated, case-insensitive substring terms; all terms must match."
+            },
+            "filters": {
+              "type": "object",
+              "properties": {
+                "pools": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "types": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "rarities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                },
+                "energy_costs": {
+                  "type": "array",
+                  "items": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "const": "X"
+                      }
+                    ]
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                }
+              },
+              "additionalProperties": false,
+              "description": "Card filters use pools, types, rarities, and energy_costs. Pool, type, and rarity values come from catalog; they are not assumed to be native definition IDs. Catalog identifies each character's own card pool; this does not mean every card that character could obtain. energy_costs matches unupgraded base energy costs, using non-negative integers or \"X\", never current combat costs. Different dimensions combine with AND; alternatives within a dimension combine with OR. Omit a dimension to leave it unconstrained. Empty lists, duplicates, and unknown filter values are input errors, not empty matches."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 5
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "filters"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "category": {
+                    "const": "card"
+                  }
+                },
+                "required": [
+                  "category"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "const": "lookup"
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "maxItems": 20,
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "mode",
+            "ids"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+]

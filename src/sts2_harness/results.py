@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import MISSING, Field
 
 from sts2_harness.client import models as native
+from sts2_harness.knowledge import KnowledgeLookup
 
 
 class SemanticValue(native.WireModel):
@@ -96,7 +97,13 @@ class WriteUnknown(SemanticValue):
 type ActionOutcome = ActionCompleted | ActionStopped | Rejected | ActionUnknown
 type QueryOutcome = ReadCompleted | Rejected | Failed | WriteUnknown
 type Outcome = ActionOutcome | QueryOutcome
-type QueryData = native.InspectData | native.CatalogData | native.SearchData | native.LookupData
+type QueryData = (
+    native.InspectData
+    | native.CatalogData
+    | native.SearchData
+    | native.LookupData
+    | KnowledgeLookup
+)
 
 
 @dataclass(frozen=True, slots=True)
