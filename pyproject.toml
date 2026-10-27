@@ -3,7 +3,12 @@ name = "sts2-harness"
 version = "0.1.0"
 description = "No-save/load game-playing core"
 requires-python = ">=3.12"
-dependencies = ["python-dotenv>=1.2,<2"]
+dependencies = [
+    "httpx2>=2.16,<3",
+    "openai==3.39.0",
+    "pydantic>=2.14,<3",
+    "python-dotenv>=1.2,<2",
+]
 
 [project.scripts]
 sts2 = "sts2_harness.cli:main"

@@ -1,0 +1,189 @@
+"""Immutable conversation values; native continuation stays inside the LLM boundary."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Self
+
+from openai.types.responses import ResponseOutputItem
+from pydantic import BaseModel, TypeAdapter
+
+_NATIVE_OUTPUT = TypeAdapter(tuple[ResponseOutputItem, ...])
+
+
+class TextRole(StrEnum):
+    SYSTEM = "system"
+    USER = "user"
+
+
+@dataclass(frozen=True, slots=True)
+class TextMessage:
+    role: TextRole
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolResultMessage:
+    call_id: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    name: str
+    description: str
+    parameters: type[BaseModel]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCall:
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResponsesReply:
+    """Complete ordered native output, including opaque reasoning and assistant phases."""
+
+    _encoded: str
+
+    @property
+    def items(self) -> tuple[ResponseOutputItem, ...]:
+        """Return decoded copies without exposing mutable retained continuation state."""
+        return _NATIVE_OUTPUT.validate_json(self._encoded, strict=True)
+
+    def to_json(self) -> str:
+        return self._encoded
+
+    @classmethod
+    def from_items(cls, items: tuple[ResponseOutputItem, ...]) -> Self:
+        return cls(
+            _NATIVE_OUTPUT.dump_json(
+                items, exclude_unset=True, by_alias=True, serialize_as_any=True
+            ).decode()
+        )
+
+    @classmethod
+    def from_json(cls, payload: str) -> Self:
+        _NATIVE_OUTPUT.validate_json(payload, strict=True)
+        return cls(payload)
+
+
+type NativeReply = ResponsesReply
+
+
+@dataclass(frozen=True, slots=True)
+class AssistantMessage:
+    native: NativeReply
+
+    @property
+    def text(self) -> str:
+        return "".join(
+            content.text
+            for item in self.native.items
+            if item.type == "message"
+            for content in item.content
+            if content.type == "output_text"
+        )
+
+    @property
+    def tool_calls(self) -> tuple[ToolCall, ...]:
+        return tuple(
+            ToolCall(item.call_id, item.name, item.arguments)
+            for item in self.native.items
+            if item.type == "function_call"
+        )
+
+
+type ModelInput = tuple[TextMessage | AssistantMessage | ToolResultMessage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Usage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+
+    @property
+    def cache_hit_ratio(self) -> float | None:
+        if self.input_tokens is None or self.input_tokens == 0 or self.cache_read_tokens is None:
+            return None
+        return self.cache_read_tokens / self.input_tokens
+
+    @staticmethod
+    def summarize_cache(samples: tuple[Usage, ...]) -> CacheUsageSummary:
+        comparable = tuple(
+            sample
+            for sample in samples
+            if sample.input_tokens is not None and sample.cache_read_tokens is not None
+        )
+        return CacheUsageSummary(
+            len(samples),
+            len(comparable),
+            sum(sample.input_tokens for sample in comparable if sample.input_tokens is not None),
+            sum(
+                sample.cache_read_tokens
+                for sample in comparable
+                if sample.cache_read_tokens is not None
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class CacheUsageSummary:
+    request_count: int
+    comparable_request_count: int
+    input_tokens: int
+    cache_read_tokens: int
+
+    @property
+    def complete_coverage(self) -> bool:
+        return self.request_count == self.comparable_request_count
+
+    @property
+    def cache_hit_ratio(self) -> float | None:
+        if not self.comparable_request_count or not self.input_tokens:
+            return None
+        return self.cache_read_tokens / self.input_tokens
+
+
+@dataclass(frozen=True, slots=True)
+class ModelMetadata:
+    requested_model: str
+    requested_effort: str
+    response_model: str | None
+    response_service_tier: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelReply:
+    assistant: AssistantMessage
+    usage: Usage
+    metadata: ModelMetadata
+
+
+class FailureKind(StrEnum):
+    CONNECTION = "connection"
+    TIMEOUT = "timeout"
+    RATE_LIMIT = "rate-limit"
+    OVERLOAD = "overload"
+    INCOMPLETE_EOF = "incomplete-eof"
+    TRUNCATED = "truncated"
+    AUTHENTICATION = "authentication"
+    PERMISSION = "permission"
+    QUOTA = "quota"
+    MODEL = "model"
+    CONFIGURATION = "configuration"
+    PROTOCOL = "protocol"
+    PROVIDER = "provider"
+
+
+class ModelUnavailable(Exception):
+    """A safe-to-display failure after LLM recovery, without provider payloads."""
+
+    def __init__(self, reason: FailureKind) -> None:
+        self.reason = reason
+        super().__init__(f"Model request unavailable: {reason.value}.")

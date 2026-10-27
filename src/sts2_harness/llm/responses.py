@@ -1,0 +1,277 @@
+"""Official Responses SDK and native conversation codec."""
+
+import json
+import os
+from base64 import b64encode
+from typing import Annotated, Literal, assert_never
+
+import httpx2 as httpx
+from openai import AsyncOpenAI, Omit, omit
+from openai.types.responses import (
+    FunctionToolParam,
+    ResponseOutputItem,
+    ToolParam,
+)
+from openai.types.responses.service_tier import ServiceTier
+from openai.types.shared_params import Reasoning
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter
+
+from sts2_harness.config import AuthKind, ModelConfiguration
+from sts2_harness.llm.messages import (
+    AssistantMessage,
+    FailureKind,
+    ModelInput,
+    ModelMetadata,
+    ModelReply,
+    ModelUnavailable,
+    ResponsesReply,
+    TextMessage,
+    ToolDefinition,
+    ToolResultMessage,
+    Usage,
+)
+
+_NATIVE_WIRE = TypeAdapter(list[dict[str, JsonValue]])
+_FUNCTION = TypeAdapter(FunctionToolParam)
+_REASONING = TypeAdapter(Reasoning)
+_SERVICE_TIER = TypeAdapter(ServiceTier)
+type _TokenCount = Annotated[int, Field(ge=0)]
+
+
+class _CacheUsage(BaseModel):
+    model_config = ConfigDict(strict=True)
+    cached_tokens: _TokenCount | None = None
+    cache_write_tokens: _TokenCount | None = None
+
+
+class _WireUsage(BaseModel):
+    # Preserve unknown counts when proxies omit fields declared required by the SDK.
+    model_config = ConfigDict(strict=True)
+    input_tokens: _TokenCount | None = None
+    output_tokens: _TokenCount | None = None
+    input_tokens_details: _CacheUsage | None = None
+
+
+class _CompletedReply(BaseModel):
+    model_config = ConfigDict(strict=True)
+    status: Literal["completed"]
+    output: tuple[ResponseOutputItem, ...]
+    model: str | None = None
+    service_tier: str | None = None
+    usage: _WireUsage | None = None
+
+
+class _CompletedEvent(BaseModel):
+    model_config = ConfigDict(strict=True)
+    response: _CompletedReply
+
+
+class _ErrorCode(BaseModel):
+    model_config = ConfigDict(strict=True)
+    code: str | None = None
+
+
+class _FailedReply(BaseModel):
+    model_config = ConfigDict(strict=True)
+    status: Literal["failed"]
+    error: _ErrorCode | None = None
+
+
+class _FailedEvent(BaseModel):
+    model_config = ConfigDict(strict=True)
+    response: _FailedReply
+
+
+def _encode(input: ModelInput) -> list[dict[str, JsonValue]]:
+    encoded: list[dict[str, JsonValue]] = []
+    for message in input:
+        match message:
+            case TextMessage(role, text):
+                encoded.append({"role": role.value, "content": text})
+            case ToolResultMessage(call_id, text):
+                encoded.append({"type": "function_call_output", "call_id": call_id, "output": text})
+            case AssistantMessage(native):
+                # Retain omitted/null distinctions and opaque continuation blocks exactly once.
+                encoded.extend(_NATIVE_WIRE.validate_json(native.to_json(), strict=True))
+            case _:
+                assert_never(message)
+    return encoded
+
+
+def _tools(tools: tuple[ToolDefinition, ...]) -> list[ToolParam]:
+    return [
+        _FUNCTION.validate_json(
+            json.dumps(
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters.model_json_schema(),
+                    # Preserve optional fields; tools own strict local argument decoding.
+                    "strict": False,
+                }
+            ),
+            strict=True,
+        )
+        for tool in tools
+    ]
+
+
+class ResponsesAdapter:
+    def __init__(
+        self, configuration: ModelConfiguration, transport: httpx.AsyncBaseTransport | None
+    ) -> None:
+        self._configuration = configuration
+        # Neutralize the SDK's ambient custom headers before applying project configuration.
+        self._headers: dict[str, str | Omit] = {
+            line.partition(":")[0].strip().lower(): omit
+            for line in os.environ.get("OPENAI_CUSTOM_HEADERS", "").splitlines()
+            if ":" in line
+        }
+        self._headers.update(
+            {
+                "authorization": omit,
+                "openai-organization": omit,
+                "openai-project": omit,
+            }
+        )
+        auth = configuration.authentication
+        match auth.kind:
+            case AuthKind.BEARER:
+                self._headers["authorization"] = f"Bearer {auth.secret}"
+            case AuthKind.API_KEY:
+                self._headers[auth.header.lower()] = auth.secret
+            case AuthKind.BASIC:
+                token = b64encode(f"{auth.username}:{auth.secret}".encode()).decode("ascii")
+                self._headers["authorization"] = f"Basic {token}"
+            case AuthKind.NONE:
+                pass
+            case _:
+                assert_never(auth.kind)
+        self._headers.update((name.lower(), value) for name, value in configuration.custom_headers)
+        self._sdk = AsyncOpenAI(
+            api_key="unused",
+            admin_api_key="",
+            organization="",
+            project="",
+            base_url=configuration.endpoint,
+            max_retries=0,
+            timeout=None,
+            http_client=httpx.AsyncClient(transport=transport, timeout=None),
+        )
+
+    async def close(self) -> None:
+        await self._sdk.close()
+
+    async def complete(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> ModelReply:
+        try:
+            reasoning = (
+                _REASONING.validate_python(
+                    {"effort": self._configuration.reasoning_effort}, strict=True
+                )
+                if self._configuration.reasoning_effort
+                else omit
+            )
+            tier = (
+                _SERVICE_TIER.validate_python(self._configuration.service_tier, strict=True)
+                if self._configuration.service_tier
+                else omit
+            )
+        except ValueError:
+            raise ModelUnavailable(FailureKind.CONFIGURATION) from None
+        stream = await self._sdk.responses.create(
+            model=self._configuration.model,
+            # SDK input TypedDicts reject valid output nulls and discard opaque fields.
+            # The native output has already passed concrete output validation.
+            extra_body={"input": _encode(input)},
+            tools=_tools(tools),
+            store=False,
+            include=["reasoning.encrypted_content"],
+            stream=True,
+            reasoning=reasoning,
+            service_tier=tier,
+            extra_headers=self._headers,
+        )
+        async with stream:
+            media_type = stream.response.headers.get("content-type", "").partition(";")[0]
+            if media_type.strip().lower() != "text/event-stream":
+                raise ModelUnavailable(FailureKind.PROTOCOL)
+            async for event in stream:
+                if event.type == "response.incomplete":
+                    raise ModelUnavailable(FailureKind.TRUNCATED)
+                if event.type == "response.failed":
+                    failed = _FailedEvent.model_validate_json(
+                        event.model_dump_json(
+                            exclude_unset=True, by_alias=True, serialize_as_any=True
+                        ),
+                        strict=True,
+                    )
+                    code = failed.response.error.code if failed.response.error else None
+                    raise ModelUnavailable(classify_error(code))
+                if event.type == "error":
+                    error = _ErrorCode.model_validate_json(
+                        event.model_dump_json(
+                            exclude_unset=True, by_alias=True, serialize_as_any=True
+                        ),
+                        strict=True,
+                    )
+                    raise ModelUnavailable(classify_error(error.code))
+                if event.type == "response.completed":
+                    completed = _CompletedEvent.model_validate_json(
+                        event.model_dump_json(
+                            exclude_unset=True, by_alias=True, serialize_as_any=True
+                        ),
+                        strict=True,
+                    )
+                    return self._reply(completed.response)
+        raise ModelUnavailable(FailureKind.INCOMPLETE_EOF)
+
+    def _reply(self, completed: _CompletedReply) -> ModelReply:
+        usage = completed.usage or _WireUsage()
+        details = usage.input_tokens_details
+        return ModelReply(
+            AssistantMessage(ResponsesReply.from_items(completed.output)),
+            Usage(
+                usage.input_tokens,
+                usage.output_tokens,
+                details.cached_tokens if details else None,
+                details.cache_write_tokens if details else None,
+            ),
+            ModelMetadata(
+                self._configuration.model,
+                self._configuration.reasoning_effort,
+                completed.model,
+                completed.service_tier,
+            ),
+        )
+
+
+def classify_error(code: str | None, status: int | None = None) -> FailureKind:
+    """Use structured provider codes and HTTP status, never free-form error text."""
+    if status == 401:
+        return FailureKind.AUTHENTICATION
+    if status == 403:
+        return FailureKind.PERMISSION
+    if code in {"insufficient_quota", "quota_exceeded", "billing_hard_limit_reached"}:
+        return FailureKind.QUOTA
+    if code in {"model_not_found", "invalid_model"} or status == 404:
+        return FailureKind.MODEL
+    if status == 408:
+        return FailureKind.TIMEOUT
+    if status == 429 or code in {"rate_limit_exceeded", "rate_limit"}:
+        return FailureKind.RATE_LIMIT
+    if (status is not None and status >= 500) or code in {
+        "server_error",
+        "overloaded",
+        "overloaded_error",
+        "engine_overloaded",
+    }:
+        return FailureKind.OVERLOAD
+    if status in {400, 422} or code in {
+        "invalid_request_error",
+        "unsupported_parameter",
+        "unsupported_value",
+        "context_length_exceeded",
+    }:
+        return FailureKind.CONFIGURATION
+    return FailureKind.PROVIDER
