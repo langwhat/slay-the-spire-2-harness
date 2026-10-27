@@ -9,6 +9,14 @@ from pydantic import MISSING, ValidationError
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.client.http import CatalogResult, InspectResult
+from sts2_harness.decisions import (
+    ActionKind,
+    ActionProposal,
+    ActionStep,
+    ActTask,
+    DecisionTask,
+    SelectStep,
+)
 from sts2_harness.execution import GameReadError
 from sts2_harness.knowledge import (
     DocumentView,
@@ -34,6 +42,7 @@ from sts2_harness.results import (
 )
 from sts2_harness.tools.inputs import (
     DEFINITIONS,
+    CombatActInput,
     InspectInput,
     KnowledgeInput,
     SkillInput,
@@ -43,6 +52,7 @@ from sts2_harness.tools.inputs import (
 
 
 class ToolName(StrEnum):
+    COMBAT_ACT = "combat_act"
     RUN_SKILL = "run_skill"
     COMBAT_SKILL = "combat_skill"
     RUN_INSPECT = "run_inspect"
@@ -91,6 +101,7 @@ class ToolCatalog:
         supplements: SupplementProvider | None = None,
         skills: SkillProvider | None = None,
     ) -> None:
+        self.action_name = ToolName.COMBAT_ACT if role is native.DecisionOwner.COMBAT else None
         self._role = role
         self._observe = observe
         self._inspect = inspect
@@ -103,6 +114,8 @@ class ToolCatalog:
                 MaterialText.create(f"tool:{item.name}:description", item.description),
                 InspectInput
                 if ToolName(item.name) in (ToolName.RUN_INSPECT, ToolName.COMBAT_INSPECT)
+                else CombatActInput
+                if ToolName(item.name) is ToolName.COMBAT_ACT
                 else SkillInput
                 if ToolName(item.name) in (ToolName.RUN_SKILL, ToolName.COMBAT_SKILL)
                 else KnowledgeInput,
@@ -111,6 +124,58 @@ class ToolCatalog:
             if item.name.startswith(role.value + "_")
         )
         self._names = frozenset(item.name for item in self.definitions)
+
+    def dispatch_action(
+        self, call: ToolCall, task: DecisionTask
+    ) -> ActionProposal | QueryToolResult:
+        if call.name != ToolName.COMBAT_ACT or self._role is not native.DecisionOwner.COMBAT:
+            return QueryToolResult(
+                _problem(ReasonCode.WRONG_ROLE, "This action tool is not available."), None
+            )
+        if not isinstance(task, ActTask):
+            return QueryToolResult(
+                _problem(
+                    ReasonCode.WRONG_ROLE, "Complete this maintenance task without game actions."
+                ),
+                None,
+            )
+        try:
+            json.loads(call.arguments, object_pairs_hook=_unique_fields)
+            query = CombatActInput.model_validate_json(call.arguments, strict=True).root
+        except (ValueError, ValidationError):
+            return QueryToolResult(
+                _problem(
+                    ReasonCode.INVALID_ARGUMENTS, "The action does not match the tool schema."
+                ),
+                None,
+            )
+        steps: list[ActionStep | SelectStep] = []
+        for step in query.steps:
+            if isinstance(step, native.Select):
+                steps.append(SelectStep(step.refs))
+            elif isinstance(step, native.PlayCard):
+                steps.append(
+                    ActionStep(
+                        ActionKind.PLAY_CARD,
+                        step.card,
+                        None if step.target is MISSING else step.target,
+                    )
+                )
+            elif isinstance(step, native.UsePotion):
+                steps.append(
+                    ActionStep(
+                        ActionKind.USE_POTION,
+                        step.potion,
+                        None if step.target is MISSING else step.target,
+                    )
+                )
+            elif isinstance(step, native.DiscardPotion):
+                steps.append(ActionStep(ActionKind.DISCARD_POTION, step.potion))
+            elif isinstance(step, native.Interact):
+                steps.append(ActionStep(ActionKind.INTERACT, step.action))
+            else:
+                steps.append(ActionStep(ActionKind.END_TURN))
+        return ActionProposal(tuple(steps), None if query.reason is MISSING else query.reason)
 
     async def _read_skill(self, call: ToolCall) -> QueryToolResult:
         observation = await self._current()
@@ -152,7 +217,7 @@ class ToolCatalog:
             return None
 
     async def dispatch(self, call: ToolCall) -> QueryToolResult:
-        if call.name not in self._names:
+        if call.name not in self._names or call.name == ToolName.COMBAT_ACT:
             return QueryToolResult(
                 _problem(ReasonCode.WRONG_ROLE, "This tool is not available to the current role."),
                 await self._current(),

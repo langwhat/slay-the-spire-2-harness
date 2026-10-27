@@ -47,7 +47,7 @@ def test_state_dispatch_delivers_current_state_without_query_data() -> None:
             assert isinstance(message, ResultMessage)
             assert message.content.state is not None
             assert message.content.data is MISSING
-            assert len(tools.definitions) == 3
+            assert len(tools.definitions) == 4
 
     asyncio.run(run())
 

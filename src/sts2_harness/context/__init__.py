@@ -124,6 +124,9 @@ class Context:
             left, self._role
         ) == visible_observation(right, self._role)
 
+    def append_correction(self, message: str) -> None:
+        self._history.append(TextMessage(TextRole.USER, message))
+
     def append_reply(self, reply: AssistantMessage) -> None:
         self._history.append(reply)
 

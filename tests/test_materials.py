@@ -88,7 +88,9 @@ def test_file_skill_delivery_retains_read_snapshot_through_responses(tmp_path: P
         async with Llm(configuration(tmp_path), transport=httpx.MockTransport(handler)) as llm:
             await llm.complete(old_input, tools.definitions)
             await llm.complete(context.model_input(), tools.definitions)
-        assert tools.definitions[-1].description.id == "tool:combat_skill:description"
+        assert next(
+            tool for tool in tools.definitions if tool.name == "combat_skill"
+        ).description.id == ("tool:combat_skill:description")
         system = context.model_input()[0]
         assert isinstance(system, TextMessage) and isinstance(system.value, MaterialParts)
         assert system.value.parts[0] is named_prompt

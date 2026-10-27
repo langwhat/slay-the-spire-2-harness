@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from sts2_harness.llm.messages import FailureKind
 from sts2_harness.results import (
     ActionCompleted,
     ActionStopped,
@@ -41,15 +42,23 @@ class ToolRecoveryBudget:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelFailure:
+    reason: FailureKind
+
+
+type InterruptionReason = Reason | ModelFailure
+
+
+@dataclass(frozen=True, slots=True)
 class Interrupted:
-    reason: Reason
+    reason: InterruptionReason
     pause_required: bool
 
 
 class DecisionInterrupted(Exception):
     """A decision failure already accounted for by its owning boundary."""
 
-    def __init__(self, reason: Reason, pause_required: bool) -> None:
+    def __init__(self, reason: InterruptionReason, pause_required: bool) -> None:
         self.reason = reason
         self.pause_required = pause_required
-        super().__init__(reason.message)
+        super().__init__(reason.message if isinstance(reason, Reason) else reason.reason.value)

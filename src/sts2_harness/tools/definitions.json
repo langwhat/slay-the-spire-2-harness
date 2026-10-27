@@ -562,5 +562,149 @@
         }
       ]
     }
+  },
+  {
+    "name": "combat_act",
+    "description": "Submit ordered steps: play_card with card and a target when required; use_potion with potion and a target when required; discard_potion with potion; end_turn; select with refs; or interact with a listed action reference. Use interact only for other offered operations; direct actions are not duplicated as interact choices. Execute game actions and selections in the current battle. Use this tool to play cards, use available combat items, resolve combat choices, or end the turn. Prefer one ordered sequence for actions, anticipated selections, and follow-up plays that you can plan from public information. This tool performs the submitted steps; it does not delegate the rest of the battle to another agent.\n\nDisplayed costs and effect previews describe the state before the first step, within any shown target scope. Predict later costs, damage, block, and other effects from earlier steps and the rules and current states of cards, relics, enemies, and powers. Account for triggers, counters, and effects consumed by earlier actions. A preview for one target is not a promise for a different target or later state.\n\nUse current pile lists for membership and observed history for relevant prior effects. Identify desired selection options and their supplied references before submitting a sequence. Use combat_inspect first if a missing public detail would change your choice. Include the triggering action, anticipated selection, and follow-up plays together when public information supports them. Use references exactly as supplied, not list positions or invented IDs. Pile lists do not reveal hidden draw order.\n\nSteps run in the submitted order and are checked against the actual state when reached. A later step may become legal because of an earlier step. Selections must satisfy the actual candidates and required count. Steps that remain valid across possible random outcomes may be combined. If an unknown result would change your choice, submit through the revealing action and decide from its result. A draw needs no stop when the remaining steps stay appropriate whatever is drawn.\n\nThe result reports outcome and the current state after execution settles. completed means the submitted operation finished, not that the battle was won. If a step is invalid or needs a new decision, execution stops and reports the completed prefix, stopping reason, and suggested next actions; completed effects are not undone. Continue from that state without replaying completed steps. If execution is unknown, submit no actions until a fresh state reports control=ready; read-only queries remain allowed. Then plan from that state as a new decision; do not replay the earlier submission just because its result was uncertain.\n\nThe returned previews describe the settled state after this call, which is the starting state for a future batch; they do not predict that batch. Use interact for a listed available operation, including special game interfaces. References are semantic handles, not menu indices. select submits the complete final selection; a bundle is one option. When the native minimum is zero, submit select with refs=[] to decline all candidates and complete the selection. A positive minimum requires that many choices. Select only offered candidates and respect the required count. Each card reference identifies one actual card; use distinct references within one selection. A later action step may reuse a card reference if that same card is present and legal then. Costs may be numeric, X, explicitly no cost, or unknown and may use more than one resource. Unknown never means free. After all submitted steps finish, completed is returned even if the current state asks for another choice. If a role transition prevents an unexecuted step, the tail stops. Neither an action batch nor a stopped result rolls back prior effects. An optional top-level reason may briefly explain the choice for the whole batch. Use object names rather than temporary references. Do not provide a step-by-step reasoning transcript. The result does not echo this text.\n\nFor an action that needs a target, target may be omitted only when exactly one legal target exists when that step executes; the Mod binds it then. Multiple legal targets require an explicit reference. An explicitly supplied invalid target is never redirected. Omit target for actions that do not use one. Each potion reference identifies one actual bottle in the current map node. Slot movement does not change it. A consumed or discarded bottle loses its reference; a newly acquired bottle receives a new reference rather than reusing a retired one in that node. References may restart in the next node.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "play_card"
+                  },
+                  "card": {
+                    "type": "string",
+                    "description": "Observed card instance reference; an earlier step may move this card into hand.",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "string",
+                    "description": "For an action that needs a target, target may be omitted only when exactly one legal target exists when that step executes; the Mod binds it then. Multiple legal targets require an explicit reference. An explicitly supplied invalid target is never redirected. Omit target for actions that do not use one.",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "card"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "use_potion"
+                  },
+                  "potion": {
+                    "type": "string",
+                    "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "type": "string",
+                    "description": "For an action that needs a target, target may be omitted only when exactly one legal target exists when that step executes; the Mod binds it then. Multiple legal targets require an explicit reference. An explicitly supplied invalid target is never redirected. Omit target for actions that do not use one.",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "potion"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "discard_potion"
+                  },
+                  "potion": {
+                    "type": "string",
+                    "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "potion"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "end_turn"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "interact"
+                  },
+                  "action": {
+                    "type": "string",
+                    "description": "Reference of a Mod-provided combat operation, including special game interfaces. It is bound to its semantic operation, not a changing menu position.",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "action"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "select"
+                  },
+                  "refs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "description": "Use an exact supplied public reference, never a list index or an invented identifier.",
+                      "minLength": 1
+                    },
+                    "minItems": 0,
+                    "uniqueItems": true,
+                    "description": "The complete final selection, not additions to the existing selection. Card, option, target, and bundle references are allowed when actual candidates allow them. Empty only when minimum is zero. A bundle reference selects that bundle as one option."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "refs"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1,
+          "description": "Steps execute in array order. Structural validation occurs before any step; state-dependent legality is checked only when each step is reached."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional short explanation of the game choice for this batch. Use object names, not temporary references; no step-by-step reasoning is needed."
+        }
+      },
+      "required": [
+        "steps"
+      ],
+      "additionalProperties": false
+    }
   }
 ]

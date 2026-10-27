@@ -2,9 +2,9 @@
 
 from enum import StrEnum
 from importlib.resources import files
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import MISSING, GetJsonSchemaHandler, JsonValue, RootModel, TypeAdapter
+from pydantic import MISSING, Field, GetJsonSchemaHandler, JsonValue, RootModel, TypeAdapter
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
@@ -63,3 +63,27 @@ class SkillInput(RootModel[SkillListInput | SkillReadInput]):
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
         return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_skill"))
+
+
+class CombatAct(native.WireModel):
+    steps: Annotated[
+        tuple[
+            native.PlayCard
+            | native.UsePotion
+            | native.DiscardPotion
+            | native.Interact
+            | native.EndTurn
+            | native.Select,
+            ...,
+        ],
+        Field(min_length=1),
+    ]
+    reason: str | MISSING = MISSING
+
+
+class CombatActInput(RootModel[CombatAct]):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "combat_act"))

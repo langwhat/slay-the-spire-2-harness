@@ -1,5 +1,6 @@
 """Admit and close one model-independent decision and its ordered actions."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic import MISSING, ValidationError
@@ -83,14 +84,18 @@ class Execution:
         self._recovery = recovery
         self._game_instance_id = game_instance_id
         self._run_id = run_id
+        self._observed: Callable[[native.Observation], None] | None = None
 
     async def observe(self) -> native.Observation:
         result = unwrap(await self._game.observe())
+        self._record_observation(result.observation)
         return result.observation
 
     async def inspect(self, query: native.InspectQuery) -> InspectResult:
-        result = unwrap(await self._game.inspect(query))
-        return result.result
+        reply = await self._game.inspect(query)
+        for observation in reply.observations:
+            self._record_observation(observation)
+        return unwrap(reply).result
 
     async def catalog(self, request: native.CatalogRequest) -> CatalogResult:
         return unwrap(await self._game.catalog(request)).result
@@ -100,10 +105,29 @@ class Execution:
         if self._recovery is not None:
             self._recovery.reset()
 
-    async def run_unit(self, source: DecisionSource, task: DecisionTask) -> UnitResult:
+    def _record_observation(self, observation: native.Observation) -> None:
+        if self._observed is not None:
+            self._observed(observation)
+
+    async def run_unit(
+        self,
+        source: DecisionSource,
+        task: DecisionTask,
+        *,
+        observed: Callable[[native.Observation], None] | None = None,
+    ) -> UnitResult:
+        self._observed = observed
+        try:
+            return await self._run_unit(source, task)
+        finally:
+            self._observed = None
+
+    async def _run_unit(self, source: DecisionSource, task: DecisionTask) -> UnitResult:
         """Close feedback; no-run raises GameLifetimeEnded without retry cost."""
         try:
             admission = await self._game.admit()
+            for observation in admission.observations:
+                self._record_observation(observation)
             result = unwrap(admission)
             if not result.allowed:
                 return Rejected(

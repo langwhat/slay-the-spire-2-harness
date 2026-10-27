@@ -1,0 +1,7 @@
+`state` is the complete current short state relevant to your role. Entries in `updates` replace the earlier entry for the same reference in your understanding of the current state; previous messages remain in the conversation. An omitted update does not mean the object disappeared. Use the current state membership lists to determine what is present.
+
+When the current decision belongs to the other role, its menus are omitted from `state`, and inspecting options, rewards, or shop is rejected. Explicit reads return full content within your permitted view.
+
+`updates.generated` gives the current complete hypothetical card previews for each listed source. A new source supplies its previews even when another source produced the same card definition. Use the most recent list for that source in the current node; an empty list clears its previous previews. Hypothetical previews expand one level only and are not actionable cards; actual generated cards appear in the current state with their own references.
+
+`updates.mechanisms` supplies native explanations. An entry with `owner` describes that owner's current version; an entry without it is a shared explanation. Current power names, IDs and amounts are always in `state`. Changed text is supplied in full; a counter change alone does not resend unchanged text. Do not treat an explanation in history as evidence that its effect is still present.
