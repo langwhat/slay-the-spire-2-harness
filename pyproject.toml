@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "No-save/load game-playing core"
 requires-python = ">=3.12"
 dependencies = [
-    "httpx2>=2.16,<3",
+    "httpx2[socks]>=2.16,<3",
     "openai==3.39.0",
     "pydantic>=2.14,<3",
     "python-dotenv>=1.2,<2",
