@@ -41,6 +41,7 @@ from sts2_harness.client.models import (
 )
 
 RUN = """{
+  "game_language":"zhs",
   "stamp":{"game_instance_id":"game","observation_sequence":1},
   "location":{"game_instance_id":"game","run_id":"run","node_id":"node","owner":"run"},
   "input_readiness":"ready",
@@ -71,6 +72,7 @@ CARD = (
     + ',"playable":null,"previews":[{"target":"e1","text":"造成3点伤害。"}]}'
 )
 COMBAT = """{
+  "game_language":"zhs",
   "stamp":{"game_instance_id":"game","observation_sequence":2},
   "location":{"game_instance_id":"game","run_id":"run","node_id":"node","owner":"combat"},
   "input_readiness":"selection",
@@ -755,3 +757,25 @@ def test_raw_map_odds_retain_probability_bounds(odds: str) -> None:
         assert failure.value.reason is ClientFailureKind.PROTOCOL
 
     asyncio.run(read())
+
+
+def test_observation_requires_native_language_and_preserves_optional_operation() -> None:
+    from pydantic import ValidationError
+
+    from sts2_harness.client.models import ActionOperation, Observation
+
+    payload = json.loads(RUN)
+    for language in ("eng", "zhs", "", "future-language"):
+        payload["game_language"] = language
+        payload["state"]["actions"][0]["operation"] = "proceed"
+        observed = Observation.model_validate_json(json.dumps(payload))
+        assert observed.game_language == language
+        assert isinstance(observed.state, RunState)
+        assert observed.state.actions[0].operation is ActionOperation.PROCEED
+    for invalid in (None, 3):
+        payload["game_language"] = invalid
+        with pytest.raises(ValidationError):
+            Observation.model_validate_json(json.dumps(payload))
+    del payload["game_language"]
+    with pytest.raises(ValidationError):
+        Observation.model_validate_json(json.dumps(payload))

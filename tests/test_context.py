@@ -66,6 +66,7 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
     card = observation.objects["c1"]
     assert isinstance(card, CardEntry)
     changed = Observation(
+        game_language="zhs",
         stamp=observation.stamp,
         location=observation.location,
         input_readiness=observation.input_readiness,
@@ -82,6 +83,7 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
         map=observation.map,
     )
     numeric_only = Observation(
+        game_language="zhs",
         stamp=changed.stamp,
         location=changed.location,
         input_readiness=changed.input_readiness,

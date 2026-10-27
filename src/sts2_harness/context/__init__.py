@@ -7,6 +7,9 @@ from pydantic import MISSING
 from sts2_harness.client import models as native
 from sts2_harness.context.models import (
     ActContent,
+    AutomaticContent,
+    AutomaticMessage,
+    AutomaticProgress,
     CombatActInput,
     CombatReviewInput,
     HandoffContent,
@@ -162,6 +165,20 @@ class Context:
 
     def append_reply(self, reply: AssistantMessage) -> None:
         self._history.append(reply)
+
+    def append_automatic(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+        state: ShortState | None = None
+        updates = Updates()
+        if result.observation is not None:
+            projected, delivered = self._delivery.project(
+                visible_observation(result.observation, self._role), result.observation.location
+            )
+            state, updates = projected.state, projected.updates
+            self._delivery = delivered
+        content = AutomaticContent(
+            automatic_progress=progress, outcome=result.outcome, state=state, updates=updates
+        )
+        self._history.append(AutomaticMessage(TextRole.USER, content.to_json(), content, result))
 
     def append_tool_result(self, call: ToolCall, result: ToolResult) -> None:
         delivered = self._delivery

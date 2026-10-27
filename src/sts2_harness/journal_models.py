@@ -22,6 +22,8 @@ from sts2_harness.client import models as native
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.context.models import (
     ActContent,
+    AutomaticContent,
+    AutomaticMessage,
     HandoffContent,
     ProjectedResult,
     ResultMessage,
@@ -349,6 +351,7 @@ class MessageKind(StrEnum):
     TEXT = "text"
     TASK = "task"
     RUN_TASK = "run_task"
+    AUTOMATIC = "automatic"
     ASSISTANT = "assistant"
     RESULT = "result"
 
@@ -371,6 +374,12 @@ class RunTaskSnapshot(native.WireModel):
     content: RunActContent | RunActHandoffContent | HandoffContent
 
 
+class AutomaticSnapshot(native.WireModel):
+    kind: Literal[MessageKind.AUTOMATIC] = MessageKind.AUTOMATIC
+    role: TextRole
+    content: AutomaticContent
+
+
 class AssistantSnapshot(native.WireModel):
     kind: Literal[MessageKind.ASSISTANT] = MessageKind.ASSISTANT
     native_output: NativeOutput
@@ -386,7 +395,12 @@ class ResultSnapshot(native.WireModel):
 
 
 type MessageSnapshot = (
-    TextSnapshot | TaskSnapshot | RunTaskSnapshot | AssistantSnapshot | ResultSnapshot
+    TextSnapshot
+    | TaskSnapshot
+    | RunTaskSnapshot
+    | AutomaticSnapshot
+    | AssistantSnapshot
+    | ResultSnapshot
 )
 MESSAGE = TypeAdapter(MessageSnapshot)
 
@@ -394,7 +408,9 @@ MESSAGE = TypeAdapter(MessageSnapshot)
 def archive_input(input: ModelInput) -> tuple[MessageSnapshot, ...]:
     messages: list[MessageSnapshot] = []
     for message in input:
-        if isinstance(message, TaskMessage):
+        if isinstance(message, AutomaticMessage):
+            messages.append(AutomaticSnapshot(role=message.role, content=message.content))
+        elif isinstance(message, TaskMessage):
             content = message.content
             if isinstance(content, (RunActContent, HandoffContent)):
                 messages.append(RunTaskSnapshot(role=message.role, content=content))

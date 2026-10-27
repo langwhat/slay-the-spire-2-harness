@@ -9,7 +9,14 @@ from pydantic import MISSING
 from sts2_harness.client import models as native
 from sts2_harness.decisions import BattleReport, CombatHandoff
 from sts2_harness.llm.messages import TextMessage, ToolResultMessage
-from sts2_harness.results import Outcome, QueryData, SemanticValue, ToolResult
+from sts2_harness.results import (
+    ActionOutcome,
+    ActionToolResult,
+    Outcome,
+    QueryData,
+    SemanticValue,
+    ToolResult,
+)
 
 
 class TaskKind(StrEnum):
@@ -169,3 +176,21 @@ class ProjectedResult(SemanticValue):
 class ResultMessage(ToolResultMessage):
     content: ProjectedResult
     source: ToolResult
+
+
+class AutomaticProgress(SemanticValue):
+    label: str
+    reason: str
+
+
+class AutomaticContent(SemanticValue):
+    automatic_progress: AutomaticProgress
+    outcome: ActionOutcome
+    state: ShortState | None
+    updates: Updates
+
+
+@dataclass(frozen=True, slots=True)
+class AutomaticMessage(TextMessage):
+    content: AutomaticContent
+    source: ActionToolResult

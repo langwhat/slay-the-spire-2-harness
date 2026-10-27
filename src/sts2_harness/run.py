@@ -7,16 +7,25 @@ from typing import Protocol
 from pydantic import MISSING
 
 from sts2_harness.agent import Agent, MaterialReader
+from sts2_harness.auto import choose_auto, shop_controls
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
-from sts2_harness.context.models import RunActInput, RunHandoffInput
-from sts2_harness.decisions import ActTask, DecisionSource, DecisionTask, HandoffTask
+from sts2_harness.context.models import AutomaticProgress, RunActInput, RunHandoffInput
+from sts2_harness.decisions import (
+    ActionDecision,
+    ActTask,
+    Decision,
+    DecisionSource,
+    DecisionTask,
+    HandoffTask,
+    TaskComplete,
+)
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialUnavailable
 from sts2_harness.prompts import PackagedPrompts, PromptReader
-from sts2_harness.results import Reason, ReasonCode
+from sts2_harness.results import ActionCompleted, ActionToolResult, Reason, ReasonCode
 from sts2_harness.tools import ToolCatalog
 
 
@@ -46,9 +55,50 @@ class RunAgent(Agent):
         self._notes = tools.notes
         self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._notes_delivered = False
+        self._pending_auto: tuple[AutomaticProgress, native.Observation] | None = None
+        self._force_strategy = False
+        self._shop_strategy_node: native.Location | None = None
+
+    async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
+        if self._pending_auto is not None or self._pending_call is not None:
+            raise RuntimeError("Accept the previous action result before another decision.")
+        if isinstance(task, ActTask) and not self._force_strategy:
+            automatic = choose_auto(
+                observation, shop_strategy=self._shop_strategy_node == observation.location
+            )
+            if automatic is not None:
+                if self._context is None:
+                    await self.enter_act(ActStart(observation))
+                proposal, progress = automatic
+                self._pending_auto = progress, observation
+                return ActionDecision(proposal)
+        if isinstance(observation.state, native.RunState) and shop_controls(observation.state):
+            self._shop_strategy_node = observation.location
+        decision = await super().decide(task, observation)
+        if isinstance(decision, TaskComplete):
+            self._force_strategy = False
+        return decision
+
+    async def accept(self, outcome: ActionToolResult) -> None:
+        if self._pending_auto is None:
+            await super().accept(outcome)
+            self._force_strategy = False
+            return
+        progress, before = self._pending_auto
+        assert self._context is not None
+        self._context.append_automatic(progress, outcome)
+        after = outcome.observation
+        # Localized text changes alone cannot establish gameplay progress.
+        self._force_strategy = (
+            not isinstance(outcome.outcome, ActionCompleted)
+            or after is None
+            or after.game_language != before.game_language
+            or after.model_copy(update={"stamp": before.stamp}) == before
+        )
+        self._pending_auto = None
 
     async def enter_act(self, start: ActStart) -> None:
-        if self._pending_call is not None:
+        if self._pending_call is not None or self._pending_auto is not None:
             raise RuntimeError("Accept the previous action result before entering an act.")
         try:
             documents = (

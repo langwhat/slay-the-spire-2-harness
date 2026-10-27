@@ -378,6 +378,14 @@ class Orb(WireModel):
     definition_id: Nonempty | MISSING = MISSING
 
 
+class ActionOperation(StrEnum):
+    OPEN_SHOP = "open_shop"
+    CLOSE_SHOP = "close_shop"
+    LEAVE_SHOP = "leave_shop"
+    OPEN_CHEST = "open_chest"
+    PROCEED = "proceed"
+
+
 class Action(WireModel):
     ref: Nonempty
     label: Nonempty
@@ -385,6 +393,7 @@ class Action(WireModel):
     reason: str | MISSING = MISSING
     subject: Nonempty | MISSING = MISSING
     destination: Nonempty | MISSING = MISSING
+    operation: ActionOperation | MISSING = MISSING
     cost: ActionCost | MISSING = MISSING
     targets: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)] | MISSING = MISSING
 
@@ -701,6 +710,7 @@ class Stamp(WireModel):
 
 
 class Observation(WireModel):
+    game_language: str
     objects: Directory[ObjectEntry]
     descriptions: Directory[str | None]
     modifier_descriptions: Directory[ModifierDescriptions]
