@@ -4,13 +4,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from sts2_harness.client import ClientUnavailable, ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind
-from sts2_harness.config import Configuration, ConfigurationError, Driver
+from sts2_harness.config import Configuration, ConfigurationError, Driver, validate_mod_url
 from sts2_harness.diagnostics import Diagnostics, Event, EventKind, Lifecycle
 from sts2_harness.game import (
     ControlWriteError,
@@ -53,27 +52,11 @@ async def run_interactive(
         Llm.validate_configuration(model)
     except ModelUnavailable:
         raise ConfigurationError("The configured model protocol is not implemented.") from None
-    try:
-        url = urlsplit(options.mod_url)
-        port = url.port
-    except ValueError:
-        raise ConfigurationError("Invalid Mod URL.") from None
-    if (
-        url.scheme not in ("http", "https")
-        or not url.hostname
-        or url.username is not None
-        or url.password is not None
-        or url.query
-        or url.fragment
-        or url.path not in ("", "/")
-    ):
-        raise ConfigurationError(
-            "The Mod URL must be an HTTP origin without credentials or parameters."
-        )
+    port = validate_mod_url(options.mod_url)
     control_endpoint = options.mod_url.rstrip("/") + "/control"
     directory = options.output_directory.resolve()
     diagnostics = Diagnostics(None, directory=directory, control_endpoint=control_endpoint)
-    diagnostics.configured(configuration, port or (443 if url.scheme == "https" else 80))
+    diagnostics.configured(configuration, port)
 
     def new_client() -> ModClient:
         return ModClient(options.mod_url)

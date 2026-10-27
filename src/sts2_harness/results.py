@@ -24,6 +24,7 @@ class OutcomeStatus(StrEnum):
 
 
 class ReasonCode(StrEnum):
+    BUSY = "busy"
     MODEL_UNAVAILABLE = "model_unavailable"
     INVALID_ARGUMENTS = "invalid_arguments"
     WRONG_ROLE = "wrong_role"

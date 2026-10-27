@@ -4,8 +4,8 @@ The no-save/load gameplay core provides a programmatic single-run gameplay loop 
 `RunSession` and `DefaultFlow`, with Responses and Chat Completions model clients and
 recorded game IO.
 The CLI can attach a resident backend to your running Mod-enabled game, validate
-configuration offline, and inspect archives. The external facade and software replay
-are not implemented yet.
+configuration offline, expose external gameplay tools, and inspect archives. Software replay
+is not implemented yet.
 
 Install Python 3.12+ and [uv](https://docs.astral.sh/uv/), then run:
 
@@ -57,7 +57,8 @@ Success establishes offline validity only; provider-specific model/effort/tier s
 actual authentication require real endpoint checks.
 
 Run Ruff, strict Pyright, and pytest with `./scripts/check` (requires `uv` on PATH).
-Tests use temporary defaults and isolated process environments; no network or game runs.
+Tests use temporary defaults, fake Mod/provider HTTP, and finite local loopback servers;
+no game or real provider runs.
 
 The Python `sts2_harness.llm.client.Llm` client accepts a `ModelConfiguration` snapshot
 and implements `complete(input, tools)` as an async context manager. It currently supports
@@ -183,8 +184,8 @@ they do not imply that an adjacent action was caused by a particular model reque
 
 The current archive schema is version 5 and records each native reply's protocol explicitly.
 Reopening provides offline inspection only. Schema versions are validated without archive
-migration. Read older archives with the revision that recorded them. The external facade,
-software replay, native restoration, and evaluation remain unsupported;
+migration. Read older archives with the revision that recorded them. Software replay,
+native restoration, and evaluation remain unsupported;
 the manifest does not claim exact replay.
 
 ## Ordinary gameplay startup
@@ -211,8 +212,42 @@ directory, while each run keeps its own `archive.sqlite`.
 
 Ctrl-C or SIGTERM requests shutdown after the admitted decision, its action batch,
 settlement, and feedback finish. Waiting has no fixed deadline. The backend closes its own
-resources and never launches or terminates your game. External driving and model protocols
-not yet implemented by the model adapter fail explicitly before connection.
+resources and never launches or terminates your game. Model protocols not yet implemented
+by the model adapter fail explicitly before connection.
+
+## External gameplay tools
+
+Start the local tool backend without model configuration:
+
+```console
+uv run sts2 start --set STS2_DRIVER=external
+```
+
+It listens only on `127.0.0.1:17878`; `--tool-port PORT` selects another tool port.
+`--mod-url` still selects the Mod connection, defaulting to port 17877. The resident
+backend establishes Pause when the game connects; use the in-game Start control before
+writes. It creates fresh notes and execution ownership for each run and stays resident
+after a terminal result. It runs no built-in model, role history, or automatic progression.
+External runs publish process diagnostics but do not create built-in model Journals.
+
+`GET /tools` returns `{ "roles": { "run": [...], "combat": [...] } }` with each tool's
+name, description, and self-contained input schema. `POST /tools/{name}` accepts its
+bare JSON argument object and returns the final semantic outcome, complete current state,
+and full relevant directories, plus query data when applicable. Technical routes and
+observation stamps are internal. A missing trustworthy observation is `state: null`.
+
+Send one call at a time. Concurrent POSTs, including reads, receive `busy` with null state;
+static discovery remains available. While paused, reads work and new actions or notes
+writes are rejected. An accepted action batch finishes its valid steps even if Pause is
+pressed during it. A lost connection does not cancel an accepted call. Reconnect and
+inspect once no longer busy, then make a new decision instead of replaying the lost call.
+A first write or changed decision route is rejected with fresh state before a new write
+can be accepted. Tool names retain their role permissions; notes writes can also occur
+while the current game decision belongs to Combat.
+
+The external agent entry point is [play-sts2](skills/play-sts2/SKILL.md), with separate
+Run and Combat references. Make that skill directory available to the external agent's
+skill loader. The backend serves tools directly and does not install or run an agent.
 
 ## Single-run sessions
 

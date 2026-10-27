@@ -248,10 +248,10 @@ def test_basic_unicode_password_and_header_tabs_remain_valid(tmp_path: Path) -> 
     assert "密碼" not in result.stdout + result.stderr
 
 
-def test_resident_start_rejects_external_driver_without_connecting(tmp_path: Path) -> None:
-    result = cli(tmp_path, "start", "--set", "STS2_DRIVER=external")
+def test_resident_external_start_validates_tool_port_without_connecting(tmp_path: Path) -> None:
+    result = cli(tmp_path, "start", "--set", "STS2_DRIVER=external", "--tool-port", "-1")
     assert result.returncode == 2
-    assert "Resident external driving is not implemented." in result.stderr
+    assert "The tool port must be between 1 and 65535." in result.stderr
     assert not (tmp_path / "runs").exists()
 
 

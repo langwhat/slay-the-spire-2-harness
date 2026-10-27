@@ -58,6 +58,11 @@ from sts2_harness.tools.inputs import (
 )
 
 
+class QueryView(StrEnum):
+    ROLE = "role"
+    PUBLIC = "public"
+
+
 class ToolName(StrEnum):
     COMBAT_ACT = "combat_act"
     RUN_ACT = "run_act"
@@ -110,10 +115,15 @@ class ToolCatalog:
         supplements: SupplementProvider | None = None,
         skills: SkillProvider | None = None,
         notes: Notes | None = None,
+        query_view: QueryView = QueryView.ROLE,
+        notes_write_guard: Callable[[native.Observation | None], Awaitable[QueryToolResult | None]]
+        | None = None,
     ) -> None:
         if role is native.DecisionOwner.RUN and notes is None:
             raise ValueError("Run tools require the run's notes owner.")
         self._notes_owner = notes
+        self._query_view = query_view
+        self._notes_write_guard = notes_write_guard
         self.action_name = (
             ToolName.COMBAT_ACT if role is native.DecisionOwner.COMBAT else ToolName.RUN_ACT
         )
@@ -229,6 +239,10 @@ class ToolCatalog:
         assert self.notes is not None
         if isinstance(query, NotesReadInput):
             return QueryToolResult(ReadCompleted(), observation, NotesText(text=self.notes.read()))
+        if self._notes_write_guard is not None:
+            refused = await self._notes_write_guard(observation)
+            if refused is not None:
+                return refused
         result = (
             self.notes.replace(query.text)
             if isinstance(query, NotesReplaceInput)
@@ -377,7 +391,8 @@ class ToolCatalog:
         if observation is None:
             observation = await self._current()
         if (
-            query.area
+            self._query_view is QueryView.ROLE
+            and query.area
             in (native.InspectArea.OPTIONS, native.InspectArea.REWARDS, native.InspectArea.SHOP)
             and observation is not None
             and observation.location.owner is not self._role

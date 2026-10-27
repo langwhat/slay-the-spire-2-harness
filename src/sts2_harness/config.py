@@ -202,3 +202,24 @@ def load_configuration(
             retries,
         ),
     )
+
+
+def validate_mod_url(value: str) -> int:
+    try:
+        url = urlsplit(value)
+        port = url.port
+    except ValueError:
+        raise ConfigurationError("Invalid Mod URL.") from None
+    if (
+        url.scheme not in ("http", "https")
+        or not url.hostname
+        or url.username is not None
+        or url.password is not None
+        or url.query
+        or url.fragment
+        or url.path not in ("", "/")
+    ):
+        raise ConfigurationError(
+            "The Mod URL must be an HTTP origin without credentials or parameters."
+        )
+    return port or (443 if url.scheme == "https" else 80)
