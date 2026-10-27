@@ -16,8 +16,7 @@ from sts2_harness.decisions import (
 from sts2_harness.execution.recovery import DecisionInterrupted, ModelFailure, ToolRecoveryBudget
 from sts2_harness.game import GameLifetimeEnded
 from sts2_harness.knowledge import DocumentView
-from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import ModelUnavailable, ToolCall
+from sts2_harness.llm.messages import ModelClient, ModelUnavailable, ToolCall
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import (
     ActionToolResult,
@@ -37,7 +36,7 @@ type MaterialReader = Callable[[native.Observation], Awaitable[tuple[DocumentVie
 class Agent(ABC):
     def __init__(
         self,
-        llm: Llm,
+        llm: ModelClient,
         tools: ToolCatalog,
         recovery: ToolRecoveryBudget,
         *,

@@ -87,7 +87,7 @@ Responses validation uses the official SDK with fake HTTP and controlled waits. 
 not establish real endpoint compatibility or game behavior. Inject an HTTP transport and
 sleep callable into `Llm` to exercise these public boundaries without network calls.
 
-Game/control recordings are local SQLite archives. Compose `RecordedGame` around the
+Game, model, material, and control recordings share one local SQLite archive. Compose `RecordedGame` around the
 logical `LiveGame` dependency; pass the same Journal as the live native audit receiver.
 The caller supplies the recording identity and genuinely known initial conditions:
 
@@ -137,11 +137,40 @@ Inspect recorded facts without startup configuration or network access:
 uv run sts2 journal --archive /path/to/journal.sqlite
 uv run sts2 journal --archive /path/to/journal.sqlite --kind settle --around 12 --window 2
 uv run sts2 journal --archive /path/to/journal.sqlite --view operation --sequence 12 --expand
+uv run sts2 journal --archive /path/to/journal.sqlite --view request --sequence 15 --expand
 uv run sts2 journal --archive /path/to/journal.sqlite --around 12 --expand --export evidence.json
 ```
 
-The default timeline shows the latest 20 matching operations. Expanded views include
-full historical replies and observations; exports always include the manifest and gaps.
-These archives cover game/control IO only. They do not yet include model requests,
-material versions, a production session launcher, or enough evidence for exact replay.
-Model request inspection reports unsupported rather than substituting current files.
+Compose `sts2_harness.model_journal.RecordedLlm` around a live `Llm`, with the same
+Journal, the actual role, and a distinct stream name for each new Context. Pass that
+client to the Agent. Compose `RecordedDocuments` around `FileDocuments` for skill and
+supplement lookups, and pass `RecordedPrompts(PackagedPrompts(), journal)` to Combat's
+`prompts` argument. The session creator supplies `Manifest.initial_notes` from its actual
+initial value: `""` is known empty, while `None` is unknown. A Combat's opening notes never
+backfill that manifest. Packaged tool definitions are code configuration loaded before
+session creation; every model anchor records their actual schemas and named descriptions.
+
+Each logical model request gets an anchor before its first attempt. Retry attempts share
+that anchor; complete native outputs are durable before the provider stream exits.
+Arrival and successful delivery are separate facts. The adapter records a canonical
+protocol request encoding digest, distinct from the archival semantic input digest,
+without saving duplicate provider bodies, headers, or SSE fragments. Safe failure kinds,
+usage, and model metadata are retained. Model timeout and backoff still belong to `Llm`.
+
+The first input in a stream is full; later inputs store a durable common prefix and new
+suffix. Materials, documents, and native outputs use shared compressed content blocks.
+Expansion restores named material IDs, versions, and bodies from the archive. A recording
+gap cannot become the base of a later input. Source edits never repair or replace history.
+
+The default timeline shows the latest 20 matching dependency records in global sequence
+order; `--kind model` and `--kind material` filter dependencies. `Journal.operations()`
+selects game/control operations, `requests()` selects model anchors, and `materials()`
+selects material reads. `request(sequence)` expands one anchor. Expanded CLI views include
+historical inputs, replies, attempts, and observations; selective exports include the
+manifest and gaps. Use `--around` with the timeline to inspect neighboring actions,
+receipts, queries, and material reads. Sequence and confirmed game cursor express ordering;
+they do not imply that an adjacent action was caused by a particular model request.
+
+Reopening provides offline inspection only. Schema versions are validated without archive
+migration. Production session launching, software replay, native restoration, and evaluation
+remain unsupported; the manifest does not claim exact replay.

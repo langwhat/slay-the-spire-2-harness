@@ -120,7 +120,7 @@ def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_p
             await pending
         journal.close()
         reopened = Journal.open(tmp_path / "archive.sqlite")
-        records = reopened.timeline()
+        records = reopened.operations()
         assert [record.sequence for record in records] == [1, 2, 3, 4, 5]
         assert [record.confirmed_operation_cursor for record in records] == [0, 1, 1, 1, 1]
         settlements = [
@@ -199,8 +199,8 @@ def test_repeated_observations_deduplicate_without_losing_sequences(tmp_path: Pa
         reopened = Journal.open(path)
         assert reopened.storage == storage
         assert first == second
-        assert [item.sequence for item in reopened.timeline()] == [1, 2]
-        assert [item.confirmed_operation_cursor for item in reopened.timeline()] == [0, 0]
+        assert [item.sequence for item in reopened.operations()] == [1, 2]
+        assert [item.confirmed_operation_cursor for item in reopened.operations()] == [0, 0]
         second_record = reopened.operation(2)
         assert second_record.reply is not None
         assert second_record.reply.observations == (observation,)
@@ -295,7 +295,7 @@ def test_archive_io_gap_does_not_repeat_game_action_and_persists_after_recovery(
             await execution.observe()
         reopened = Journal.open(directory / "archive.sqlite")
         assert reopened.gaps == (Gap(first_sequence=2, last_sequence=3),)
-        assert [record.sequence for record in reopened.timeline()] == [1, 2, 4]
+        assert [record.sequence for record in reopened.operations()] == [1, 2, 4]
         assert reopened.operation(2).reply is None
         assert reopened.operation(4).confirmed_operation_cursor == 1
         assert "recording_recovered" in console.getvalue()
@@ -366,11 +366,11 @@ def test_offline_evidence_cli_filters_expands_and_exports_recorded_facts(tmp_pat
         == 0
     )
     exported = json.loads(destination.read_text())
-    assert [item["sequence"] for item in exported["operations"]] == [2]
-    assert exported["operations"][0]["reply"]["observations"][0] == json.loads(RUN)
+    assert [item["sequence"] for item in exported["records"]] == [2]
+    assert exported["records"][0]["reply"]["observations"][0] == json.loads(RUN)
     assert exported["manifest"]["initial_notes"] == "historical notes"
     assert exported["gaps"] == []
-    assert main(["journal", "--archive", str(tmp_path / "archive.sqlite"), "--view", "model"]) == 2
+    assert main(["journal", "--archive", str(tmp_path / "archive.sqlite"), "--view", "model"]) == 0
 
 
 def test_diagnostics_redact_limit_repeats_and_rotate_without_touching_evidence(
@@ -432,7 +432,7 @@ def test_diagnostics_redact_limit_repeats_and_rotate_without_touching_evidence(
     assert len(segments) == 3
     assert all(path.stat().st_size <= 10 * 1024 * 1024 for path in segments)
     assert (tmp_path / "archive.sqlite").read_bytes() == before
-    assert Journal.open(journal.path).timeline() == ()
+    assert Journal.open(journal.path).operations() == ()
     # The active file and console are the very same structured event stream.
     assert segments[0].read_text().splitlines()[-1] == console.getvalue().splitlines()[-1]
 
@@ -480,7 +480,7 @@ def test_same_initial_conditions_and_interactions_have_identical_correlations(
             await game.settle(
                 route, native.Interact(kind=native.StepKind.INTERACT, action="second")
             )
-        return Journal.open(path).timeline()
+        return Journal.open(path).operations()
 
     assert asyncio.run(record(tmp_path / "one.sqlite")) == asyncio.run(
         record(tmp_path / "two.sqlite")
@@ -675,7 +675,7 @@ def test_initial_archive_disk_failure_keeps_gameplay_and_recovers_recording(tmp_
             reopened = Journal.open(journal.path)
             assert reopened.manifest == journal.manifest
             assert reopened.gaps == (Gap(first_sequence=1, last_sequence=3),)
-            assert [record.sequence for record in reopened.timeline()] == [4]
+            assert [record.sequence for record in reopened.operations()] == [4]
             assert reopened.operation(4).confirmed_operation_cursor == 1
             assert (
                 "recording_gap" in console.getvalue()
@@ -761,7 +761,7 @@ def test_knowledge_catalog_and_current_state_are_separate_recorded_reads(tmp_pat
             failed = await tools.dispatch(ToolCall("second", "run_knowledge", '{"mode":"catalog"}'))
             assert isinstance(completed.data, native.CatalogData)
             assert isinstance(failed.outcome, Failed) and failed.observation == observation
-        records = Journal.open(journal.path).timeline()
+        records = Journal.open(journal.path).operations()
         assert [item.request.kind for item in records] == [
             OperationKind.CATALOG,
             OperationKind.OBSERVE,

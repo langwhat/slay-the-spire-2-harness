@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.llm.messages import (
     FailureKind,
+    ModelAttemptSink,
     ModelInput,
     ModelReply,
     ModelUnavailable,
@@ -40,6 +41,10 @@ class Llm:
         self._configuration = configuration
         self._sleep = sleep
 
+    @property
+    def configuration(self) -> ModelConfiguration:
+        return self._configuration
+
     async def __aenter__(self) -> Self:
         return self
 
@@ -51,11 +56,19 @@ class Llm:
     ) -> None:
         await self._adapter.close()
 
-    async def complete(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> ModelReply:
+    async def complete(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        evidence: ModelAttemptSink | None = None,
+    ) -> ModelReply:
         for attempt in range(self._configuration.extra_retries + 1):
+            if evidence is not None:
+                evidence.started(attempt + 1)
             try:
                 async with asyncio.timeout(self._configuration.timeout_seconds):
-                    return await self._adapter.complete(input, tools)
+                    return await self._adapter.complete(input, tools, evidence=evidence)
             except (TimeoutError, APITimeoutError, httpx.TimeoutException):
                 reason = FailureKind.TIMEOUT
             except (APIConnectionError, httpx.TransportError):
@@ -70,6 +83,8 @@ class Llm:
                 reason = FailureKind.PROTOCOL
             except ModelUnavailable as error:
                 reason = error.reason
+            if evidence is not None:
+                evidence.failed(reason)
             retryable = reason in {
                 FailureKind.TIMEOUT,
                 FailureKind.CONNECTION,

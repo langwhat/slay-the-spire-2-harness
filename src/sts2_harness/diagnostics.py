@@ -21,6 +21,11 @@ class EventKind(StrEnum):
     RECORDING_RECOVERED = "recording_recovered"
     NATIVE_RETRY = "native_retry"
     NATIVE_RECOVERED = "native_recovered"
+    MODEL_REQUEST_STARTED = "model_request_started"
+    MODEL_REQUEST_COMPLETED = "model_request_completed"
+    MODEL_RETRY = "model_retry"
+    MODEL_RECOVERED = "model_recovered"
+    MODEL_EXHAUSTED = "model_exhausted"
 
 
 class Event(native.WireModel):
@@ -32,6 +37,9 @@ class Event(native.WireModel):
     endpoint: Endpoint | None = None
     failures: int | None = None
     recovered_from: str | None = None
+    role: native.DecisionOwner | None = None
+    attempt: int | None = None
+    elapsed_seconds: float | None = None
 
 
 class Level(StrEnum):
@@ -43,7 +51,7 @@ class Level(StrEnum):
 class DiagnosticLine(Event):
     time: str
     level: Level
-    component: Literal["game_control"] = "game_control"
+    component: Literal["game_control", "model"] = "game_control"
     recording_id: str
     suppressed: int
 
@@ -57,6 +65,8 @@ class Status(native.WireModel):
     recording_id: str
     stage: Stage
     operation: OperationKind | None = None
+    role: native.DecisionOwner | None = None
+    model_request: int | None = None
     started_at: str | None = None
     sequence: int | None = None
 
@@ -106,7 +116,7 @@ class Diagnostics:
             if handler is not None:
                 handler.setFormatter(logging.Formatter("%(message)s"))
                 self._logger.addHandler(handler)
-        self._native_reports: dict[Endpoint, tuple[str, float, int]] = {}
+        self._retry_reports: dict[Endpoint | int, tuple[str, float, int]] = {}
         self._storage_error: str | None = None
         self._storage_report = 0.0
         self._storage_suppressed = 0
@@ -119,22 +129,33 @@ class Diagnostics:
     def emit(self, event: Event) -> None:
         now = time.monotonic()
         native_event = event.event in (EventKind.NATIVE_RETRY, EventKind.NATIVE_RECOVERED)
-        native_suppressed = 0
-        if native_event and event.endpoint is not None:
-            previous = self._native_reports.get(event.endpoint)
+        model_event = event.event in (
+            EventKind.MODEL_RETRY,
+            EventKind.MODEL_RECOVERED,
+            EventKind.MODEL_EXHAUSTED,
+        )
+        report_key = event.endpoint if native_event else event.sequence if model_event else None
+        retry_suppressed = 0
+        if report_key is not None:
+            previous = self._retry_reports.get(report_key)
             if event.error is not None:
-                if previous is not None and previous[0] == event.error and now - previous[1] < 60:
-                    self._native_reports[event.endpoint] = (
+                if (
+                    previous is not None
+                    and previous[0] == event.error
+                    and now - previous[1] < 60
+                    and event.event is not EventKind.MODEL_EXHAUSTED
+                ):
+                    self._retry_reports[report_key] = (
                         previous[0],
                         previous[1],
                         previous[2] + 1,
                     )
                     return
-                native_suppressed = previous[2] if previous is not None else 0
-                self._native_reports[event.endpoint] = (event.error, now, 0)
+                retry_suppressed = previous[2] if previous is not None else 0
+                self._retry_reports[report_key] = (event.error, now, 0)
             elif previous is not None:
-                native_suppressed = previous[2]
-                del self._native_reports[event.endpoint]
+                retry_suppressed = previous[2]
+                del self._retry_reports[report_key]
         storage_failure = event.event is EventKind.RECORDING_GAP
         repeated = (
             storage_failure and event.error is not None and event.error == self._storage_error
@@ -144,8 +165,8 @@ class Diagnostics:
             return
         recovering = event.event is EventKind.RECORDING_RECOVERED
         suppressed = (
-            native_suppressed
-            if native_event
+            retry_suppressed
+            if native_event or model_event
             else self._storage_suppressed
             if repeated or recovering
             else 0
@@ -160,7 +181,7 @@ class Diagnostics:
             self._storage_error = None
             self._storage_suppressed = 0
         # Only selected typed fields enter diagnostics, never native bodies or headers.
-        severe = event.error in (
+        severe = event.event is EventKind.MODEL_EXHAUSTED or event.error in (
             "execution_unconfirmed",
             "execution_unknown",
             "control_unavailable",
@@ -176,6 +197,19 @@ class Diagnostics:
             level=level,
             recording_id=_redact(self._recording_id)[:2048],
             event=event.event,
+            component="model"
+            if event.event
+            in (
+                EventKind.MODEL_REQUEST_STARTED,
+                EventKind.MODEL_REQUEST_COMPLETED,
+                EventKind.MODEL_RETRY,
+                EventKind.MODEL_RECOVERED,
+                EventKind.MODEL_EXHAUSTED,
+            )
+            else "game_control",
+            role=event.role,
+            attempt=event.attempt,
+            elapsed_seconds=event.elapsed_seconds,
             sequence=event.sequence,
             operation_id=_redact(event.operation_id)[:2048] if event.operation_id else None,
             result=_redact(event.result)[:2048] if event.result else None,
@@ -190,8 +224,21 @@ class Diagnostics:
             logging.ERROR if severe else logging.WARNING if event.error else logging.INFO, text
         )
 
+    def started_model(self, role: native.DecisionOwner, sequence: int) -> None:
+        self._write_status(
+            Status(
+                recording_id=_redact(self._recording_id)[:2048],
+                stage=Stage.INFLIGHT,
+                role=role,
+                model_request=sequence,
+                started_at=datetime.now(UTC).isoformat(),
+                sequence=sequence,
+            )
+        )
+        self.emit(Event(event=EventKind.MODEL_REQUEST_STARTED, role=role, sequence=sequence))
+
     def started(self, operation: OperationKind, *, sequence: int | None = None) -> None:
-        self._native_reports.clear()
+        self._retry_reports.clear()
         self._write_status(
             Status(
                 recording_id=_redact(self._recording_id)[:2048],
@@ -206,7 +253,7 @@ class Diagnostics:
         )
 
     def finished(self) -> None:
-        self._native_reports.clear()
+        self._retry_reports.clear()
         self._write_status(
             Status(recording_id=_redact(self._recording_id)[:2048], stage=Stage.IDLE)
         )

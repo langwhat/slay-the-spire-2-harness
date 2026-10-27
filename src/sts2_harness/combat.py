@@ -3,7 +3,6 @@
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from importlib.resources import files
 
 from pydantic import MISSING
 
@@ -26,16 +25,16 @@ from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import Interrupted, ModelFailure, ToolRecoveryBudget
 from sts2_harness.game import GameLifetimeEnded
 from sts2_harness.knowledge import DocumentView, GuidanceContent
-from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import TextMessage, TextRole
-from sts2_harness.material_text import MaterialParts, MaterialText, MaterialUnavailable
+from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
+from sts2_harness.material_text import MaterialParts, MaterialText
+from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.tools import ToolCatalog
 
 _LOG = logging.getLogger(__name__)
 
 
-def _system() -> MaterialParts:
+def _system(prompts: PromptReader) -> MaterialParts:
     blocks: list[MaterialText | str] = []
     for name in (
         "combat-tasks",
@@ -44,32 +43,28 @@ def _system() -> MaterialParts:
         "projected-reader",
         "combat-observations",
     ):
-        try:
-            body = files("sts2_harness.prompts").joinpath(name + ".md").read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            raise MaterialUnavailable(
-                "The required Combat instructions could not be read."
-            ) from None
-        blocks.append(MaterialText.create("prompt:" + name, body))
+        blocks.append(prompts.read(name))
     return MaterialParts(tuple(blocks))
 
 
 class CombatAgent(Agent):
     def __init__(
         self,
-        llm: Llm,
+        llm: ModelClient,
         tools: ToolCatalog,
         recovery: ToolRecoveryBudget,
         *,
         opening_notes: str,
+        prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
     ) -> None:
         super().__init__(llm, tools, recovery, materials=materials)
+        self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._opening_notes = opening_notes
         self._opening_delivered = False
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
-        system = (TextMessage(TextRole.SYSTEM, _system()),)
+        system = (TextMessage(TextRole.SYSTEM, _system(self._prompts)),)
         if documents:
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
         return Context(native.DecisionOwner.COMBAT, system=system)

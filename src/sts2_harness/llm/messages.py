@@ -202,3 +202,16 @@ class ModelUnavailable(Exception):
     def __init__(self, reason: FailureKind) -> None:
         self.reason = reason
         super().__init__(f"Model request unavailable: {reason.value}.")
+
+
+class ModelClient(Protocol):
+    async def complete(
+        self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+    ) -> ModelReply: ...
+
+
+class ModelAttemptSink(Protocol):
+    def started(self, index: int) -> None: ...
+    def encoded(self, digest: str) -> None: ...
+    def received(self, reply: ModelReply) -> None: ...
+    def failed(self, reason: FailureKind) -> None: ...
