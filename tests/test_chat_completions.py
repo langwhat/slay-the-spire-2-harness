@@ -478,6 +478,13 @@ def fragmented_chat(
             },
             {"content": "Second.", "reasoning_details": [False]},
         ),
+        *[
+            (
+                {"role": "assistant", "content": "First."},
+                {"role": role, "content": "Second."},
+            )
+            for role in ("user", "", "assistantassistant", 1)
+        ],
     ],
 )
 def test_invalid_chat_deltas_close_recorded_request_as_protocol_failure(
@@ -661,5 +668,48 @@ def test_chat_complete_arrival_is_durable_before_stream_close(
         assert len(record.attempts) == 1 and record.attempts[0].failure is reason
         assert record.attempts[0].reply == last and reader.gaps == ()
         reader.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["text", "tools", "initial-null"])
+def test_chat_repeated_assistant_role_preserves_text_and_native_identity(
+    tmp_path: Path, kind: str
+) -> None:
+    deltas: list[dict[str, JsonValue]] = [
+        {"role": "assistant", "content": "First."},
+        {"role": "assistant", "content": "Second."},
+    ]
+    if kind == "initial-null":
+        deltas.insert(0, {"role": None, "content": ""})
+    stream = fragmented_chat(*deltas)
+    if kind == "tools":
+        stream = chat_stream().replace(
+            b'"delta": {"tool_calls":', b'"delta": {"role": "assistant", "tool_calls":'
+        )
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=stream, headers={"content-type": "text/event-stream"})
+
+    async def scenario() -> None:
+        async with Llm(
+            configuration(tmp_path, LLM_PROTOCOL="chat-completions", LLM_EXTRA_RETRIES="0"),
+            transport=httpx.MockTransport(provider),
+        ) as llm:
+            reply = await llm.complete((), ())
+            message = json.loads(reply.assistant.native.to_json())["choices"][0]["message"]
+            assert message["role"] == "assistant"
+            if kind == "tools":
+                call = reply.assistant.tool_calls[0]
+                assert (call.id, call.name, call.arguments) == (
+                    "call_1",
+                    "inspect",
+                    '{"reference":"c1"}',
+                )
+                assert message["content"] is None
+                assert message["continuation"] == {"token": "keep", "unset": None}
+                assert reply.usage.input_tokens == 100 and reply.usage.cache_read_tokens == 25
+            else:
+                assert reply.assistant.text == "First.Second."
 
     asyncio.run(scenario())

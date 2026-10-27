@@ -65,6 +65,7 @@ class _CompletionStream:
         self._choice_extras: dict[str, JsonValue] = {}
         self._finished = False
         self._seen = False
+        self._role_seen = False
         self._message_fields: set[str] = set()
         self._tool_fields: dict[int, set[str]] = {}
         self._function_fields: dict[int, set[str]] = {}
@@ -98,6 +99,13 @@ class _CompletionStream:
                 self._provider_parsed["parsed"] = raw_delta["parsed"]
             self._message_fields.update(delta.model_fields_set)
             self._message_fields.update(delta.model_extra or {})
+            if delta.role is not None:
+                if delta.role != "assistant":
+                    raise ModelUnavailable(FailureKind.PROTOCOL)
+                if self._role_seen:
+                    # Role is identity metadata, not another text fragment.
+                    delta.role = None
+                self._role_seen = True
             for call in delta.tool_calls or ():
                 if call.index < 0 or call.index > len(self._tool_fields):
                     raise ModelUnavailable(FailureKind.PROTOCOL)
