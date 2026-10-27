@@ -144,7 +144,7 @@ uv run sts2 journal --archive /path/to/journal.sqlite --around 12 --expand --exp
 Compose `sts2_harness.model_journal.RecordedLlm` around a live `Llm`, with the same
 Journal, the actual role, and a distinct stream name for each new Context. Pass that
 client to the Agent. Compose `RecordedDocuments` around `FileDocuments` for skill and
-supplement lookups, and pass `RecordedPrompts(PackagedPrompts(), journal)` to Combat's
+supplement lookups, and pass `RecordedPrompts(PackagedPrompts(), journal)` to either role's
 `prompts` argument. The session creator supplies `Manifest.initial_notes` from its actual
 initial value: `""` is known empty, while `None` is unknown. A Combat's opening notes never
 backfill that manifest. Packaged tool definitions are code configuration loaded before
@@ -174,3 +174,20 @@ they do not imply that an adjacent action was caused by a particular model reque
 Reopening provides offline inspection only. Schema versions are validated without archive
 migration. Production session launching, software replay, native restoration, and evaluation
 remain unsupported; the manifest does not claim exact replay.
+
+## Run decisions and strategy notes
+
+`RunAgent` uses the shared `Agent` loop and `Execution.run_unit` for explicitly supplied
+`ActTask` and `HandoffTask` values. Its fixed tools are `run_act`, `run_inspect`,
+`run_knowledge`, `run_skill`, and `run_notes`. Construct one `Notes(initial_text)` per run
+and pass it to the Run `ToolCatalog`; the agent reads the same owner. Notes are authoritative
+in memory. Reads return the full text; replacement permits clearing; an edit requires one
+exact unique match, including overlapping occurrences, and permits deletion. Failed edits
+leave notes unchanged, while successful writes return only `{"updated":true}`.
+
+`await role.enter_act(ActStart(observation))` fully loads guidance and packaged instructions
+before installing a fresh Context and delivery ledger. A required-material failure requests
+Pause through `DecisionInterrupted`; explicit retry preserves the same notes owner. Finish
+pending action feedback before entering an act. The first actual act or handoff task in the
+new Context carries current notes, including an empty string; construction alone does not
+consume them. Session orchestration owns act scheduling and recording stream assembly.

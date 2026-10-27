@@ -98,6 +98,16 @@ class WriteUnknown(SemanticValue):
 type ActionOutcome = ActionCompleted | ActionStopped | Rejected | ActionUnknown
 type QueryOutcome = ReadCompleted | Rejected | Failed | WriteUnknown
 type Outcome = ActionOutcome | QueryOutcome
+
+
+class NotesText(SemanticValue):
+    text: str
+
+
+class NotesUpdated(SemanticValue):
+    updated: Literal[True] = True
+
+
 type QueryData = (
     native.InspectData
     | native.CatalogData
@@ -106,6 +116,8 @@ type QueryData = (
     | KnowledgeLookup
     | DocumentView
     | SkillList
+    | NotesText
+    | NotesUpdated
 )
 
 

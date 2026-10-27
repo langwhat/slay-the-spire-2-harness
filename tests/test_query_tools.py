@@ -13,6 +13,7 @@ from sts2_harness.execution import Execution
 from sts2_harness.game import LiveGame
 from sts2_harness.llm.messages import ToolCall
 from sts2_harness.material_text import MaterialText
+from sts2_harness.notes import Notes
 from sts2_harness.results import ReadCompleted
 from sts2_harness.tools import ToolCatalog
 
@@ -199,6 +200,7 @@ def test_knowledge_preserves_native_matches_pagination_and_lookup_order() -> Non
             )
             tools = ToolCatalog(
                 DecisionOwner.RUN,
+                notes=Notes(""),
                 observe=execution.observe,
                 inspect=execution.inspect,
                 catalog=execution.catalog,

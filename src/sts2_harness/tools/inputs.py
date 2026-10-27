@@ -87,3 +87,48 @@ class CombatActInput(RootModel[CombatAct]):
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
         return dict(next(item.input_schema for item in DEFINITIONS if item.name == "combat_act"))
+
+
+class RunAct(native.WireModel):
+    steps: Annotated[
+        tuple[native.Interact | native.UsePotion | native.DiscardPotion | native.Select, ...],
+        Field(min_length=1),
+    ]
+    reason: str | MISSING = MISSING
+
+
+class RunActInput(RootModel[RunAct]):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_act"))
+
+
+class NotesMode(StrEnum):
+    READ = "read"
+    REPLACE = "replace"
+    EDIT = "edit"
+
+
+class NotesReadInput(native.WireModel):
+    mode: Literal[NotesMode.READ]
+
+
+class NotesReplaceInput(native.WireModel):
+    mode: Literal[NotesMode.REPLACE]
+    text: str
+
+
+class NotesEditInput(native.WireModel):
+    mode: Literal[NotesMode.EDIT]
+    old_text: native.Nonempty
+    new_text: str
+
+
+class NotesInput(RootModel[NotesReadInput | NotesReplaceInput | NotesEditInput]):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_notes"))

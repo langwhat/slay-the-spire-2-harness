@@ -692,6 +692,7 @@ def test_knowledge_catalog_and_current_state_are_separate_recorded_reads(tmp_pat
     async def scenario() -> None:
         from sts2_harness.game import Cataloged, IOFailure, OperationKind
         from sts2_harness.llm.messages import ToolCall
+        from sts2_harness.notes import Notes
         from sts2_harness.results import Failed
         from sts2_harness.tools import ToolCatalog
 
@@ -751,6 +752,7 @@ def test_knowledge_catalog_and_current_state_are_separate_recorded_reads(tmp_pat
             )
             tools = ToolCatalog(
                 native.DecisionOwner.RUN,
+                notes=Notes(""),
                 observe=execution.observe,
                 inspect=execution.inspect,
                 catalog=execution.catalog,

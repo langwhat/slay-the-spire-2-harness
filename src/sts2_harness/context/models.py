@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import MISSING
 
 from sts2_harness.client import models as native
-from sts2_harness.decisions import BattleReport
+from sts2_harness.decisions import BattleReport, CombatHandoff
 from sts2_harness.llm.messages import TextMessage, ToolResultMessage
 from sts2_harness.results import Outcome, QueryData, SemanticValue, ToolResult
 
@@ -15,6 +15,7 @@ from sts2_harness.results import Outcome, QueryData, SemanticValue, ToolResult
 class TaskKind(StrEnum):
     ACT = "act"
     REVIEW = "review"
+    HANDOFF = "handoff"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,13 +110,51 @@ class ReviewContent(SemanticValue):
     battle_report: BattleReport
 
 
-type CombatInput = CombatActInput | CombatReviewInput
+@dataclass(frozen=True, slots=True)
+class RunActInput:
+    strategy_notes: str | MISSING = MISSING
+    handoff: CombatHandoff | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RunHandoffInput:
+    handoff: CombatHandoff
+    strategy_notes: str | MISSING = MISSING
+
+
+class RunActContent(SemanticValue):
+    task: Literal[TaskKind.ACT] = TaskKind.ACT
+    instruction: str = "Make the next run decision using run_act."
+    observation: ActObservation
+    strategy_notes: str | MISSING = MISSING
+
+
+class RunActHandoffContent(RunActContent):
+    battle_report: BattleReport
+    combat_review: str | None
+
+
+class HandoffContent(SemanticValue):
+    task: Literal[TaskKind.HANDOFF] = TaskKind.HANDOFF
+    instruction: str = (
+        "Assess the battle report and any Combat review. Update strategy notes if useful, "
+        "then finish with a concise response. Do not perform game actions."
+    )
+    battle_report: BattleReport
+    combat_review: str | None
+    strategy_notes: str | MISSING = MISSING
+
+
+type TaskInput = CombatActInput | CombatReviewInput | RunActInput | RunHandoffInput
+type TaskContent = (
+    ActContent | ReviewContent | RunActContent | RunActHandoffContent | HandoffContent
+)
 
 
 @dataclass(frozen=True, slots=True)
 class TaskMessage(TextMessage):
-    content: ActContent | ReviewContent
-    task: CombatInput
+    content: TaskContent
+    task: TaskInput
     observation: native.Observation | None
 
 

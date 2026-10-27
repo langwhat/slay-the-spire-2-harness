@@ -4,7 +4,7 @@ import json
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 
-from pydantic import MISSING, ValidationError
+from pydantic import MISSING, BaseModel, ValidationError
 
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
@@ -31,8 +31,11 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.llm.messages import ToolCall, ToolDefinition
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
+from sts2_harness.notes import Notes
 from sts2_harness.results import (
     Failed,
+    NotesText,
+    NotesUpdated,
     QueryToolResult,
     ReadCompleted,
     Reason,
@@ -45,6 +48,10 @@ from sts2_harness.tools.inputs import (
     CombatActInput,
     InspectInput,
     KnowledgeInput,
+    NotesInput,
+    NotesReadInput,
+    NotesReplaceInput,
+    RunActInput,
     SkillInput,
     SkillListInput,
     StateQuery,
@@ -53,6 +60,8 @@ from sts2_harness.tools.inputs import (
 
 class ToolName(StrEnum):
     COMBAT_ACT = "combat_act"
+    RUN_ACT = "run_act"
+    RUN_NOTES = "run_notes"
     RUN_SKILL = "run_skill"
     COMBAT_SKILL = "combat_skill"
     RUN_INSPECT = "run_inspect"
@@ -100,35 +109,50 @@ class ToolCatalog:
         catalog: Callable[[native.CatalogRequest], Awaitable[CatalogResult]],
         supplements: SupplementProvider | None = None,
         skills: SkillProvider | None = None,
+        notes: Notes | None = None,
     ) -> None:
-        self.action_name = ToolName.COMBAT_ACT if role is native.DecisionOwner.COMBAT else None
+        if role is native.DecisionOwner.RUN and notes is None:
+            raise ValueError("Run tools require the run's notes owner.")
+        self._notes_owner = notes
+        self.action_name = (
+            ToolName.COMBAT_ACT if role is native.DecisionOwner.COMBAT else ToolName.RUN_ACT
+        )
         self._role = role
         self._observe = observe
         self._inspect = inspect
         self._catalog = catalog
         self._supplements = supplements
         self._skills = skills
+        inputs: dict[ToolName, type[BaseModel]] = {
+            ToolName.RUN_ACT: RunActInput,
+            ToolName.COMBAT_ACT: CombatActInput,
+            ToolName.RUN_NOTES: NotesInput,
+            ToolName.RUN_INSPECT: InspectInput,
+            ToolName.COMBAT_INSPECT: InspectInput,
+            ToolName.RUN_SKILL: SkillInput,
+            ToolName.COMBAT_SKILL: SkillInput,
+            ToolName.RUN_KNOWLEDGE: KnowledgeInput,
+            ToolName.COMBAT_KNOWLEDGE: KnowledgeInput,
+        }
         self.definitions = tuple(
             ToolDefinition(
                 item.name,
                 MaterialText.create(f"tool:{item.name}:description", item.description),
-                InspectInput
-                if ToolName(item.name) in (ToolName.RUN_INSPECT, ToolName.COMBAT_INSPECT)
-                else CombatActInput
-                if ToolName(item.name) is ToolName.COMBAT_ACT
-                else SkillInput
-                if ToolName(item.name) in (ToolName.RUN_SKILL, ToolName.COMBAT_SKILL)
-                else KnowledgeInput,
+                inputs[ToolName(item.name)],
             )
             for item in DEFINITIONS
             if item.name.startswith(role.value + "_")
         )
         self._names = frozenset(item.name for item in self.definitions)
 
+    @property
+    def notes(self) -> Notes | None:
+        return self._notes_owner
+
     def dispatch_action(
         self, call: ToolCall, task: DecisionTask
     ) -> ActionProposal | QueryToolResult:
-        if call.name != ToolName.COMBAT_ACT or self._role is not native.DecisionOwner.COMBAT:
+        if call.name != self.action_name:
             return QueryToolResult(
                 _problem(ReasonCode.WRONG_ROLE, "This action tool is not available."), None
             )
@@ -141,7 +165,11 @@ class ToolCatalog:
             )
         try:
             json.loads(call.arguments, object_pairs_hook=_unique_fields)
-            query = CombatActInput.model_validate_json(call.arguments, strict=True).root
+            query = (
+                CombatActInput.model_validate_json(call.arguments, strict=True).root
+                if self._role is native.DecisionOwner.COMBAT
+                else RunActInput.model_validate_json(call.arguments, strict=True).root
+            )
         except (ValueError, ValidationError):
             return QueryToolResult(
                 _problem(
@@ -176,6 +204,28 @@ class ToolCatalog:
             else:
                 steps.append(ActionStep(ActionKind.END_TURN))
         return ActionProposal(tuple(steps), None if query.reason is MISSING else query.reason)
+
+    async def _notes(self, call: ToolCall) -> QueryToolResult:
+        observation = await self._current()
+        try:
+            json.loads(call.arguments, object_pairs_hook=_unique_fields)
+            query = NotesInput.model_validate_json(call.arguments, strict=True).root
+        except (ValueError, ValidationError):
+            return QueryToolResult(
+                _problem(ReasonCode.INVALID_ARGUMENTS, "The query does not match the tool schema."),
+                observation,
+            )
+        assert self.notes is not None
+        if isinstance(query, NotesReadInput):
+            return QueryToolResult(ReadCompleted(), observation, NotesText(text=self.notes.read()))
+        result = (
+            self.notes.replace(query.text)
+            if isinstance(query, NotesReplaceInput)
+            else self.notes.edit(query.old_text, query.new_text)
+        )
+        if isinstance(result, NotesUpdated):
+            return QueryToolResult(ReadCompleted(), observation, result)
+        return QueryToolResult(result, observation)
 
     async def _read_skill(self, call: ToolCall) -> QueryToolResult:
         observation = await self._current()
@@ -217,11 +267,13 @@ class ToolCatalog:
             return None
 
     async def dispatch(self, call: ToolCall) -> QueryToolResult:
-        if call.name not in self._names or call.name == ToolName.COMBAT_ACT:
+        if call.name not in self._names or call.name == self.action_name:
             return QueryToolResult(
                 _problem(ReasonCode.WRONG_ROLE, "This tool is not available to the current role."),
                 await self._current(),
             )
+        if call.name == ToolName.RUN_NOTES:
+            return await self._notes(call)
         if ToolName(call.name) in (ToolName.RUN_SKILL, ToolName.COMBAT_SKILL):
             return await self._read_skill(call)
         try:

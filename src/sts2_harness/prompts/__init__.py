@@ -16,6 +16,6 @@ class PackagedPrompts:
             body = files("sts2_harness.prompts").joinpath(name + ".md").read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             raise MaterialUnavailable(
-                "The required Combat instructions could not be read."
+                "The required gameplay instructions could not be read."
             ) from None
         return MaterialText.create("prompt:" + name, body)

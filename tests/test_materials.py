@@ -16,6 +16,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import TextMessage, TextRole, ToolCall
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.materials import DocumentSource, FileDocuments, ResourceSource
+from sts2_harness.notes import Notes
 from sts2_harness.tools import ToolCatalog
 
 
@@ -187,6 +188,7 @@ def test_shared_file_supplements_and_resources_keep_complete_independent_identit
         async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
             tools = ToolCatalog(
                 DecisionOwner.RUN,
+                notes=Notes(""),
                 observe=observe,
                 inspect=client.inspect,
                 catalog=client.catalog,
@@ -246,12 +248,19 @@ def test_skill_queries_reject_unadvertised_reads_and_report_real_io_failure(tmp_
         raise AssertionError("No catalog is required.")
 
     async def scenario() -> None:
-        empty = ToolCatalog(DecisionOwner.RUN, observe=observe, inspect=inspect, catalog=catalog)
+        empty = ToolCatalog(
+            DecisionOwner.RUN, notes=Notes(""), observe=observe, inspect=inspect, catalog=catalog
+        )
         listed = await empty.dispatch(ToolCall("list", "run_skill", '{"mode":"list"}'))
         assert isinstance(listed.outcome, ReadCompleted)
         assert isinstance(listed.data, SkillList) and listed.data.skills == ()
         enabled = ToolCatalog(
-            DecisionOwner.RUN, observe=observe, inspect=inspect, catalog=catalog, skills=source
+            DecisionOwner.RUN,
+            notes=Notes(""),
+            observe=observe,
+            inspect=inspect,
+            catalog=catalog,
+            skills=source,
         )
         for arguments in (
             '{"mode":"read","id":"unknown"}',

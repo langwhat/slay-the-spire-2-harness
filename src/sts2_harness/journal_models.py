@@ -22,9 +22,12 @@ from sts2_harness.client import models as native
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.context.models import (
     ActContent,
+    HandoffContent,
     ProjectedResult,
     ResultMessage,
     ReviewContent,
+    RunActContent,
+    RunActHandoffContent,
     ShortState,
     TaskMessage,
     Updates,
@@ -49,7 +52,7 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.material_text import MaterialParts, MaterialText
-from sts2_harness.results import Outcome
+from sts2_harness.results import NotesText, NotesUpdated, Outcome
 
 
 class BlobKind(StrEnum):
@@ -237,6 +240,7 @@ class DataKind(StrEnum):
     DOCUMENT = "document"
     SKILLS = "skills"
     NATIVE = "native"
+    NOTES = "notes"
 
 
 class KnowledgeData(native.WireModel):
@@ -260,7 +264,12 @@ class NativeData(native.WireModel):
     value: native.InspectData | native.CatalogData | native.SearchData | native.LookupData
 
 
-type ArchivedData = KnowledgeData | DocumentData | SkillsData | NativeData
+class NotesData(native.WireModel):
+    kind: Literal[DataKind.NOTES] = DataKind.NOTES
+    value: NotesText | NotesUpdated
+
+
+type ArchivedData = KnowledgeData | DocumentData | SkillsData | NativeData | NotesData
 
 
 def archive_data(data: ProjectedResult) -> ArchivedData | MISSING:
@@ -284,6 +293,8 @@ def archive_data(data: ProjectedResult) -> ArchivedData | MISSING:
         return DocumentData(document=DocumentSnapshot.of(value))
     if isinstance(value, SkillList):
         return SkillsData(skills=tuple(SkillSnapshot.of(skill) for skill in value.skills))
+    if isinstance(value, (NotesText, NotesUpdated)):
+        return NotesData(value=value)
     return NativeData(value=value)
 
 
@@ -337,6 +348,7 @@ def archive_text(value: str | MaterialText | MaterialParts | GuidanceContent) ->
 class MessageKind(StrEnum):
     TEXT = "text"
     TASK = "task"
+    RUN_TASK = "run_task"
     ASSISTANT = "assistant"
     RESULT = "result"
 
@@ -353,6 +365,12 @@ class TaskSnapshot(native.WireModel):
     content: ActContent | ReviewContent
 
 
+class RunTaskSnapshot(native.WireModel):
+    kind: Literal[MessageKind.RUN_TASK] = MessageKind.RUN_TASK
+    role: TextRole
+    content: RunActContent | RunActHandoffContent | HandoffContent
+
+
 class AssistantSnapshot(native.WireModel):
     kind: Literal[MessageKind.ASSISTANT] = MessageKind.ASSISTANT
     native_output: NativeOutput
@@ -367,7 +385,9 @@ class ResultSnapshot(native.WireModel):
     data: ArchivedData | MISSING = MISSING
 
 
-type MessageSnapshot = TextSnapshot | TaskSnapshot | AssistantSnapshot | ResultSnapshot
+type MessageSnapshot = (
+    TextSnapshot | TaskSnapshot | RunTaskSnapshot | AssistantSnapshot | ResultSnapshot
+)
 MESSAGE = TypeAdapter(MessageSnapshot)
 
 
@@ -375,7 +395,11 @@ def archive_input(input: ModelInput) -> tuple[MessageSnapshot, ...]:
     messages: list[MessageSnapshot] = []
     for message in input:
         if isinstance(message, TaskMessage):
-            messages.append(TaskSnapshot(role=message.role, content=message.content))
+            content = message.content
+            if isinstance(content, (RunActContent, HandoffContent)):
+                messages.append(RunTaskSnapshot(role=message.role, content=content))
+            else:
+                messages.append(TaskSnapshot(role=message.role, content=content))
         elif isinstance(message, ResultMessage):
             result = message.content
             messages.append(

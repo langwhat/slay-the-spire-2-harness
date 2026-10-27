@@ -8,12 +8,18 @@ from sts2_harness.client import models as native
 from sts2_harness.context.models import (
     ActContent,
     CombatActInput,
-    CombatInput,
     CombatReviewInput,
+    HandoffContent,
     ProjectedResult,
     ResultMessage,
     ReviewContent,
+    RunActContent,
+    RunActHandoffContent,
+    RunActInput,
+    RunHandoffInput,
     ShortState,
+    TaskContent,
+    TaskInput,
     TaskMessage,
     Updates,
 )
@@ -82,19 +88,39 @@ class Context:
     @overload
     def append_task(self, task: CombatReviewInput) -> None: ...
 
-    def append_task(self, task: CombatInput, observation: native.Observation | None = None) -> None:
-        """Append approved Combat tasks; Run message assembly has its own contract."""
-        if self._role is not native.DecisionOwner.COMBAT:
-            raise ValueError("Combat tasks require a Combat context.")
-        if isinstance(task, CombatReviewInput):
+    @overload
+    def append_task(self, task: RunActInput, observation: native.Observation) -> None: ...
+
+    @overload
+    def append_task(self, task: RunHandoffInput) -> None: ...
+
+    def append_task(self, task: TaskInput, observation: native.Observation | None = None) -> None:
+        """Append a complete task and install only the observation actually delivered."""
+        combat = isinstance(task, (CombatActInput, CombatReviewInput))
+        if combat != (self._role is native.DecisionOwner.COMBAT):
+            raise ValueError("The task requires its corresponding role context.")
+        if isinstance(task, (CombatReviewInput, RunHandoffInput)):
             if self._history and isinstance(last := self._history[-1], TaskMessage):
                 if last.task == task:
                     return
-            review = ReviewContent(battle_report=task.battle_report)
-            self._history.append(TaskMessage(TextRole.USER, review.to_json(), review, task, None))
+            content: TaskContent = (
+                ReviewContent(battle_report=task.battle_report)
+                if isinstance(task, CombatReviewInput)
+                else HandoffContent(
+                    battle_report=task.handoff.report,
+                    combat_review=task.handoff.review,
+                    strategy_notes=task.strategy_notes,
+                )
+            )
+            self._history.append(TaskMessage(TextRole.USER, content.to_json(), content, task, None))
             return
         if observation is None:
             raise TypeError("An act task requires a current observation.")
+        ordinary = (
+            task.opening_notes is MISSING
+            if isinstance(task, CombatActInput)
+            else task.strategy_notes is MISSING and task.handoff is None
+        )
         if self._history:
             last = self._history[-1]
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
@@ -103,7 +129,7 @@ class Context:
             if (
                 isinstance(last, ResultMessage)
                 and isinstance(last.source, ActionToolResult)
-                and task.opening_notes is MISSING
+                and ordinary
                 and last.source.observation is not None
                 and self._same_observation(last.source.observation, observation)
             ):
@@ -111,10 +137,17 @@ class Context:
         projected, delivered = self._delivery.project(
             visible_observation(observation, self._role), observation.location
         )
-        content = ActContent(
-            observation=projected,
-            opening_notes=task.opening_notes,
-        )
+        if isinstance(task, CombatActInput):
+            content = ActContent(observation=projected, opening_notes=task.opening_notes)
+        elif task.handoff is not None:
+            content = RunActHandoffContent(
+                observation=projected,
+                strategy_notes=task.strategy_notes,
+                battle_report=task.handoff.report,
+                combat_review=task.handoff.review,
+            )
+        else:
+            content = RunActContent(observation=projected, strategy_notes=task.strategy_notes)
         message = TaskMessage(TextRole.USER, content.to_json(), content, task, observation)
         self._history.append(message)
         self._delivery = delivered
