@@ -1,7 +1,8 @@
 # STS2 Harness
 
 The no-save/load gameplay core provides a programmatic single-run gameplay loop through
-`RunSession` and `DefaultFlow`, with a Responses model client and recorded game IO.
+`RunSession` and `DefaultFlow`, with Responses and Chat Completions model clients and
+recorded game IO.
 The CLI can attach a resident backend to your running Mod-enabled game, validate
 configuration offline, and inspect archives. The external facade and software replay
 are not implemented yet.
@@ -40,7 +41,8 @@ names in the local file fail validation; unrelated process environment keys are 
 | `LLM_EXTRA_RETRIES` | `25`, nonnegative additional attempts |
 
 Base URLs must omit userinfo, query strings, and fragments. Endpoint path prefixes are
-retained when the Responses client appends `/responses`. Authentication applies SDK
+retained when the selected client appends `/responses` or `/chat/completions`.
+Authentication applies SDK
 defaults, configured authentication, then case-insensitive custom headers. SDK environment
 credentials and custom headers do not supply project authentication.
 `none` discards configured credentials and must not inherit SDK environment credentials.
@@ -59,7 +61,8 @@ Tests use temporary defaults and isolated process environments; no network or ga
 
 The Python `sts2_harness.llm.client.Llm` client accepts a `ModelConfiguration` snapshot
 and implements `complete(input, tools)` as an async context manager. It currently supports
-Responses only. Callers own the immutable `ModelInput` message tuple; the client retains
+Responses and Chat Completions. Callers own the immutable `ModelInput` message tuple;
+the client retains
 no conversation. Tool definitions use concrete Pydantic argument models. Provider
 schemas use `strict=False` to preserve optional-field semantics; tools remain responsible
 for strict local argument decoding.
@@ -68,11 +71,16 @@ A completed `ModelReply` exposes read-only text/tool-call views, native continua
 usage, and separate requested/response model metadata. `ResponsesReply.to_json()` and
 `from_json()` preserve the complete ordered native output, including encrypted reasoning
 and assistant phases in one immutable encoded snapshot. Decoded SDK items are independent
-copies. Append the returned assistant message and associated tool-result
+copies. `ChatCompletionsReply` retains a complete native completion and continues with its
+native assistant message, including opaque continuation fields. Histories from another
+protocol are rejected; protocol switching does not migrate existing context. Append the
+returned assistant message and associated tool-result
 messages to the caller's input; native output is sent once, without `previous_response_id`.
 The adapter does not execute tools or return intermediate streamed argument fragments.
 
-Only `response.completed` with a completed response returns a reply. Premature clean EOF,
+Responses requires `response.completed`; Chat Completions requires a complete `stop` or
+`tool_calls` choice after consuming the stream, including any final usage chunk.
+Premature clean EOF,
 connection failures, timeouts, rate limits, and overload are retried. Each attempt gets its
 own configured timeout covering request start through final decoding. SDK retries are
 disabled; the default 25 additional attempts wait 2, 4, 8, 16, then 32 seconds, totaling
@@ -85,7 +93,7 @@ all input tokens, including cache writes. `Usage.summarize_cache()` sums compara
 counts and reports coverage instead of averaging request percentages. Cache configuration
 belongs to the protocol adapter; no separate cache settings or warmup calls are introduced.
 
-Responses validation uses the official SDK with fake HTTP and controlled waits. It does
+Protocol validation uses the official SDK with fake HTTP and controlled waits. It does
 not establish real endpoint compatibility or game behavior. Inject an HTTP transport and
 sleep callable into `Llm` to exercise these public boundaries without network calls.
 
@@ -173,6 +181,7 @@ manifest and gaps. Use `--around` with the timeline to inspect neighboring actio
 receipts, queries, and material reads. Sequence and confirmed game cursor express ordering;
 they do not imply that an adjacent action was caused by a particular model request.
 
+The current archive schema is version 5 and records each native reply's protocol explicitly.
 Reopening provides offline inspection only. Schema versions are validated without archive
 migration. Read older archives with the revision that recorded them. The external facade,
 software replay, native restoration, and evaluation remain unsupported;

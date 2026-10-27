@@ -266,7 +266,7 @@ def test_resident_start_rejects_unimplemented_protocol_before_game_connection(
         "--set",
         "LLM_AUTH=none",
         "--set",
-        "LLM_PROTOCOL=chat-completions",
+        "LLM_PROTOCOL=messages",
     )
     assert result.returncode == 2
     assert "configured model protocol is not implemented" in result.stderr

@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha256
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     MISSING,
@@ -45,9 +45,11 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.llm.messages import (
     AssistantMessage,
+    ChatCompletionsReply,
     FailureKind,
     ModelInput,
     ModelReply,
+    NativeReply,
     ResponsesReply,
     TextMessage,
     TextRole,
@@ -108,7 +110,6 @@ def _decode_native(value: object, info: ValidationInfo) -> object:
     if isinstance(info.context, BlobDecoding):
         reference = NativeReference.model_validate(value)
         content = info.context.read(reference.native_digest).decode()
-        ResponsesReply.from_json(content)
         return content
     return value
 
@@ -380,9 +381,28 @@ class AutomaticSnapshot(native.WireModel):
     content: AutomaticContent
 
 
-class AssistantSnapshot(native.WireModel):
-    kind: Literal[MessageKind.ASSISTANT] = MessageKind.ASSISTANT
+class NativeSnapshot(native.WireModel):
+    protocol: Protocol
     native_output: NativeOutput
+
+    @property
+    def native_reply(self) -> NativeReply:
+        match self.protocol:
+            case Protocol.RESPONSES:
+                return ResponsesReply.from_json(self.native_output)
+            case Protocol.CHAT_COMPLETIONS:
+                return ChatCompletionsReply.from_json(self.native_output)
+            case Protocol.MESSAGES:
+                raise ValueError("The archived native protocol is unsupported.")
+
+    @model_validator(mode="after")
+    def validate_native(self) -> Self:
+        _ = self.native_reply
+        return self
+
+
+class AssistantSnapshot(NativeSnapshot):
+    kind: Literal[MessageKind.ASSISTANT] = MessageKind.ASSISTANT
 
 
 class ResultSnapshot(native.WireModel):
@@ -430,7 +450,11 @@ def archive_input(input: ModelInput) -> tuple[MessageSnapshot, ...]:
         elif isinstance(message, TextMessage):
             messages.append(TextSnapshot(role=message.role, value=archive_text(message.value)))
         elif isinstance(message, AssistantMessage):
-            messages.append(AssistantSnapshot(native_output=message.native.to_json()))
+            messages.append(
+                AssistantSnapshot(
+                    protocol=message.native.protocol, native_output=message.native.to_json()
+                )
+            )
         else:
             raise ValueError("The model result has no supported archival semantic type.")
     return tuple(messages)
@@ -476,8 +500,7 @@ class ConfigurationSnapshot(native.WireModel):
         )
 
 
-class ReplySnapshot(native.WireModel):
-    native_output: NativeOutput
+class ReplySnapshot(NativeSnapshot):
     input_tokens: int | None
     output_tokens: int | None
     cache_read_tokens: int | None
@@ -490,6 +513,7 @@ class ReplySnapshot(native.WireModel):
     @classmethod
     def of(cls, reply: ModelReply) -> "ReplySnapshot":
         return cls(
+            protocol=reply.assistant.native.protocol,
             native_output=reply.assistant.native.to_json(),
             input_tokens=reply.usage.input_tokens,
             output_tokens=reply.usage.output_tokens,

@@ -16,6 +16,7 @@ from openai import (
 from pydantic import ValidationError
 
 from sts2_harness.config import ModelConfiguration, Protocol
+from sts2_harness.llm.chat_completions import ChatCompletionsAdapter
 from sts2_harness.llm.messages import (
     FailureKind,
     ModelAttemptSink,
@@ -24,7 +25,8 @@ from sts2_harness.llm.messages import (
     ModelUnavailable,
     ToolDefinition,
 )
-from sts2_harness.llm.responses import ResponsesAdapter, classify_error
+from sts2_harness.llm.openai_boundary import classify_error
+from sts2_harness.llm.responses import ResponsesAdapter
 
 
 class Llm:
@@ -36,13 +38,17 @@ class Llm:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.validate_configuration(configuration)
-        self._adapter = ResponsesAdapter(configuration, transport)
+        self._adapter = (
+            ChatCompletionsAdapter(configuration, transport)
+            if configuration.protocol is Protocol.CHAT_COMPLETIONS
+            else ResponsesAdapter(configuration, transport)
+        )
         self._configuration = configuration
         self._sleep = sleep
 
     @staticmethod
     def validate_configuration(configuration: ModelConfiguration) -> None:
-        if configuration.protocol is not Protocol.RESPONSES:
+        if configuration.protocol not in {Protocol.RESPONSES, Protocol.CHAT_COMPLETIONS}:
             raise ModelUnavailable(FailureKind.CONFIGURATION)
 
     @property

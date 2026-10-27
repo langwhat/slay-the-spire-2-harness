@@ -1061,7 +1061,10 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
     asyncio.run(scenario())
 
 
-def test_archive_open_rejects_previous_versions_and_reads_current_version(tmp_path: Path) -> None:
+@pytest.mark.parametrize("version", [2, 3, 4])
+def test_archive_open_rejects_old_versions_and_reads_current_version(
+    tmp_path: Path, version: int
+) -> None:
     import json
     import sqlite3
 
@@ -1075,17 +1078,15 @@ def test_archive_open_rejects_previous_versions_and_reads_current_version(tmp_pa
     journal.close()
     with sqlite3.connect(path) as connection:
         manifest = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
-        for version in (2, 3):
-            manifest["schema_version"] = version
-            connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
-            connection.commit()
-            with pytest.raises(ArchiveError, match="schema is unsupported"):
-                Journal.open(path)
+        manifest["schema_version"] = version
+        connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
+    with pytest.raises(ArchiveError, match="schema is unsupported"):
+        Journal.open(path)
     with sqlite3.connect(path) as connection:
-        manifest["schema_version"] = 4
+        manifest["schema_version"] = 5
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     reopened = Journal.open(path)
-    assert reopened.manifest.schema_version == 4
+    assert reopened.manifest.schema_version == 5
     assert reopened.operations() == ()
     reopened.close()
 

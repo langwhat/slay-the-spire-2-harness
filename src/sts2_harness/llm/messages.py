@@ -9,7 +9,9 @@ from typing import Protocol, Self
 from openai.types.responses import ResponseOutputItem
 from pydantic import BaseModel, TypeAdapter
 
+from sts2_harness.config import Protocol as ModelProtocol
 from sts2_harness.knowledge import GuidanceContent
+from sts2_harness.llm.chat_native import ChatCompletionsReply
 from sts2_harness.material_text import MaterialParts, MaterialText
 
 _NATIVE_OUTPUT = TypeAdapter(tuple[ResponseOutputItem, ...])
@@ -65,6 +67,10 @@ class ResponsesReply:
     _encoded: str
 
     @property
+    def protocol(self) -> ModelProtocol:
+        return ModelProtocol.RESPONSES
+
+    @property
     def items(self) -> tuple[ResponseOutputItem, ...]:
         """Return decoded copies without exposing mutable retained continuation state."""
         return _NATIVE_OUTPUT.validate_json(self._encoded, strict=True)
@@ -86,7 +92,7 @@ class ResponsesReply:
         return cls(payload)
 
 
-type NativeReply = ResponsesReply
+type NativeReply = ResponsesReply | ChatCompletionsReply
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +101,8 @@ class AssistantMessage:
 
     @property
     def text(self) -> str:
+        if isinstance(self.native, ChatCompletionsReply):
+            return self.native.completion.choices[0].message.content or ""
         return "".join(
             content.text
             for item in self.native.items
@@ -105,6 +113,12 @@ class AssistantMessage:
 
     @property
     def tool_calls(self) -> tuple[ToolCall, ...]:
+        if isinstance(self.native, ChatCompletionsReply):
+            return tuple(
+                ToolCall(call.id, call.function.name, call.function.arguments)
+                for call in self.native.completion.choices[0].message.tool_calls or ()
+                if call.type == "function"
+            )
         return tuple(
             ToolCall(item.call_id, item.name, item.arguments)
             for item in self.native.items

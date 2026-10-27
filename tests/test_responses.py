@@ -8,7 +8,7 @@ import httpx2 as httpx
 import pytest
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from sts2_harness.config import ModelConfiguration, load_configuration
+from sts2_harness.config import ModelConfiguration, Protocol, load_configuration
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
     AssistantMessage,
@@ -167,6 +167,7 @@ def test_complete_and_continue_native_reply_once(tmp_path: Path) -> None:
             assert reply.metadata.response_model == "reported-model"
             retained = reply.assistant.native.to_json()
             assert json.loads(retained) == OUTPUT
+            assert isinstance(reply.assistant.native, ResponsesReply)
             for item in reply.assistant.native.items:
                 if item.type == "function_call":
                     item.arguments = '{"reference":"changed"}'
@@ -352,9 +353,12 @@ def test_whole_attempt_timeout_resets_and_cancellation_propagates(tmp_path: Path
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("protocol", [Protocol.RESPONSES, Protocol.CHAT_COMPLETIONS])
 def test_final_wire_authentication_and_custom_precedence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, protocol: Protocol
 ) -> None:
+    from test_chat_completions import chat_stream
+
     monkeypatch.setenv("OPENAI_API_KEY", "environment-secret")
     monkeypatch.setenv("OPENAI_ADMIN_KEY", "environment-admin")
     monkeypatch.setenv("OPENAI_ORG_ID", "environment-org")
@@ -368,7 +372,9 @@ def test_final_wire_authentication_and_custom_precedence(
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(
-            200, content=completed(), headers={"Content-Type": "text/event-stream"}
+            200,
+            content=completed() if protocol is Protocol.RESPONSES else chat_stream(),
+            headers={"Content-Type": "text/event-stream"},
         )
 
     async def scenario() -> None:
@@ -393,14 +399,19 @@ def test_final_wire_authentication_and_custom_precedence(
             ),
         ]:
             async with Llm(
-                configuration(tmp_path, **settings), transport=httpx.MockTransport(handler)
+                configuration(tmp_path, LLM_PROTOCOL=protocol.value, **settings),
+                transport=httpx.MockTransport(handler),
             ) as llm:
                 await llm.complete((), ())
             headers = requests[-1].headers
             assert headers.get("authorization") == authorization
             assert headers.get("x-api-key") == named_key
             assert "environment" not in str(headers)
-            assert requests[-1].url.path == "/proxy/v1/responses"
+            assert requests[-1].url.path == (
+                "/proxy/v1/responses"
+                if protocol is Protocol.RESPONSES
+                else "/proxy/v1/chat/completions"
+            )
 
     asyncio.run(scenario())
 

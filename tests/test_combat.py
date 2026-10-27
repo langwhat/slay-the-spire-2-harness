@@ -12,6 +12,7 @@ from sts2_harness.agent import MaterialReader
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent, CombatTask
+from sts2_harness.config import Protocol
 from sts2_harness.decisions import (
     ActionDecision,
     ActionKind,
@@ -353,6 +354,7 @@ class BattleHTTP:
         *,
         materials: MaterialReader | None = None,
         source: DecisionSource | None = None,
+        protocol: Protocol = Protocol.RESPONSES,
     ) -> CombatHandoff | RunEnded:
         async with ModClient("http://mod", transport=httpx.MockTransport(self.mod)) as client:
             assert self.opening.location.run_id is not None
@@ -377,7 +379,8 @@ class BattleHTTP:
                 catalog=execution.catalog,
             )
             async with Llm(
-                configuration(tmp_path), transport=httpx.MockTransport(self.model)
+                configuration(tmp_path, LLM_PROTOCOL=protocol.value),
+                transport=httpx.MockTransport(self.model),
             ) as llm:
                 role = source or CombatAgent(
                     llm, tools, self.budget, opening_notes="Opening notes.", materials=materials
