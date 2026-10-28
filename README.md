@@ -5,7 +5,7 @@ The no-save/load gameplay core provides a programmatic single-run gameplay loop 
 recorded game IO.
 The CLI can attach a resident backend to your running Mod-enabled game, validate
 configuration offline, expose external gameplay tools, launch isolated developer headless
-runs on macOS, and inspect archives. Software replay is not implemented yet.
+runs on macOS, inspect archives, and replay built-in software history offline.
 
 Install Python 3.12+ and [uv](https://docs.astral.sh/uv/), then run:
 
@@ -201,10 +201,32 @@ receipts, queries, and material reads. Sequence and confirmed game cursor expres
 they do not imply that an adjacent action was caused by a particular model request.
 
 The current archive schema is version 7 and records each native reply's protocol explicitly.
-Reopening provides offline inspection only. Schema versions are validated without archive
-migration. Read older archives with the revision that recorded them. Software replay,
-native restoration, and evaluation remain unsupported;
-the manifest does not claim exact replay.
+`Journal.open()` provides read-only inspection. Schema versions are validated without archive
+migration. Read older archives with the revision that recorded them. Native restoration
+and live evaluation remain unsupported; the manifest does not claim exact native replay.
+
+## Offline software replay
+
+`sts2_harness_eval` exports `reach`, `ModelAnchor`, `Reached`, `Rejected`, `RejectReason`,
+and `ReplayResult`. Select a recording identity and model sequence from the Journal:
+
+```python
+from pathlib import Path
+from sts2_harness_eval import ModelAnchor, Reached, Rejected, reach
+
+async with reach(Path("/path/to/archive.sqlite"), ModelAnchor("recording-id", 15)) as result:
+    if isinstance(result, Reached):
+        print(result.confirmed_operation_cursor, result.semantic_digest)
+    elif isinstance(result, Rejected):
+        print(result.reason, result.sequence, result.detail)
+```
+
+Replay supports the default built-in Run/Combat flow without automatic entry guidance;
+explicit document tools use recorded materials. It checks recorded inputs and dependency
+order without contacting a model, game, or material source. `Reached` holds the original
+RunSession coroutine inside the target model call only while the context is open; exit
+cancels and awaits that coroutine. It consumes no target reply, restores no native game,
+and provides no live takeover. Missing facts and mismatches return typed `Rejected` results.
 
 ## Ordinary gameplay startup
 

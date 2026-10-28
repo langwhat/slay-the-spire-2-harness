@@ -36,3 +36,6 @@ include = ["src", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sts2_harness", "src/sts2_harness_eval"]
