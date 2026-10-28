@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, closing
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
@@ -33,12 +34,16 @@ from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedP
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval import ModelAnchor, Reached, reach, take_over
+from sts2_harness_eval.annotations import AnnotationStore
+from sts2_harness_eval.assessment import AssessmentSelection, assess_sample
 from sts2_harness_eval.cases import (
     AdmissionRequest,
     AfterDecisionsSpec,
+    Artifact,
     Case,
     CaseStore,
     CheckpointRef,
+    ShortcutBinding,
     plan_admission,
 )
 from sts2_harness_eval.checkpoints import (
@@ -52,7 +57,7 @@ from sts2_harness_eval.native import LoadedTarget, NativeLaunch, NativeRestorer
 from sts2_harness_eval.sample import SampleBudget
 from sts2_harness_eval.takeover import TakeoverCompleted, TakeoverIncomplete
 from sts2_harness_eval.variants import MaterialVariant, SceneStart
-from sts2_harness_eval.verification import LoadedCorrespondence
+from sts2_harness_eval.verification import KeyedRefs, LoadedCorrespondence, Publication, Reference
 
 
 class Source(Campaign):
@@ -434,7 +439,86 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
                 SampleBudget(5, 30),
                 stop_requested=lambda: False,
             )
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as model:
+            reused = await take_over(
+                case,
+                restorer,
+                branch,
+                model,
+                PackagedPrompts(),
+                FileDocuments(),
+                SampleBudget(5, 30),
+                stop_requested=lambda: False,
+            )
+        assert isinstance(reused, TakeoverIncomplete)
+        assert reused.recording_id is None
         assert isinstance(result, TakeoverCompleted)
+        with closing(Journal.open(branch)) as recorded:
+            assert result.recording_id == recorded.manifest.recording_id
+        store = CaseStore(tmp_path / "retained")
+        plan = plan_admission(
+            AdmissionRequest(
+                id=case.id,
+                archive=case.source.archive,
+                anchor=case.source.anchor,
+                endpoint=case.endpoint,
+            ),
+            tmp_path,
+        )
+        publication = Publication(
+            source_sequence=case.source.anchor.model_sequence,
+            source_stamp=plan.target.stamp,
+            read=IdentityRead(
+                status=native.ResultStatus.COMPLETED,
+                observation=plan.target,
+                identities=IdentityFacts(cards=(), creatures=(), map_travel=(), relics=()),
+            ),
+        )
+        reference = store.content(
+            Artifact.REFERENCES,
+            Reference(
+                boundary=publication,
+                suffix=(),
+                target=publication,
+                follow_on_before=(),
+                follow_on=(),
+            ),
+        )
+        binding = store.content(
+            Artifact.BINDINGS,
+            ShortcutBinding(
+                suffix=(),
+                target=KeyedRefs(source_sequence=case.source.anchor.model_sequence, refs=()),
+                follow_on=(),
+                reference=reference,
+            ),
+        )
+        evidence = store.content(Artifact.EVIDENCE, case.endpoint)
+        checkpoint = tmp_path / "synthetic-checkpoint"
+        checkpoint.write_bytes(b"x")
+
+        retained_checkpoint = case.checkpoint.model_copy(
+            update={"sha256": sha256(b"x").hexdigest()}
+        )
+        store.retain_checkpoint(retained_checkpoint, checkpoint)
+        retained_case = case.model_copy(
+            update={"binding": binding, "evidence": evidence, "checkpoint": retained_checkpoint}
+        )
+        store.publish(retained_case)
+        annotations = AnnotationStore(tmp_path / "annotations", store)
+        report = assess_sample(
+            retained_case, result, annotations, AssessmentSelection(), judgment=None
+        )
+        report_ref = annotations.append_assessment(report, id="actual-loop")
+        assert AnnotationStore(annotations.directory, store).assessment(report_ref) == report
+        assert report.execution.recording_id == result.recording_id
+        uncreated = assess_sample(
+            retained_case, reused, annotations, AssessmentSelection(), judgment=None
+        )
+        assert uncreated.provenance.sample is None
+        assert uncreated.evidence.metrics.net_hp_change is None
+        uncreated_ref = annotations.append_assessment(uncreated, id="reused-path")
+        assert AnnotationStore(annotations.directory, store).assessment(uncreated_ref) == uncreated
         assert result.sample.decisions == 2
         assert result.sample.requests == 3
         assert restorer.closed

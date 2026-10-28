@@ -141,6 +141,7 @@ class TakeoverCompleted:
     branch: Path
     anchor: Reached
     sample: Completed
+    recording_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,12 +149,14 @@ class TakeoverIncomplete:
     branch: Path
     anchor: Reached | None
     evidence: Incomplete | NativeUncertain | OperatorStopped
+    recording_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class TakeoverUnsupported:
     branch: Path
     evidence: Refusal
+    recording_id: str | None
 
 
 type TakeoverResult = TakeoverCompleted | TakeoverIncomplete | TakeoverUnsupported
@@ -204,6 +207,7 @@ async def take_over(
 ) -> TakeoverResult:
     """Verify both prefixes, then release the held request into recorded live dependencies."""
     anchor: Reached | None = None
+    recording_id: str | None = None
     stage = Stage.PREPARATION
     task: asyncio.Task[SampleResult] | None = None
     released = False
@@ -288,6 +292,7 @@ async def take_over(
                         variant=declaration,
                     )
                     journal = resources.enter_context(closing(Journal.create(branch, manifest)))
+                    recording_id = journal.manifest.recording_id
                     endpoint: Endpoint
                     if isinstance(case.endpoint, AfterDecisionsSpec):
                         endpoint = AfterDecisions(case.endpoint.count)
@@ -330,9 +335,9 @@ async def take_over(
                     if isinstance(sample, Completed):
                         if anchor is None:
                             raise ArchiveError("A completed scene has no recorded model request.")
-                        return TakeoverCompleted(branch, anchor, sample)
+                        return TakeoverCompleted(branch, anchor, sample, recording_id=recording_id)
                     assert isinstance(sample, Incomplete)
-                    return TakeoverIncomplete(branch, anchor, sample)
+                    return TakeoverIncomplete(branch, anchor, sample, recording_id=recording_id)
             for message in target.input:
                 if isinstance(message, AssistantSnapshot):
                     protocol = message.native_reply.protocol
@@ -343,6 +348,7 @@ async def take_over(
                                 protocol,
                                 model.configuration.protocol,
                             ),
+                            recording_id=recording_id,
                         )
             with case.source.archive.open("rb") as original:
                 digest = file_digest(original, "sha256").hexdigest()
@@ -394,6 +400,7 @@ async def take_over(
                 }
             )
             journal = resources.enter_context(closing(Journal.create(branch, manifest)))
+            recording_id = journal.manifest.recording_id
             if isinstance(case.endpoint, AfterDecisionsSpec):
                 endpoint = AfterDecisions(case.endpoint.count)
             else:
@@ -554,9 +561,9 @@ async def take_over(
                             task.result()
                         raise
                     if isinstance(sample, Completed):
-                        return TakeoverCompleted(branch, anchor, sample)
+                        return TakeoverCompleted(branch, anchor, sample, recording_id=recording_id)
                     assert isinstance(sample, Incomplete)
-                    return TakeoverIncomplete(branch, anchor, sample)
+                    return TakeoverIncomplete(branch, anchor, sample, recording_id=recording_id)
             finally:
                 if not released:
                     task.cancel()
@@ -565,13 +572,13 @@ async def take_over(
     except SessionStopped:
         if not operator_stopped:
             raise
-        return TakeoverIncomplete(branch, anchor, OperatorStopped())
+        return TakeoverIncomplete(branch, anchor, OperatorStopped(), recording_id=recording_id)
     except ReplayRejected as error:
-        return TakeoverUnsupported(branch, error.result)
+        return TakeoverUnsupported(branch, error.result, recording_id=recording_id)
     except VariantError as error:
-        return TakeoverUnsupported(branch, error.rejection)
+        return TakeoverUnsupported(branch, error.rejection, recording_id=recording_id)
     except AdmissionFailure as error:
-        return TakeoverUnsupported(branch, error.result)
+        return TakeoverUnsupported(branch, error.result, recording_id=recording_id)
     except VerificationFailure as error:
         return TakeoverUnsupported(
             branch,
@@ -580,9 +587,10 @@ async def take_over(
                 sequence=error.sequence,
                 field_path=error.field_path,
             ),
+            recording_id=recording_id,
         )
     except CheckpointRejected as error:
-        return TakeoverUnsupported(branch, error.cause)
+        return TakeoverUnsupported(branch, error.cause, recording_id=recording_id)
     except (
         CheckpointUncertain,
         ClientUnavailable,
@@ -598,18 +606,28 @@ async def take_over(
                 IncompleteCause.NATIVE_UNCERTAIN,
                 str(error),
             ),
+            recording_id=recording_id,
         )
     except (OSError, ArchiveError, httpx.HTTPError, TimeoutError) as error:
         return TakeoverIncomplete(
-            branch, anchor, NativeUncertain(stage, IncompleteCause.IO, str(error))
+            branch,
+            anchor,
+            NativeUncertain(stage, IncompleteCause.IO, str(error)),
+            recording_id=recording_id,
         )
     except ValidationError as error:
         return TakeoverIncomplete(
-            branch, anchor, NativeUncertain(stage, IncompleteCause.PROTOCOL, str(error))
+            branch,
+            anchor,
+            NativeUncertain(stage, IncompleteCause.PROTOCOL, str(error)),
+            recording_id=recording_id,
         )
     except (HeadlessError, TemplateError) as error:
         return TakeoverIncomplete(
-            branch, anchor, NativeUncertain(stage, IncompleteCause.STARTUP, str(error))
+            branch,
+            anchor,
+            NativeUncertain(stage, IncompleteCause.STARTUP, str(error)),
+            recording_id=recording_id,
         )
     finally:
         # Cleanup failures must not turn a caller cancellation into a normal result.

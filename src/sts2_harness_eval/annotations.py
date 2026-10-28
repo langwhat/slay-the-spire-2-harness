@@ -3,126 +3,87 @@
 from __future__ import annotations
 
 import os
+from contextlib import closing
 from enum import StrEnum
+from hashlib import file_digest, sha256
 from pathlib import Path
-from typing import Annotated, Literal, Self
 from uuid import uuid4
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import TypeAdapter
 
-from sts2_harness.client.models import Nonempty, WireModel
-from sts2_harness_eval.cases import CaseId, CaseStore, Sequence
-
-
-class Origin(StrEnum):
-    HUMAN = "human"
-    AGENT = "agent"
-
-
-class EvidenceRef(WireModel):
-    recording_id: Nonempty
-    sequence: Sequence
-
-
-class HumanAuthor(WireModel):
-    kind: Literal[Origin.HUMAN] = Origin.HUMAN
-    id: Nonempty
-
-
-class AgentAuthor(WireModel):
-    kind: Literal[Origin.AGENT] = Origin.AGENT
-    id: Nonempty
-    model: Nonempty | None = None
-    generation: EvidenceRef | None = None
-
-    @model_validator(mode="after")
-    def require_generation_source(self) -> Self:
-        if self.model is None and self.generation is None:
-            raise ValueError("An agent author requires a model or generation record reference.")
-        return self
-
-
-type Author = Annotated[HumanAuthor | AgentAuthor, Field(discriminator="kind")]
-
-
-class RecordRef(WireModel):
-    case_id: CaseId
-    id: CaseId
-
-
-class AnnotationRef(RecordRef):
-    pass
-
-
-class ReviewRef(RecordRef):
-    pass
-
-
-class RubricRef(RecordRef):
-    pass
-
-
-class AuthoredRecord(RecordRef):
-    origin: Origin
-    author: Author
-
-    @model_validator(mode="after")
-    def require_matching_origin(self) -> Self:
-        if self.origin is not self.author.kind:
-            raise ValueError("Record origin must match its author's permanent source.")
-        return self
-
-
-class AnnotationRecord(AuthoredRecord):
-    text: Nonempty
-    evidence_refs: tuple[EvidenceRef, ...]
-
-
-class ReviewDecision(StrEnum):
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-    NEEDS_REVIEW = "needs_review"
-
-
-class ReviewRecord(RecordRef):
-    annotation: AnnotationRef
-    decision: ReviewDecision
-    reviewer: Author
-    rationale: Nonempty
-
-
-class RubricKind(StrEnum):
-    BATTLE = "battle"
-    CARD_REWARD = "card_reward"
-
-
-class BattleRubric(WireModel):
-    kind: Literal[RubricKind.BATTLE] = RubricKind.BATTLE
-    description: Nonempty
-
-
-class CardRewardRubric(WireModel):
-    kind: Literal[RubricKind.CARD_REWARD] = RubricKind.CARD_REWARD
-    acceptable_card_ids: tuple[Nonempty, ...]
-    allow_skip: bool
-    description: str = ""
-
-
-class RubricRecord(AuthoredRecord):
-    criterion: Annotated[BattleRubric | CardRewardRubric, Field(discriminator="kind")]
-
-
-class CaseAnnotations(WireModel):
-    case_id: CaseId
-    annotations: tuple[AnnotationRecord, ...]
-    reviews: tuple[ReviewRecord, ...]
-    rubrics: tuple[RubricRecord, ...]
+from sts2_harness.journal import Journal
+from sts2_harness_eval.annotation_records import (
+    AgentAuthor as AgentAuthor,
+)
+from sts2_harness_eval.annotation_records import (
+    AnnotationRecord as AnnotationRecord,
+)
+from sts2_harness_eval.annotation_records import (
+    AnnotationRef as AnnotationRef,
+)
+from sts2_harness_eval.annotation_records import (
+    Author as Author,
+)
+from sts2_harness_eval.annotation_records import (
+    AuthoredRecord as AuthoredRecord,
+)
+from sts2_harness_eval.annotation_records import (
+    BattleRubric as BattleRubric,
+)
+from sts2_harness_eval.annotation_records import (
+    CardRewardRubric as CardRewardRubric,
+)
+from sts2_harness_eval.annotation_records import (
+    CaseAnnotations as CaseAnnotations,
+)
+from sts2_harness_eval.annotation_records import (
+    EvidenceRef as EvidenceRef,
+)
+from sts2_harness_eval.annotation_records import (
+    HumanAuthor as HumanAuthor,
+)
+from sts2_harness_eval.annotation_records import (
+    Origin as Origin,
+)
+from sts2_harness_eval.annotation_records import (
+    RecordRef as RecordRef,
+)
+from sts2_harness_eval.annotation_records import (
+    ReviewDecision as ReviewDecision,
+)
+from sts2_harness_eval.annotation_records import (
+    ReviewRecord as ReviewRecord,
+)
+from sts2_harness_eval.annotation_records import (
+    ReviewRef as ReviewRef,
+)
+from sts2_harness_eval.annotation_records import (
+    RubricKind as RubricKind,
+)
+from sts2_harness_eval.annotation_records import (
+    RubricRecord as RubricRecord,
+)
+from sts2_harness_eval.annotation_records import (
+    RubricRef as RubricRef,
+)
+from sts2_harness_eval.assessment_records import (
+    Assessed,
+    AssessmentRecord,
+    AssessmentRef,
+    AssessmentSelection,
+    CaseTargetRef,
+    SampleAssessment,
+    SelectedStandards,
+)
+from sts2_harness_eval.cases import Case, CaseId, CaseStore
+from sts2_harness_eval.execution_record import CompletedExecution
 
 
 class RecordKind(StrEnum):
     ANNOTATIONS = "annotations"
     REVIEWS = "reviews"
     RUBRICS = "rubrics"
+    ASSESSMENTS = "assessments"
 
 
 class AnnotationStore:
@@ -188,3 +149,141 @@ class AnnotationStore:
         return CaseAnnotations(
             case_id=case_id, annotations=annotations, reviews=reviews, rubrics=rubrics
         )
+
+    def select(
+        self,
+        case: Case,
+        selection: AssessmentSelection,
+    ) -> SelectedStandards:
+        records = self.load(case.id)
+        if self.cases.load(case.id) != case:
+            raise ValueError("The supplied case differs from its immutable stored case.")
+        annotation = None
+        review = None
+        rubric = None
+        if selection.annotation is not None:
+            annotation = next(
+                (r for r in records.annotations if r.id == selection.annotation.id), None
+            )
+            if selection.annotation.case_id != case.id or annotation is None:
+                raise ValueError("The selected annotation does not exist in this case.")
+        if selection.review is not None:
+            review = next((r for r in records.reviews if r.id == selection.review.id), None)
+            if (
+                selection.review.case_id != case.id
+                or review is None
+                or review.annotation != selection.annotation
+            ):
+                raise ValueError("The selected review must refer to the selected annotation.")
+        if selection.rubric is not None:
+            rubric = next((r for r in records.rubrics if r.id == selection.rubric.id), None)
+            if selection.rubric.case_id != case.id or rubric is None:
+                raise ValueError("The selected rubric does not exist in this case.")
+        return SelectedStandards(
+            selection=selection, annotation=annotation, review=review, rubric=rubric
+        )
+
+    def _check_assessment(self, report: SampleAssessment) -> None:
+        provenance = report.provenance
+        case = self.cases.load(provenance.case_id)
+        if (
+            sha256(case.model_dump_json().encode()).hexdigest() != provenance.case_sha256
+            or case.source != provenance.source
+        ):
+            raise ValueError("The assessment does not match its immutable case.")
+        if self.select(case, report.standards.selection) != report.standards:
+            raise ValueError("The assessment standards do not match the selected records.")
+        if provenance.archive != report.execution.branch or report.endpoint_reached != isinstance(
+            report.execution, CompletedExecution
+        ):
+            raise ValueError("The report execution and sample provenance disagree.")
+        sample = provenance.sample
+        if sample is not None and sample.recording_id != report.execution.recording_id:
+            raise ValueError("The report recording does not match its execution.")
+        if sample is None and (
+            provenance.parent is not None
+            or provenance.first_sequence is not None
+            or provenance.last_sequence is not None
+            or report.endpoint_reached
+        ):
+            raise ValueError("An unrecorded sample cannot claim recorded evidence.")
+        if sample is not None:
+            with provenance.archive.open("rb") as source:
+                digest = file_digest(source, "sha256").hexdigest()
+            with closing(Journal.open(provenance.archive)) as journal:
+                manifest = journal.manifest
+                parent = manifest.parent
+                if (
+                    parent is None
+                    or parent.archive.resolve() != case.source.archive.resolve()
+                    or parent.recording_id != case.source.anchor.recording_id
+                    or parent.before_sequence != case.source.anchor.model_sequence
+                    or provenance.first_sequence != parent.before_sequence
+                ):
+                    raise ValueError("The report sample does not match the case source interval.")
+                summaries = journal.summaries(start=parent.before_sequence)
+                if provenance.last_sequence != max(
+                    (item.sequence for item in summaries), default=None
+                ):
+                    raise ValueError("The report evidence interval differs from its sample.")
+                binding = self.cases.binding(case)
+                target = self.cases.reference(binding).target
+                if provenance.target != CaseTargetRef(
+                    case_id=case.id,
+                    reference_sha256=binding.reference,
+                    recording_id=case.source.anchor.recording_id,
+                    sequence=target.source_sequence,
+                ):
+                    raise ValueError("The report target is not the verified case publication.")
+                endpoint = provenance.endpoint
+                if endpoint is not None:
+                    observations = tuple(
+                        record
+                        for record in journal.operations(
+                            start=endpoint.sequence, stop=endpoint.sequence
+                        )
+                        if record.reply is not None
+                    )
+                    if (
+                        endpoint.recording_id != sample.recording_id
+                        or endpoint.sequence < parent.before_sequence
+                        or not observations
+                        or observations[0].reply is None
+                        or not 0 <= endpoint.index < len(observations[0].reply.observations)
+                    ):
+                        raise ValueError(
+                            "The report endpoint is not a recorded sample observation."
+                        )
+                if (
+                    sample.sha256 != digest
+                    or sample.recording_id != manifest.recording_id
+                    or provenance.parent != manifest.parent
+                    or provenance.variant != manifest.variant
+                ):
+                    raise ValueError("The assessment sample archive has changed.")
+        if isinstance(report.quality, Assessed):
+            judgment = report.quality.judgment
+            if (
+                judgment.case_id != case.id
+                or judgment.sample != sample
+                or judgment.selection != report.standards.selection
+            ):
+                raise ValueError("The assessment judgment has mismatched associations.")
+
+    def append_assessment(self, report: SampleAssessment, *, id: str) -> AssessmentRef:
+        record = AssessmentRecord(
+            case_id=report.provenance.case_id,
+            id=TypeAdapter(CaseId).validate_python(id),
+            assessment=report,
+        )
+        self._check_assessment(report)
+        self._append(RecordKind.ASSESSMENTS, record)
+        return AssessmentRef(case_id=record.case_id, id=record.id)
+
+    def assessment(self, reference: AssessmentRef) -> SampleAssessment:
+        path = self.directory / reference.case_id / RecordKind.ASSESSMENTS / f"{reference.id}.json"
+        record = AssessmentRecord.model_validate_json(path.read_bytes())
+        if record.case_id != reference.case_id or record.id != reference.id:
+            raise ValueError("The stored assessment does not match its reference.")
+        self._check_assessment(record.assessment)
+        return record.assessment

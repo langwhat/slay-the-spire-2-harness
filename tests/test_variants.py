@@ -83,6 +83,7 @@ def test_historical_variant_retains_native_history_and_reopens(tmp_path: Path) -
             )
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             assert journal.manifest.variant is not None
             saved = journal.manifest.variant.replacements[0].replacement
             assert (saved.id, saved.body) == (prompt.id, "Act carefully.")
@@ -205,6 +206,7 @@ def test_document_versions_keep_explicit_result_links_and_reject_unknown_sources
             return
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             resumed = journal.request(original.sequence)
             original_results = [item for item in original.input if isinstance(item, ResultSnapshot)]
             actual_results = [item for item in resumed.input if isinstance(item, ResultSnapshot)]
@@ -227,6 +229,7 @@ def test_document_versions_keep_explicit_result_links_and_reject_unknown_sources
             assert isinstance(reached, Reached)
         assert case.source.archive.read_bytes() == original_bytes
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             manifest = journal.manifest.model_copy(
                 update={
                     "recording_id": "broken-link",
@@ -421,6 +424,7 @@ def test_automatic_material_versions_deduplicate_only_complete_delivered_views(
             )
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             assert journal.manifest.schema_version == 10
             assert journal.manifest.materials.battle_guidance == ("guide", "other")
             selected = journal.request(case.source.anchor.model_sequence)
@@ -599,6 +603,7 @@ def test_action_boundary_task_omission_requires_complete_recorded_evidence(
         assert restorer.launches == 1
         assert len(restorer.actions) == 2
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             candidate = journal.request(original.sequence)
             retained_tasks = [item for item in candidate.input if isinstance(item, TaskSnapshot)]
             assert len(retained_tasks) == (2 if difference == "observation" else 1)
@@ -658,6 +663,7 @@ def test_scene_starts_fresh_and_reopens_actual_requests(tmp_path: Path, candidat
             )
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             assert journal.manifest.parent is None
             assert journal.manifest.headless is None
             assert journal.manifest.game_instance_id == "B"
@@ -777,6 +783,7 @@ def test_scene_continues_through_normal_combat_review_and_run_handoff(tmp_path: 
             )
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             requests = journal.requests()
             assert [item.role for item in requests] == [
                 native.DecisionOwner.COMBAT,
@@ -825,6 +832,7 @@ def test_scene_without_a_model_request_has_no_anchor(tmp_path: Path) -> None:
         assert isinstance(result, TakeoverIncomplete)
         assert result.anchor is None
         with closing(Journal.open(branch)) as journal:
+            assert result.recording_id == journal.manifest.recording_id
             assert journal.requests() == ()
         assert not restorer.actions
 
