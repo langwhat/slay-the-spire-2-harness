@@ -463,6 +463,61 @@ def test_tcp_disconnect_does_not_cancel_settlement_or_expose_unsent_route() -> N
     asyncio.run(run())
 
 
+def test_cli_external_occupied_port_fails_safely_before_contacting_mod(tmp_path: Path) -> None:
+    import socket
+    import sys
+
+    async def run() -> None:
+        requests: list[bytes] = []
+
+        async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            requests.append(await reader.readline())
+            writer.write(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        with socket.socket() as occupied, socket.socket() as mod_listener:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            mod_listener.bind(("127.0.0.1", 0))
+            mod_listener.listen()
+            mod_port = mod_listener.getsockname()[1]
+            async with await asyncio.start_server(respond, sock=mod_listener):
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "sts2_harness.cli",
+                    "start",
+                    "--set",
+                    "STS2_DRIVER=external",
+                    "--env-file",
+                    str(tmp_path / "missing"),
+                    "--tool-port",
+                    str(occupied.getsockname()[1]),
+                    "--mod-url",
+                    f"http://127.0.0.1:{mod_port}",
+                    "--output",
+                    str(tmp_path / "output"),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), 4)
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.communicate()
+            assert process.returncode == 2, stderr.decode()
+            assert stderr.decode().splitlines() == [
+                "Configuration error: The tool port could not be opened."
+            ]
+            assert stdout == b""
+            assert requests == []
+
+    asyncio.run(run())
+
+
 def test_cli_external_serves_discovery_without_game_or_model_and_stops(tmp_path: Path) -> None:
     import os
     import signal

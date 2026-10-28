@@ -1,6 +1,7 @@
 """The local HTTP boundary for the fixed external gameplay tools."""
 
 import asyncio
+import socket
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -113,55 +114,62 @@ async def run_external(
     if not 1 <= tool_port <= 65535:
         raise ConfigurationError("The tool port must be between 1 and 65535.")
     mod_port = validate_mod_url(options.mod_url)
-    diagnostics = Diagnostics(
-        None,
-        directory=options.output_directory.resolve(),
-        control_endpoint=options.mod_url.rstrip("/") + "/control",
-    )
-    diagnostics.configured(configuration, mod_port)
     try:
-        async with ExternalBackend(ModClient(options.mod_url), diagnostics=diagnostics) as backend:
-            server = LocalServer(
-                uvicorn.Config(
-                    create_app(backend),
-                    host="127.0.0.1",
-                    port=tool_port,
-                    workers=1,
-                    proxy_headers=False,
-                    access_log=False,
-                    log_config=None,
-                    timeout_graceful_shutdown=None,
-                    lifespan="off",
+        listener = socket.create_server(("127.0.0.1", tool_port))
+    except OSError:
+        raise ConfigurationError("The tool port could not be opened.") from None
+    with listener:
+        diagnostics = Diagnostics(
+            None,
+            directory=options.output_directory.resolve(),
+            control_endpoint=options.mod_url.rstrip("/") + "/control",
+        )
+        diagnostics.configured(configuration, mod_port)
+        try:
+            async with ExternalBackend(
+                ModClient(options.mod_url), diagnostics=diagnostics
+            ) as backend:
+                server = LocalServer(
+                    uvicorn.Config(
+                        create_app(backend),
+                        host="127.0.0.1",
+                        port=tool_port,
+                        workers=1,
+                        proxy_headers=False,
+                        access_log=False,
+                        log_config=None,
+                        timeout_graceful_shutdown=None,
+                        lifespan="off",
+                    )
                 )
-            )
-            monitor = asyncio.create_task(backend.maintain())
+                monitor = asyncio.create_task(backend.maintain())
 
-            async def stop() -> None:
-                await stop_requested.wait()
-                backend.stop_accepting()
-                diagnostics.lifecycle(Lifecycle.STOPPING)
-                server.should_exit = True
+                async def stop() -> None:
+                    await stop_requested.wait()
+                    backend.stop_accepting()
+                    diagnostics.lifecycle(Lifecycle.STOPPING)
+                    server.should_exit = True
 
-            stopping = asyncio.create_task(stop())
-            serving = asyncio.create_task(server.serve())
-            try:
-                done, _ = await asyncio.wait(
-                    (serving, monitor, stopping), return_when=asyncio.FIRST_COMPLETED
-                )
-                if monitor in done:
-                    await monitor
-                if serving in done:
+                stopping = asyncio.create_task(stop())
+                serving = asyncio.create_task(server.serve(sockets=[listener]))
+                try:
+                    done, _ = await asyncio.wait(
+                        (serving, monitor, stopping), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if monitor in done:
+                        await monitor
+                    if serving in done:
+                        await serving
+                finally:
+                    server.should_exit = True
+                    backend.stop_accepting()
+                    monitor.cancel()
+                    stopping.cancel()
+                    await asyncio.gather(monitor, stopping, return_exceptions=True)
                     await serving
-            finally:
-                server.should_exit = True
-                backend.stop_accepting()
-                monitor.cancel()
-                stopping.cancel()
-                await asyncio.gather(monitor, stopping, return_exceptions=True)
-                await serving
-        diagnostics.lifecycle(Lifecycle.STOPPED)
-    finally:
-        diagnostics.close()
+            diagnostics.lifecycle(Lifecycle.STOPPED)
+        finally:
+            diagnostics.close()
 
 
 class LocalServer(uvicorn.Server):
