@@ -119,22 +119,7 @@ class Agent(ABC):
                         Reason(code=ReasonCode.INVALID_ARGUMENTS, message=message), True
                     )
             elif len(calls) > 1:
-                result = self._reject(
-                    "Submit at most one tool call per response; none of these calls was executed.",
-                    observation,
-                )
-                for call in calls:
-                    if self._diagnostics is not None:
-                        self._diagnostics.tool_finished(call.name, result.outcome)
-                    context.append_tool_result(call, result)
-                if self._recovery.record_failure():
-                    raise DecisionInterrupted(
-                        Reason(
-                            code=ReasonCode.INVALID_ARGUMENTS,
-                            message="Multiple tool calls were rejected.",
-                        ),
-                        True,
-                    )
+                self._reject_multiple_calls(context, calls, observation)
             else:
                 call = calls[0]
                 result = (
@@ -147,35 +132,66 @@ class Agent(ABC):
                     return ActionDecision(
                         result, isinstance(task, ActTask) and task.handoff is not None
                     )
-                if self._diagnostics is not None:
-                    self._diagnostics.tool_finished(call.name, result.outcome)
-                context.append_tool_result(call, result)
-                pause = self._recovery.record_outcome(result)
-                if result.observation is not None:
-                    observation = result.observation
-                    if (
-                        observation.location.game_instance_id != bound.game_instance_id
-                        or observation.location.run_id != bound.run_id
-                        or observation.state.phase is native.Phase.TERMINAL
-                    ):
-                        raise GameLifetimeEnded(observation.location)
-                if pause:
-                    assert isinstance(result.outcome, (Rejected, Failed, WriteUnknown))
-                    raise DecisionInterrupted(result.outcome.reason, True)
-                if result.observation is not None:
-                    if isinstance(
-                        task, ActTask
-                    ) and observation.location != native.Location.model_validate(
-                        task.expected_route.model_dump()
-                    ):
-                        raise DecisionInterrupted(
-                            Reason(
-                                code=ReasonCode.ROLE_CHANGED,
-                                message="The action route changed; choose the current role again.",
-                            ),
-                            False,
-                        )
+                latest = self._close_query(context, task, bound, call, result)
+                if latest is not None:
+                    observation = latest
             context = await self._prepare(observation)
+
+    def _reject_multiple_calls(
+        self, context: Context, calls: tuple[ToolCall, ...], observation: native.Observation
+    ) -> None:
+        result = self._reject(
+            "Submit at most one tool call per response; none of these calls was executed.",
+            observation,
+        )
+        for call in calls:
+            if self._diagnostics is not None:
+                self._diagnostics.tool_finished(call.name, result.outcome)
+            context.append_tool_result(call, result)
+        if self._recovery.record_failure():
+            raise DecisionInterrupted(
+                Reason(
+                    code=ReasonCode.INVALID_ARGUMENTS,
+                    message="Multiple tool calls were rejected.",
+                ),
+                True,
+            )
+
+    def _close_query(
+        self,
+        context: Context,
+        task: DecisionTask,
+        bound: native.Location,
+        call: ToolCall,
+        result: QueryToolResult,
+    ) -> native.Observation | None:
+        if self._diagnostics is not None:
+            self._diagnostics.tool_finished(call.name, result.outcome)
+        context.append_tool_result(call, result)
+        pause = self._recovery.record_outcome(result)
+        observation = result.observation
+        if observation is not None and (
+            observation.location.game_instance_id != bound.game_instance_id
+            or observation.location.run_id != bound.run_id
+            or observation.state.phase is native.Phase.TERMINAL
+        ):
+            raise GameLifetimeEnded(observation.location)
+        if pause:
+            assert isinstance(result.outcome, (Rejected, Failed, WriteUnknown))
+            raise DecisionInterrupted(result.outcome.reason, True)
+        if observation is None:
+            return None
+        if isinstance(task, ActTask) and observation.location != native.Location.model_validate(
+            task.expected_route.model_dump()
+        ):
+            raise DecisionInterrupted(
+                Reason(
+                    code=ReasonCode.ROLE_CHANGED,
+                    message="The action route changed; choose the current role again.",
+                ),
+                False,
+            )
+        return observation
 
     async def accept(self, outcome: ActionToolResult) -> None:
         if self._pending_call is None or self._context is None:
