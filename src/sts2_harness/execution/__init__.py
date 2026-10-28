@@ -57,6 +57,7 @@ class Executed:
     outcome: ActionToolResult
     pause_required: bool = False
     handoff_processed: bool = False
+    ended: RunEnded | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +210,9 @@ class Execution:
             )
             return Rejected(problem, observation, pause_required)
         assert isinstance(task, ActTask)
-        result, final_read_failed = await self._execute_plan(decision.proposal, task.expected_route)
+        result, final_read_failed, ended = await self._execute_plan(
+            decision.proposal, task.expected_route
+        )
         await source.accept(result)
         pause_required = False
         if self._recovery is not None:
@@ -218,18 +221,21 @@ class Execution:
                 if final_read_failed
                 else self._recovery.record_outcome(result)
             )
-        return Executed(decision.proposal, result, pause_required, decision.handoff_processed)
+        return Executed(
+            decision.proposal, result, pause_required, decision.handoff_processed, ended
+        )
 
     async def _execute_plan(
         self,
         proposal: ActionProposal,
         route: native.RouteKey,
-    ) -> tuple[ActionToolResult, bool]:
+    ) -> tuple[ActionToolResult, bool, RunEnded | None]:
         steps = tuple(_native_step(step) for step in proposal.steps)
         confirmed = 0
         status = BatchStatus.INTERRUPTED
         reason: ReasonCode | None = None
         uncertain_step: int | None = None
+        ended: RunEnded | None = None
         if self._diagnostics is not None:
             self._diagnostics.emit(BatchSubmitted(planned=len(steps)))
         try:
@@ -241,6 +247,11 @@ class Execution:
                 if isinstance(receipt, native.ReceiptCompleted):
                     confirmed += 1
                     uncertain_step = None
+                    if receipt.boundary is native.InputReadiness.TERMINAL:
+                        outcome = ActionCompleted(completed_steps=confirmed)
+                        status = BatchStatus.COMPLETED
+                        ended = RunEnded(RunEndReason.TERMINAL, None)
+                        break
                     continue
                 if receipt is None or isinstance(receipt, native.ReceiptUnknown):
                     outcome = ActionUnknown(
@@ -294,12 +305,16 @@ class Execution:
             final_read_failed = False
             try:
                 final_observation = await self.observe()
-            except GameLifetimeEnded:
+            except GameLifetimeEnded as error:
                 final_observation = None
+                if ended is not None:
+                    ended = RunEnded(self.end_reason(error.location), None)
             except (ClientUnavailable, GameReadError):
                 final_observation = None
                 final_read_failed = True
-            return ActionToolResult(outcome, final_observation), final_read_failed
+            if ended is not None and final_observation is not None:
+                ended = self.run_ended(final_observation) or ended
+            return ActionToolResult(outcome, final_observation), final_read_failed, ended
         finally:
             if self._diagnostics is not None:
                 self._diagnostics.emit(

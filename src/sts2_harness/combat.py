@@ -184,6 +184,8 @@ class CombatTask:
                 result = await self._execution.run_unit(
                     self._role, ActTask(route), observed=self._observed
                 )
+                if isinstance(result, Executed) and result.ended is not None:
+                    return result.ended
                 observation = (
                     result.outcome.observation
                     if isinstance(result, Executed)

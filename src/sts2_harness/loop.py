@@ -133,6 +133,8 @@ class DefaultFlow:
                     observation = None
                     continue
                 if isinstance(outcome, Executed):
+                    if outcome.ended is not None:
+                        return outcome.ended
                     if outcome.handoff_processed:
                         self._pending = None
                     observation = outcome.outcome.observation
