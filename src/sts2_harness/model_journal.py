@@ -60,6 +60,17 @@ class _Attempts:
     def started(self, index: int) -> None:
         self._attempt = ModelAttempt(index=index)
         self._journal.model_attempt(self._sequence, self._attempt)
+        if self._last_failure is not None:
+            self._journal.diagnostics.emit(
+                Event(
+                    event=EventKind.MODEL_RETRY,
+                    sequence=self._sequence,
+                    role=self._role,
+                    attempt=self._attempt.index,
+                    error=self._last_failure.value,
+                    failures=self._failures,
+                )
+            )
 
     def encoded(self, digest: str) -> None:
         self._journal.diagnostics.emit(EncodingMetadata(sequence=self._sequence, digest=digest))
@@ -75,22 +86,12 @@ class _Attempts:
         self._journal.model_attempt(self._sequence, self._attempt)
         self._failures += 1
         self._last_failure = reason
-        self._journal.diagnostics.emit(
-            Event(
-                event=EventKind.MODEL_RETRY,
-                sequence=self._sequence,
-                role=self._role,
-                attempt=self._attempt.index,
-                error=reason.value,
-                failures=self._failures,
-            )
-        )
 
     def finished(self, failure: FailureKind | None = None) -> None:
         if self._failures or failure is not None:
             self._journal.diagnostics.emit(
                 Event(
-                    event=EventKind.MODEL_EXHAUSTED if failure else EventKind.MODEL_RECOVERED,
+                    event=EventKind.MODEL_FAILED if failure else EventKind.MODEL_RECOVERED,
                     sequence=self._sequence,
                     role=self._role,
                     attempt=self._attempt.index,

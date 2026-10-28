@@ -53,7 +53,7 @@ class EventKind(StrEnum):
     MODEL_REQUEST_COMPLETED = "model_request_completed"
     MODEL_RETRY = "model_retry"
     MODEL_RECOVERED = "model_recovered"
-    MODEL_EXHAUSTED = "model_exhausted"
+    MODEL_FAILED = "model_failed"
     LIFECYCLE_CHANGED = "lifecycle_changed"
     CONTROL_CHANGED = "control_changed"
     TOOL_RECOVERY_EXHAUSTED = "tool_recovery_exhausted"
@@ -378,7 +378,7 @@ class Diagnostics:
         model_event = event.event in (
             EventKind.MODEL_RETRY,
             EventKind.MODEL_RECOVERED,
-            EventKind.MODEL_EXHAUSTED,
+            EventKind.MODEL_FAILED,
         )
         discovery_event = event.event in (EventKind.DISCOVERY_RETRY, EventKind.DISCOVERY_RECOVERED)
         channel = (
@@ -398,7 +398,7 @@ class Diagnostics:
                 EventKind.NATIVE_RECOVERED,
                 EventKind.NATIVE_FAILED,
                 EventKind.MODEL_RECOVERED,
-                EventKind.MODEL_EXHAUSTED,
+                EventKind.MODEL_FAILED,
                 EventKind.DISCOVERY_RECOVERED,
             )
             if previous is not None:
@@ -441,7 +441,7 @@ class Diagnostics:
             or event.result in ("rejected", "paused", "stopped")
         )
         severe = not ordinary and (
-            event.event in (EventKind.MODEL_EXHAUSTED, EventKind.TOOL_RECOVERY_EXHAUSTED)
+            event.event in (EventKind.MODEL_FAILED, EventKind.TOOL_RECOVERY_EXHAUSTED)
             or isinstance(event, (ResultEvent, BatchSettled))
             and event.reason is ReasonCode.CONTROL_UNAVAILABLE
             or isinstance(event, BattleFinished)
@@ -502,7 +502,7 @@ class Diagnostics:
                 EventKind.MODEL_REQUEST_COMPLETED,
                 EventKind.MODEL_RETRY,
                 EventKind.MODEL_RECOVERED,
-                EventKind.MODEL_EXHAUSTED,
+                EventKind.MODEL_FAILED,
             )
             else "game_control",
             suppressed=suppressed,

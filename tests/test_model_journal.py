@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 
 import httpx2 as httpx
@@ -16,6 +17,7 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent, CombatTask
 from sts2_harness.decisions import CombatHandoff
+from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution import Execution
 from sts2_harness.game import LiveGame
 from sts2_harness.journal import Journal, Manifest, Record, RecordedGame
@@ -42,6 +44,75 @@ from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedP
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.results import ActionUnknown
 from sts2_harness.tools import ToolCatalog
+
+
+@pytest.mark.parametrize(
+    ("statuses", "retries", "expected"),
+    [
+        ((401,), 2, ("model_failed",)),
+        ((503,), 0, ("model_failed",)),
+        ((503, 503), 1, ("model_retry", "model_failed")),
+        ((503, 200), 1, ("model_retry", "model_recovered")),
+    ],
+)
+def test_model_diagnostics_describe_actual_retries_and_terminal_failures(
+    tmp_path: Path, statuses: tuple[int, ...], retries: int, expected: tuple[str, ...]
+) -> None:
+    console = StringIO()
+    diagnostics = Diagnostics("attempts", console=console)
+    journal = Journal.create(
+        tmp_path / "archive.sqlite",
+        Manifest(
+            recording_id="attempts", core_version="test", game_instance_id="game", run_id="run"
+        ),
+        diagnostics=diagnostics,
+    )
+    requests = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        status = statuses[requests]
+        requests += 1
+        if status == 200:
+            return httpx.Response(
+                200, content=completed(), headers={"Content-Type": "text/event-stream"}
+            )
+        return httpx.Response(status, json={"error": {"code": "synthetic"}})
+
+    async def sleep(_: float) -> None:
+        return None
+
+    async def scenario() -> None:
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=retries),
+            transport=httpx.MockTransport(provider),
+            sleep=sleep,
+        ) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.RUN, stream="run:1")
+            if statuses[-1] == 200:
+                await model.complete((), ())
+            else:
+                with pytest.raises(ModelUnavailable):
+                    await model.complete((), ())
+        journal.close()
+        diagnostics.close()
+
+    asyncio.run(scenario())
+    events = [json.loads(line) for line in console.getvalue().splitlines()]
+    assert (
+        tuple(
+            event["event"]
+            for event in events
+            if event["event"] not in ("model_request_started", "model_request_completed")
+        )
+        == expected
+    )
+    assert requests == len(statuses)
+    for event in events:
+        if event["event"] == "model_retry":
+            assert event["attempt"] == 2
+        if event["event"] == "model_failed":
+            assert event["level"] == "ERROR"
 
 
 def test_combat_requests_keep_retry_query_and_native_continuation(
