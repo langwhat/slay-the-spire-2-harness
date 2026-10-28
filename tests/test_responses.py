@@ -97,6 +97,33 @@ def completed() -> bytes:
     ).encode()
 
 
+@pytest.mark.parametrize("kind", ["message", "function_call"])
+@pytest.mark.parametrize("status", ["in_progress", "incomplete"])
+def test_completed_response_rejects_unfinished_consumable_items(
+    tmp_path: Path, kind: str, status: str
+) -> None:
+    payload = json.loads(completed().decode().removeprefix("data: "))
+    for item in payload["response"]["output"]:
+        if item["type"] == kind:
+            item["status"] = status
+    content = ("data: " + json.dumps(payload) + "\n\n").encode()
+    requests = 0
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(200, content=content, headers={"Content-Type": "text/event-stream"})
+
+    async def scenario() -> None:
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(provider)) as llm:
+            with pytest.raises(ModelUnavailable) as failed:
+                await llm.complete((), ())
+            assert failed.value.reason is FailureKind.PROTOCOL
+
+    asyncio.run(scenario())
+    assert requests == 1
+
+
 def configuration(tmp_path: Path, **overrides: str) -> ModelConfiguration:
     config = load_configuration(
         tmp_path / "absent",

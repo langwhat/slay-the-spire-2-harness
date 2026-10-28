@@ -8,7 +8,9 @@ import httpx2 as httpx
 from openai import Omit, omit
 from openai.types.responses import (
     FunctionToolParam,
+    ResponseFunctionToolCall,
     ResponseOutputItem,
+    ResponseOutputMessage,
     ToolParam,
 )
 from openai.types.responses.service_tier import ServiceTier
@@ -235,6 +237,12 @@ class ResponsesAdapter:
         raise ModelUnavailable(FailureKind.INCOMPLETE_EOF)
 
     def _reply(self, completed: _CompletedReply) -> ModelReply:
+        if any(
+            isinstance(item, (ResponseOutputMessage, ResponseFunctionToolCall))
+            and item.status in ("in_progress", "incomplete")
+            for item in completed.output
+        ):
+            raise ModelUnavailable(FailureKind.PROTOCOL)
         usage = completed.usage or _WireUsage()
         details = usage.input_tokens_details
         return ModelReply(
