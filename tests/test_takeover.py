@@ -3,6 +3,7 @@ import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
+from typing import Literal
 
 import httpx2 as httpx
 import pytest
@@ -541,10 +542,61 @@ def test_refusal_never_releases_live_dependencies(tmp_path: Path, failure: str) 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("cancel", [0, 1, 2])
+def test_cancellation_during_load_survives_restorer_cleanup_failure(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        case = await source_case(tmp_path / "source.sqlite", start=False)
+        loading = asyncio.Event()
+        blocked = asyncio.Event()
+
+        class LoadingRestorer(FakeRestorer):
+            @asynccontextmanager
+            async def loaded(self, case: Case) -> AsyncGenerator[LoadedTarget]:
+                async with super().loaded(case) as loaded:
+                    try:
+                        loading.set()
+                        await blocked.wait()
+                        yield loaded
+                    finally:
+                        raise OSError("Synthetic load cleanup failure")
+
+        restorer = LoadingRestorer(tmp_path, case)
+        async with Llm(
+            configuration(tmp_path),
+            transport=httpx.MockTransport(
+                lambda _: pytest.fail("The live model was not released.")
+            ),
+        ) as model:
+            task = asyncio.create_task(
+                take_over(
+                    case,
+                    restorer,
+                    tmp_path / "branch.sqlite",
+                    model,
+                    PackagedPrompts(),
+                    FileDocuments(),
+                    SampleBudget(5, 30),
+                    stop_requested=lambda: False,
+                )
+            )
+            await loading.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert restorer.closed
+        assert not restorer.started
+        assert not restorer.actions
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("cancel", "failure"),
+    [(0, None), (1, None), (2, None), (1, "feedback"), (1, "cleanup")],
+)
 def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
     tmp_path: Path,
     cancel: int,
+    failure: Literal["feedback", "cleanup"] | None,
 ) -> None:
     async def scenario() -> None:
         case = await source_case(tmp_path / "source.sqlite", start=False)
@@ -559,6 +611,8 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
                     submitted.set()
                     await confirm.wait()
                     assert not self.closed
+                    if failure == "feedback" and len(self.actions) == 2:
+                        raise OSError("Synthetic feedback failure")
                     return response
                 return self.respond(request)
 
@@ -568,15 +622,19 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
                     async with ModClient(
                         "http://B", transport=httpx.MockTransport(self.pending)
                     ) as client:
-                        yield LoadedTarget(
-                            loaded.game,
-                            client,
-                            loaded.checkpoints,
-                            loaded.read,
-                            loaded.refs,
-                            loaded.differences,
-                            loaded.correspondence,
-                        )
+                        try:
+                            yield LoadedTarget(
+                                loaded.game,
+                                client,
+                                loaded.checkpoints,
+                                loaded.read,
+                                loaded.refs,
+                                loaded.differences,
+                                loaded.correspondence,
+                            )
+                        finally:
+                            if failure == "cleanup":
+                                raise OSError("Synthetic cleanup failure")
 
         restorer = PendingRestorer(tmp_path, case)
         async with Llm(
@@ -636,7 +694,7 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
                 for record in journal.operations(start=case.source.anchor.model_sequence)
                 if isinstance(record.reply.outcome if record.reply else None, Settlement)
             ]
-            assert len(settled) == 2
+            assert len(settled) == (1 if failure == "feedback" else 2)
             assert all(record.reply is not None for record in settled)
 
     asyncio.run(scenario())

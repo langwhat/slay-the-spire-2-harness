@@ -244,6 +244,10 @@ async def take_over(
     task: asyncio.Task[SampleResult] | None = None
     released = False
     operator_stopped = False
+    caller_cancellation: asyncio.CancelledError | None = None
+    caller = asyncio.current_task()
+    assert caller is not None
+    initial_cancellations = caller.cancelling()
     try:
         with ExitStack() as resources:
             plan = plan_admission(
@@ -474,7 +478,8 @@ async def take_over(
                     release.set()
                     try:
                         sample = await asyncio.shield(task)
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as error:
+                        caller_cancellation = error
                         operator_stopped = True
                         with suppress(SessionStopped):
                             while not task.done():
@@ -542,3 +547,9 @@ async def take_over(
         return TakeoverIncomplete(
             branch, anchor, NativeUncertain(stage, IncompleteCause.STARTUP, str(error))
         )
+    finally:
+        # Cleanup failures must not turn a caller cancellation into a normal result.
+        if caller_cancellation is not None:
+            raise caller_cancellation
+        if caller.cancelling() > initial_cancellations:
+            raise asyncio.CancelledError
