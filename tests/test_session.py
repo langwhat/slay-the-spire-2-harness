@@ -2,7 +2,9 @@ import asyncio
 from pathlib import Path
 
 import httpx2 as httpx
-from test_lifecycle import Campaign
+import pytest
+from test_combat import reply
+from test_lifecycle import Campaign, terminal
 from test_responses import configuration
 
 from sts2_harness.client import ModClient
@@ -14,6 +16,69 @@ from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
+
+
+@pytest.mark.parametrize("change", ["terminal", "run", "instance"])
+@pytest.mark.parametrize("mode", ["replace", "edit"])
+def test_session_preserves_notes_when_query_observes_ended_lifetime(
+    tmp_path: Path, change: str, mode: str
+) -> None:
+    campaign = Campaign()
+    arguments = (
+        '{"mode":"replace","text":"Changed."}'
+        if mode == "replace"
+        else '{"mode":"edit","old_text":"Original.","new_text":"Changed."}'
+    )
+    campaign.responses = iter([reply(("notes", "run_notes", arguments))])
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        opening = campaign.current
+        campaign.states[0] = (
+            terminal(opening)
+            if change == "terminal"
+            else opening.model_copy(
+                update={
+                    "location": opening.location.model_copy(
+                        update={"run_id": "other"}
+                        if change == "run"
+                        else {"game_instance_id": "other"}
+                    ),
+                    "stamp": opening.stamp.model_copy(
+                        update={"game_instance_id": "other"} if change == "instance" else {}
+                    ),
+                }
+            )
+        )
+        return campaign.model(request)
+
+    async def scenario() -> None:
+        async with (
+            ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)) as client,
+            Llm(configuration(tmp_path), transport=httpx.MockTransport(provider)) as model,
+        ):
+            game = LiveGame(client, namespace="notes", game_instance_id="game", run_id="run")
+            dependencies = SessionDependencies(
+                game, PackagedPrompts(), FileDocuments(), lambda role, stream: model
+            )
+            async with RunSession(
+                Manifest(
+                    recording_id="notes",
+                    core_version="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    initial_notes="Original.",
+                ),
+                dependencies,
+            ) as session:
+                ended = await session.run()
+                assert ended.reason is (
+                    RunEndReason.TERMINAL if change == "terminal" else RunEndReason.RUN_CHANGED
+                )
+                assert session.notes.read() == "Original."
+        assert len(campaign.inputs) == 1
+        assert campaign.actions == []
+
+    asyncio.run(scenario())
 
 
 def test_session_runs_injected_dependencies_without_closing_them(tmp_path: Path) -> None:

@@ -13,13 +13,14 @@ from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.game import GameIO, RunEnded
+from sts2_harness.game import GameIO, GameLifetimeEnded, RunEnded
 from sts2_harness.journal import Manifest
 from sts2_harness.knowledge import Documents, DocumentView
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.loop import CombatFactory, DefaultFlow, RunFlow
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PromptReader
+from sts2_harness.results import QueryToolResult
 from sts2_harness.run import RunAgent, RunRole
 from sts2_harness.tools import ToolCatalog
 
@@ -135,9 +136,17 @@ class RunSession:
             inspect=self.execution.inspect,
             catalog=self.execution.catalog,
             notes=self.notes if role is native.DecisionOwner.RUN else None,
+            notes_write_guard=self._notes_write_guard,
             skills=self._dependencies.documents,
             supplements=self._dependencies.documents,
         )
+
+    async def _notes_write_guard(
+        self, observation: native.Observation | None
+    ) -> QueryToolResult | None:
+        if observation is not None and self.execution.run_ended(observation) is not None:
+            raise GameLifetimeEnded(observation.location)
+        return None
 
     def _run_client(self) -> ModelClient:
         self._run_stream += 1
