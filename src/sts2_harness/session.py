@@ -1,6 +1,6 @@
 """Own one run's software state using injected logical dependencies."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
@@ -48,9 +48,6 @@ class RunSession:
         manifest: Manifest,
         dependencies: SessionDependencies,
         *,
-        entry_documents_enabled: bool = False,
-        act_guidance: Mapping[int, tuple[str, ...]] | None = None,
-        battle_guidance: tuple[str, ...] = (),
         run_factory: RunFactory | None = None,
         combat_factory: RoleFactory | None = None,
         flow_factory: FlowFactory | None = None,
@@ -62,9 +59,6 @@ class RunSession:
         self.recovery = ToolRecoveryBudget(on_exhausted=self._recovery_exhausted)
         self._dependencies = dependencies
         self._manifest = manifest
-        self._entry_documents_enabled = entry_documents_enabled
-        self._act_guidance = act_guidance
-        self._battle_guidance = battle_guidance
         self._run_factory = run_factory
         self._combat_factory = combat_factory
         self._flow_factory = flow_factory
@@ -155,7 +149,7 @@ class RunSession:
     def _materials(
         self, role: native.DecisionOwner, opening: native.Observation | None = None
     ) -> MaterialReader | None:
-        if not self._entry_documents_enabled:
+        if not self._manifest.materials.entry_documents_enabled:
             return None
 
         async def read(observation: native.Observation) -> tuple[DocumentView, ...]:
@@ -164,11 +158,11 @@ class RunSession:
                 or observation.location.node_id != opening.location.node_id
             ):
                 observation = opening
-            configured = self._battle_guidance
+            configured = self._manifest.materials.battle_guidance
             if role is native.DecisionOwner.RUN:
                 configured = (
-                    self._act_guidance.get(observation.state.progress.act, ())
-                    if self._act_guidance is not None and observation.state.progress.act is not None
+                    self._manifest.materials.act_guidance.get(observation.state.progress.act, ())
+                    if observation.state.progress.act is not None
                     else ()
                 )
             return await entry_materials(

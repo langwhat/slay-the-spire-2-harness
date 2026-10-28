@@ -30,6 +30,7 @@ from sts2_harness.journal import (
     HeadlessInitialConditions,
     Manifest,
     NativeStartReceipt,
+    SessionMaterials,
     StandardCharacter,
 )
 from sts2_harness.live_session import live_session
@@ -578,6 +579,9 @@ async def run_headless(
             run_id = instance.opening.location.run_id
             assert run_id is not None
             manifest = Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id=uuid4().hex,
                 core_version="0.1.0",
                 game_instance_id=instance.opening.location.game_instance_id,

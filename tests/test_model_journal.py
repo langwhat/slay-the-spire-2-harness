@@ -20,7 +20,7 @@ from sts2_harness.decisions import CombatHandoff
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution import Execution
 from sts2_harness.game import LiveGame
-from sts2_harness.journal import Journal, Manifest, Record, RecordedGame
+from sts2_harness.journal import Journal, Manifest, Record, RecordedGame, SessionMaterials
 from sts2_harness.journal_models import (
     AssistantSnapshot,
     DocumentData,
@@ -63,7 +63,13 @@ def test_model_diagnostics_describe_actual_retries_and_terminal_failures(
     journal = Journal.create(
         tmp_path / "archive.sqlite",
         Manifest(
-            recording_id="attempts", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="attempts",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         ),
         diagnostics=diagnostics,
     )
@@ -137,6 +143,9 @@ def test_combat_requests_keep_retry_query_and_native_continuation(
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="recording",
                 core_version="test",
                 game_instance_id=battle.opening.location.game_instance_id,
@@ -340,6 +349,9 @@ def test_recording_recovers_from_a_locked_archive_without_using_a_missing_input_
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="recovery",
                 core_version="test",
                 game_instance_id="game",
@@ -398,6 +410,9 @@ def test_native_reply_is_durable_before_a_failing_stream_exit(tmp_path: Path) ->
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="closing",
                 core_version="test",
                 game_instance_id="game",
@@ -434,6 +449,9 @@ def test_material_failures_and_outer_lookup_reads_remain_distinct_evidence(tmp_p
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="materials",
                 core_version="test",
                 game_instance_id="game",
@@ -510,7 +528,13 @@ def test_indexed_model_and_material_summaries_keep_historical_input_and_incomple
     journal = Journal.create(
         tmp_path / "selection.sqlite",
         Manifest(
-            recording_id="selection", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="selection",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         ),
     )
     observation = native.Observation.model_validate_json(RUN)
@@ -608,7 +632,15 @@ def test_summary_storage_failure_preserves_gap_and_allows_later_model_recording(
 
     journal = Journal.create(
         tmp_path / "index-io.sqlite",
-        Manifest(recording_id="io", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="io",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     messages = archive_input((TextMessage(TextRole.USER, "Keep playing after archive failure."),))
     snapshot = ConfigurationSnapshot.of(configuration(tmp_path))
@@ -667,7 +699,13 @@ def test_summary_rejects_disagreement_with_authoritative_metadata(
     journal = Journal.create(
         tmp_path / "metadata.sqlite",
         Manifest(
-            recording_id="metadata", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="metadata",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         ),
     )
 

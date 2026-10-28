@@ -12,7 +12,7 @@ from test_responses import configuration
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
-from sts2_harness.journal import Journal, Manifest
+from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 
@@ -175,6 +175,9 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="auto",
                 core_version="test",
                 game_instance_id="game",
@@ -302,6 +305,9 @@ def test_mechanical_rules_use_verified_languages_and_keep_event_choices_for_stra
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="rules",
                 core_version="test",
                 game_instance_id="game",
@@ -431,6 +437,9 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="force",
                 core_version="test",
                 game_instance_id="game",
@@ -522,6 +531,9 @@ def test_unknown_language_uses_strategy_and_shop_stays_with_strategy_after_resum
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="language",
                 core_version="test",
                 game_instance_id="game",
@@ -601,6 +613,9 @@ def test_auto_preserves_handoff_before_next_combat_and_act_rebuild(
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="handoff",
                 core_version="test",
                 game_instance_id="game",
@@ -722,6 +737,9 @@ def test_rewards_stay_with_strategy_and_pure_dialogue_advances_from_changed_nati
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="dialogue",
                 core_version="test",
                 game_instance_id="game",

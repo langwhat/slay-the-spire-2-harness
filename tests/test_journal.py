@@ -16,7 +16,14 @@ from sts2_harness.client import models as native
 from sts2_harness.decisions import ActionDecision, ActionKind, ActionProposal, ActionStep, ActTask
 from sts2_harness.execution import Executed, Execution, ToolRecoveryBudget
 from sts2_harness.game import LiveGame, Observe, Settlement
-from sts2_harness.journal import Journal, Manifest, Record, RecordedGame, ResultKind
+from sts2_harness.journal import (
+    Journal,
+    Manifest,
+    Record,
+    RecordedGame,
+    ResultKind,
+    SessionMaterials,
+)
 from sts2_harness.results import ActionUnknown, Reason, ReasonCode
 
 
@@ -83,7 +90,13 @@ def test_branch_readers_join_the_parent_prefix_with_local_evidence(tmp_path: Pat
     source = Journal.create(
         tmp_path / "parent.sqlite",
         Manifest(
-            recording_id="parent", core_version="source", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="parent",
+            core_version="source",
+            game_instance_id="game",
+            run_id="run",
         ),
     )
     settle(source, "parent:1")
@@ -188,7 +201,15 @@ def test_parent_hash_is_checked_before_following_a_corrupt_parent_chain(tmp_path
     path = tmp_path / "self-parent.sqlite"
     journal = Journal.create(
         path,
-        Manifest(recording_id="branch", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="branch",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     journal.close()
     changed = journal.manifest.model_copy(
@@ -269,7 +290,13 @@ def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_p
             )
 
         manifest = Manifest(
-            recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="session",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         )
         journal = Journal.create(tmp_path / "archive.sqlite", manifest)
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
@@ -388,7 +415,13 @@ def test_repeated_observations_deduplicate_without_losing_sequences(tmp_path: Pa
         journal = Journal.create(
             path,
             Manifest(
-                recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="session",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
@@ -443,7 +476,13 @@ def test_archive_io_gap_does_not_repeat_game_action_and_persists_after_recovery(
         journal = Journal.create(
             directory / "archive.sqlite",
             Manifest(
-                recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="session",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
             diagnostics=diagnostics,
         )
@@ -531,6 +570,9 @@ def test_offline_evidence_cli_filters_expands_and_exports_recorded_facts(tmp_pat
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="session",
                 core_version="test",
                 game_instance_id="game",
@@ -598,7 +640,13 @@ def test_diagnostics_redact_limit_repeats_and_rotate_without_touching_evidence(
     journal = Journal.create(
         tmp_path / "archive.sqlite",
         Manifest(
-            recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="session",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         ),
     )
     before = (tmp_path / "archive.sqlite").read_bytes()
@@ -671,6 +719,9 @@ def test_same_initial_conditions_and_interactions_have_identical_correlations(
         journal = Journal.create(
             path,
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="same-session",
                 core_version="test",
                 game_instance_id="game",
@@ -734,7 +785,13 @@ def test_native_control_reply_is_durable_while_start_is_still_waiting(tmp_path: 
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
-                recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="session",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
@@ -778,7 +835,13 @@ def test_native_audit_rejects_missing_or_overlapping_record_owner(tmp_path: Path
     journal = Journal.create(
         tmp_path / "archive.sqlite",
         Manifest(
-            recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="session",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         ),
     )
     with pytest.raises(ArchiveError, match="already exists"):
@@ -850,6 +913,9 @@ def test_initial_archive_disk_failure_keeps_gameplay_and_recovers_recording(tmp_
             journal = Journal.create(
                 directory / "archive.sqlite",
                 Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                    ),
                     recording_id="session",
                     core_version="test",
                     game_instance_id="game",
@@ -945,7 +1011,13 @@ def test_knowledge_catalog_and_current_state_are_separate_recorded_reads(tmp_pat
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
-                recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="session",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
@@ -1018,7 +1090,13 @@ def test_native_query_failures_keep_typed_diagnostic_cause(
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
-                recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="session",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
             diagnostics=Diagnostics("session", console=console),
         )
@@ -1135,7 +1213,13 @@ def test_pause_retry_diagnostics_and_durable_children_without_reply_history(tmp_
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
-                recording_id="session", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="session",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
             diagnostics=Diagnostics("session", console=console),
         )
@@ -1240,7 +1324,13 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
         archive = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
-                recording_id="polling", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="polling",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
@@ -1274,7 +1364,7 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8])
 def test_archive_open_rejects_old_versions_and_reads_current_version(
     tmp_path: Path, version: int
 ) -> None:
@@ -1286,7 +1376,15 @@ def test_archive_open_rejects_old_versions_and_reads_current_version(
     path = tmp_path / "archive.sqlite"
     journal = Journal.create(
         path,
-        Manifest(recording_id="schema", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="schema",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     journal.close()
     with sqlite3.connect(path) as connection:
@@ -1296,10 +1394,10 @@ def test_archive_open_rejects_old_versions_and_reads_current_version(
     with pytest.raises(ArchiveError, match="schema is unsupported"):
         Journal.open(path)
     with sqlite3.connect(path) as connection:
-        manifest["schema_version"] = 8
+        manifest["schema_version"] = 9
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     reopened = Journal.open(path)
-    assert reopened.manifest.schema_version == 8
+    assert reopened.manifest.schema_version == 9
     assert reopened.operations() == ()
     reopened.close()
 
@@ -1330,7 +1428,13 @@ def test_stopping_start_wait_finishes_the_recorded_operation(tmp_path: Path) -> 
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
-                recording_id="stop", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="stop",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
         )
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
@@ -1412,7 +1516,13 @@ def test_evidence_filters_fixed_window_and_latest_matching_summaries(tmp_path: P
     journal = Journal.create(
         tmp_path / "selection.sqlite",
         Manifest(
-            recording_id="selection", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="selection",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         ),
     )
     original = native.Observation.model_validate_json(RUN)
@@ -1454,7 +1564,15 @@ def test_summary_queries_do_not_expand_bodies_and_detect_hidden_index_damage(
 
     journal = Journal.create(
         tmp_path / "damage.sqlite",
-        Manifest(recording_id="damage", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="damage",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     observation = native.Observation.model_validate_json(RUN)
     journal.begin(Observe())
@@ -1484,7 +1602,15 @@ def test_error_filter_excludes_normal_pause_stop_and_rejected_receipt(tmp_path: 
 
     journal = Journal.create(
         tmp_path / "normal.sqlite",
-        Manifest(recording_id="normal", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="normal",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     journal.begin(Admit())
     journal.finish(GameReply(outcome=Admitted(allowed=False)))
@@ -1530,7 +1656,15 @@ def test_settlement_errors_reopen_with_request_role_and_node(
 
     journal = Journal.create(
         tmp_path / "settlement.sqlite",
-        Manifest(recording_id="settle", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="settle",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     route = native.RouteKey(
         game_instance_id="game", run_id="run", node_id="node", owner=native.DecisionOwner.RUN
@@ -1603,7 +1737,15 @@ def test_settlement_summary_discards_explicit_observation_route_conflicts(tmp_pa
 
     journal = Journal.create(
         tmp_path / "conflicts.sqlite",
-        Manifest(recording_id="settle", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="settle",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     observation = native.Observation.model_validate_json(RUN)
     assert isinstance(observation.state, native.RunState)
@@ -1688,7 +1830,15 @@ def test_settlement_summary_discards_explicit_observation_route_conflicts(tmp_pa
 def test_short_read_transaction_preserves_the_contending_write(tmp_path: Path) -> None:
     journal = Journal.create(
         tmp_path / "archive.sqlite",
-        Manifest(recording_id="reader", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="reader",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     started = Event()
     written = Future[None]()
@@ -1733,7 +1883,15 @@ def test_short_read_transaction_preserves_the_contending_write(tmp_path: Path) -
 def test_unreleased_read_transaction_marks_a_gap_and_recovers(tmp_path: Path) -> None:
     journal = Journal.create(
         tmp_path / "archive.sqlite",
-        Manifest(recording_id="reader", core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="reader",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     journal.begin(Observe())
     journal.end()

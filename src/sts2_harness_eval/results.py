@@ -61,13 +61,23 @@ class InputDifference:
 
 
 @dataclass(frozen=True, slots=True)
+class MaterialDifference:
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class OrderDifference:
     recorded: DependencyKind | OperationKind | None
     requested: DependencyKind | OperationKind
 
 
 type ReplayRejectionDetail = (
-    ArchiveUnreadable | MissingTarget | Unsupported | InputDifference | OrderDifference
+    ArchiveUnreadable
+    | MissingTarget
+    | Unsupported
+    | InputDifference
+    | OrderDifference
+    | MaterialDifference
 )
 
 

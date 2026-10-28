@@ -1,7 +1,7 @@
 """Own live clients and recording decorators outside the run's software state."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
@@ -33,8 +33,6 @@ async def live_session(
     *,
     model: Llm | None = None,
     documents: Documents | None = None,
-    act_guidance: Mapping[int, tuple[str, ...]] | None = None,
-    battle_guidance: tuple[str, ...] = (),
     run_factory: RunFactory | None = None,
     combat_factory: RoleFactory | None = None,
     flow_factory: FlowFactory | None = None,
@@ -44,7 +42,11 @@ async def live_session(
 ) -> AsyncGenerator[RunSession]:
     if model is None and (run_factory is None or combat_factory is None):
         raise ValueError("Default model roles require a model resource.")
-    if documents is None and (act_guidance or battle_guidance):
+    if documents is None and (
+        manifest.materials.entry_documents_enabled
+        or manifest.materials.act_guidance
+        or manifest.materials.battle_guidance
+    ):
         raise ValueError("Configured guidance requires a document provider.")
     async with AsyncExitStack() as resources:
         await resources.enter_async_context(client)
@@ -81,9 +83,6 @@ async def live_session(
         async with RunSession(
             manifest,
             dependencies,
-            entry_documents_enabled=documents is not None,
-            act_guidance=act_guidance,
-            battle_guidance=battle_guidance,
             run_factory=run_factory,
             combat_factory=combat_factory,
             flow_factory=flow_factory,

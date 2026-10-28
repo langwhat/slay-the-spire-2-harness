@@ -6,6 +6,7 @@ import pytest
 
 from sts2_harness.diagnostics import Diagnostics, Event, EventKind
 from sts2_harness.game import Endpoint
+from sts2_harness.journal import SessionMaterials
 
 
 @pytest.mark.parametrize(
@@ -141,7 +142,13 @@ def test_failed_destinations_disable_themselves_without_blocking_evidence(tmp_pa
     journal = Journal.create(
         tmp_path / "evidence.sqlite",
         Manifest(
-            recording_id="recording", core_version="test", game_instance_id="game", run_id="run"
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="recording",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
         ),
         diagnostics=diagnostics,
     )
@@ -174,7 +181,13 @@ def test_native_failures_finish_each_logical_operation_without_losing_attempts(
         journal = Journal.create(
             tmp_path / "evidence.sqlite",
             Manifest(
-                recording_id="recording", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="recording",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
             diagnostics=diagnostics,
         )
@@ -406,7 +419,13 @@ def test_native_recovery_totals_survive_a_second_failure_in_the_same_operation(
         journal = Journal.create(
             tmp_path / "evidence.sqlite",
             Manifest(
-                recording_id="recording", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="recording",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
             diagnostics=diagnostics,
         )
@@ -492,7 +511,13 @@ def test_ordinary_native_request_rejection_remains_info(tmp_path: Path) -> None:
         journal = Journal.create(
             tmp_path / "evidence.sqlite",
             Manifest(
-                recording_id="recording", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="recording",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
             diagnostics=diagnostics,
         )

@@ -19,8 +19,10 @@ from sts2_harness.journal import (
     Manifest,
     NativeStartReceipt,
     RecordedGame,
+    SessionMaterials,
     StandardCharacter,
 )
+from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
@@ -120,9 +122,20 @@ class Source(Campaign):
         return super().mod(request)
 
 
-async def source_case(path: Path, *, start: bool) -> Case:
-    source = Source()
+async def source_case(
+    path: Path,
+    *,
+    start: bool,
+    source: Source | None = None,
+    documents: Documents | None = None,
+    target_position: int = 2,
+    materials: SessionMaterials | None = None,
+) -> Case:
+    source = source or Source()
     manifest = Manifest(
+        materials=materials
+        if materials is not None
+        else SessionMaterials(entry_documents_enabled=False, act_guidance={}, battle_guidance=()),
         recording_id="source",
         core_version="test",
         game_instance_id="game",
@@ -167,7 +180,7 @@ async def source_case(path: Path, *, start: bool) -> Case:
                         journal,
                     ),
                     RecordedPrompts(PackagedPrompts(), journal),
-                    RecordedDocuments(FileDocuments(), journal),
+                    RecordedDocuments(documents or FileDocuments(), journal),
                     factory,
                 ),
             ) as session:
@@ -178,7 +191,7 @@ async def source_case(path: Path, *, start: bool) -> Case:
         target = next(
             item
             for item in requests
-            if item.role is native.DecisionOwner.COMBAT and item.position == 2
+            if item.role is native.DecisionOwner.COMBAT and item.position == target_position
         )
         anchor = ModelAnchor("source", target.sequence)
     plan = plan_admission(

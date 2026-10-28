@@ -1,13 +1,21 @@
 from pathlib import Path
 
-from sts2_harness.journal import Journal, Manifest
+from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness_eval.prune import ArchivePruner, PrunePlan, PruneRequest, PruneScope, RunRef
 
 
 def archive(path: Path, identity: str) -> RunRef:
     journal = Journal.create(
         path,
-        Manifest(recording_id=identity, core_version="test", game_instance_id="game", run_id="run"),
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id=identity,
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
     )
     journal.close()
     return RunRef(path, identity)
@@ -122,7 +130,13 @@ def test_unreferenced_children_precede_selected_parents(tmp_path: Path) -> None:
 
     parent = RunRef(tmp_path / "parent.sqlite", "parent")
     manifest = Manifest(
-        recording_id="parent", core_version="test", game_instance_id="game", run_id="run"
+        materials=SessionMaterials(
+            entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+        ),
+        recording_id="parent",
+        core_version="test",
+        game_instance_id="game",
+        run_id="run",
     )
     journal = Journal.create(parent.archive, manifest)
     sequence = journal.begin_model(
@@ -260,6 +274,9 @@ def test_retained_templates_are_resolved_only_inside_declared_roots(tmp_path: Pa
     Journal.create(
         retained.archive,
         Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
             recording_id="retained",
             core_version="test",
             game_instance_id="game",

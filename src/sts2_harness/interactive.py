@@ -19,7 +19,7 @@ from sts2_harness.game import (
     RunEndReason,
     SessionStopped,
 )
-from sts2_harness.journal import Manifest
+from sts2_harness.journal import Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
@@ -189,6 +189,9 @@ async def run_interactive(
                 recording_id = uuid4().hex
                 archive = directory / recording_id / "archive.sqlite"
                 manifest = Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                    ),
                     recording_id=recording_id,
                     core_version="0.1.0",
                     game_instance_id=location.game_instance_id,

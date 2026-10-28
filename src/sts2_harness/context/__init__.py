@@ -54,6 +54,34 @@ __all__ = [
 ]
 
 
+def same_observation(
+    role: native.DecisionOwner, left: native.Observation, right: native.Observation
+) -> bool:
+    return left.location == right.location and visible_observation(
+        left, role
+    ) == visible_observation(right, role)
+
+
+def repeats_action_result(
+    role: native.DecisionOwner,
+    last: ResultMessage,
+    task: TaskInput,
+    observation: native.Observation,
+) -> bool:
+    if isinstance(task, CombatActInput):
+        ordinary = task.opening_notes is MISSING
+    elif isinstance(task, RunActInput):
+        ordinary = task.strategy_notes is MISSING and task.handoff is None
+    else:
+        return False
+    return (
+        ordinary
+        and isinstance(last.source, ActionToolResult)
+        and last.source.observation is not None
+        and same_observation(role, last.source.observation, observation)
+    )
+
+
 class Context:
     def __init__(self, role: native.DecisionOwner, *, system: tuple[TextMessage, ...] = ()) -> None:
         self._role = role
@@ -119,22 +147,13 @@ class Context:
             return
         if observation is None:
             raise TypeError("An act task requires a current observation.")
-        ordinary = (
-            task.opening_notes is MISSING
-            if isinstance(task, CombatActInput)
-            else task.strategy_notes is MISSING and task.handoff is None
-        )
         if self._history:
             last = self._history[-1]
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
-                if self._same_observation(last.observation, observation):
+                if same_observation(self._role, last.observation, observation):
                     return
-            if (
-                isinstance(last, ResultMessage)
-                and isinstance(last.source, ActionToolResult)
-                and ordinary
-                and last.source.observation is not None
-                and self._same_observation(last.source.observation, observation)
+            if isinstance(last, ResultMessage) and repeats_action_result(
+                self._role, last, task, observation
             ):
                 return
         projected, delivered = self._delivery.project(
@@ -154,11 +173,6 @@ class Context:
         message = TaskMessage(TextRole.USER, content.to_json(), content, task, observation)
         self._history.append(message)
         self._delivery = delivered
-
-    def _same_observation(self, left: native.Observation, right: native.Observation) -> bool:
-        return left.location == right.location and visible_observation(
-            left, self._role
-        ) == visible_observation(right, self._role)
 
     def append_correction(self, message: str) -> None:
         self._history.append(TextMessage(TextRole.USER, message))

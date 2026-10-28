@@ -24,7 +24,7 @@ from sts2_harness.game import (
     Stopped,
     unwrap,
 )
-from sts2_harness.journal import Journal, Manifest, RecordedGame
+from sts2_harness.journal import Journal, Manifest, RecordedGame, SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.loop import CombatFactory, RunFlow
@@ -59,6 +59,9 @@ async def sample(
     operator_stop: Callable[[], bool] | None = None,
 ) -> AsyncGenerator[tuple[SampleHost, Journal, RunSession]]:
     manifest = Manifest(
+        materials=SessionMaterials(
+            entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+        ),
         recording_id="sample",
         core_version="test",
         game_instance_id="game",
@@ -157,6 +160,9 @@ def test_explicit_arm_releases_one_target_request_in_the_same_session_coroutine(
     async def scenario() -> None:
         campaign = BattleCampaign() if ending == "observed" else TerminalReceipt()
         manifest = Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
             recording_id="target",
             core_version="test",
             game_instance_id="game",

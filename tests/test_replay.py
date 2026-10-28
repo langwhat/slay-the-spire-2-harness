@@ -24,6 +24,7 @@ from sts2_harness.journal import (
     Record,
     RecordedGame,
     RecordedResult,
+    SessionMaterials,
     StoredReply,
 )
 from sts2_harness.journal_models import DocumentRead, MaterialFailed, ResultSnapshot
@@ -63,6 +64,9 @@ async def record_campaign(
     start: bool = False,
 ) -> tuple[ModelAnchor, ...]:
     manifest = Manifest(
+        materials=SessionMaterials(
+            entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+        ),
         recording_id="recording",
         core_version="historical-software",
         game_instance_id="game",

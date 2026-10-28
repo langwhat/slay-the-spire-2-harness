@@ -8,7 +8,7 @@ from test_lifecycle import battle_state
 from test_responses import configuration
 
 from sts2_harness.client import models as native
-from sts2_harness.journal import Journal, Manifest
+from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import ConfigurationSnapshot, ToolSet
 from sts2_harness_eval.annotations import (
     AgentAuthor,
@@ -45,7 +45,13 @@ def cases_fixture(directory: Path) -> CaseStore:
         Journal.create(
             archive,
             Manifest(
-                recording_id="source", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="source",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
         )
     ) as journal:

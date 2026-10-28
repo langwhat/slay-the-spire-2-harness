@@ -22,7 +22,7 @@ from sts2_harness.decisions import (
     TaskComplete,
 )
 from sts2_harness.game import RunEndReason
-from sts2_harness.journal import Journal, Manifest
+from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.results import ActionToolResult
@@ -231,6 +231,9 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=True, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="campaign",
                 core_version="test",
                 game_instance_id="game",
@@ -375,6 +378,9 @@ def test_act_initialization_waits_for_start_and_rechecks_lifetime_without_replay
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=True, act_guidance={2: ("act-two",)}, battle_guidance=()
+                ),
                 recording_id="initialization",
                 core_version="test",
                 game_instance_id="game",
@@ -384,7 +390,6 @@ def test_act_initialization_waits_for_start_and_rechecks_lifetime_without_replay
             tmp_path / "archive.sqlite",
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
             documents=documents,
-            act_guidance={2: ("act-two",)},
             combat_factory=lambda execution, recovery, observation, notes: CodeCombat(),
             wait=wait,
         ) as session:
@@ -496,6 +501,9 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="handoff",
                 core_version="test",
                 game_instance_id="game",
@@ -568,6 +576,11 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=True,
+                    act_guidance={2: ("act-2",), 3: ("act-3",)},
+                    battle_guidance=(),
+                ),
                 recording_id="manual-pause",
                 core_version="test",
                 game_instance_id="game",
@@ -577,7 +590,6 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
             tmp_path / "archive.sqlite",
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
             documents=FileDocuments(tuple(sources)),
-            act_guidance={2: ("act-2",), 3: ("act-3",)},
             combat_factory=lambda execution, recovery, observation, notes: CodeCombat(),
             wait=wait,
         ) as session:

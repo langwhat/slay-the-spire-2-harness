@@ -7,6 +7,7 @@ import pytest
 from pydantic import JsonValue
 from test_responses import InspectArguments, PlainResult, configuration
 
+from sts2_harness.journal import SessionMaterials
 from sts2_harness.llm.chat_native import ChatCompletionsReply
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
@@ -179,6 +180,9 @@ def test_recorded_chat_round_trip_keeps_protocol_and_native_prefix(tmp_path: Pat
         journal = Journal.create(
             tmp_path / "chat.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="chat",
                 core_version="test",
                 game_instance_id="instance",
@@ -509,6 +513,9 @@ def test_invalid_chat_deltas_close_recorded_request_as_protocol_failure(
         journal = Journal.create(
             tmp_path / "failed.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="failed",
                 core_version="test",
                 game_instance_id="instance",
@@ -592,7 +599,13 @@ def test_chat_complete_arrival_is_durable_before_stream_close(
         journal = Journal.create(
             tmp_path / "arrival.sqlite",
             Manifest(
-                recording_id="arrival", core_version="test", game_instance_id="game", run_id="run"
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="arrival",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
             ),
         )
         arrivals: list[ReplySnapshot | None] = []

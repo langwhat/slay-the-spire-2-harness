@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import ExitStack, closing, suppress
 from dataclasses import dataclass
-from hashlib import file_digest
+from hashlib import file_digest, sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,8 +31,15 @@ from sts2_harness.game import (
     Settlement,
 )
 from sts2_harness.headless import HeadlessError
-from sts2_harness.journal import ArchiveError, Journal, ParentPrefix, Record, RecordedGame
-from sts2_harness.journal_models import AssistantSnapshot
+from sts2_harness.journal import (
+    ArchiveError,
+    HistoricalVariant,
+    Journal,
+    ParentPrefix,
+    Record,
+    RecordedGame,
+)
+from sts2_harness.journal_models import AssistantSnapshot, MaterialRecord, ModelRecord
 from sts2_harness.knowledge import (
     Document,
     Documents,
@@ -56,6 +63,7 @@ from sts2_harness_eval._replay import (
     ReplayPrompts,
     ReplayRejected,
     Timeline,
+    material_boundary,
     prefix,
     unsupported,
 )
@@ -97,6 +105,14 @@ from sts2_harness_eval.sample import (
     SampleBudget,
     SampleHost,
     SampleResult,
+)
+from sts2_harness_eval.variants import (
+    Materials,
+    MaterialVariant,
+    VariantDocuments,
+    VariantError,
+    VariantPrompts,
+    replacements,
 )
 from sts2_harness_eval.verification import VerificationFailure
 
@@ -181,7 +197,10 @@ class _PromptProxy:
         self._switch = switch
 
     def read(self, name: str) -> MaterialText:
-        return self._switch.current.prompts.read(name)
+        try:
+            return self._switch.current.prompts.read(name)
+        except VariantError as error:
+            raise ReplayRejected(error.rejection) from error
 
 
 class _DocumentProxy:
@@ -189,13 +208,22 @@ class _DocumentProxy:
         self._switch = switch
 
     async def list(self, role: native.DecisionOwner) -> tuple[SkillSummary, ...]:
-        return await self._switch.current.documents.list(role)
+        try:
+            return await self._switch.current.documents.list(role)
+        except VariantError as error:
+            raise ReplayRejected(error.rejection) from error
 
     async def read(self, request: SkillRead) -> DocumentView:
-        return await self._switch.current.documents.read(request)
+        try:
+            return await self._switch.current.documents.read(request)
+        except VariantError as error:
+            raise ReplayRejected(error.rejection) from error
 
     async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
-        return await self._switch.current.documents.lookup(subjects)
+        try:
+            return await self._switch.current.documents.lookup(subjects)
+        except VariantError as error:
+            raise ReplayRejected(error.rejection) from error
 
 
 async def take_over(
@@ -208,6 +236,7 @@ async def take_over(
     budget: SampleBudget,
     *,
     stop_requested: Callable[[], bool],
+    variant: MaterialVariant | None = None,
 ) -> TakeoverResult:
     """Verify both prefixes, then release the held request into recorded live dependencies."""
     anchor: Reached | None = None
@@ -250,15 +279,49 @@ async def take_over(
                         )
             with case.source.archive.open("rb") as original:
                 digest = file_digest(original, "sha256").hexdigest()
+            parent = ParentPrefix(
+                archive=case.source.archive.resolve(),
+                recording_id=case.source.anchor.recording_id,
+                before_sequence=case.source.anchor.model_sequence,
+                archive_sha256=digest,
+            )
+            declaration = source.manifest.variant
+            if declaration is not None:
+                if variant is not None and replacements(variant) != declaration.replacements:
+                    raise VariantError(
+                        "Different variants require sibling branches from the original case."
+                    )
+            elif variant is not None:
+                declaration = HistoricalVariant(
+                    case_id=case.id,
+                    case_sha256=sha256(case.model_dump_json().encode()).hexdigest(),
+                    source=parent,
+                    replacements=replacements(variant),
+                )
+            materials = Materials(declaration.replacements) if declaration is not None else None
+            original_before = (
+                declaration.source.before_sequence if declaration is not None else None
+            )
+            if materials is not None:
+                original_records = records
+                if source.manifest.variant is not None:
+                    assert declaration is not None
+                    original_source = resources.enter_context(
+                        closing(Journal.open(declaration.source.archive))
+                    )
+                    original_records = original_source.timeline(stop=original_before)
+                materials.preflight(
+                    tuple(
+                        record
+                        for record in original_records
+                        if isinstance(record, (ModelRecord, MaterialRecord))
+                    )
+                )
             manifest = plan.manifest.model_copy(
                 update={
                     "recording_id": uuid4().hex,
-                    "parent": ParentPrefix(
-                        archive=case.source.archive.resolve(),
-                        recording_id=case.source.anchor.recording_id,
-                        before_sequence=case.source.anchor.model_sequence,
-                        archive_sha256=digest,
-                    ),
+                    "parent": parent,
+                    "variant": declaration,
                 }
             )
             journal = resources.enter_context(closing(Journal.create(branch, manifest)))
@@ -272,7 +335,9 @@ async def take_over(
             host = SampleHost(budget, endpoint, journal)
             reached: asyncio.Future[Reached] = asyncio.get_running_loop().create_future()
             release = asyncio.Event()
-            timeline = Timeline(records)
+            # Only the original source target still needs material mapping.
+            mapping_before = material_boundary(source)
+            timeline = Timeline(records, materials, mapping_before)
 
             def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
                 async def continue_live(
@@ -292,9 +357,12 @@ async def take_over(
                         input: ModelInput,
                         tools: tuple[ToolDefinition, ...],
                     ) -> ModelReply:
+                        treated_tools = materials.tools(tools) if materials is not None else tools
                         if switch.live:
-                            return await switch.current.model(role, stream).complete(input, tools)
-                        return await historical.complete(input, tools)
+                            return await switch.current.model(role, stream).complete(
+                                input, treated_tools
+                            )
+                        return await historical.complete(input, treated_tools)
 
                 return Model()
 
@@ -379,8 +447,18 @@ async def take_over(
 
                     live = SessionDependencies(
                         host.game(RecordedGame(game, journal)),
-                        RecordedPrompts(prompts, journal),
-                        RecordedDocuments(documents, journal),
+                        RecordedPrompts(
+                            VariantPrompts(prompts, materials)
+                            if materials is not None
+                            else prompts,
+                            journal,
+                        ),
+                        RecordedDocuments(
+                            VariantDocuments(documents, materials)
+                            if materials is not None
+                            else documents,
+                            journal,
+                        ),
                         host.models(live_model),
                     )
                     host.arm(game.observation(loaded.read.observation))
@@ -421,6 +499,8 @@ async def take_over(
         return TakeoverIncomplete(branch, anchor, OperatorStopped())
     except ReplayRejected as error:
         return TakeoverUnsupported(branch, error.result)
+    except VariantError as error:
+        return TakeoverUnsupported(branch, error.rejection)
     except AdmissionFailure as error:
         return TakeoverUnsupported(branch, error.result)
     except VerificationFailure as error:

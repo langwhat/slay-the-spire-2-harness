@@ -22,6 +22,7 @@ from sts2_harness.decisions import (
 from sts2_harness.execution import Executed, Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
+from sts2_harness.journal import SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.notes import Notes
 from sts2_harness.run import RunAgent
@@ -145,6 +146,9 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
         journal = Journal.create(
             tmp_path / "archive.sqlite",
             Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
                 recording_id="run",
                 core_version="test",
                 game_instance_id="game",

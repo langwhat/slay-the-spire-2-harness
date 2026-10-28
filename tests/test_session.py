@@ -10,7 +10,7 @@ from test_responses import configuration
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.game import LiveGame, RunEndReason
-from sts2_harness.journal import Manifest
+from sts2_harness.journal import Manifest, SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
@@ -62,6 +62,9 @@ def test_session_preserves_notes_when_query_observes_ended_lifetime(
             )
             async with RunSession(
                 Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                    ),
                     recording_id="notes",
                     core_version="test",
                     game_instance_id="game",
@@ -108,6 +111,9 @@ def test_session_runs_injected_dependencies_without_closing_them(tmp_path: Path)
             dependencies = SessionDependencies(game, PackagedPrompts(), FileDocuments(), factory)
             async with RunSession(
                 Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                    ),
                     recording_id="injected",
                     core_version="test",
                     game_instance_id="game",
@@ -163,6 +169,9 @@ def test_live_resources_close_when_session_entry_fails(tmp_path: Path) -> None:
             async with live_session(
                 ModClient("http://mod", transport=game_transport),
                 Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                    ),
                     recording_id="entry-failed",
                     core_version="test",
                     game_instance_id="game",

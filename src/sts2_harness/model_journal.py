@@ -172,7 +172,13 @@ class RecordedDocuments:
 
     async def list(self, role: native.DecisionOwner) -> tuple[SkillSummary, ...]:
         sequence = self._journal.begin_material(SkillListing(role=role))
-        skills = await self._live.list(role)
+        try:
+            skills = await self._live.list(role)
+        except MaterialUnavailable as error:
+            self._journal.finish_material(
+                sequence, MaterialFailed(failure=MaterialFailure.UNAVAILABLE, message=str(error))
+            )
+            raise
         self._journal.finish_material(
             sequence, SkillListingResult(skills=tuple(SkillSnapshot.of(skill) for skill in skills))
         )

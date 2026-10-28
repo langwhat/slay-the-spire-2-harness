@@ -58,6 +58,7 @@ from sts2_harness.journal_models import (
     MaterialRecord,
     MaterialReply,
     MaterialRequest,
+    MaterialSnapshot,
     MessageSnapshot,
     ModelAttempt,
     ModelRecord,
@@ -111,8 +112,14 @@ class ParentPrefix(native.WireModel):
         return value
 
 
+class SessionMaterials(native.WireModel):
+    entry_documents_enabled: bool
+    act_guidance: dict[int, tuple[str, ...]]
+    battle_guidance: tuple[str, ...]
+
+
 class Manifest(native.WireModel):
-    schema_version: Literal[8] = 8
+    schema_version: Literal[9] = 9
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -120,12 +127,30 @@ class Manifest(native.WireModel):
     core_version: str
     game_instance_id: str
     run_id: str
+    materials: SessionMaterials
     seed: str | None = None
     template: str | None = None
     initial_notes: str | None = None
     game_version: str | None = None
     headless: HeadlessInitialConditions | None = None
     parent: ParentPrefix | None = None
+    variant: "HistoricalVariant | None" = None
+
+
+class ArchivedReplacement(native.WireModel):
+    material_id: native.Nonempty
+    expected_versions: frozenset[native.Nonempty]
+    replacement: MaterialSnapshot
+
+
+class HistoricalVariant(native.WireModel):
+    """Immutable material declaration and its original case evidence."""
+
+    mode: Literal["historical"] = "historical"
+    case_id: native.Nonempty
+    case_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    source: ParentPrefix
+    replacements: tuple[ArchivedReplacement, ...]
 
 
 class GapCause(StrEnum):
@@ -285,10 +310,16 @@ class Journal:
                 "recording_id": parent.manifest.recording_id,
                 "core_version": parent.manifest.core_version,
                 "parent": parent.manifest.parent,
+                "variant": parent.manifest.variant,
             }
         )
         if inherited != parent.manifest:
             raise ArchiveError("The branch initial conditions differ from its parent recording.")
+        variant = self.manifest.variant
+        if parent.manifest.variant is not None and variant != parent.manifest.variant:
+            raise ArchiveError("A candidate branch must retain its immutable material declaration.")
+        if variant is not None and parent.manifest.variant is None and variant.source != prefix:
+            raise ArchiveError("The material declaration does not identify its original prefix.")
         targets = parent.summaries(
             kind=DependencyKind.MODEL,
             start=prefix.before_sequence,

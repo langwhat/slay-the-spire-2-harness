@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, closing, suppress
 from hashlib import sha256
 from pathlib import Path
 from typing import Never
@@ -10,6 +10,16 @@ from typing import Never
 from pydantic import MISSING
 
 from sts2_harness.client import models as native
+from sts2_harness.context import repeats_action_result
+from sts2_harness.context.models import (
+    ActContent,
+    ActObservation,
+    CombatActInput,
+    ResultMessage,
+    RunActContent,
+    RunActInput,
+    Updates,
+)
 from sts2_harness.game import (
     Admit,
     Admitted,
@@ -31,6 +41,7 @@ from sts2_harness.game import (
 )
 from sts2_harness.journal import ArchiveError, DependencyKind, Journal, Record
 from sts2_harness.journal_models import (
+    AssistantSnapshot,
     BlobCollector,
     BlobEncoding,
     DocumentLookup,
@@ -47,8 +58,11 @@ from sts2_harness.journal_models import (
     ModelRecord,
     PromptRead,
     PromptReadResult,
+    ResultSnapshot,
+    RunTaskSnapshot,
     SkillListing,
     SkillListingResult,
+    TaskSnapshot,
     ToolSnapshot,
     archive_input,
 )
@@ -68,12 +82,14 @@ from sts2_harness.llm.messages import (
     ModelMetadata,
     ModelReply,
     ModelUnavailable,
+    TextRole,
     ToolDefinition,
     Usage,
 )
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
 from sts2_harness.results import Reason
 from sts2_harness.session import RunSession, SessionDependencies
+from sts2_harness.tools import ToolName
 from sts2_harness_eval.results import (
     ArchiveUnreadable,
     InputComponent,
@@ -88,6 +104,7 @@ from sts2_harness_eval.results import (
     Unsupported,
     UnsupportedCause,
 )
+from sts2_harness_eval.variants import Materials, VariantError
 
 type Dependency = Record | ModelRecord | MaterialRecord
 
@@ -117,10 +134,20 @@ def _kind(record: Dependency) -> DependencyKind | OperationKind:
 
 
 class Timeline:
-    def __init__(self, records: tuple[Dependency, ...]) -> None:
+    def __init__(
+        self,
+        records: tuple[Dependency, ...],
+        materials: Materials | None = None,
+        original_before: int | None = None,
+    ) -> None:
         self.records = records
         self.index = 0
         self.cursor = 0
+        self.materials = materials
+        self.original_before = original_before
+
+    def original(self, sequence: int) -> bool:
+        return self.original_before is None or sequence < self.original_before
 
     def take(self, kind: DependencyKind | OperationKind) -> Dependency:
         if self.index == len(self.records):
@@ -149,11 +176,94 @@ class Timeline:
             _different(record.sequence, InputComponent.REQUEST)
         if record.reply is None:
             unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
-        return record.reply
+        reply = record.reply
+        if self.materials is None or not self.original(record.sequence):
+            return reply
+        try:
+            return self.materials.reply(reply)
+        except VariantError as error:
+            raise ReplayRejected(error.rejection) from error
 
     def check_cursor(self, record: Dependency) -> None:
         if record.confirmed_operation_cursor != self.cursor:
             _different(record.sequence, InputComponent.CURSOR)
+
+    def repeated_tasks(self, record: ModelRecord, input: ModelInput) -> frozenset[int]:
+        repeated: set[int] = set()
+        for index, message in enumerate(record.input):
+            if index < 3 or not isinstance(message, (TaskSnapshot, RunTaskSnapshot)):
+                continue
+            previous = record.input[index - 2]
+            assistant = record.input[index - 3]
+            if not isinstance(previous, ResultSnapshot) or not isinstance(
+                assistant, AssistantSnapshot
+            ):
+                continue
+            calls = AssistantMessage(assistant.native_reply).tool_calls
+            action_name = (
+                ToolName.COMBAT_ACT
+                if record.role is native.DecisionOwner.COMBAT
+                else ToolName.RUN_ACT
+            )
+            if len(calls) != 1 or (calls[0].id, calls[0].name) != (previous.call_id, action_name):
+                continue
+            results = tuple(
+                item
+                for item in input
+                if isinstance(item, ResultMessage) and item.call_id == previous.call_id
+            )
+            if len(results) != 1 or archive_input(results) != (previous,):
+                continue
+            result = results[0]
+            if result.content.state is None:
+                continue
+            projected = ActObservation(state=result.content.state, updates=Updates())
+            task: CombatActInput | RunActInput
+            if record.role is native.DecisionOwner.COMBAT:
+                if message != TaskSnapshot(
+                    role=TextRole.USER, content=ActContent(observation=projected)
+                ):
+                    continue
+                task = CombatActInput()
+            else:
+                if message != RunTaskSnapshot(
+                    role=TextRole.USER, content=RunActContent(observation=projected)
+                ):
+                    continue
+                task = RunActInput()
+            observation = self._task_observation(record, index)
+            if observation is not None and repeats_action_result(
+                record.role, result, task, observation
+            ):
+                repeated.add(index)
+        return frozenset(repeated)
+
+    def _task_observation(self, target: ModelRecord, index: int) -> native.Observation | None:
+        observation: native.Observation | None = None
+        for record in self.records:
+            if record.sequence > target.sequence:
+                break
+            if isinstance(record, Record) and isinstance(record.request, Admit):
+                reply = record.reply
+                observation = (
+                    reply.observations[-1]
+                    if reply is not None
+                    and isinstance(reply.outcome, Admitted)
+                    and reply.outcome.allowed
+                    and reply.observations
+                    else None
+                )
+                continue
+            if not isinstance(record, ModelRecord) or (record.role, record.stream) != (
+                target.role,
+                target.stream,
+            ):
+                continue
+            if len(record.input) <= index:
+                continue
+            # The task's first request binds its observation; later reads cannot replace it.
+            return observation if record.input[index] == target.input[index] else None
+        return None
 
 
 class ReplayGame:
@@ -320,17 +430,32 @@ class ReplayModel:
         if record.position != self._position:
             _different(record.sequence, InputComponent.POSITION)
         messages = archive_input(input)
-        if messages != record.input:
+        materials = self._timeline.materials
+        treated = materials is not None and self._timeline.original(record.sequence)
+        expected_input = (
+            materials.messages(record.input, self._timeline.repeated_tasks(record, input))
+            if treated and materials is not None
+            else record.input
+        )
+        expected_tools = (
+            materials.tool_snapshots(record.tools)
+            if treated and materials is not None
+            else record.tools
+        )
+        if messages != expected_input:
             _different(record.sequence, InputComponent.MODEL_INPUT)
-        if tuple(ToolSnapshot.of(tool) for tool in tools) != record.tools:
+        if tuple(ToolSnapshot.of(tool) for tool in tools) != expected_tools:
             _different(record.sequence, InputComponent.TOOLS)
         encoding = BlobEncoding(BlobCollector().collect)
         encoded = tuple(message.model_dump_json(context=encoding).encode() for message in messages)
         digest = sha256(b"[" + b",".join(encoded) + b"]").hexdigest()
-        if digest != record.semantic_digest:
+        if not treated and digest != record.semantic_digest:
             _different(record.sequence, InputComponent.SEMANTIC_DIGEST)
         if record.sequence == self._target.model_sequence:
-            self._reached.set_result(Reached(self._target, self._timeline.cursor, digest))
+            # Native admission stays bound to the source request digest.
+            self._reached.set_result(
+                Reached(self._target, self._timeline.cursor, record.semantic_digest)
+            )
             if self._continuation is not None:
                 return await self._continuation(input, tools)
             await asyncio.Future[None]()
@@ -363,7 +488,18 @@ async def _run(
     journal: Journal, timeline: Timeline, target: ModelAnchor, reached: asyncio.Future[Reached]
 ) -> None:
     def model(role: native.DecisionOwner, stream: str) -> ModelClient:
-        return ReplayModel(timeline, role, stream, target, reached)
+        historical = ReplayModel(timeline, role, stream, target, reached)
+
+        class Model:
+            async def complete(
+                self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+            ) -> ModelReply:
+                materials = timeline.materials
+                return await historical.complete(
+                    input, materials.tools(tools) if materials is not None else tools
+                )
+
+        return Model()
 
     dependencies = SessionDependencies(
         ReplayGame(timeline),
@@ -403,6 +539,24 @@ def prefix(journal: Journal, target: ModelAnchor) -> tuple[Dependency, ...]:
     return records
 
 
+def material_boundary(journal: Journal) -> int | None:
+    """Find the original segment through the existing immutable parent chain."""
+    boundary: int | None = None
+    with ExitStack() as resources:
+        current = journal
+        while current.manifest.variant is not None:
+            parent = current.manifest.parent
+            if parent is None:
+                raise ArchiveError("A historical material variant requires its parent prefix.")
+            boundary = (
+                min(boundary, parent.before_sequence)
+                if boundary is not None
+                else parent.before_sequence
+            )
+            current = resources.enter_context(closing(Journal.open(parent.archive)))
+    return boundary
+
+
 @asynccontextmanager
 async def reach(archive: Path, target: ModelAnchor) -> AsyncGenerator[ReplayResult]:
     """Validate the prefix and hold its original RunSession at the target until context exit."""
@@ -414,13 +568,20 @@ async def reach(archive: Path, target: ModelAnchor) -> AsyncGenerator[ReplayResu
             journal = Journal.open(archive)
             records = prefix(journal, target)
             reached = asyncio.get_running_loop().create_future()
-            task = asyncio.create_task(_run(journal, Timeline(records), target, reached))
+            declaration = journal.manifest.variant
+            materials = Materials(declaration.replacements) if declaration is not None else None
+            original_before = material_boundary(journal)
+            task = asyncio.create_task(
+                _run(journal, Timeline(records, materials, original_before), target, reached)
+            )
             await asyncio.wait((task, reached), return_when=asyncio.FIRST_COMPLETED)
             if task.done():
                 await task
             result = reached.result()
         except ReplayRejected as error:
             result = error.result
+        except VariantError as error:
+            result = error.rejection
         except ArchiveError as error:
             result = Rejected(RejectReason.UNSUPPORTED_HISTORY, None, ArchiveUnreadable(str(error)))
         yield result
