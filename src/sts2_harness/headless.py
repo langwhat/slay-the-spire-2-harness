@@ -337,6 +337,16 @@ class OwnedHeadlessInstance:
                         "The owned native process did not return ready public state."
                     )
                 observation = state.observation
+                readiness = (status.input_readiness, observation.input_readiness)
+                if any(
+                    value not in (native.InputReadiness.READY, native.InputReadiness.BUSY)
+                    for value in readiness
+                ):
+                    raise HeadlessError("The controlled native start is not ready for run input.")
+                if native.InputReadiness.BUSY in readiness:
+                    previous = None
+                    await asyncio.sleep(0.1)
+                    continue
                 if (
                     status.control_intent is not native.ControlIntent.PAUSED
                     or status.location != observation.location
@@ -348,16 +358,6 @@ class OwnedHeadlessInstance:
                     raise HeadlessError(
                         "The controlled native start did not match the paused run recipe."
                     )
-                readiness = (status.input_readiness, observation.input_readiness)
-                if any(
-                    value not in (native.InputReadiness.READY, native.InputReadiness.BUSY)
-                    for value in readiness
-                ):
-                    raise HeadlessError("The controlled native start is not ready for run input.")
-                if native.InputReadiness.BUSY in readiness:
-                    previous = None
-                    await asyncio.sleep(0.1)
-                    continue
                 if (
                     previous is not None
                     and previous.location == observation.location

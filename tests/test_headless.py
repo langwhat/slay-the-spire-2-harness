@@ -137,6 +137,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         else:
             observation = json.loads(json.dumps(state))
             if busy:
+                observation["location"]["node_id"] = "transition-node"
                 observation["input_readiness"] = "busy"
                 observation["state"]["control"] = "busy"
                 observation["state"]["screen"] = "transition"
@@ -409,7 +410,10 @@ def test_owned_game_exit_finishes_the_session_at_a_safe_boundary(tmp_path: Path)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
-def test_owned_listener_with_mismatched_public_route_is_not_admitted(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mismatch_route", [True, False], ids=["route", "character"])
+def test_owned_listener_with_mismatched_ready_recipe_is_not_admitted(
+    tmp_path: Path, mismatch_route: bool
+) -> None:
     import asyncio
     import os
 
@@ -422,12 +426,13 @@ def test_owned_listener_with_mismatched_public_route_is_not_admitted(tmp_path: P
     from sts2_harness.journal import StandardCharacter
 
     game, template = game_fixture(tmp_path)
-    game.write_text(
-        game.read_text().replace(
-            '"location": state["location"],',
-            '"location": state["location"] | {"run_id": "different-run"},',
+    if mismatch_route:
+        game.write_text(
+            game.read_text().replace(
+                '"location": state["location"],',
+                '"location": state["location"] | {"run_id": "different-run"},',
+            )
         )
-    )
     directory = tmp_path / "instance"
 
     async def scenario() -> None:
@@ -438,7 +443,14 @@ def test_owned_listener_with_mismatched_public_route_is_not_admitted(tmp_path: P
                     template,
                     tmp_path / "runs",
                     directory,
-                    recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="TEST"),
+                    recipe=StandardRunRecipe(
+                        character=(
+                            StandardCharacter.IRONCLAD
+                            if mismatch_route
+                            else StandardCharacter.SILENT
+                        ),
+                        seed="TEST",
+                    ),
                 )
             ):
                 pytest.fail("Mismatched startup facts must not enter gameplay.")
@@ -446,6 +458,11 @@ def test_owned_listener_with_mismatched_public_route_is_not_admitted(tmp_path: P
     asyncio.run(scenario())
     status = json.loads((directory / "status.json").read_text())
     assert status["lifecycle"] == "failed"
+    bootstrap = [
+        json.loads(line) for line in (directory / "bootstrap.jsonl").read_text().splitlines()
+    ]
+    assert bootstrap[-2]["reply"]["input_readiness"] == "ready"
+    assert bootstrap[-1]["reply"]["observation"]["input_readiness"] == "ready"
     assert not Path(status["user_data_alias"]).exists()
     with pytest.raises(ProcessLookupError):
         os.kill(status["game_process_id"], 0)
