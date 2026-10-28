@@ -393,6 +393,58 @@ class FakeRestorer(NativeRestorer):
                 self.closed = True
 
 
+def retain_case(directory: Path, case: Case) -> tuple[CaseStore, Case]:
+    store = CaseStore(directory)
+    plan = plan_admission(
+        AdmissionRequest(
+            id=case.id,
+            archive=case.source.archive,
+            anchor=case.source.anchor,
+            endpoint=case.endpoint,
+        ),
+        directory,
+    )
+    publication = Publication(
+        source_sequence=case.source.anchor.model_sequence,
+        source_stamp=plan.target.stamp,
+        read=IdentityRead(
+            status=native.ResultStatus.COMPLETED,
+            observation=plan.target,
+            identities=IdentityFacts(cards=(), creatures=(), map_travel=(), relics=()),
+        ),
+    )
+    reference = store.content(
+        Artifact.REFERENCES,
+        Reference(
+            boundary=publication,
+            suffix=(),
+            target=publication,
+            follow_on_before=(),
+            follow_on=(),
+        ),
+    )
+    binding = store.content(
+        Artifact.BINDINGS,
+        ShortcutBinding(
+            suffix=(),
+            target=KeyedRefs(source_sequence=case.source.anchor.model_sequence, refs=()),
+            follow_on=(),
+            reference=reference,
+        ),
+    )
+    evidence = store.content(Artifact.EVIDENCE, case.endpoint)
+    checkpoint = directory.parent / "synthetic-checkpoint"
+    checkpoint.write_bytes(b"x")
+
+    retained_checkpoint = case.checkpoint.model_copy(update={"sha256": sha256(b"x").hexdigest()})
+    store.retain_checkpoint(retained_checkpoint, checkpoint)
+    retained_case = case.model_copy(
+        update={"binding": binding, "evidence": evidence, "checkpoint": retained_checkpoint}
+    )
+    store.publish(retained_case)
+    return store, retained_case
+
+
 @pytest.mark.parametrize("start", [False, True])
 def test_inspected_request_resumes_with_native_history_and_only_b_writes(
     tmp_path: Path, start: bool
@@ -455,64 +507,15 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as recorded:
             assert result.recording_id == recorded.manifest.recording_id
-        store = CaseStore(tmp_path / "retained")
-        plan = plan_admission(
-            AdmissionRequest(
-                id=case.id,
-                archive=case.source.archive,
-                anchor=case.source.anchor,
-                endpoint=case.endpoint,
-            ),
-            tmp_path,
-        )
-        publication = Publication(
-            source_sequence=case.source.anchor.model_sequence,
-            source_stamp=plan.target.stamp,
-            read=IdentityRead(
-                status=native.ResultStatus.COMPLETED,
-                observation=plan.target,
-                identities=IdentityFacts(cards=(), creatures=(), map_travel=(), relics=()),
-            ),
-        )
-        reference = store.content(
-            Artifact.REFERENCES,
-            Reference(
-                boundary=publication,
-                suffix=(),
-                target=publication,
-                follow_on_before=(),
-                follow_on=(),
-            ),
-        )
-        binding = store.content(
-            Artifact.BINDINGS,
-            ShortcutBinding(
-                suffix=(),
-                target=KeyedRefs(source_sequence=case.source.anchor.model_sequence, refs=()),
-                follow_on=(),
-                reference=reference,
-            ),
-        )
-        evidence = store.content(Artifact.EVIDENCE, case.endpoint)
-        checkpoint = tmp_path / "synthetic-checkpoint"
-        checkpoint.write_bytes(b"x")
-
-        retained_checkpoint = case.checkpoint.model_copy(
-            update={"sha256": sha256(b"x").hexdigest()}
-        )
-        store.retain_checkpoint(retained_checkpoint, checkpoint)
-        retained_case = case.model_copy(
-            update={"binding": binding, "evidence": evidence, "checkpoint": retained_checkpoint}
-        )
-        store.publish(retained_case)
+        store, retained_case = retain_case(tmp_path / "retained", case)
         annotations = AnnotationStore(tmp_path / "annotations", store)
-        report = assess_sample(
+        report = await assess_sample(
             retained_case, result, annotations, AssessmentSelection(), judgment=None
         )
         report_ref = annotations.append_assessment(report, id="actual-loop")
         assert AnnotationStore(annotations.directory, store).assessment(report_ref) == report
         assert report.execution.recording_id == result.recording_id
-        uncreated = assess_sample(
+        uncreated = await assess_sample(
             retained_case, reused, annotations, AssessmentSelection(), judgment=None
         )
         assert uncreated.provenance.sample is None

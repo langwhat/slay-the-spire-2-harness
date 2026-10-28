@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import closing
 from hashlib import file_digest, sha256
 from pathlib import Path
@@ -123,7 +124,9 @@ def test_unscored_report_reopens_with_actual_archive_identity(tmp_path: Path) ->
         recording_id=archive_identity(branch).recording_id,
     )
     store = AnnotationStore(tmp_path / "annotations", cases)
-    report = assess_sample(case, execution, store, AssessmentSelection(), judgment=None)
+    report = asyncio.run(
+        assess_sample(case, execution, store, AssessmentSelection(), judgment=None)
+    )
     assert isinstance(report.quality, Unscored)
     assert report.provenance.sample is not None
     assert report.provenance.sample.recording_id == "sample"
@@ -183,7 +186,7 @@ def test_human_judgment_binds_selected_agent_standard_and_reopens(
         rationale="A valid line.",
         author=HumanAuthor(id="judge"),
     )
-    report = assess_sample(case, execution, store, selection, judgment=judgment)
+    report = asyncio.run(assess_sample(case, execution, store, selection, judgment=judgment))
     assert isinstance(report.quality, Assessed)
     assert report.quality.judgment.acceptable
     assert report.standards.annotation is not None
@@ -193,20 +196,24 @@ def test_human_judgment_binds_selected_agent_standard_and_reopens(
     with pytest.raises(FileExistsError):
         store.append_assessment(report, id="judgment")
     with pytest.raises(ValueError, match="human judgment"):
-        assess_sample(
-            case,
-            execution,
-            store,
-            selection,
-            judgment=judgment.model_copy(update={"selection": AssessmentSelection()}),
+        asyncio.run(
+            assess_sample(
+                case,
+                execution,
+                store,
+                selection,
+                judgment=judgment.model_copy(update={"selection": AssessmentSelection()}),
+            )
         )
     with pytest.raises(ValueError, match="rubric"):
-        assess_sample(
-            case,
-            execution,
-            store,
-            AssessmentSelection(rubric=RubricRef(case_id="other", id="battle")),
-            judgment=None,
+        asyncio.run(
+            assess_sample(
+                case,
+                execution,
+                store,
+                AssessmentSelection(rubric=RubricRef(case_id="other", id="battle")),
+                judgment=None,
+            )
         )
 
 
@@ -275,8 +282,8 @@ def test_facts_count_confirmed_uses_and_healing_without_inventing_victory(
             journal.begin(Observe())
             journal.finish(GameReply(outcome=Observed(observation=final), observations=(final,)))
             journal.end()
-    report = assess_sample(
-        case, completed(case, branch), store, AssessmentSelection(), judgment=None
+    report = asyncio.run(
+        assess_sample(case, completed(case, branch), store, AssessmentSelection(), judgment=None)
     )
     uses = report.evidence.metrics.potion_uses
     assert uses is not None
@@ -296,7 +303,7 @@ def test_reports_reject_replaced_archive_and_preserve_unstarted_failure(tmp_path
         ProtocolMismatch(Protocol.RESPONSES, Protocol.CHAT_COMPLETIONS),
         recording_id=None,
     )
-    report = assess_sample(case, failure, store, AssessmentSelection(), judgment=None)
+    report = asyncio.run(assess_sample(case, failure, store, AssessmentSelection(), judgment=None))
     assert report.provenance.sample is None
     assert report.evidence.metrics.potion_uses is None
     assert report.evidence.metrics.net_hp_change is None
@@ -309,8 +316,8 @@ def test_reports_reject_replaced_archive_and_preserve_unstarted_failure(tmp_path
         write_step(
             journal, observation, native.EndTurn(kind=native.StepKind.END_TURN), "turn", observation
         )
-    report = assess_sample(
-        case, completed(case, branch), store, AssessmentSelection(), judgment=None
+    report = asyncio.run(
+        assess_sample(case, completed(case, branch), store, AssessmentSelection(), judgment=None)
     )
     reference = store.append_assessment(report, id="recorded")
     branch.write_bytes(b"replaced archive")
@@ -401,7 +408,9 @@ def test_synthetic_reward_requires_confirmed_choice_and_native_deck_change(
         rationale="One accepted reward.",
         author=HumanAuthor(id="reviewer"),
     )
-    report = assess_sample(case, completed(case, branch), store, selection, judgment=judgment)
+    report = asyncio.run(
+        assess_sample(case, completed(case, branch), store, selection, judgment=judgment)
+    )
     if not confirmed:
         assert isinstance(report.quality, Unassessed)
         assert report.evidence.metrics.reward is None
@@ -477,8 +486,8 @@ def test_inherited_variant_uses_current_direct_parent_interval(tmp_path: Path) -
             journal, opening, native.EndTurn(kind=native.StepKind.END_TURN), "child-turn", opening
         )
     store = AnnotationStore(tmp_path / "annotations", cases)
-    report = assess_sample(
-        child, completed(child, branch), store, AssessmentSelection(), judgment=None
+    report = asyncio.run(
+        assess_sample(child, completed(child, branch), store, AssessmentSelection(), judgment=None)
     )
     assert report.evidence.metrics.potion_uses == ()
     assert tuple(action.operation_id for action in report.evidence.actions) == ("child-turn",)
@@ -515,7 +524,9 @@ def test_uncreated_execution_does_not_read_existing_branch(tmp_path: Path) -> No
         recording_id=None,
     )
     store = AnnotationStore(tmp_path / "annotations", cases)
-    report = assess_sample(case, execution, store, AssessmentSelection(), judgment=None)
+    report = asyncio.run(
+        assess_sample(case, execution, store, AssessmentSelection(), judgment=None)
+    )
     assert report.provenance.sample is None
     assert report.evidence.metrics.net_hp_change is None
     reference = store.append_assessment(report, id="uncreated")
@@ -535,4 +546,4 @@ def test_execution_rejects_same_case_sibling_archive(tmp_path: Path) -> None:
     branch.write_bytes(sibling.read_bytes())
     store = AnnotationStore(tmp_path / "annotations", cases)
     with pytest.raises(ValueError, match="recording"):
-        assess_sample(case, execution, store, AssessmentSelection(), judgment=None)
+        asyncio.run(assess_sample(case, execution, store, AssessmentSelection(), judgment=None))

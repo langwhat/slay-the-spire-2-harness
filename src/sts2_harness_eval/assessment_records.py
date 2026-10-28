@@ -2,13 +2,14 @@
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from sts2_harness.client import models as native
 from sts2_harness.journal import HistoricalVariant, ParentPrefix
 from sts2_harness_eval.annotation_records import (
+    AgentAuthor,
     AnnotationRecord,
     AnnotationRef,
     HumanAuthor,
@@ -116,6 +117,33 @@ class HumanJudgment(native.WireModel):
     author: HumanAuthor
 
 
+class JudgmentKind(StrEnum):
+    JUDGED = "judged"
+    FAILED = "failed"
+
+
+class Judged(native.WireModel):
+    kind: Literal[JudgmentKind.JUDGED] = JudgmentKind.JUDGED
+    case_id: CaseId
+    sample: ArchiveIdentity
+    selection: AssessmentSelection
+    acceptable: bool
+    rationale: native.Nonempty
+    author: AgentAuthor
+
+
+class JudgeFailed(native.WireModel):
+    kind: Literal[JudgmentKind.FAILED] = JudgmentKind.FAILED
+    case_id: CaseId
+    sample: ArchiveIdentity
+    selection: AssessmentSelection
+    author: AgentAuthor
+    reason: native.Nonempty
+
+
+type JudgmentResult = Annotated[Judged | JudgeFailed, Field(discriminator="kind")]
+
+
 class QualityKind(StrEnum):
     UNSCORED = "unscored"
     UNASSESSED = "unassessed"
@@ -128,17 +156,25 @@ class Unscored(native.WireModel):
 
 class UnassessedReason(StrEnum):
     NO_JUDGMENT = "no_judgment"
+    JUDGE_FAILED = "judge_failed"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
 
 
 class Unassessed(native.WireModel):
     kind: Literal[QualityKind.UNASSESSED] = QualityKind.UNASSESSED
     reason: UnassessedReason
+    failure: JudgeFailed | None = None
+
+    @model_validator(mode="after")
+    def require_failure_provenance(self) -> Self:
+        if (self.reason is UnassessedReason.JUDGE_FAILED) != (self.failure is not None):
+            raise ValueError("A judge failure requires its actual failure provenance.")
+        return self
 
 
 class Assessed(native.WireModel):
     kind: Literal[QualityKind.ASSESSED] = QualityKind.ASSESSED
-    judgment: HumanJudgment
+    judgment: HumanJudgment | Judged
 
 
 type Quality = Annotated[Unscored | Unassessed | Assessed, Field(discriminator="kind")]
@@ -158,6 +194,19 @@ class SelectedStandards(native.WireModel):
     annotation: AnnotationRecord | None
     review: ReviewRecord | None
     rubric: RubricRecord | None
+
+
+class JudgmentInput(native.WireModel):
+    case_id: CaseId
+    sample: ArchiveIdentity
+    standards: SelectedStandards
+    evidence: SampleEvidence
+    endpoint_reached: bool
+    uncertainty: tuple[Uncertainty, ...]
+
+
+class SemanticJudge(Protocol):
+    async def assess(self, input: JudgmentInput) -> JudgmentResult: ...
 
 
 class SampleAssessment(native.WireModel):

@@ -14,6 +14,8 @@ from sts2_harness_eval.assessment_records import (
     Assessed,
     CaseTargetRef,
     ConfirmedAction,
+    JudgeFailed,
+    JudgmentInput,
     ObservationRef,
     PotionUse,
     Quality,
@@ -31,6 +33,9 @@ from sts2_harness_eval.assessment_records import (
 )
 from sts2_harness_eval.assessment_records import (
     HumanJudgment as HumanJudgment,
+)
+from sts2_harness_eval.assessment_records import (
+    SemanticJudge as SemanticJudge,
 )
 from sts2_harness_eval.assessment_records import (
     Unscored as Unscored,
@@ -257,13 +262,13 @@ def _evidence(
     return SampleEvidence(actions=tuple(actions), metrics=metrics), endpoint_ref, tuple(uncertain)
 
 
-def assess_sample(
+async def assess_sample(
     case: Case,
     execution: TakeoverResult,
     annotations: AnnotationStore,
     selection: AssessmentSelection,
     *,
-    judgment: HumanJudgment | None,
+    judgment: HumanJudgment | SemanticJudge | None,
 ) -> SampleAssessment:
     standards = annotations.select(case, selection)
     branch = execution.branch.resolve()
@@ -356,7 +361,7 @@ def assess_sample(
             ),
         )
         uncertainty = (Uncertainty.NO_ARCHIVE,)
-    if judgment is not None and (
+    if isinstance(judgment, HumanJudgment) and (
         judgment.case_id != case.id
         or judgment.sample != identity
         or judgment.selection != selection
@@ -382,7 +387,28 @@ def assess_sample(
     elif judgment is None:
         quality = Unassessed(reason=UnassessedReason.NO_JUDGMENT)
     else:
-        quality = Assessed(judgment=judgment)
+        assert identity is not None
+        result = (
+            judgment
+            if isinstance(judgment, HumanJudgment)
+            else await judgment.assess(
+                JudgmentInput(
+                    case_id=case.id,
+                    sample=identity,
+                    standards=standards,
+                    evidence=evidence,
+                    endpoint_reached=True,
+                    uncertainty=tuple(dict.fromkeys(uncertainty)),
+                )
+            )
+        )
+        if result.case_id != case.id or result.sample != identity or result.selection != selection:
+            raise ValueError("The judge result must bind this case, sample and selected standards.")
+        quality = (
+            Unassessed(reason=UnassessedReason.JUDGE_FAILED, failure=result)
+            if isinstance(result, JudgeFailed)
+            else Assessed(judgment=result)
+        )
     if identity is not None and archive_identity(branch) != identity:
         raise ValueError("The sample archive changed during assessment.")
     return SampleAssessment(

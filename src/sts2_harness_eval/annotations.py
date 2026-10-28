@@ -74,6 +74,7 @@ from sts2_harness_eval.assessment_records import (
     CaseTargetRef,
     SampleAssessment,
     SelectedStandards,
+    Unassessed,
 )
 from sts2_harness_eval.cases import Case, CaseId, CaseStore
 from sts2_harness_eval.execution_record import CompletedExecution
@@ -261,14 +262,17 @@ class AnnotationStore:
                     or provenance.variant != manifest.variant
                 ):
                     raise ValueError("The assessment sample archive has changed.")
+        judgment = None
         if isinstance(report.quality, Assessed):
             judgment = report.quality.judgment
-            if (
-                judgment.case_id != case.id
-                or judgment.sample != sample
-                or judgment.selection != report.standards.selection
-            ):
-                raise ValueError("The assessment judgment has mismatched associations.")
+        elif isinstance(report.quality, Unassessed):
+            judgment = report.quality.failure
+        if judgment is not None and (
+            judgment.case_id != case.id
+            or judgment.sample != sample
+            or judgment.selection != report.standards.selection
+        ):
+            raise ValueError("The assessment judgment has mismatched associations.")
 
     def append_assessment(self, report: SampleAssessment, *, id: str) -> AssessmentRef:
         record = AssessmentRecord(
