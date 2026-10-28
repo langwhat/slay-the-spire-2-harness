@@ -379,6 +379,8 @@ def _arm_report(
             assessment.execution != state.execution
             or original.execution != state.execution
             or assessment.provenance != original.provenance
+            or assessment.evidence != original.evidence
+            or assessment.uncertainty != original.uncertainty
             or assessment.provenance.case_id != item.case_id
             or assessment.standards.selection != item.standards
             or original.standards.selection != item.standards

@@ -30,6 +30,7 @@ from sts2_harness_eval.assessment_records import (
     Judged,
     JudgmentInput,
     Unassessed,
+    Uncertainty,
     Unscored,
 )
 from sts2_harness_eval.cases import Case
@@ -348,6 +349,58 @@ def test_human_reassessment_requires_explicit_refs_for_same_sample_and_standards
         archive.write_bytes(original_bytes + b"changed")
         with pytest.raises(ValueError, match="changed"):
             read_suite(tmp_path / "suite", annotations, assessments=tuple(choices))
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("changed_field", ["metrics", "uncertainty"])
+def test_reassessment_cannot_replace_sample_facts(tmp_path: Path, changed_field: str) -> None:
+    async def scenario() -> None:
+        source = await source_case(tmp_path / "source.sqlite", start=False)
+        cases, case = retain_case(tmp_path / "cases", source)
+        annotations = AnnotationStore(tmp_path / "annotations", cases)
+        async with actor(tmp_path) as baseline, actor(tmp_path) as candidate:
+            original = await run_suite(
+                SuiteSpec(cases=(specification(case, pairs=1),)),
+                cases,
+                SuiteRestorer(tmp_path, annotations),
+                annotations,
+                ArmDependencies(baseline, PackagedPrompts(), FileDocuments()),
+                ArmDependencies(candidate, PackagedPrompts(), FileDocuments()),
+                tmp_path / "suite",
+                stop_requested=lambda: False,
+            )
+        assessment = original.pairs[0].baseline.assessment
+        assert assessment is not None
+        assert isinstance(assessment.execution, CompletedExecution)
+        if changed_field == "metrics":
+            changed = assessment.model_copy(
+                update={
+                    "evidence": assessment.evidence.model_copy(
+                        update={
+                            "metrics": assessment.evidence.metrics.model_copy(
+                                update={"net_hp_change": 50}
+                            )
+                        }
+                    )
+                }
+            )
+        else:
+            changed = assessment.model_copy(
+                update={"uncertainty": (Uncertainty.INCOMPLETE_RECORDS,)}
+            )
+        reference = annotations.append_assessment(changed, id="changed-facts")
+        with pytest.raises(ValueError, match="suite arm"):
+            read_suite(
+                tmp_path / "suite",
+                annotations,
+                assessments=(
+                    AssessmentChoice(
+                        address=ArmAddress(case_id=case.id, repeat_index=0, arm=Arm.BASELINE),
+                        assessment=reference,
+                    ),
+                ),
+            )
 
     asyncio.run(scenario())
 
