@@ -8,5 +8,14 @@ from sts2_harness_eval.results import (
     RejectReason,
     ReplayResult,
 )
+from sts2_harness_eval.takeover import take_over
 
-__all__ = ["ModelAnchor", "Reached", "Rejected", "RejectReason", "ReplayResult", "reach"]
+__all__ = [
+    "ModelAnchor",
+    "Reached",
+    "Rejected",
+    "RejectReason",
+    "ReplayResult",
+    "reach",
+    "take_over",
+]
