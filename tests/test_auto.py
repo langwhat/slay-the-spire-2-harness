@@ -13,8 +13,8 @@ from test_responses import configuration
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.journal import Journal, Manifest
+from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
-from sts2_harness.session import RunSession
 
 
 def shop(*, opened: bool, potion: bool) -> native.Observation:
@@ -172,7 +172,7 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
     http = AutoHTTP(states, responses)
 
     async def scenario() -> None:
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
                 recording_id="auto",
@@ -299,7 +299,7 @@ def test_mechanical_rules_use_verified_languages_and_keep_event_choices_for_stra
     )
 
     async def scenario() -> None:
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
                 recording_id="rules",
@@ -430,7 +430,7 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
         paused = False
 
     async def scenario() -> None:
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
                 recording_id="force",
@@ -516,7 +516,7 @@ def test_unknown_language_uses_strategy_and_shop_stays_with_strategy_after_resum
         paused = False
 
     async def scenario() -> None:
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
                 recording_id="language",
@@ -595,7 +595,7 @@ def test_auto_preserves_handoff_before_next_combat_and_act_rebuild(
         return CodeCombat()
 
     async def scenario() -> None:
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
                 recording_id="handoff",
@@ -716,7 +716,7 @@ def test_rewards_stay_with_strategy_and_pure_dialogue_advances_from_changed_nati
     )
 
     async def scenario() -> None:
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
             Manifest(
                 recording_id="dialogue",

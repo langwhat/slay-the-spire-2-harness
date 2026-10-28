@@ -95,3 +95,7 @@ class SkillList(native.WireModel):
 class SkillProvider(Protocol):
     async def list(self, role: native.DecisionOwner) -> tuple[SkillSummary, ...]: ...
     async def read(self, request: SkillRead) -> DocumentView: ...
+
+
+class Documents(SkillProvider, SupplementProvider, Protocol):
+    """The document capabilities shared by tools and entry guidance."""

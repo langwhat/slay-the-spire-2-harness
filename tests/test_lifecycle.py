@@ -23,9 +23,9 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.game import RunEndReason
 from sts2_harness.journal import Journal, Manifest
+from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.results import ActionToolResult
-from sts2_harness.session import RunSession
 
 
 def run_state(act: int, node: str) -> native.Observation:
@@ -228,7 +228,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             openings.append(notes)
             return CodeCombat()
 
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
             Manifest(
                 recording_id="campaign",
@@ -372,7 +372,7 @@ def test_act_initialization_waits_for_start_and_rechecks_lifetime_without_replay
 
     async def scenario() -> None:
         nonlocal is_paused
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
                 recording_id="initialization",
@@ -493,7 +493,7 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
         return CodeCombat()
 
     async def scenario() -> None:
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
             Manifest(
                 recording_id="handoff",
@@ -565,7 +565,7 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
 
     async def scenario() -> None:
         nonlocal paused
-        async with RunSession(
+        async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(mod)),
             Manifest(
                 recording_id="manual-pause",
@@ -584,9 +584,9 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
             running = asyncio.create_task(session.run())
             await asyncio.wait_for(waiting.wait(), 3)
             assert len(campaign.actions) == 3 and len(campaign.inputs) == 3
-            assert not any(
-                isinstance(item.request, DocumentRead) for item in session.journal.materials()
-            )
+            archive = Journal.open(tmp_path / "archive.sqlite")
+            assert not any(isinstance(item.request, DocumentRead) for item in archive.materials())
+            archive.close()
             if resume == "changed_act":
                 campaign.states[3] = run_state(3, "latest-act")
                 campaign.states[4] = battle_state(3, "battle2")

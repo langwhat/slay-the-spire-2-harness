@@ -1,9 +1,12 @@
 import hashlib
 import json
 import sys
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import pytest
+
+from sts2_harness.session import RunSession
 
 
 def template_fixture(directory: Path) -> Path:
@@ -201,13 +204,15 @@ def test_headless_owns_two_concurrent_children_and_runs_one_session_each(tmp_pat
     from sts2_harness.diagnostics import Diagnostics
     from sts2_harness.headless import HeadlessOptions, StandardRunRecipe, run_headless
     from sts2_harness.journal import Journal, Manifest, StandardCharacter
+    from sts2_harness.live_session import live_session
     from sts2_harness.llm.client import Llm
-    from sts2_harness.session import RunSession
 
     executable, template = game_fixture(tmp_path)
     paths: list[Path] = []
 
-    def session(manifest: Manifest, archive: Path, diagnostics: Diagnostics) -> RunSession:
+    def session(
+        manifest: Manifest, archive: Path, diagnostics: Diagnostics
+    ) -> AbstractAsyncContextManager[RunSession]:
         from sts2_harness.client import ModClient
 
         paths.append(archive)
@@ -223,7 +228,7 @@ def test_headless_owns_two_concurrent_children_and_runs_one_session_each(tmp_pat
                 headers={"Content-Type": "text/event-stream"},
             )
 
-        return RunSession(
+        return live_session(
             ModClient(f"http://127.0.0.1:{port}"),
             manifest,
             archive,
@@ -345,13 +350,15 @@ def test_owned_game_exit_finishes_the_session_at_a_safe_boundary(tmp_path: Path)
         run_headless,
     )
     from sts2_harness.journal import Journal, Manifest, StandardCharacter
+    from sts2_harness.live_session import live_session
     from sts2_harness.llm.client import Llm
-    from sts2_harness.session import RunSession
 
     game, template = game_fixture(tmp_path)
     archive_path: Path | None = None
 
-    def session(manifest: Manifest, archive: Path, diagnostics: Diagnostics) -> RunSession:
+    def session(
+        manifest: Manifest, archive: Path, diagnostics: Diagnostics
+    ) -> AbstractAsyncContextManager[RunSession]:
         nonlocal archive_path
         archive_path = archive
         status = json.loads((archive.parent / "status.json").read_text())
@@ -367,7 +374,7 @@ def test_owned_game_exit_finishes_the_session_at_a_safe_boundary(tmp_path: Path)
                 headers={"Content-Type": "text/event-stream"},
             )
 
-        return RunSession(
+        return live_session(
             ModClient(f"http://127.0.0.1:{status['mod_port']}"),
             manifest,
             archive,

@@ -9,7 +9,7 @@ import socket
 import sys
 import tempfile
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -31,6 +31,7 @@ from sts2_harness.journal import (
     NativeStartReceipt,
     StandardCharacter,
 )
+from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
 from sts2_harness.native_template import NativeTemplate, TemplateError, digest
@@ -476,7 +477,9 @@ class _PortCollision(Exception):
     pass
 
 
-type SessionFactory = Callable[[Manifest, Path, Diagnostics], RunSession]
+type SessionFactory = Callable[
+    [Manifest, Path, Diagnostics], AbstractAsyncContextManager[RunSession]
+]
 
 
 async def run_headless(
@@ -565,8 +568,8 @@ async def run_headless(
 
             def new_session(
                 manifest: Manifest, archive: Path, diagnostics: Diagnostics
-            ) -> RunSession:
-                return RunSession(
+            ) -> AbstractAsyncContextManager[RunSession]:
+                return live_session(
                     ModClient(f"http://127.0.0.1:{instance.port}"),
                     manifest,
                     archive,

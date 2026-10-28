@@ -1,5 +1,7 @@
 import asyncio
 import json
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx2 as httpx
@@ -14,6 +16,7 @@ from sts2_harness.client import models as native
 from sts2_harness.config import Configuration, Driver
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.journal import Journal, Manifest
+from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.session import RunSession
 
@@ -147,10 +150,13 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(tmp_path: Path) 
     def client() -> ModClient:
         return ModClient("http://mod", transport=httpx.MockTransport(mod))
 
-    def session(manifest: Manifest, path: Path, diagnostics: Diagnostics) -> RunSession:
+    @asynccontextmanager
+    async def session(
+        manifest: Manifest, path: Path, diagnostics: Diagnostics
+    ) -> AsyncGenerator[RunSession]:
         assert process_configuration.model is not None
         manifests.append(manifest)
-        current = RunSession(
+        async with live_session(
             client(),
             manifest,
             path,
@@ -158,10 +164,10 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(tmp_path: Path) 
             diagnostics=diagnostics,
             stop_requested=stop.is_set,
             wait=wait,
-        )
-        sessions.append(current)
-        assert current.notes.read() == "" and current.recovery.failures == 0
-        return current
+        ) as current:
+            sessions.append(current)
+            assert current.notes.read() == "" and current.recovery.failures == 0
+            yield current
 
     asyncio.run(
         run_interactive(
@@ -300,8 +306,11 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
     ) -> CodeRun:
         return CodeRun()
 
-    def make_session(manifest: Manifest, path: Path, diagnostics: Diagnostics) -> RunSession:
-        session = RunSession(
+    @asynccontextmanager
+    async def make_session(
+        manifest: Manifest, path: Path, diagnostics: Diagnostics
+    ) -> AsyncGenerator[RunSession]:
+        async with live_session(
             client(),
             manifest,
             path,
@@ -310,11 +319,11 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
             diagnostics=diagnostics,
             stop_requested=stop.is_set,
             wait=wait,
-        )
-        session.notes.replace("Retain this session.")
-        sessions.append(session)
-        paths.append(path)
-        return session
+        ) as session:
+            session.notes.replace("Retain this session.")
+            sessions.append(session)
+            paths.append(path)
+            yield session
 
     asyncio.run(
         run_interactive(
@@ -372,10 +381,34 @@ def test_session_leaving_run_does_not_publish_terminal(tmp_path: Path) -> None:
             stop.set()
             return RunEnded(RunEndReason.NO_RUN, None)
 
-    def session(manifest: Manifest, path: Path, diagnostics: Diagnostics) -> RunSession:
-        return LeavingSession(
-            client(), manifest, path, diagnostics=diagnostics, model=Llm(configuration(tmp_path))
-        )
+    from sts2_harness.game import LiveGame
+    from sts2_harness.llm.messages import ModelClient
+    from sts2_harness.materials import FileDocuments
+    from sts2_harness.prompts import PackagedPrompts
+    from sts2_harness.session import SessionDependencies
+
+    def no_model(role: native.DecisionOwner, stream: str) -> ModelClient:
+        raise AssertionError("This session exits without model decisions.")
+
+    @asynccontextmanager
+    async def session(
+        manifest: Manifest, path: Path, diagnostics: Diagnostics
+    ) -> AsyncGenerator[RunSession]:
+        async with client() as active:
+            dependencies = SessionDependencies(
+                LiveGame(
+                    active,
+                    namespace=manifest.recording_id,
+                    game_instance_id=manifest.game_instance_id,
+                    run_id=manifest.run_id,
+                    wait_for_start=True,
+                ),
+                PackagedPrompts(),
+                FileDocuments(),
+                no_model,
+            )
+            async with LeavingSession(manifest, dependencies, diagnostics=diagnostics) as current:
+                yield current
 
     asyncio.run(
         run_interactive(

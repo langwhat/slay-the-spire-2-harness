@@ -317,21 +317,24 @@ directory. Shared installation files and the source template remain intact.
 
 ## Single-run sessions
 
-`sts2_harness.session.RunSession` assembles `ModClient`, `Llm`, `Manifest`, and an archive
-path into one run. The manifest supplies the bound game/run identities and the unique
+`sts2_harness.live_session.live_session` assembles `ModClient`, `Llm`, `Manifest`, and an
+archive path into one run. The manifest supplies the bound game/run identities and the unique
 initial notes value; `initial_notes` must be explicit, including `""` for known empty notes.
-Pass resources that the session may own and close:
+Pass resources that the live context owns and closes:
 
 ```python
-from sts2_harness.session import RunSession
+from sts2_harness.live_session import live_session
 
-async with RunSession(client, manifest, archive_path, model=model) as session:
+async with live_session(client, manifest, archive_path, model=model) as session:
     await session.start()
     ended = await session.run()
 ```
 
-The session owns and releases the supplied client and optional model, creates and closes
-its Journal, and shares one Notes owner and recovery budget. `DefaultFlow` waits for Start,
+The live context releases the supplied client and optional model and closes its Journal.
+`RunSession(manifest, dependencies)` borrows typed game, prompt, document, and model-factory
+dependencies and owns one Notes instance, recovery budget, and role flow. It does not close
+injected dependencies. Automatic entry guidance is enabled separately from tool documents.
+`DefaultFlow` waits for Start,
 schedules Run and Combat, completes pending battle handoffs before creating the next
 Combat, rebuilds Run context at act boundaries, and returns on termination or run change.
 `start()` records a real Pause and waits for explicit Start before `run()` enters gameplay.

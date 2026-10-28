@@ -28,6 +28,7 @@ from sts2_harness.journal_models import (
 )
 from sts2_harness.knowledge import (
     Document,
+    Documents,
     DocumentView,
     SkillRead,
     SkillSummary,
@@ -43,7 +44,6 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
-from sts2_harness.materials import FileDocuments
 from sts2_harness.prompts import PromptReader
 
 
@@ -165,7 +165,7 @@ class RecordedPrompts:
 
 
 class RecordedDocuments:
-    def __init__(self, live: FileDocuments, journal: Journal) -> None:
+    def __init__(self, live: Documents, journal: Journal) -> None:
         self._live = live
         self._journal = journal
 

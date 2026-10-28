@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -19,6 +20,7 @@ from sts2_harness.game import (
     SessionStopped,
 )
 from sts2_harness.journal import Manifest
+from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
 from sts2_harness.results import Reason, ReasonCode
@@ -31,7 +33,9 @@ class InteractiveOptions:
     output_directory: Path
 
 
-type SessionFactory = Callable[[Manifest, Path, Diagnostics], RunSession]
+type SessionFactory = Callable[
+    [Manifest, Path, Diagnostics], AbstractAsyncContextManager[RunSession]
+]
 
 
 async def run_interactive(
@@ -63,8 +67,10 @@ async def run_interactive(
 
     make_client = client_factory or new_client
 
-    def new_session(manifest: Manifest, path: Path, diagnostic: Diagnostics) -> RunSession:
-        return RunSession(
+    def new_session(
+        manifest: Manifest, path: Path, diagnostic: Diagnostics
+    ) -> AbstractAsyncContextManager[RunSession]:
+        return live_session(
             make_client(),
             manifest,
             path,

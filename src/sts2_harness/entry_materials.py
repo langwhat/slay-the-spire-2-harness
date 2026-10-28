@@ -7,15 +7,14 @@ from sts2_harness.client import models as native
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import DecisionInterrupted
 from sts2_harness.game import GameLifetimeEnded, GameReadError
-from sts2_harness.knowledge import DocumentView, SkillRead, SubjectId, UnknownDocument
+from sts2_harness.knowledge import Documents, DocumentView, SkillRead, SubjectId, UnknownDocument
 from sts2_harness.material_text import MaterialUnavailable
-from sts2_harness.model_journal import RecordedDocuments
 from sts2_harness.results import Reason, ReasonCode
 
 
 async def entry_materials(
     execution: Execution,
-    documents: RecordedDocuments,
+    documents: Documents,
     role: native.DecisionOwner,
     observation: native.Observation,
     configured: tuple[str, ...],
