@@ -11,6 +11,7 @@ import tempfile
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
 from typing import Annotated, Self
@@ -91,11 +92,23 @@ def _candidate_port(requested: int | None) -> int:
         return candidate.getsockname()[1]
 
 
+class HeadlessLaunchMode(StrEnum):
+    RECIPE = "recipe"
+    FRESH_MENU = "fresh_menu"
+
+
 class OwnedHeadlessInstance:
     def __init__(
-        self, options: HeadlessOptions, *, stop_requested: asyncio.Event | None = None
+        self,
+        options: HeadlessOptions,
+        *,
+        stop_requested: asyncio.Event | None = None,
+        mode: HeadlessLaunchMode = HeadlessLaunchMode.RECIPE,
+        development_checkpoints: bool = False,
     ) -> None:
         self.options = options
+        self._mode = mode
+        self._development_checkpoints = development_checkpoints
         self._stop_requested = stop_requested
         self.process: asyncio.subprocess.Process | None = None
         self.diagnostics: Diagnostics | None = None
@@ -223,13 +236,12 @@ class OwnedHeadlessInstance:
             self._alias = alias
             self.alias = alias
             start = self.directory / "start.json"
-            start.write_text(self.options.recipe.model_dump_json())
-            self.environment.update(
-                {
-                    "STS2AGENT_START_RUN_FILE": str(start),
-                    "STS2AGENT_GRACEFUL_HEADLESS_EXIT": "1",
-                }
-            )
+            if self._mode is HeadlessLaunchMode.RECIPE:
+                start.write_text(self.options.recipe.model_dump_json())
+                self.environment["STS2AGENT_START_RUN_FILE"] = str(start)
+            if self._development_checkpoints:
+                self.environment["STS2_ALLOW_CHECKPOINTS"] = "true"
+            self.environment["STS2AGENT_GRACEFUL_HEADLESS_EXIT"] = "1"
             self._outputs = tuple(
                 BoundedChildOutput(self.directory, stream) for stream in ChildStream
             )
@@ -291,6 +303,7 @@ class OwnedHeadlessInstance:
         receipt = Path(str(start) + ".result.json")
         async with ModClient(f"http://127.0.0.1:{self.port}") as client:
             previous: native.Observation | None = None
+            previous_menu: native.Status | None = None
             while True:
                 if self._stop_requested is not None and self._stop_requested.is_set():
                     raise SessionStopped()
@@ -309,17 +322,41 @@ class OwnedHeadlessInstance:
                 owners = {int(value) for value in stdout.split()}
                 if owners and owners != {self.process.pid}:
                     raise _PortCollision()
-                if not owners or not receipt.exists():
+                if not owners or (self._mode is HeadlessLaunchMode.RECIPE and not receipt.exists()):
                     previous = None
+                    previous_menu = None
                     await asyncio.sleep(0.1)
                     continue
                 try:
-                    self.receipt = NativeStartReceipt.model_validate_json(receipt.read_bytes())
+                    if self._mode is HeadlessLaunchMode.RECIPE:
+                        self.receipt = NativeStartReceipt.model_validate_json(receipt.read_bytes())
                     status = await client.status()
                     self.bootstrap(Endpoint.STATUS, status)
                 except ClientUnavailable as error:
                     self.bootstrap(Endpoint.STATUS, error=error.reason)
                     previous = None
+                    previous_menu = None
+                    await asyncio.sleep(0.1)
+                    continue
+                if self._mode is HeadlessLaunchMode.FRESH_MENU:
+                    if not isinstance(status, native.Status):
+                        raise HeadlessError("The owned menu did not return public status.")
+                    if status.input_readiness is native.InputReadiness.BUSY:
+                        previous_menu = None
+                    elif (
+                        status.control_intent is native.ControlIntent.PAUSED
+                        and status.location.run_id is None
+                        and status.location.node_id is None
+                        and status.location.owner is None
+                        and status.receipt is None
+                    ):
+                        if previous_menu == status:
+                            return
+                        previous_menu = status
+                    else:
+                        raise HeadlessError(
+                            "Checkpoint loading requires an owned fresh paused menu."
+                        )
                     await asyncio.sleep(0.1)
                     continue
                 try:
