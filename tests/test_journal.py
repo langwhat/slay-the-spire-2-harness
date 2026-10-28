@@ -20,6 +20,190 @@ from sts2_harness.journal import Journal, Manifest, Record, RecordedGame, Result
 from sts2_harness.results import ActionUnknown, Reason, ReasonCode
 
 
+def test_branch_readers_join_the_parent_prefix_with_local_evidence(tmp_path: Path) -> None:
+    from hashlib import sha256
+
+    from test_responses import configuration
+
+    from sts2_harness.game import GameReply, OperationKind, Settle
+    from sts2_harness.journal import (
+        ArchiveError,
+        DependencyKind,
+        Gap,
+        ModelSummary,
+        ParentPrefix,
+        evidence,
+    )
+    from sts2_harness.journal_models import (
+        ConfigurationSnapshot,
+        MaterialFailed,
+        MaterialFailure,
+        PromptRead,
+        PromptReadResult,
+        ToolSet,
+        archive_input,
+    )
+    from sts2_harness.llm.messages import TextMessage, TextRole
+    from sts2_harness.model_journal import RecordedPrompts
+    from sts2_harness.prompts import PackagedPrompts
+
+    observation = native.Observation.model_validate_json(RUN)
+    route = native.RouteKey.model_validate(observation.location.model_dump())
+    step = native.Interact(kind=native.StepKind.INTERACT, action="travel")
+    config = ConfigurationSnapshot.of(configuration(tmp_path))
+    messages = archive_input((TextMessage(TextRole.USER, "Synthetic current task."),))
+
+    def model(journal: Journal, stream: str) -> int:
+        sequence = journal.begin_model(
+            native.DecisionOwner.RUN, stream, messages, ToolSet(tools=()), config
+        )
+        journal.finish_model(sequence)
+        journal.end_model()
+        return sequence
+
+    def settle(journal: Journal, operation_id: str) -> None:
+        journal.begin(Settle(route=route, step=step))
+        journal.finish(
+            GameReply(
+                outcome=Settlement(
+                    request=native.StepRequest(
+                        operation_id=operation_id, expected_route=route, step=step
+                    ),
+                    receipt=native.ReceiptCompleted(
+                        operation_id=operation_id,
+                        status=native.ResultStatus.COMPLETED,
+                        boundary=native.InputReadiness.READY,
+                    ),
+                ),
+                observations=(observation,),
+            )
+        )
+        journal.end()
+
+    source = Journal.create(
+        tmp_path / "parent.sqlite",
+        Manifest(
+            recording_id="parent", core_version="source", game_instance_id="game", run_id="run"
+        ),
+    )
+    settle(source, "parent:1")
+    assert model(source, "run:1") == 2
+    RecordedPrompts(PackagedPrompts(), source).read("run-tasks")
+    assert model(source, "run:1") == 4
+    RecordedPrompts(PackagedPrompts(), source).read("combat-tasks")
+    model(source, "run:1")
+    source.close()
+    prefix = ParentPrefix(
+        archive=source.path,
+        recording_id="parent",
+        before_sequence=4,
+        archive_sha256=sha256(source.path.read_bytes()).hexdigest(),
+    )
+    branch = Journal.create(
+        tmp_path / "branch.sqlite",
+        source.manifest.model_copy(
+            update={"recording_id": "branch", "core_version": "current", "parent": prefix}
+        ),
+    )
+    assert model(branch, "run:1") == 4
+    material_sequence = branch.begin_material(PromptRead(name="branch-only"))
+    branch.finish_material(
+        material_sequence,
+        MaterialFailed(failure=MaterialFailure.UNAVAILABLE, message="Synthetic branch failure."),
+    )
+    settle(branch, "actual-B:91")
+    assert model(branch, "run:1") == 7
+    assert model(branch, "run:2") == 8
+    branch.close()
+    with closing(Journal.open(branch.path)) as reader:
+        requests = reader.requests()
+        assert [
+            (item.sequence, item.stream, item.position, item.base_sequence) for item in requests
+        ] == [
+            (2, "run:1", 1, None),
+            (4, "run:1", 2, None),
+            (7, "run:1", 3, 4),
+            (8, "run:2", 1, None),
+        ]
+        assert reader.request(2) == requests[0] and reader.request(4) == requests[1]
+        assert all(item.input == messages for item in requests)
+        first = reader.summaries(kind=DependencyKind.MODEL, start=4, stop=4)[0]
+        assert isinstance(first, ModelSummary)
+        assert (first.role, first.node_id, first.confirmed_operation_cursor, first.position) == (
+            native.DecisionOwner.RUN,
+            route.node_id,
+            1,
+            2,
+        )
+        assert [item.sequence for item in reader.timeline()] == list(range(1, 9))
+        assert [item.sequence for item in reader.operations(limit=1)] == [6]
+        assert [item.operation_id for item in reader.operations()] == ["parent:1", "actual-B:91"]
+        assert [item.sequence for item in reader.summaries(limit=6)] == list(range(3, 9))
+        assert [item.sequence for item in reader.timeline(kind=DependencyKind.MODEL, limit=2)] == [
+            7,
+            8,
+        ]
+        assert [item.sequence for item in reader.materials(start=3, stop=5)] == [3, 5]
+        assert isinstance(reader.materials()[0].reply, PromptReadResult)
+        assert reader.materials()[1].request == PromptRead(name="branch-only")
+        assert [item.sequence for item in reader.summaries(errors_only=True)] == [5]
+        assert [item.sequence for item in reader.summaries(kind=OperationKind.SETTLE, limit=2)] == [
+            1,
+            6,
+        ]
+        assert [item.sequence for item in evidence(reader, expand=True, sequence=4).records] == [4]
+        assert [
+            item.sequence
+            for item in evidence(
+                reader, role=native.DecisionOwner.RUN, node_id=route.node_id
+            ).records
+        ] == [1, 2, 4, 6, 7, 8]
+        with closing(sqlite3.connect(branch.path)) as connection:
+            local_blocks = connection.execute("SELECT COUNT(*) FROM blobs").fetchone()[0]
+        assert reader.storage.unique_blocks == local_blocks
+        assert reader.gaps == ()
+        with pytest.raises(ArchiveError):
+            reader.operation(9)
+    with closing(sqlite3.connect(branch.path)) as connection:
+        assert connection.execute("SELECT MIN(sequence) FROM summaries").fetchone() == (4,)
+        assert connection.execute("SELECT MIN(sequence) FROM model_requests").fetchone() == (4,)
+    with closing(sqlite3.connect(source.path)) as connection, connection:
+        connection.execute("INSERT INTO gaps VALUES (3,6,'storage_unavailable')")
+    with pytest.raises(ArchiveError, match="parent recording has changed"):
+        Journal.open(branch.path)
+    changed_prefix = prefix.model_copy(
+        update={"archive_sha256": sha256(source.path.read_bytes()).hexdigest()}
+    )
+    gaps_branch = Journal.create(
+        tmp_path / "gaps.sqlite",
+        branch.manifest.model_copy(update={"parent": changed_prefix}),
+    )
+    assert gaps_branch.gaps == (Gap(first_sequence=3, last_sequence=3),)
+    gaps_branch.close()
+
+
+def test_parent_hash_is_checked_before_following_a_corrupt_parent_chain(tmp_path: Path) -> None:
+    from sts2_harness.journal import ArchiveError, ParentPrefix
+
+    path = tmp_path / "self-parent.sqlite"
+    journal = Journal.create(
+        path,
+        Manifest(recording_id="branch", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    journal.close()
+    changed = journal.manifest.model_copy(
+        update={
+            "parent": ParentPrefix(
+                archive=path, recording_id="branch", before_sequence=1, archive_sha256="0" * 64
+            )
+        }
+    )
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("UPDATE manifest SET value=?", (changed.model_dump_json(),))
+    with pytest.raises(ArchiveError, match="parent recording has changed"):
+        Journal.open(path)
+
+
 def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_path: Path) -> None:
     async def scenario() -> None:
         import json

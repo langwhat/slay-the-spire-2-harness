@@ -337,6 +337,110 @@ def test_reach_runs_start_combat_handoff_and_act_rebuild(tmp_path: Path) -> None
     asyncio.run(scenario())
 
 
+def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Path) -> None:
+    from sts2_harness.game import GameReply
+    from sts2_harness.journal import ParentPrefix
+    from sts2_harness.journal_models import MaterialRecord, ModelRecord, ToolSet
+
+    async def scenario() -> None:
+        source_path = tmp_path / "parent.sqlite"
+        anchors = await record_campaign(source_path, StartedCampaign(), start=True)
+        with closing(Journal.open(source_path)) as source:
+            cutoff = anchors[1].model_sequence
+            target = source.request(anchors[-1].model_sequence)
+            branch = Journal.create(
+                tmp_path / "branch.sqlite",
+                source.manifest.model_copy(
+                    update={
+                        "recording_id": "branch",
+                        "core_version": "current-software",
+                        "parent": ParentPrefix(
+                            archive=source_path,
+                            recording_id=source.manifest.recording_id,
+                            before_sequence=cutoff,
+                            archive_sha256=sha256(source_path.read_bytes()).hexdigest(),
+                        ),
+                    }
+                ),
+            )
+            for record in source.timeline(start=cutoff, stop=target.sequence):
+                if isinstance(record, ModelRecord):
+                    sequence = branch.begin_model(
+                        record.role,
+                        record.stream,
+                        record.input,
+                        ToolSet(tools=record.tools),
+                        record.configuration,
+                    )
+                    for attempt in record.attempts:
+                        branch.model_attempt(sequence, attempt)
+                    branch.finish_model(sequence, failure=record.failure)
+                    branch.end_model()
+                    continue
+                if isinstance(record, MaterialRecord):
+                    sequence = branch.begin_material(record.request)
+                    assert record.reply is not None
+                    branch.finish_material(sequence, record.reply)
+                    continue
+                assert record.reply is not None
+                outcome = record.reply.outcome
+                if isinstance(outcome, Settlement):
+                    assert outcome.receipt is not None
+                    operation_id = f"native-B:{record.sequence}"
+                    outcome = outcome.model_copy(
+                        update={
+                            "request": outcome.request.model_copy(
+                                update={"operation_id": operation_id}
+                            ),
+                            "receipt": outcome.receipt.model_copy(
+                                update={"operation_id": operation_id}
+                            ),
+                        }
+                    )
+                branch.begin(record.request)
+                branch.finish(GameReply(outcome=outcome, observations=record.reply.observations))
+                branch.end()
+            branch.close()
+        with closing(Journal.open(branch.path)) as reader:
+            writes = reader.operations(kind=OperationKind.SETTLE)
+            assert writes[0].operation_id == "recording:1"
+            assert all(
+                record.operation_id == f"native-B:{record.sequence}" for record in writes[1:]
+            )
+            assert reader.timeline()[-1].sequence == target.sequence
+            assert reader.request(target.sequence).semantic_digest == target.semantic_digest
+            assert reader.requests()[1].base_sequence is None
+            assert reader.request(anchors[3].model_sequence).position == 2
+        anchor = ModelAnchor("branch", target.sequence)
+        async with reach(branch.path, anchor) as result:
+            assert result == Reached(
+                anchor, target.confirmed_operation_cursor, target.semantic_digest
+            )
+        changed = writes[1]
+        assert changed.reply is not None and isinstance(changed.reply.outcome, Settlement)
+        receipt = changed.reply.outcome.receipt
+        assert receipt is not None
+        replace_result(
+            branch.path,
+            changed.sequence,
+            changed.reply.model_copy(
+                update={
+                    "outcome": changed.reply.outcome.model_copy(
+                        update={"receipt": receipt.model_copy(update={"operation_id": "wrong"})}
+                    )
+                }
+            ),
+        )
+        async with reach(branch.path, anchor) as result:
+            assert result == Rejected(
+                RejectReason.INPUT_MISMATCH,
+                changed.sequence,
+                InputDifference(InputComponent.OPERATION_ID),
+            )
+
+    asyncio.run(scenario())
+
+
 class FailedAutoCampaign(StartedCampaign):
     def __init__(self) -> None:
         from test_auto import scene

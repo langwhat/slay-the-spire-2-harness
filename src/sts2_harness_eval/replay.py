@@ -157,10 +157,8 @@ class _Timeline:
 
 
 class _Game:
-    def __init__(self, timeline: _Timeline, namespace: str) -> None:
+    def __init__(self, timeline: _Timeline) -> None:
         self._timeline = timeline
-        self._namespace = namespace
-        self._settles = 0
 
     def _reply[T: GameSuccess](self, request: GameRequest, success: type[T]) -> GameReply[T]:
         record = self._timeline.take(request.kind)
@@ -172,18 +170,17 @@ class _Game:
             _unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
         outcome = reply.outcome
         if isinstance(request, Settle):
-            self._settles += 1
             if isinstance(outcome, Settlement):
-                expected = native.StepRequest(
-                    operation_id=f"{self._namespace}:{self._settles}",
-                    expected_route=request.route,
-                    step=request.step,
-                )
-                if outcome.request != expected or record.operation_id != expected.operation_id:
+                if (
+                    not record.operation_id
+                    or outcome.request.operation_id != record.operation_id
+                    or outcome.request.expected_route != request.route
+                    or outcome.request.step != request.step
+                ):
                     _different(record.sequence, InputComponent.OPERATION_ID)
                 if outcome.receipt is None or isinstance(outcome.receipt, native.ReceiptUnknown):
                     _unsupported(record.sequence, UnsupportedCause.UNKNOWN_WRITE)
-                if outcome.receipt.operation_id != expected.operation_id:
+                if outcome.receipt.operation_id != record.operation_id:
                     _different(record.sequence, InputComponent.OPERATION_ID)
                 if isinstance(outcome.receipt, native.ReceiptCompleted):
                     self._timeline.cursor += 1
@@ -364,7 +361,7 @@ async def _run(
         return _Model(timeline, role, stream, target, reached)
 
     dependencies = SessionDependencies(
-        _Game(timeline, journal.manifest.recording_id),
+        _Game(timeline),
         _Prompts(timeline),
         _Documents(timeline),
         model,

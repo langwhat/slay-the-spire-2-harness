@@ -10,7 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError, field_validator
 
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
@@ -97,6 +97,20 @@ class HeadlessInitialConditions(native.WireModel):
     initial_observation_sha256: str
 
 
+class ParentPrefix(native.WireModel):
+    archive: Path
+    recording_id: native.Nonempty
+    before_sequence: Annotated[int, Field(gt=0)]
+    archive_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+    @field_validator("archive")
+    @classmethod
+    def _absolute_archive(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("A parent recording archive path must be absolute.")
+        return value
+
+
 class Manifest(native.WireModel):
     schema_version: Literal[8] = 8
     scope: Literal["game_model_material_control"] = "game_model_material_control"
@@ -111,6 +125,7 @@ class Manifest(native.WireModel):
     initial_notes: str | None = None
     game_version: str | None = None
     headless: HeadlessInitialConditions | None = None
+    parent: ParentPrefix | None = None
 
 
 class GapCause(StrEnum):
@@ -219,6 +234,7 @@ class Journal:
         self._initialized = False
         self._owns_path = False
         self._storage_error: GapCause | None = None
+        self._parent: Journal | None = None
 
     @classmethod
     def create(
@@ -236,6 +252,11 @@ class Journal:
         if supplied is None:
             journal._resources.callback(diagnostics.close)
         try:
+            journal._inherit_parent()
+        except ArchiveError:
+            journal.close()
+            raise
+        try:
             journal._initialize()
         except (OSError, sqlite3.OperationalError):
             journal._storage_error = GapCause.STORAGE_UNAVAILABLE
@@ -243,6 +264,73 @@ class Journal:
                 Event(event=EventKind.RECORDING_GAP, error=GapCause.STORAGE_UNAVAILABLE.value)
             )
         return journal
+
+    def _inherit_parent(self) -> None:
+        prefix = self.manifest.parent
+        if prefix is None:
+            return
+        try:
+            with prefix.archive.open("rb") as source:
+                digest = hashlib.file_digest(source, "sha256").hexdigest()
+        except OSError:
+            raise ArchiveError("Cannot read the parent recording archive.") from None
+        if digest != prefix.archive_sha256:
+            raise ArchiveError("The parent recording has changed.")
+        parent = Journal.open(prefix.archive)
+        self._resources.callback(parent.close)
+        if parent.manifest.recording_id != prefix.recording_id:
+            raise ArchiveError("The parent recording identity differs.")
+        inherited = self.manifest.model_copy(
+            update={
+                "recording_id": parent.manifest.recording_id,
+                "core_version": parent.manifest.core_version,
+                "parent": parent.manifest.parent,
+            }
+        )
+        if inherited != parent.manifest:
+            raise ArchiveError("The branch initial conditions differ from its parent recording.")
+        targets = parent.summaries(
+            kind=DependencyKind.MODEL,
+            start=prefix.before_sequence,
+            stop=prefix.before_sequence,
+        )
+        if not targets:
+            raise ArchiveError("The branch target is not a recorded model request.")
+        target = targets[0]
+        assert isinstance(target, ModelSummary)
+        self._sequence = prefix.before_sequence - 1
+        self._cursor = target.confirmed_operation_cursor
+        for summary in parent.summaries(kind=DependencyKind.MODEL, stop=self._sequence):
+            assert isinstance(summary, ModelSummary)
+            self._stream_positions[summary.stream] = max(
+                self._stream_positions.get(summary.stream, 0), summary.position
+            )
+        for record in reversed(parent.operations(stop=self._sequence)):
+            reply = record.reply
+            if reply is not None:
+                if (
+                    isinstance(
+                        reply.outcome, (LifetimeEnded, IOFailure, ReadFailure, ControlFailure)
+                    )
+                    or _result(reply.outcome)[0] is ResultKind.UNKNOWN
+                ):
+                    break
+                if reply.observations:
+                    location = reply.observations[-1].location
+                    if (
+                        location.game_instance_id == self.manifest.game_instance_id
+                        and location.run_id == self.manifest.run_id
+                        and not any(
+                            gap.first_sequence < prefix.before_sequence
+                            and gap.last_sequence >= record.sequence
+                            for gap in parent.gaps
+                        )
+                    ):
+                        self._boundary = (record.confirmed_operation_cursor, location)
+                    break
+            if isinstance(record.request, (Settle, Pause)):
+                break
+        self._parent = parent
 
     def _initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -291,8 +379,13 @@ class Journal:
                 "Cannot read the recording archive or its schema is unsupported."
             ) from None
         journal = cls(path, manifest)
-        journal._sequence = sequence
-        journal._cursor = cursor
+        try:
+            journal._inherit_parent()
+        except ArchiveError:
+            journal.close()
+            raise
+        journal._sequence = max(journal._sequence, sequence)
+        journal._cursor = max(journal._cursor, cursor)
         journal._read_only = True
         journal._initialized = True
         return journal
@@ -491,6 +584,17 @@ class Journal:
         self._active_sequence = None
 
     def requests(self, *, start: int = 1, stop: int | None = None) -> tuple[ModelRecord, ...]:
+        prefix = self.manifest.parent
+        inherited: tuple[ModelRecord, ...] = ()
+        if prefix is not None:
+            assert self._parent is not None
+            inherited = self._parent.requests(
+                start=start,
+                stop=min(stop, prefix.before_sequence - 1)
+                if stop is not None
+                else prefix.before_sequence - 1,
+            )
+            start = max(start, prefix.before_sequence)
         try:
             with closing(self._read_connection(self.path)) as connection:
                 rows = connection.execute(
@@ -572,7 +676,7 @@ class Journal:
                             failure=FailureKind(failure) if failure else None,
                         )
                     )
-                return tuple(result)
+                return inherited + tuple(result)
         except (OSError, sqlite3.Error, ValidationError, ValueError):
             raise ArchiveError("Cannot decode the requested model evidence.") from None
 
@@ -583,9 +687,20 @@ class Journal:
         return records[0]
 
     def materials(self, *, start: int = 1, stop: int | None = None) -> tuple[MaterialRecord, ...]:
+        prefix = self.manifest.parent
+        inherited: tuple[MaterialRecord, ...] = ()
+        if prefix is not None:
+            assert self._parent is not None
+            inherited = self._parent.materials(
+                start=start,
+                stop=min(stop, prefix.before_sequence - 1)
+                if stop is not None
+                else prefix.before_sequence - 1,
+            )
+            start = max(start, prefix.before_sequence)
         try:
             with closing(self._read_connection(self.path)) as connection:
-                return tuple(
+                return inherited + tuple(
                     MaterialRecord(
                         sequence=sequence,
                         confirmed_operation_cursor=cursor,
@@ -927,10 +1042,28 @@ class Journal:
                     for first, last, cause in rows
                 )
         except (OSError, sqlite3.Error):
-            if self._pending_gaps:
-                return tuple(self._pending_gaps)
-            raise ArchiveError("Cannot read recording gaps.") from None
-        return persisted + tuple(self._pending_gaps)
+            if not self._pending_gaps:
+                raise ArchiveError("Cannot read recording gaps.") from None
+            persisted = ()
+        local = persisted + tuple(self._pending_gaps)
+        prefix = self.manifest.parent
+        if prefix is None:
+            return local
+        assert self._parent is not None
+        inherited = tuple(
+            gap.model_copy(
+                update={"last_sequence": min(gap.last_sequence, prefix.before_sequence - 1)}
+            )
+            for gap in self._parent.gaps
+            if gap.first_sequence < prefix.before_sequence
+        )
+        return inherited + tuple(
+            gap.model_copy(
+                update={"first_sequence": max(gap.first_sequence, prefix.before_sequence)}
+            )
+            for gap in local
+            if gap.last_sequence >= prefix.before_sequence
+        )
 
     def operations(
         self,
@@ -940,6 +1073,7 @@ class Journal:
         stop: int | None = None,
         limit: int | None = None,
     ) -> tuple[Record, ...]:
+        prefix = self.manifest.parent
         try:
             with closing(self._read_connection(self.path)) as connection:
                 rows = connection.execute(
@@ -948,7 +1082,7 @@ class Journal:
                     "AND (? IS NULL OR sequence<=?) AND (? IS NULL OR kind=?) "
                     "ORDER BY sequence DESC LIMIT ?",
                     (
-                        start,
+                        max(start, prefix.before_sequence) if prefix is not None else start,
                         stop,
                         stop,
                         kind.value if kind else None,
@@ -997,9 +1131,20 @@ class Journal:
                             attempts=attempts,
                         )
                     )
-                return tuple(records)
         except (OSError, sqlite3.Error, ValidationError, ValueError):
             raise ArchiveError("Cannot decode the requested recording evidence.") from None
+        remaining = max(0, limit - len(records)) if limit is not None and limit >= 0 else None
+        if prefix is None or remaining == 0:
+            return tuple(records)
+        assert self._parent is not None
+        return self._parent.operations(
+            kind=kind,
+            start=start,
+            stop=min(stop, prefix.before_sequence - 1)
+            if stop is not None
+            else prefix.before_sequence - 1,
+            limit=remaining,
+        ) + tuple(records)
 
     @staticmethod
     def _write_summary(connection: sqlite3.Connection, summary: "Summary") -> None:
@@ -1094,6 +1239,7 @@ class Journal:
         node_id: str | None = None,
         errors_only: bool = False,
     ) -> tuple["Summary", ...]:
+        prefix = self.manifest.parent
         try:
             with closing(self._read_connection(self.path)) as connection:
                 self._check_summaries(connection)
@@ -1104,7 +1250,7 @@ class Journal:
                     "AND (? IS NULL OR node_id=?) AND (?=0 OR is_error=1) "
                     "ORDER BY sequence DESC LIMIT ?",
                     (
-                        start,
+                        max(start, prefix.before_sequence) if prefix is not None else start,
                         stop,
                         stop,
                         kind.value if kind is not None else None,
@@ -1117,9 +1263,27 @@ class Journal:
                         limit if limit is not None else -1,
                     ),
                 ).fetchall()
-                return tuple(_SUMMARY.validate_json(value) for (value,) in reversed(rows))
+                summaries = tuple(_SUMMARY.validate_json(value) for (value,) in reversed(rows))
         except (OSError, sqlite3.Error, ValidationError, ValueError):
             raise ArchiveError("Cannot decode the requested recording summaries.") from None
+        remaining = max(0, limit - len(summaries)) if limit is not None and limit >= 0 else None
+        if prefix is None or remaining == 0:
+            return summaries
+        assert self._parent is not None
+        return (
+            self._parent.summaries(
+                kind=kind,
+                start=start,
+                stop=min(stop, prefix.before_sequence - 1)
+                if stop is not None
+                else prefix.before_sequence - 1,
+                limit=remaining,
+                role=role,
+                node_id=node_id,
+                errors_only=errors_only,
+            )
+            + summaries
+        )
 
     def timeline(
         self,
