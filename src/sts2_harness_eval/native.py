@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,7 +31,7 @@ from sts2_harness_eval.cases import (
     UnsupportedCause,
     plan_admission,
 )
-from sts2_harness_eval.checkpoints import CheckpointClient, CheckpointUncertain
+from sts2_harness_eval.checkpoints import CheckpointClient, CheckpointUncertain, IdentityRead
 from sts2_harness_eval.verification import (
     AllowedMapDifference,
     KeyedRefs,
@@ -80,7 +80,8 @@ class LoadedTarget:
     game: LiveGame
     client: ModClient
     checkpoints: CheckpointClient
-    observation: native.Observation
+    read: IdentityRead
+    refs: Mapping[str, str]
     differences: tuple[AllowedMapDifference, ...]
     correspondence: LoadedCorrespondence
 
@@ -337,9 +338,9 @@ class NativeRestorer:
                     await _write(game, client, read.observation, translated_step(write.step, refs))
                 read = await checkpoints.identity()
                 correspondence.compare(reference.target, read)
-                loaded_refs(binding.target, read)
+                refs = loaded_refs(binding.target, read)
                 yield LoadedTarget(
-                    game, client, checkpoints, read.observation, tuple(differences), correspondence
+                    game, client, checkpoints, read, refs, tuple(differences), correspondence
                 )
 
     async def verify_follow_on(
