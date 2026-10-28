@@ -358,6 +358,24 @@ class Journal:
         )
 
     @classmethod
+    def read_manifest(cls, path: Path) -> Manifest:
+        """Read local metadata without following parents or expanding evidence bodies."""
+        try:
+            with closing(cls._read_connection(path)) as connection:
+                rows = connection.execute("SELECT value FROM manifest").fetchall()
+                if len(rows) != 1 or not isinstance(rows[0][0], str):
+                    raise ArchiveError("The recording manifest is missing or ambiguous.")
+                manifest = Manifest.model_validate_json(rows[0][0])
+                if not manifest.recording_id or not manifest.core_version:
+                    raise ArchiveError("Recording identity and core version are required.")
+                cls._check_summaries(connection)
+                return manifest
+        except (OSError, sqlite3.Error, ValidationError):
+            raise ArchiveError(
+                "Cannot read the recording manifest or its schema is unsupported."
+            ) from None
+
+    @classmethod
     def open(cls, path: Path) -> "Journal":
         try:
             with closing(cls._read_connection(path)) as connection:
