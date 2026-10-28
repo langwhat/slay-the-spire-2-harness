@@ -640,6 +640,8 @@ class Journal:
                             result=ResultKind.INCOMPLETE,
                             physical_attempts=0,
                             observations=0,
+                            role=request.route.owner if isinstance(request, Settle) else None,
+                            node_id=request.route.node_id if isinstance(request, Settle) else None,
                         ),
                     )
             opened = True
@@ -767,8 +769,23 @@ class Journal:
                         stored.model_dump_json(),
                     ),
                 )
-                location = reply.observations[0].location if reply.observations else None
-                if any(observation.location != location for observation in reply.observations):
+                location: native.Location | native.RouteKey | None = (
+                    reply.observations[0].location if reply.observations else None
+                )
+                if isinstance(request, Settle):
+                    route = request.route
+                    location = route
+                    for observation in reply.observations:
+                        observed = observation.location
+                        if (
+                            observed.game_instance_id != route.game_instance_id
+                            or (observed.run_id is not None and observed.run_id != route.run_id)
+                            or (observed.node_id is not None and observed.node_id != route.node_id)
+                            or (observed.owner is not None and observed.owner != route.owner)
+                        ):
+                            location = None
+                            break
+                elif any(observation.location != location for observation in reply.observations):
                     location = None
                 self._write_summary(
                     connection,

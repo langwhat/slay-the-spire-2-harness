@@ -4,14 +4,14 @@ from pathlib import Path
 import httpx2 as httpx
 import pytest
 from test_execution import Source
-from test_mod_client import RUN
+from test_mod_client import COMBAT, RUN
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.decisions import ActionDecision, ActionKind, ActionProposal, ActionStep, ActTask
 from sts2_harness.execution import Executed, Execution, ToolRecoveryBudget
 from sts2_harness.game import LiveGame, Settlement
-from sts2_harness.journal import Journal, Manifest, Record, RecordedGame
+from sts2_harness.journal import Journal, Manifest, Record, RecordedGame, ResultKind
 from sts2_harness.results import ActionUnknown, Reason, ReasonCode
 
 
@@ -1329,4 +1329,168 @@ def test_error_filter_excludes_normal_pause_stop_and_rejected_receipt(tmp_path: 
     reader = Journal.open(journal.path)
     assert len(evidence(reader).records) == 3
     assert evidence(reader, errors_only=True).records == ()
+    reader.close()
+
+
+@pytest.mark.parametrize("result", [ResultKind.UNKNOWN, ResultKind.FAILED, ResultKind.INCOMPLETE])
+def test_settlement_errors_reopen_with_request_role_and_node(
+    tmp_path: Path, result: ResultKind
+) -> None:
+    from sts2_harness.game import GameReply, Settle
+    from sts2_harness.journal import OperationSummary, evidence
+
+    journal = Journal.create(
+        tmp_path / "settlement.sqlite",
+        Manifest(recording_id="settle", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    route = native.RouteKey(
+        game_instance_id="game", run_id="run", node_id="node", owner=native.DecisionOwner.RUN
+    )
+    for index, requested_route in enumerate(
+        (
+            route,
+            route.model_copy(update={"node_id": "other"}),
+            route.model_copy(update={"owner": native.DecisionOwner.COMBAT}),
+        ),
+        start=1,
+    ):
+        request = native.StepRequest(
+            operation_id=f"settle:{index}",
+            expected_route=requested_route,
+            step=native.Interact(kind=native.StepKind.INTERACT, action="travel"),
+        )
+        journal.begin(Settle(route=requested_route, step=request.step))
+        if result is not ResultKind.INCOMPLETE:
+            receipt = (
+                native.ReceiptFailed(
+                    operation_id=request.operation_id,
+                    status=native.ResultStatus.FAILED,
+                    error=native.ActionFailure(
+                        code=native.ErrorCode.DISPATCH_FAILED, message="Dispatch failed."
+                    ),
+                )
+                if result is ResultKind.FAILED
+                else native.ReceiptUnknown(
+                    operation_id=request.operation_id,
+                    status=native.ResultStatus.UNKNOWN,
+                    error=native.UnknownExecution(
+                        code=native.ErrorCode.EXECUTION_UNCERTAIN, message="Execution unconfirmed."
+                    ),
+                )
+            )
+            journal.finish(GameReply(outcome=Settlement(request=request, receipt=receipt)))
+        journal.end()
+    journal.close()
+
+    reader = Journal.open(journal.path)
+    selected = evidence(reader, role=native.DecisionOwner.RUN, node_id="node", errors_only=True)
+    assert len(selected.records) == 1
+    summary = selected.records[0]
+    assert isinstance(summary, OperationSummary)
+    assert (summary.sequence, summary.role, summary.node_id, summary.result) == (
+        1,
+        native.DecisionOwner.RUN,
+        "node",
+        result,
+    )
+    assert [
+        row.sequence
+        for row in evidence(
+            reader, role=native.DecisionOwner.RUN, node_id="other", errors_only=True
+        ).records
+    ] == [2]
+    assert [
+        row.sequence
+        for row in evidence(
+            reader, role=native.DecisionOwner.COMBAT, node_id="node", errors_only=True
+        ).records
+    ] == [3]
+    reader.close()
+
+
+def test_settlement_summary_discards_explicit_observation_route_conflicts(tmp_path: Path) -> None:
+    from sts2_harness.game import GameReply, Settle
+    from sts2_harness.journal import OperationSummary, evidence
+
+    journal = Journal.create(
+        tmp_path / "conflicts.sqlite",
+        Manifest(recording_id="settle", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    observation = native.Observation.model_validate_json(RUN)
+    assert isinstance(observation.state, native.RunState)
+    route = native.RouteKey.model_validate(observation.location.model_dump())
+    terminal = observation.model_copy(
+        update={
+            "location": observation.location.model_copy(update={"owner": None}),
+            "input_readiness": native.InputReadiness.TERMINAL,
+            "state": native.TerminalState(
+                phase=native.Phase.TERMINAL,
+                screen=native.TerminalScreen.RUN_COMPLETE,
+                control=native.StateControl.UNAVAILABLE,
+                progress=observation.state.progress,
+                player=native.Player.model_validate(observation.state.player.model_dump()),
+                relics=observation.state.relics,
+                potions=observation.state.potions,
+                actions=(),
+                selection=None,
+                result=native.TerminalResult.VICTORY,
+                deck=observation.state.deck,
+            ),
+        }
+    )
+    for index, observed in enumerate(
+        (
+            observation,
+            terminal,
+            observation.model_copy(
+                update={
+                    "location": observation.location.model_copy(
+                        update={"game_instance_id": "other-game"}
+                    ),
+                    "stamp": observation.stamp.model_copy(
+                        update={"game_instance_id": "other-game"}
+                    ),
+                }
+            ),
+            observation.model_copy(
+                update={"location": observation.location.model_copy(update={"run_id": "other-run"})}
+            ),
+            observation.model_copy(
+                update={
+                    "location": observation.location.model_copy(update={"node_id": "other-node"})
+                }
+            ),
+            native.Observation.model_validate_json(COMBAT),
+        ),
+        start=1,
+    ):
+        request = native.StepRequest(
+            operation_id=f"settle:{index}",
+            expected_route=route,
+            step=native.Interact(kind=native.StepKind.INTERACT, action="travel"),
+        )
+        journal.begin(Settle(route=route, step=request.step))
+        journal.finish(
+            GameReply(
+                outcome=Settlement(request=request, receipt=None),
+                observations=(observation, observed),
+            )
+        )
+        journal.end()
+    journal.close()
+
+    reader = Journal.open(journal.path)
+    summaries = evidence(reader, errors_only=True).records
+    assert len(summaries) == 6
+    for index, summary in enumerate(summaries, start=1):
+        assert isinstance(summary, OperationSummary)
+        assert (summary.role, summary.node_id) == (
+            (native.DecisionOwner.RUN, "node") if index <= 2 else (None, None)
+        )
+    assert [
+        row.sequence
+        for row in evidence(
+            reader, role=native.DecisionOwner.RUN, node_id="node", errors_only=True
+        ).records
+    ] == [1, 2]
     reader.close()
