@@ -275,7 +275,50 @@ def test_eof_retries_but_explicit_truncation_does_not(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_retry_budget_classification_and_attempt_timeout(tmp_path: Path) -> None:
+def test_unknown_provider_failures_recover_with_the_same_request(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        content = (
+            b'data: {"type":"error","sequence_number":1,"code":"service_failed",'
+            b'"message":"Synthetic service failure.","param":null}\n\n'
+            if len(requests) < 3
+            else completed()
+        )
+        return httpx.Response(200, content=content, headers={"Content-Type": "text/event-stream"})
+
+    async def scenario() -> None:
+        async with Llm(
+            configuration(tmp_path), transport=httpx.MockTransport(handler), sleep=sleep
+        ) as llm:
+            reply = await llm.complete(
+                (TextMessage(TextRole.USER, "Inspect card c1."),),
+                (
+                    ToolDefinition(
+                        "inspect",
+                        MaterialText.create("inspect", "Inspect a card."),
+                        InspectArguments,
+                    ),
+                ),
+            )
+            assert reply.assistant.tool_calls[0].id == "call_1"
+            assert reply.assistant.tool_calls[0].arguments == '{"reference":"c1"}'
+        assert len(requests) == 3
+        assert requests[0].content == requests[1].content == requests[2].content
+        assert waits == [2, 4]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure_kind", [FailureKind.OVERLOAD, FailureKind.PROVIDER])
+def test_retry_budget_classification_and_attempt_timeout(
+    tmp_path: Path, failure_kind: FailureKind
+) -> None:
     async def scenario() -> None:
         waits: list[float] = []
         calls = 0
@@ -283,9 +326,18 @@ def test_retry_budget_classification_and_attempt_timeout(tmp_path: Path) -> None
         async def sleep(seconds: float) -> None:
             waits.append(seconds)
 
-        def overloaded(request: httpx.Request) -> httpx.Response:
+        def failing_provider(request: httpx.Request) -> httpx.Response:
             nonlocal calls
             calls += 1
+            if failure_kind is FailureKind.PROVIDER:
+                return httpx.Response(
+                    200,
+                    content=(
+                        b'data: {"type":"error","sequence_number":1,"code":"service_failed",'
+                        b'"message":"secret","param":null}\n\n'
+                    ),
+                    headers={"Content-Type": "text/event-stream"},
+                )
             return httpx.Response(
                 503,
                 json={"error": {"code": "server_error", "message": "secret"}},
@@ -293,11 +345,11 @@ def test_retry_budget_classification_and_attempt_timeout(tmp_path: Path) -> None
             )
 
         async with Llm(
-            configuration(tmp_path), transport=httpx.MockTransport(overloaded), sleep=sleep
+            configuration(tmp_path), transport=httpx.MockTransport(failing_provider), sleep=sleep
         ) as llm:
             with pytest.raises(ModelUnavailable) as failure:
                 await llm.complete((), ())
-            assert failure.value.reason is FailureKind.OVERLOAD
+            assert failure.value.reason is failure_kind
             assert "secret" not in str(failure.value)
         assert calls == 26
         assert waits == [2, 4, 8, 16, *([32] * 21)]

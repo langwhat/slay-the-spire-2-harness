@@ -101,6 +101,7 @@ class Llm:
                 FailureKind.RATE_LIMIT,
                 FailureKind.OVERLOAD,
                 FailureKind.INCOMPLETE_EOF,
+                FailureKind.PROVIDER,
             }
             if not retryable or attempt == self._configuration.extra_retries:
                 raise ModelUnavailable(reason) from None
