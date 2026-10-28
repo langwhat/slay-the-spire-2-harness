@@ -239,6 +239,7 @@ class LiveGame:
         wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
         stop_requested: Callable[[], bool] | None = None,
         on_status: Callable[[native.Status, bool], None] | None = None,
+        settle_confirmation_seconds: float | None = None,
     ) -> None:
         if not namespace:
             raise ValueError("A game session namespace is required.")
@@ -252,6 +253,7 @@ class LiveGame:
         self._wait = wait
         self._stop_requested = stop_requested
         self._on_status = on_status
+        self._settle_confirmation_seconds = settle_confirmation_seconds
         self._observations: list[native.Observation] = []
         self._inflight = False
 
@@ -415,6 +417,7 @@ class LiveGame:
                 native.InputReadiness.SELECTION,
             )
         ):
+            self._check_stop()
             await self._wait(0.1)
             status = await self._status()
             if status.location.run_id is None:
@@ -501,6 +504,11 @@ class LiveGame:
             reply = await self._attempt(Endpoint.SUBMIT, self._client.submit(request))
         except ClientUnavailable:
             reply = None
+        confirmation_deadline = (
+            asyncio.get_running_loop().time() + self._settle_confirmation_seconds
+            if self._settle_confirmation_seconds is not None
+            else None
+        )
         if isinstance(reply, native.InvalidRequestReply):
             return native.ReceiptRejected(
                 operation_id=request.operation_id,
@@ -514,6 +522,11 @@ class LiveGame:
         if reply is not None and not isinstance(reply, native.ReceiptPending):
             return reply
         while True:
+            if (
+                confirmation_deadline is not None
+                and asyncio.get_running_loop().time() >= confirmation_deadline
+            ):
+                return None
             try:
                 status = await self._attempt(Endpoint.STATUS, self._client.status())
             except ClientUnavailable:
