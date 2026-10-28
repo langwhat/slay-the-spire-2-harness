@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 import zlib
 from contextlib import closing
@@ -25,13 +26,22 @@ from sts2_harness.journal import (
     RecordedResult,
     StoredReply,
 )
-from sts2_harness.knowledge import Documents, SubjectId
+from sts2_harness.journal_models import DocumentRead, MaterialFailed, ResultSnapshot
+from sts2_harness.knowledge import (
+    Document,
+    Documents,
+    DocumentView,
+    SkillRead,
+    SubjectId,
+    UnknownDocument,
+)
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
-from sts2_harness.material_text import MaterialText
+from sts2_harness.material_text import MaterialText, MaterialUnavailable
 from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.prompts import PackagedPrompts
+from sts2_harness.results import Rejected as RejectedQuery
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval import ModelAnchor, Reached, Rejected, RejectReason, reach
 from sts2_harness_eval.results import (
@@ -184,6 +194,112 @@ def test_reach_replays_explicit_document_reads_without_entry_injection(tmp_path:
         anchors = await record_campaign(path, campaign, documents=documents)
         guide.unlink()
         async with reach(path, anchors[3]) as result:
+            assert isinstance(result, Reached)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("document_id", "message"),
+    [
+        ("guide", "Resource 'missing' is not advertised by document 'guide'."),
+        ("unknown", "Document 'unknown' is not configured."),
+    ],
+)
+def test_reach_preserves_missing_resource_feedback(
+    tmp_path: Path, document_id: str, message: str
+) -> None:
+    async def scenario() -> None:
+        campaign = Campaign()
+        campaign.responses = iter(
+            [
+                reply(
+                    (
+                        "read",
+                        "run_skill",
+                        json.dumps({"mode": "read", "id": document_id, "resource": "missing"}),
+                    )
+                ),
+                *campaign.responses,
+            ]
+        )
+        guide = tmp_path / "guide.txt"
+        guide.write_text("Synthetic guidance.", encoding="utf-8")
+        documents = FileDocuments((DocumentSource("guide", "Guide", "Example", guide),))
+        path = tmp_path / "archive.sqlite"
+        anchors = await record_campaign(path, campaign, documents=documents)
+        archive = Journal.open(path)
+        failure = next(
+            record for record in archive.materials() if isinstance(record.request, DocumentRead)
+        )
+        assert isinstance(failure.reply, MaterialFailed) and failure.reply.message == message
+        feedback = next(
+            item
+            for item in archive.request(anchors[1].model_sequence).input
+            if isinstance(item, ResultSnapshot)
+        )
+        assert isinstance(feedback.outcome, RejectedQuery)
+        assert feedback.outcome.reason.message == message
+        archive.close()
+        async with reach(path, anchors[1]) as result:
+            assert isinstance(result, Reached)
+        changed = failure.reply.model_copy(update={"message": "Different historical failure."})
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute(
+                "UPDATE materials SET reply=? WHERE sequence=?",
+                (store(connection, changed), failure.sequence),
+            )
+        async with reach(path, anchors[1]) as result:
+            assert result == Rejected(
+                RejectReason.INPUT_MISMATCH,
+                anchors[1].model_sequence,
+                InputDifference(InputComponent.MODEL_INPUT),
+            )
+
+    asyncio.run(scenario())
+
+
+class FailedDocuments(FileDocuments):
+    def __init__(self, failure: MaterialUnavailable | UnknownDocument) -> None:
+        super().__init__()
+        self.failure = failure
+
+    async def read(self, request: SkillRead) -> DocumentView:
+        raise self.failure
+
+    async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
+        raise self.failure
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "failure"),
+    [
+        (
+            "run_skill",
+            '{"mode":"read","id":"guide"}',
+            MaterialUnavailable("The custom document service is temporarily unavailable."),
+        ),
+        (
+            "run_skill",
+            '{"mode":"read","id":"guide"}',
+            UnknownDocument("The custom document source does not advertise this guide."),
+        ),
+        (
+            "run_knowledge",
+            '{"mode":"lookup","ids":["RELIC.ONE"]}',
+            MaterialUnavailable("The custom supplement service is temporarily unavailable."),
+        ),
+    ],
+)
+def test_reach_preserves_custom_material_failure_feedback(
+    tmp_path: Path, tool: str, arguments: str, failure: MaterialUnavailable | UnknownDocument
+) -> None:
+    async def scenario() -> None:
+        campaign = DocumentCampaign()
+        campaign.responses = iter([reply(("read", tool, arguments)), *campaign.responses])
+        path = tmp_path / "archive.sqlite"
+        anchors = await record_campaign(path, campaign, documents=FailedDocuments(failure))
+        async with reach(path, anchors[1]) as result:
             assert isinstance(result, Reached)
 
     asyncio.run(scenario())

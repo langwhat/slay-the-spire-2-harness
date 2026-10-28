@@ -154,9 +154,9 @@ class RecordedPrompts:
         sequence = self._journal.begin_material(PromptRead(name=name))
         try:
             material = self._live.read(name)
-        except MaterialUnavailable:
+        except MaterialUnavailable as error:
             self._journal.finish_material(
-                sequence, MaterialFailed(failure=MaterialFailure.UNAVAILABLE)
+                sequence, MaterialFailed(failure=MaterialFailure.UNAVAILABLE, message=str(error))
             )
             raise
         self._journal.finish_material(
@@ -184,12 +184,14 @@ class RecordedDocuments:
         )
         try:
             document = await self._live.read(request)
-        except UnknownDocument:
-            self._journal.finish_material(sequence, MaterialFailed(failure=MaterialFailure.UNKNOWN))
-            raise
-        except MaterialUnavailable:
+        except UnknownDocument as error:
             self._journal.finish_material(
-                sequence, MaterialFailed(failure=MaterialFailure.UNAVAILABLE)
+                sequence, MaterialFailed(failure=MaterialFailure.UNKNOWN, message=str(error))
+            )
+            raise
+        except MaterialUnavailable as error:
+            self._journal.finish_material(
+                sequence, MaterialFailed(failure=MaterialFailure.UNAVAILABLE, message=str(error))
             )
             raise
         self._journal.finish_material(
@@ -201,9 +203,9 @@ class RecordedDocuments:
         sequence = self._journal.begin_material(DocumentLookup(subjects=subjects))
         try:
             documents = await self._live.lookup(subjects)
-        except MaterialUnavailable:
+        except MaterialUnavailable as error:
             self._journal.finish_material(
-                sequence, MaterialFailed(failure=MaterialFailure.UNAVAILABLE)
+                sequence, MaterialFailed(failure=MaterialFailure.UNAVAILABLE, message=str(error))
             )
             raise
         self._journal.finish_material(

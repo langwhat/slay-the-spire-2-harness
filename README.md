@@ -200,7 +200,7 @@ manifest and gaps. Use `--around` with the timeline to inspect neighboring actio
 receipts, queries, and material reads. Sequence and confirmed game cursor express ordering;
 they do not imply that an adjacent action was caused by a particular model request.
 
-The current archive schema is version 7 and records each native reply's protocol explicitly.
+The current archive schema is version 8 and records each native reply's protocol explicitly.
 `Journal.open()` provides read-only inspection. Schema versions are validated without archive
 migration. Read older archives with the revision that recorded them. Native restoration
 and live evaluation remain unsupported; the manifest does not claim exact native replay.

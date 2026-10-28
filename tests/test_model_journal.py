@@ -457,11 +457,11 @@ def test_material_failures_and_outer_lookup_reads_remain_distinct_evidence(tmp_p
             ),
             journal,
         )
-        with pytest.raises(MaterialUnavailable):
+        with pytest.raises(MaterialUnavailable) as prompt_failure:
             RecordedPrompts(PackagedPrompts(), journal).read("missing-required-instructions")
-        with pytest.raises(MaterialUnavailable):
+        with pytest.raises(MaterialUnavailable) as lookup_failure:
             await documents.lookup((subject,))
-        with pytest.raises(UnknownDocument):
+        with pytest.raises(UnknownDocument) as read_failure:
             await documents.read(SkillRead(id="unknown"))
         listed = await documents.list(native.DecisionOwner.COMBAT)
         assert len(listed) == 1
@@ -484,6 +484,9 @@ def test_material_failures_and_outer_lookup_reads_remain_distinct_evidence(tmp_p
             MaterialFailure.UNAVAILABLE,
             MaterialFailure.UNKNOWN,
         ]
+        assert [
+            record.reply.message for record in records if isinstance(record.reply, MaterialFailed)
+        ] == [str(prompt_failure.value), str(lookup_failure.value), str(read_failure.value)]
         assert Journal.open(journal.path).manifest.initial_notes is None
 
     asyncio.run(scenario())
@@ -563,7 +566,10 @@ def test_indexed_model_and_material_summaries_keep_historical_input_and_incomple
     )
     journal.end_model()
     material = journal.begin_material(PromptRead(name="guide"))
-    journal.finish_material(material, MaterialFailed(failure=MaterialFailure.UNAVAILABLE))
+    journal.finish_material(
+        material,
+        MaterialFailed(failure=MaterialFailure.UNAVAILABLE, message="Synthetic guide unavailable."),
+    )
     journal.close()
     reader = Journal.open(journal.path)
     selected = evidence(

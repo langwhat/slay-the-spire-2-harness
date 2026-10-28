@@ -239,7 +239,7 @@ class _Prompts:
     def read(self, name: str) -> MaterialText:
         reply = self._timeline.material(PromptRead(name=name))
         if isinstance(reply, MaterialFailed):
-            raise MaterialUnavailable("The required gameplay instructions could not be read.")
+            raise MaterialUnavailable(reply.message)
         if not isinstance(reply, PromptReadResult):
             _different(self._timeline.sequence, InputComponent.REQUEST)
         return _text(reply.prompt)
@@ -252,7 +252,7 @@ class _Documents:
     async def list(self, role: native.DecisionOwner) -> tuple[SkillSummary, ...]:
         reply = self._timeline.material(SkillListing(role=role))
         if isinstance(reply, MaterialFailed):
-            raise MaterialUnavailable("The enabled document source could not be read.")
+            raise MaterialUnavailable(reply.message)
         if not isinstance(reply, SkillListingResult):
             _different(self._timeline.sequence, InputComponent.REQUEST)
         return tuple(
@@ -264,11 +264,8 @@ class _Documents:
         reply = self._timeline.material(DocumentRead(id=request.id, resource=request.resource))
         if isinstance(reply, MaterialFailed):
             if reply.failure is MaterialFailure.UNKNOWN:
-                raise UnknownDocument(f"Document {request.id!r} is not configured.")
-            label = f"Document {request.id!r}"
-            if request.resource is not None:
-                label += f" resource {request.resource!r}"
-            raise MaterialUnavailable(f"{label} could not be read.")
+                raise UnknownDocument(reply.message)
+            raise MaterialUnavailable(reply.message)
         if not isinstance(reply, DocumentReadResult):
             _different(self._timeline.sequence, InputComponent.REQUEST)
         return _document(reply.document)
@@ -276,7 +273,7 @@ class _Documents:
     async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
         reply = self._timeline.material(DocumentLookup(subjects=subjects))
         if isinstance(reply, MaterialFailed):
-            raise MaterialUnavailable("The enabled supplementary source could not be read.")
+            raise MaterialUnavailable(reply.message)
         if not isinstance(reply, DocumentLookupResult):
             _different(self._timeline.sequence, InputComponent.REQUEST)
         documents: list[Document] = []

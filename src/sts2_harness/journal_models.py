@@ -629,6 +629,7 @@ class DocumentLookupResult(native.WireModel):
 class MaterialFailed(native.WireModel):
     status: Literal[MaterialStatus.FAILED] = MaterialStatus.FAILED
     failure: MaterialFailure
+    message: str
 
 
 type MaterialReply = (

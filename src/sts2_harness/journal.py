@@ -98,7 +98,7 @@ class HeadlessInitialConditions(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[7] = 7
+    schema_version: Literal[8] = 8
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
