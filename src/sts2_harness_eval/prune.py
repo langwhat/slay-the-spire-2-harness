@@ -1,7 +1,7 @@
 """Inspect retention within a caller-declared complete, offline archive scope.
 
 Metadata inspection does not prove the integrity of archived model or game bodies.
-No files are removed, and unreferenced shared contents remain retained.
+Only explicitly requested whole archives can be removed. Shared contents remain retained.
 """
 
 from dataclasses import dataclass
@@ -91,9 +91,51 @@ class PrunePlan:
 @dataclass(frozen=True)
 class PruneRefused:
     message: str
+    protected: tuple[ProtectedArchive, ...] = ()
+
+
+@dataclass(frozen=True)
+class PruneCompleted:
+    removed: tuple[RunRef, ...]
+    bytes: int
+
+
+@dataclass(frozen=True)
+class PruneIncomplete:
+    removed: tuple[RunRef, ...]
+    bytes: int
+    failed: RunRef
+    remaining: tuple[RunRef, ...]
+    message: str
 
 
 class ArchivePruner:
+    def prune(
+        self, scope: PruneScope, request: PruneRequest
+    ) -> PruneCompleted | PruneRefused | PruneIncomplete:
+        """Recheck current offline relations before deleting selected whole archives."""
+        plan = self.inspect(scope, request)
+        if isinstance(plan, PruneRefused):
+            return plan
+        if plan.protected:
+            return PruneRefused("The request includes protected archives.", plan.protected)
+        try:
+            sizes = tuple(run.archive.stat().st_size for run in plan.removable)
+        except OSError as error:
+            return PruneRefused(str(error))
+        removed: list[RunRef] = []
+        total_bytes = 0
+        for index, (run, size) in enumerate(zip(plan.removable, sizes, strict=True)):
+            try:
+                run.archive.unlink()
+            except OSError as error:
+                return PruneIncomplete(
+                    tuple(removed), total_bytes, run, plan.removable[index:], str(error)
+                )
+            removed.append(run)
+            total_bytes += size
+        return PruneCompleted(tuple(removed), total_bytes)
+
     def inspect(self, scope: PruneScope, request: PruneRequest) -> PrunePlan | PruneRefused:
         """Return a read-only plan, never an authorization token for later deletion."""
         try:

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness_eval.prune import ArchivePruner, PrunePlan, PruneRequest, PruneScope, RunRef
 
@@ -118,8 +120,38 @@ def test_cases_protect_branches_and_whole_transitive_parents(tmp_path: Path) -> 
     }
     assert {path: path.read_bytes() for path in before} == before
 
+    from contextlib import closing
 
-def test_unreferenced_children_precede_selected_parents(tmp_path: Path) -> None:
+    from sts2_harness.journal import evidence
+    from sts2_harness_eval.prune import PruneCompleted, PruneRefused
+
+    scope = PruneScope(
+        archives=(parent.archive, branch.archive, unrelated.archive),
+        complete=True,
+        offline=True,
+        case_stores=(store.directory,),
+    )
+    refused = ArchivePruner().prune(scope, PruneRequest(archives=(unrelated, parent, branch)))
+    assert isinstance(refused, PruneRefused)
+    assert refused.protected == result.protected
+    assert {path: path.read_bytes() for path in before} == before
+    removed = ArchivePruner().prune(scope, PruneRequest(archives=(unrelated,)))
+    assert isinstance(removed, PruneCompleted)
+    assert removed.removed == (unrelated,)
+    assert store.load("battle") == case
+    assert store.load("branch-case") == branch_case
+    with closing(Journal.open(branch.archive)) as reader:
+        exported = evidence(reader, expand=True)
+        assert exported.manifest.recording_id == "branch"
+        assert len(exported.records) == 1
+    assert {path: path.read_bytes() for path in before if path != unrelated.archive} == {
+        path: content for path, content in before.items() if path != unrelated.archive
+    }
+
+
+def test_unreferenced_children_precede_selected_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from hashlib import sha256
 
     from test_responses import configuration
@@ -164,6 +196,15 @@ def test_unreferenced_children_precede_selected_parents(tmp_path: Path) -> None:
             }
         ),
     )
+    child_sequence = journal.begin_model(
+        native.DecisionOwner.RUN,
+        "run",
+        (),
+        ToolSet(tools=()),
+        ConfigurationSnapshot.of(configuration(tmp_path)),
+    )
+    journal.finish_model(child_sequence)
+    journal.end_model()
     journal.close()
     scope = PruneScope(archives=(parent.archive, child.archive), complete=True, offline=True)
     result = ArchivePruner().inspect(scope, PruneRequest(archives=(parent, child)))
@@ -174,6 +215,57 @@ def test_unreferenced_children_precede_selected_parents(tmp_path: Path) -> None:
     assert isinstance(kept_child, PrunePlan)
     assert kept_child.removable == ()
     assert kept_child.protected[0].reasons[0].root == child
+
+    from sts2_harness_eval.prune import PruneCompleted, PruneIncomplete
+
+    # The grandchild can be removed before the child encounters a filesystem error.
+    child_manifest = Journal.read_manifest(child.archive)
+    grandchild = RunRef(tmp_path / "grandchild.sqlite", "grandchild")
+    Journal.create(
+        grandchild.archive,
+        child_manifest.model_copy(
+            update={
+                "recording_id": "grandchild",
+                "parent": ParentPrefix(
+                    archive=child.archive,
+                    recording_id="child",
+                    before_sequence=child_sequence,
+                    archive_sha256=sha256(child.archive.read_bytes()).hexdigest(),
+                ),
+            }
+        ),
+    ).close()
+    scope = PruneScope(
+        archives=(parent.archive, child.archive, grandchild.archive), complete=True, offline=True
+    )
+    grandchild_bytes = grandchild.archive.stat().st_size
+    before = {run.archive: run.archive.read_bytes() for run in (parent, child)}
+    unlink = Path.unlink
+
+    def fail_child(path: Path, missing_ok: bool = False) -> None:
+        if path == child.archive:
+            raise PermissionError("Synthetic archive deletion failure.")
+        unlink(path, missing_ok=missing_ok)
+
+    with monkeypatch.context() as boundary:
+        boundary.setattr(Path, "unlink", fail_child)
+        failed = ArchivePruner().prune(scope, PruneRequest(archives=(parent, child, grandchild)))
+    assert isinstance(failed, PruneIncomplete)
+    assert failed.removed == (grandchild,)
+    assert failed.bytes == grandchild_bytes
+    assert failed.failed == child
+    assert failed.remaining == (child, parent)
+    assert "Synthetic" in failed.message
+    assert not grandchild.archive.exists()
+    assert {path: path.read_bytes() for path in before} == before
+    completed = ArchivePruner().prune(
+        PruneScope(archives=(parent.archive, child.archive), complete=True, offline=True),
+        PruneRequest(archives=(parent, child)),
+    )
+    assert isinstance(completed, PruneCompleted)
+    assert completed.removed == (child, parent)
+    assert completed.bytes == sum(len(content) for content in before.values())
+    assert not parent.archive.exists() and not child.archive.exists()
 
 
 def test_incomplete_or_damaged_declared_scope_refuses_the_entire_plan(tmp_path: Path) -> None:
@@ -319,3 +411,63 @@ def test_manifest_without_journal_indexes_does_not_count_as_a_valid_archive(tmp_
         PruneRequest(archives=(selected,)),
     )
     assert isinstance(result, PruneRefused)
+
+
+def test_prune_removes_only_the_requested_archive_and_reports_actual_bytes(tmp_path: Path) -> None:
+    from sts2_harness_eval.prune import PruneCompleted
+
+    selected = archive(tmp_path / "selected.sqlite", "selected")
+    import asyncio
+
+    from test_lifecycle import Campaign
+    from test_replay import record_campaign
+
+    from sts2_harness_eval import Reached, reach
+
+    kept = RunRef(tmp_path / "kept.sqlite", "recording")
+    anchors = asyncio.run(record_campaign(kept.archive, Campaign()))
+    diagnostic = tmp_path / "events.jsonl"
+    save = tmp_path / "current_run.save"
+    diagnostic.write_text("synthetic diagnostic")
+    save.write_bytes(b"synthetic native save")
+    before = {path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+    result = ArchivePruner().prune(
+        PruneScope(archives=(selected.archive, kept.archive), complete=True, offline=True),
+        PruneRequest(archives=(selected,)),
+    )
+    assert isinstance(result, PruneCompleted)
+    assert result.removed == (selected,)
+    assert result.bytes == len(before[selected.archive])
+    assert not selected.archive.exists()
+    assert {path: path.read_bytes() for path in before if path != selected.archive} == {
+        path: content for path, content in before.items() if path != selected.archive
+    }
+
+    async def replay_retained_history() -> None:
+        async with reach(kept.archive, anchors[0]) as reached:
+            assert isinstance(reached, Reached)
+            assert reached.anchor == anchors[0]
+
+    asyncio.run(replay_retained_history())
+
+
+def test_prune_rereads_identity_instead_of_using_an_earlier_inspection(tmp_path: Path) -> None:
+    from sts2_harness_eval.prune import PruneRefused
+
+    selected = archive(tmp_path / "selected.sqlite", "selected")
+    scope = PruneScope(archives=(selected.archive,), complete=True, offline=True)
+    request = PruneRequest(archives=(selected,))
+    pruner = ArchivePruner()
+    earlier = pruner.inspect(scope, request)
+    assert isinstance(earlier, PrunePlan)
+    assert earlier.removable == (selected,)
+    preserved = tmp_path / "preserved.sqlite"
+    selected.archive.rename(preserved)
+    replacement = archive(selected.archive, "replacement")
+    original = preserved.read_bytes()
+    replacement_bytes = replacement.archive.read_bytes()
+    result = pruner.prune(scope, request)
+    assert isinstance(result, PruneRefused)
+    assert "identity" in result.message
+    assert preserved.read_bytes() == original
+    assert replacement.archive.read_bytes() == replacement_bytes
