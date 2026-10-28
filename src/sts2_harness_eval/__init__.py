@@ -8,6 +8,7 @@ from sts2_harness_eval.results import (
     RejectReason,
     ReplayResult,
 )
+from sts2_harness_eval.suite import read_suite, run_suite
 from sts2_harness_eval.takeover import take_over
 from sts2_harness_eval.variants import (
     HistoricalStart,
@@ -28,4 +29,6 @@ __all__ = [
     "ReplayResult",
     "reach",
     "take_over",
+    "run_suite",
+    "read_suite",
 ]
