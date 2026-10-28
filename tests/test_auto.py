@@ -403,9 +403,7 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
                     "operation_id": http.actions[0].operation_id,
                     "status": outcome,
                     "error": {
-                        "code": "dispatch_failed"
-                        if outcome == "failed"
-                        else "execution_unconfirmed",
+                        "code": "dispatch_failed" if outcome == "failed" else "execution_uncertain",
                         "message": "Synthetic uncertain or unsuccessful execution.",
                     },
                 },
@@ -460,6 +458,11 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
             if outcome == "unknown"
             else ActionCompleted,
         )
+        if outcome == "unknown":
+            assert isinstance(automatic.content.outcome, ActionUnknown)
+            assert automatic.content.outcome.reason.message == (
+                "Synthetic uncertain or unsuccessful execution."
+            )
         assert first.failure is not None
         archive.close()
 

@@ -324,7 +324,7 @@ class BattleHTTP:
                 json={
                     "operation_id": submitted.operation_id,
                     "status": "unknown",
-                    "error": {"code": "execution_unconfirmed", "message": "Unconfirmed."},
+                    "error": {"code": "execution_uncertain", "message": "Unconfirmed."},
                 },
             )
         if len(self.actions) == 1 and self.manual_pause_after_first:
@@ -508,6 +508,16 @@ def test_waiting_between_units_preserves_feedback_without_replaying_actions(
             for item in wire
             if isinstance(item, dict) and item.get("type") == "function_call_output"
         ] == ["first", "next"]
+        if unknown:
+            first = next(
+                item
+                for item in wire
+                if isinstance(item, dict)
+                and item.get("type") == "function_call_output"
+                and item.get("call_id") == "first"
+            )
+            assert isinstance(first["output"], str)
+            assert json.loads(first["output"])["outcome"]["reason"]["message"] == "Unconfirmed."
 
     asyncio.run(scenario())
 
