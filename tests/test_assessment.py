@@ -491,7 +491,7 @@ def test_inherited_variant_uses_current_direct_parent_interval(tmp_path: Path) -
     )
     assert report.evidence.metrics.potion_uses == ()
     assert tuple(action.operation_id for action in report.evidence.actions) == ("child-turn",)
-    assert report.provenance.variant is not None
+    assert isinstance(report.provenance.variant, HistoricalVariant)
     assert report.provenance.parent is not None
     assert report.provenance.parent.before_sequence == 3
     assert report.provenance.variant.source.before_sequence == 1

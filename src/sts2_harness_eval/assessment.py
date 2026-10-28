@@ -1,4 +1,4 @@
-"""Assess one historical sample from bounded public evidence and explicit standards."""
+"""Assess one executed sample from bounded public evidence and explicit standards."""
 
 from contextlib import closing
 from hashlib import file_digest, sha256
@@ -7,6 +7,7 @@ from pathlib import Path
 from sts2_harness.client import models as native
 from sts2_harness.game import Settle, Settlement
 from sts2_harness.journal import Journal, Record, SceneVariant
+from sts2_harness_eval._scene_assessment import validate_scene_sample
 from sts2_harness_eval.annotation_records import CardRewardRubric
 from sts2_harness_eval.annotations import AnnotationStore
 from sts2_harness_eval.assessment_records import (
@@ -24,6 +25,7 @@ from sts2_harness_eval.assessment_records import (
     SampleEvidence,
     SampleMetrics,
     SampleProvenance,
+    SceneInitialRef,
     Unassessed,
     UnassessedReason,
     Uncertainty,
@@ -82,7 +84,7 @@ def _card_ids(observation: native.Observation, refs: tuple[str, ...]) -> tuple[s
 
 def _reward(
     before: native.Observation,
-    before_ref: CaseTargetRef | ObservationRef,
+    before_ref: CaseTargetRef | SceneInitialRef | ObservationRef,
     after: native.Observation,
     after_ref: ObservationRef,
     action: ConfirmedAction,
@@ -156,14 +158,14 @@ def _reward(
 def _evidence(
     records: tuple[Record, ...],
     target: native.Observation | None,
-    target_ref: CaseTargetRef | None,
+    target_ref: CaseTargetRef | SceneInitialRef | None,
     recording_id: str,
 ) -> tuple[SampleEvidence, ObservationRef | None, tuple[Uncertainty, ...]]:
     actions: list[ConfirmedAction] = []
     uses: list[PotionUse] = []
     seen: dict[str, native.StepRequest] = {}
     before = target
-    before_ref: CaseTargetRef | ObservationRef | None = target_ref
+    before_ref: CaseTargetRef | SceneInitialRef | ObservationRef | None = target_ref
     reward: RewardChoice | None = None
     uncertain: list[Uncertainty] = []
     for record in records:
@@ -282,6 +284,7 @@ async def assess_sample(
     parent = None
     variant = None
     records: tuple[Record, ...] = ()
+    first_sequence = None
     last_sequence = None
     gaps = False
     target = None
@@ -290,44 +293,52 @@ async def assess_sample(
         with closing(Journal.open(branch)) as journal:
             parent = journal.manifest.parent
             variant = journal.manifest.variant
-            if parent is None or isinstance(variant, SceneVariant):
-                raise ValueError(
-                    "Historical assessment requires a direct parent; Scene is unsupported."
-                )
-            if (
-                parent.archive.resolve() != case.source.archive.resolve()
-                or parent.recording_id != case.source.anchor.recording_id
-                or parent.before_sequence != case.source.anchor.model_sequence
-            ):
-                raise ValueError("The sample parent does not match the case source anchor.")
-            anchor = None if isinstance(execution, TakeoverUnsupported) else execution.anchor
-            if anchor is not None and (
-                anchor.anchor != case.source.anchor
-                or anchor.confirmed_operation_cursor != case.source.target_cursor
-                or anchor.semantic_digest != case.source.semantic_digest
-            ):
-                raise ValueError("The execution anchor does not match the case.")
-            if variant is not None:
-                original = annotations.cases.load(variant.case_id)
+            if isinstance(variant, SceneVariant):
+                validate_scene_sample(case, annotations.cases, journal, execution_record(execution))
+                target = variant.initial.observation
+                target_ref = SceneInitialRef(recording_id=identity.recording_id)
+                records = journal.operations()
+                summaries = journal.summaries()
+                first_sequence = min((item.sequence for item in summaries), default=None)
+            else:
+                if parent is None:
+                    raise ValueError("Historical assessment requires a direct parent.")
                 if (
-                    sha256(original.model_dump_json().encode()).hexdigest() != variant.case_sha256
-                    or variant.source.archive.resolve() != original.source.archive.resolve()
-                    or variant.source.recording_id != original.source.anchor.recording_id
-                    or variant.source.before_sequence != original.source.anchor.model_sequence
+                    parent.archive.resolve() != case.source.archive.resolve()
+                    or parent.recording_id != case.source.anchor.recording_id
+                    or parent.before_sequence != case.source.anchor.model_sequence
                 ):
-                    raise ValueError("The material variant does not match its original case.")
-            records = journal.operations(start=parent.before_sequence)
-            summaries = journal.summaries(start=parent.before_sequence)
+                    raise ValueError("The sample parent does not match the case source anchor.")
+                anchor = None if isinstance(execution, TakeoverUnsupported) else execution.anchor
+                if anchor is not None and (
+                    anchor.anchor != case.source.anchor
+                    or anchor.confirmed_operation_cursor != case.source.target_cursor
+                    or anchor.semantic_digest != case.source.semantic_digest
+                ):
+                    raise ValueError("The execution anchor does not match the case.")
+                if variant is not None:
+                    original = annotations.cases.load(variant.case_id)
+                    if (
+                        sha256(original.model_dump_json().encode()).hexdigest()
+                        != variant.case_sha256
+                        or variant.source.archive.resolve() != original.source.archive.resolve()
+                        or variant.source.recording_id != original.source.anchor.recording_id
+                        or variant.source.before_sequence != original.source.anchor.model_sequence
+                    ):
+                        raise ValueError("The material variant does not match its original case.")
+                records = journal.operations(start=parent.before_sequence)
+                summaries = journal.summaries(start=parent.before_sequence)
+                binding = annotations.cases.binding(case)
+                reference = annotations.cases.reference(binding).target
+                target = reference.read.observation
+                target_ref = CaseTargetRef(
+                    case_id=case.id,
+                    reference_sha256=binding.reference,
+                    recording_id=case.source.anchor.recording_id,
+                    sequence=reference.source_sequence,
+                )
+                first_sequence = parent.before_sequence
             last_sequence = max((item.sequence for item in summaries), default=None)
-            binding = annotations.cases.binding(case)
-            reference = annotations.cases.reference(binding).target
-            target = reference.read.observation
-            target_ref = CaseTargetRef(
-                case_id=case.id,
-                reference_sha256=binding.reference,
-                recording_id=case.source.anchor.recording_id,
-                sequence=reference.source_sequence,
-            )
             gaps = bool(journal.gaps)
             if isinstance(execution, TakeoverCompleted):
                 endpoint = execution.sample.endpoint
@@ -424,7 +435,7 @@ async def assess_sample(
             sample=identity,
             parent=parent,
             variant=variant,
-            first_sequence=parent.before_sequence if parent else None,
+            first_sequence=first_sequence,
             last_sequence=last_sequence,
             target=target_ref,
             endpoint=endpoint_ref,

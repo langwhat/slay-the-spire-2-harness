@@ -11,7 +11,8 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
-from sts2_harness.journal import Journal
+from sts2_harness.journal import Journal, SceneVariant
+from sts2_harness_eval._scene_assessment import validate_scene_sample
 from sts2_harness_eval.annotation_records import (
     AgentAuthor as AgentAuthor,
 )
@@ -73,6 +74,7 @@ from sts2_harness_eval.assessment_records import (
     AssessmentSelection,
     CaseTargetRef,
     SampleAssessment,
+    SceneInitialRef,
     SelectedStandards,
     Unassessed,
 )
@@ -203,6 +205,9 @@ class AnnotationStore:
             raise ValueError("The report recording does not match its execution.")
         if sample is None and (
             provenance.parent is not None
+            or provenance.variant is not None
+            or provenance.target is not None
+            or provenance.endpoint is not None
             or provenance.first_sequence is not None
             or provenance.last_sequence is not None
             or report.endpoint_reached
@@ -214,28 +219,38 @@ class AnnotationStore:
             with closing(Journal.open(provenance.archive)) as journal:
                 manifest = journal.manifest
                 parent = manifest.parent
-                if (
-                    parent is None
-                    or parent.archive.resolve() != case.source.archive.resolve()
-                    or parent.recording_id != case.source.anchor.recording_id
-                    or parent.before_sequence != case.source.anchor.model_sequence
-                    or provenance.first_sequence != parent.before_sequence
-                ):
-                    raise ValueError("The report sample does not match the case source interval.")
-                summaries = journal.summaries(start=parent.before_sequence)
-                if provenance.last_sequence != max(
+                if isinstance(manifest.variant, SceneVariant):
+                    validate_scene_sample(case, self.cases, journal, report.execution)
+                    summaries = journal.summaries()
+                    first_sequence = min((item.sequence for item in summaries), default=None)
+                    expected_target = SceneInitialRef(recording_id=sample.recording_id)
+                else:
+                    if (
+                        parent is None
+                        or parent.archive.resolve() != case.source.archive.resolve()
+                        or parent.recording_id != case.source.anchor.recording_id
+                        or parent.before_sequence != case.source.anchor.model_sequence
+                        or provenance.first_sequence != parent.before_sequence
+                    ):
+                        raise ValueError(
+                            "The report sample does not match the case source interval."
+                        )
+                    summaries = journal.summaries(start=parent.before_sequence)
+                    binding = self.cases.binding(case)
+                    target = self.cases.reference(binding).target
+                    expected_target = CaseTargetRef(
+                        case_id=case.id,
+                        reference_sha256=binding.reference,
+                        recording_id=case.source.anchor.recording_id,
+                        sequence=target.source_sequence,
+                    )
+                    first_sequence = parent.before_sequence
+                if provenance.first_sequence != first_sequence or provenance.last_sequence != max(
                     (item.sequence for item in summaries), default=None
                 ):
                     raise ValueError("The report evidence interval differs from its sample.")
-                binding = self.cases.binding(case)
-                target = self.cases.reference(binding).target
-                if provenance.target != CaseTargetRef(
-                    case_id=case.id,
-                    reference_sha256=binding.reference,
-                    recording_id=case.source.anchor.recording_id,
-                    sequence=target.source_sequence,
-                ):
-                    raise ValueError("The report target is not the verified case publication.")
+                if provenance.target != expected_target:
+                    raise ValueError("The report target is not the verified sample publication.")
                 endpoint = provenance.endpoint
                 if endpoint is not None:
                     observations = tuple(
@@ -247,7 +262,8 @@ class AnnotationStore:
                     )
                     if (
                         endpoint.recording_id != sample.recording_id
-                        or endpoint.sequence < parent.before_sequence
+                        or first_sequence is None
+                        or endpoint.sequence < first_sequence
                         or not observations
                         or observations[0].reply is None
                         or not 0 <= endpoint.index < len(observations[0].reply.observations)

@@ -258,6 +258,9 @@ class FakeRestorer(NativeRestorer):
         ):
             data = data.replace('"' + old + '"', '"' + new + '"')
         self.observation = native.Observation.model_validate_json(data)
+        self.boundary_route = native.RouteKey.model_validate(
+            plan.boundary.location.model_dump()
+        ).model_copy(update={"game_instance_id": "B", "run_id": "B-run", "node_id": "B-boundary"})
         self.actions: list[native.StepRequest] = []
         self.launches = 0
         self.inspections: list[native.InspectQuery] = []
@@ -375,9 +378,7 @@ class FakeRestorer(NativeRestorer):
                             ascension=0,
                             act=1,
                             floor=1,
-                            route=native.RouteKey.model_validate(
-                                self.observation.location.model_dump()
-                            ),
+                            route=self.boundary_route,
                             native_run_instance_id=99,
                             native_revision=7,
                         ),
@@ -416,7 +417,15 @@ def retain_case(directory: Path, case: Case) -> tuple[CaseStore, Case]:
     reference = store.content(
         Artifact.REFERENCES,
         Reference(
-            boundary=publication,
+            boundary=Publication(
+                source_sequence=plan.boundary_sequence,
+                source_stamp=plan.boundary.stamp,
+                read=IdentityRead(
+                    status=native.ResultStatus.COMPLETED,
+                    observation=plan.boundary,
+                    identities=IdentityFacts(cards=(), creatures=(), map_travel=(), relics=()),
+                ),
+            ),
             suffix=(),
             target=publication,
             follow_on_before=(),

@@ -7,7 +7,7 @@ from typing import Annotated, Literal, Protocol, Self
 from pydantic import Field, model_validator
 
 from sts2_harness.client import models as native
-from sts2_harness.journal import HistoricalVariant, ParentPrefix
+from sts2_harness.journal import HistoricalVariant, ParentPrefix, SceneVariant
 from sts2_harness_eval.annotation_records import (
     AgentAuthor,
     AnnotationRecord,
@@ -37,6 +37,7 @@ class ArchiveIdentity(native.WireModel):
 
 class ObservationKind(StrEnum):
     CASE_TARGET = "case_target"
+    SCENE_INITIAL = "scene_initial"
     RECORDED = "recorded"
 
 
@@ -46,6 +47,13 @@ class CaseTargetRef(native.WireModel):
     reference_sha256: Sha256
     recording_id: native.Nonempty
     sequence: int
+
+
+class SceneInitialRef(native.WireModel):
+    """Resolve within the sample's hashed Scene manifest, never as a standalone observation."""
+
+    kind: Literal[ObservationKind.SCENE_INITIAL] = ObservationKind.SCENE_INITIAL
+    recording_id: native.Nonempty
 
 
 class ObservationRef(native.WireModel):
@@ -62,10 +70,10 @@ class SampleProvenance(native.WireModel):
     archive: Path
     sample: ArchiveIdentity | None
     parent: ParentPrefix | None
-    variant: HistoricalVariant | None
+    variant: Annotated[HistoricalVariant | SceneVariant, Field(discriminator="mode")] | None
     first_sequence: int | None
     last_sequence: int | None
-    target: CaseTargetRef | None
+    target: Annotated[CaseTargetRef | SceneInitialRef, Field(discriminator="kind")] | None
     endpoint: ObservationRef | None
 
 
@@ -88,7 +96,7 @@ class RewardChoice(native.WireModel):
     skipped: bool
     before_deck: tuple[str, ...]
     after_deck: tuple[str, ...]
-    before: Annotated[CaseTargetRef | ObservationRef, Field(discriminator="kind")]
+    before: Annotated[CaseTargetRef | SceneInitialRef | ObservationRef, Field(discriminator="kind")]
     after: ObservationRef
     operation_id: str
     sequence: int
