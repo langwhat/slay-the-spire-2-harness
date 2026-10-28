@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
+from pydantic import MISSING
 from test_combat import reply
 from test_responses import configuration
 from test_takeover import FakeRestorer, Source, source_case
@@ -12,11 +13,13 @@ from test_takeover import FakeRestorer, Source, source_case
 from sts2_harness.client import models as native
 from sts2_harness.context.models import ActContent, Updates
 from sts2_harness.game import GameReply, GameSuccess
-from sts2_harness.journal import Journal, ParentPrefix, SessionMaterials
+from sts2_harness.journal import Journal, ParentPrefix, SceneVariant, SessionMaterials
 from sts2_harness.journal_models import (
     AssistantSnapshot,
     DocumentData,
     GuidanceText,
+    NamedText,
+    PartsText,
     ResultSnapshot,
     TaskSnapshot,
     TextSnapshot,
@@ -32,7 +35,12 @@ from sts2_harness_eval.cases import AdmissionRequest, plan_admission
 from sts2_harness_eval.results import InputComponent, InputDifference, MaterialDifference
 from sts2_harness_eval.sample import SampleBudget
 from sts2_harness_eval.takeover import TakeoverCompleted, TakeoverUnsupported
-from sts2_harness_eval.variants import HistoricalStart, MaterialReplacement, MaterialVariant
+from sts2_harness_eval.variants import (
+    HistoricalStart,
+    MaterialReplacement,
+    MaterialVariant,
+    SceneStart,
+)
 
 
 def test_historical_variant_retains_native_history_and_reopens(tmp_path: Path) -> None:
@@ -413,7 +421,7 @@ def test_automatic_material_versions_deduplicate_only_complete_delivered_views(
             )
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as journal:
-            assert journal.manifest.schema_version == 9
+            assert journal.manifest.schema_version == 10
             assert journal.manifest.materials.battle_guidance == ("guide", "other")
             selected = journal.request(case.source.anchor.model_sequence)
             guidance = [
@@ -606,5 +614,296 @@ def test_action_boundary_task_omission_requires_complete_recorded_evidence(
             anchor = ModelAnchor(journal.manifest.recording_id, last.sequence)
         async with reach(branch, anchor) as reached:
             assert isinstance(reached, Reached)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+def test_scene_starts_fresh_and_reopens_actual_requests(tmp_path: Path, candidate: bool) -> None:
+    async def scenario() -> None:
+        case = await source_case(tmp_path / "source.sqlite", start=False)
+        original = case.source.archive.read_bytes()
+        prompt = PackagedPrompts().read("combat-task-rules")
+        declared = (
+            (MaterialReplacement(prompt.id, frozenset({prompt.version}), "Act carefully."),)
+            if candidate
+            else ()
+        )
+        restorer = FakeRestorer(tmp_path, case)
+        branch = tmp_path / "scene.sqlite"
+        responses = iter(
+            [
+                reply(("fresh-first", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+                reply(("fresh-second", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            ]
+        )
+        async with Llm(
+            configuration(tmp_path),
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, content=next(responses), headers={"Content-Type": "text/event-stream"}
+                )
+            ),
+        ) as model:
+            result = await take_over(
+                case,
+                restorer,
+                branch,
+                model,
+                PackagedPrompts(),
+                FileDocuments(),
+                SampleBudget(3, 30),
+                variant=MaterialVariant(SceneStart("Fresh plan."), declared),
+                stop_requested=lambda: False,
+            )
+        assert isinstance(result, TakeoverCompleted)
+        with closing(Journal.open(branch)) as journal:
+            assert journal.manifest.parent is None
+            assert journal.manifest.headless is None
+            assert journal.manifest.game_instance_id == "B"
+            assert journal.manifest.initial_notes == "Fresh plan."
+            assert journal.manifest.template == "fresh-template"
+            assert journal.manifest.game_version == "fresh-version"
+            assert isinstance(journal.manifest.variant, SceneVariant)
+            assert journal.manifest.variant.case_id == case.id
+            assert (
+                journal.manifest.variant.case_sha256
+                == sha256(case.model_dump_json().encode()).hexdigest()
+            )
+            assert journal.manifest.variant.source.recording_id == "source"
+            assert journal.manifest.variant.initial.restore.native_run_instance_id == 99
+            assert journal.manifest.variant.initial.observation.location.game_instance_id == "B"
+            requests = journal.requests()
+            first = requests[0]
+            assert first.role is native.DecisionOwner.COMBAT
+            assert first.position == 1
+            assert not any(
+                isinstance(item, (AssistantSnapshot, ResultSnapshot)) for item in first.input
+            )
+            system = first.input[0]
+            assert isinstance(system, TextSnapshot)
+            assert isinstance(system.value, PartsText)
+            rules = next(
+                part.material
+                for part in system.value.parts
+                if isinstance(part, NamedText) and part.material.id == prompt.id
+            )
+            assert rules.body == ("Act carefully." if candidate else prompt.body)
+            task = next(item for item in first.input if isinstance(item, TaskSnapshot))
+            assert isinstance(task.content, ActContent)
+            assert task.content.opening_notes == "Fresh plan."
+            objects = task.content.observation.updates.objects
+            assert objects is not MISSING
+            assert set(objects) == {"card:9:1", "card:9:2"}
+            assert task.content.observation.updates.descriptions == {
+                "card:9:1": None,
+                "card:9:2": "造成3点伤害。",
+            }
+            assert result.anchor.anchor == ModelAnchor(
+                journal.manifest.recording_id, first.sequence
+            )
+            anchors = [
+                ModelAnchor(journal.manifest.recording_id, item.sequence) for item in requests
+            ]
+        for anchor in anchors:
+            async with reach(branch, anchor) as reached:
+                assert isinstance(reached, Reached)
+        assert case.source.archive.read_bytes() == original
+        if candidate:
+            import json
+            import sqlite3
+
+            with sqlite3.connect(branch) as connection:
+                saved = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
+                saved["variant"]["initial"]["observation"]["state"]["turn"] = 99
+                connection.execute("UPDATE manifest SET value = ?", (json.dumps(saved),))
+            async with reach(branch, anchors[0]) as rejected:
+                assert isinstance(rejected, Rejected)
+                assert rejected.detail == InputDifference(InputComponent.REQUEST)
+
+    asyncio.run(scenario())
+
+
+def test_scene_continues_through_normal_combat_review_and_run_handoff(tmp_path: Path) -> None:
+    from test_lifecycle import run_state
+
+    from sts2_harness.context.models import RunActHandoffContent
+    from sts2_harness.journal_models import RunTaskSnapshot
+
+    class ExitRestorer(FakeRestorer):
+        def respond(self, request: httpx.Request) -> httpx.Response:
+            response = super().respond(request)
+            if request.url.path == "/action" and len(self.actions) == 1:
+                reward = run_state(1, "reward")
+                self.observation = reward.model_copy(
+                    update={
+                        "location": reward.location.model_copy(
+                            update={"game_instance_id": "B", "run_id": "B-run"}
+                        ),
+                        "stamp": reward.stamp.model_copy(update={"game_instance_id": "B"}),
+                    }
+                )
+            return response
+
+    async def scenario() -> None:
+        case = await source_case(tmp_path / "source.sqlite", start=False)
+        restorer = ExitRestorer(tmp_path, case)
+        responses = iter(
+            [
+                reply(("exit", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+                reply(text="Preserve resources after this battle."),
+                reply(("reward", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
+            ]
+        )
+        branch = tmp_path / "handoff.sqlite"
+        async with Llm(
+            configuration(tmp_path),
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, content=next(responses), headers={"Content-Type": "text/event-stream"}
+                )
+            ),
+        ) as model:
+            result = await take_over(
+                case,
+                restorer,
+                branch,
+                model,
+                PackagedPrompts(),
+                FileDocuments(),
+                SampleBudget(4, 30),
+                variant=MaterialVariant(SceneStart(""), ()),
+                stop_requested=lambda: False,
+            )
+        assert isinstance(result, TakeoverCompleted)
+        with closing(Journal.open(branch)) as journal:
+            requests = journal.requests()
+            assert [item.role for item in requests] == [
+                native.DecisionOwner.COMBAT,
+                native.DecisionOwner.COMBAT,
+                native.DecisionOwner.RUN,
+            ]
+            task = next(item for item in requests[-1].input if isinstance(item, RunTaskSnapshot))
+            assert isinstance(task.content, RunActHandoffContent)
+            assert task.content.strategy_notes == ""
+            assert task.content.combat_review == "Preserve resources after this battle."
+            assert [action.expected_route.owner for action in restorer.actions] == [
+                native.DecisionOwner.COMBAT,
+                native.DecisionOwner.RUN,
+            ]
+            anchor = ModelAnchor(journal.manifest.recording_id, requests[-1].sequence)
+        async with reach(branch, anchor) as reached:
+            assert isinstance(reached, Reached)
+
+    asyncio.run(scenario())
+
+
+def test_scene_without_a_model_request_has_no_anchor(tmp_path: Path) -> None:
+    from sts2_harness_eval.takeover import TakeoverIncomplete
+
+    async def scenario() -> None:
+        case = await source_case(tmp_path / "source.sqlite", start=False)
+        restorer = FakeRestorer(tmp_path, case)
+        branch = tmp_path / "no-request.sqlite"
+        async with Llm(
+            configuration(tmp_path),
+            transport=httpx.MockTransport(
+                lambda _: pytest.fail("No provider request is allowed by the budget.")
+            ),
+        ) as model:
+            result = await take_over(
+                case,
+                restorer,
+                branch,
+                model,
+                PackagedPrompts(),
+                FileDocuments(),
+                SampleBudget(0, 30),
+                variant=MaterialVariant(SceneStart(""), ()),
+                stop_requested=lambda: False,
+            )
+        assert isinstance(result, TakeoverIncomplete)
+        assert result.anchor is None
+        with closing(Journal.open(branch)) as journal:
+            assert journal.requests() == ()
+        assert not restorer.actions
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_scene_rejects_unknown_live_material_before_actor_failure_or_pause(
+    tmp_path: Path, automatic: bool
+) -> None:
+    from sts2_harness.game import Pause, Settle
+
+    async def scenario() -> None:
+        case = await source_case(
+            tmp_path / "source.sqlite",
+            start=False,
+            source=document_source(),
+            documents=VersionDocuments(("First",) + ("Second",) * 10),
+            target_position=4,
+            materials=SessionMaterials(
+                entry_documents_enabled=automatic,
+                act_guidance={},
+                battle_guidance=("guide",) if automatic else (),
+            ),
+        )
+        restorer = FakeRestorer(tmp_path, case)
+        responses = iter(
+            [
+                reply(("unknown-read", "combat_skill", '{"mode":"read","id":"guide"}')),
+                reply(("continue-one", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+                reply(("continue-two", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            ]
+        )
+        branch = tmp_path / "rejected-scene.sqlite"
+        async with Llm(
+            configuration(tmp_path),
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, content=next(responses), headers={"Content-Type": "text/event-stream"}
+                )
+            ),
+        ) as model:
+            result = await take_over(
+                case,
+                restorer,
+                branch,
+                model,
+                PackagedPrompts(),
+                VersionDocuments(("Third",) * 10),
+                SampleBudget(4, 30),
+                variant=MaterialVariant(
+                    SceneStart(""),
+                    (
+                        MaterialReplacement(
+                            "guide:text",
+                            frozenset(
+                                MaterialText.create("guide:text", body).version
+                                for body in ("First", "Second")
+                            ),
+                            "Declared replacement.",
+                        ),
+                    ),
+                ),
+                stop_requested=lambda: False,
+            )
+        assert isinstance(result, TakeoverUnsupported)
+        assert isinstance(result.evidence, Rejected)
+        assert isinstance(result.evidence.detail, MaterialDifference)
+        assert not restorer.actions
+        with closing(Journal.open(branch)) as journal:
+            assert not any(
+                isinstance(item.request, (Pause, Settle)) for item in journal.operations()
+            )
+            requests = journal.requests()
+            assert len(requests) == (0 if automatic else 1)
+            assert not any(
+                isinstance(message, ResultSnapshot)
+                for request in requests
+                for message in request.input
+            )
 
     asyncio.run(scenario())

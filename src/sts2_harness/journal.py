@@ -8,9 +8,9 @@ from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, TypeAdapter, ValidationError, field_validator
+from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
@@ -119,7 +119,7 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[9] = 9
+    schema_version: Literal[10] = 10
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -134,7 +134,30 @@ class Manifest(native.WireModel):
     game_version: str | None = None
     headless: HeadlessInitialConditions | None = None
     parent: ParentPrefix | None = None
-    variant: "HistoricalVariant | None" = None
+    variant: 'Annotated[HistoricalVariant | SceneVariant, Field(discriminator="mode")] | None' = (
+        None
+    )
+
+    @model_validator(mode="after")
+    def scene_conditions(self) -> Self:
+        if not isinstance(self.variant, SceneVariant):
+            return self
+        initial = self.variant.initial
+        location = initial.observation.location
+        if (
+            self.parent is not None
+            or self.headless is not None
+            or self.initial_notes is None
+            or self.game_instance_id != location.game_instance_id
+            or self.run_id != location.run_id
+            or self.seed != initial.restore.canonical_seed
+            or self.template != initial.template
+            or self.game_version != initial.game_version
+            or initial.control.mode is not native.ControlIntent.RUNNING
+            or not isinstance(initial.observation.state, native.CombatState)
+        ):
+            raise ValueError("Scene initial conditions do not match the fresh recording.")
+        return self
 
 
 class ArchivedReplacement(native.WireModel):
@@ -151,6 +174,50 @@ class HistoricalVariant(native.WireModel):
     case_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     source: ParentPrefix
     replacements: tuple[ArchivedReplacement, ...]
+
+
+class SceneSource(native.WireModel):
+    archive: Path
+    recording_id: native.Nonempty
+    model_sequence: Annotated[int, Field(gt=0)]
+    archive_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class SceneRestore(native.WireModel):
+    checkpoint_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    checkpoint_bytes: Annotated[int, Field(gt=0)]
+    canonical_seed: native.Nonempty
+    game_mode: native.Nonempty
+    character: native.Nonempty
+    ascension: Annotated[int, Field(ge=0)]
+    act: Annotated[int, Field(ge=1)]
+    floor: Annotated[int, Field(ge=0)]
+    route: native.RouteKey
+    native_run_instance_id: Annotated[int, Field(ge=0)]
+    native_revision: Annotated[int, Field(ge=0)]
+
+
+class SceneInitialConditions(native.WireModel):
+    observation: native.Observation
+    control: native.ControlReply
+    restore: SceneRestore
+    template: str
+    game_version: str
+    effective_settings_sha256: str
+    game_assembly_sha256: str
+    mod_version: str
+    mod_sha256: str
+
+
+class SceneVariant(native.WireModel):
+    """Fresh software history with independent restore provenance."""
+
+    mode: Literal["scene"] = "scene"
+    case_id: native.Nonempty
+    case_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    source: SceneSource
+    replacements: tuple[ArchivedReplacement, ...]
+    initial: SceneInitialConditions
 
 
 class GapCause(StrEnum):
@@ -318,7 +385,11 @@ class Journal:
         variant = self.manifest.variant
         if parent.manifest.variant is not None and variant != parent.manifest.variant:
             raise ArchiveError("A candidate branch must retain its immutable material declaration.")
-        if variant is not None and parent.manifest.variant is None and variant.source != prefix:
+        if (
+            isinstance(variant, HistoricalVariant)
+            and parent.manifest.variant is None
+            and variant.source != prefix
+        ):
             raise ArchiveError("The material declaration does not identify its original prefix.")
         targets = parent.summaries(
             kind=DependencyKind.MODEL,

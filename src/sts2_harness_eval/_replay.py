@@ -39,7 +39,14 @@ from sts2_harness.game import (
     Settle,
     Settlement,
 )
-from sts2_harness.journal import ArchiveError, DependencyKind, Journal, Record
+from sts2_harness.journal import (
+    ArchiveError,
+    DependencyKind,
+    HistoricalVariant,
+    Journal,
+    Record,
+    SceneVariant,
+)
 from sts2_harness.journal_models import (
     AssistantSnapshot,
     BlobCollector,
@@ -531,6 +538,22 @@ def prefix(journal: Journal, target: ModelAnchor) -> tuple[Dependency, ...]:
     if journal.manifest.initial_notes is None:
         unsupported(None, UnsupportedCause.MISSING_INITIAL_NOTES)
     records = journal.timeline(stop=target.model_sequence)
+    declaration = journal.manifest.variant
+    if isinstance(declaration, SceneVariant):
+        admitted = next((record for record in records if isinstance(record, Record)), None)
+        if (
+            admitted is None
+            or admitted.request != Admit()
+            or admitted.reply is None
+            or not isinstance(admitted.reply.outcome, Admitted)
+            or not admitted.reply.outcome.allowed
+            or not admitted.reply.observations
+        ):
+            unsupported(None, UnsupportedCause.START_MODE)
+        observation = admitted.reply.observations[-1]
+        initial = declaration.initial.observation
+        if observation.model_copy(update={"stamp": initial.stamp}) != initial:
+            _different(admitted.sequence, InputComponent.REQUEST)
     if any(gap.first_sequence <= target.model_sequence for gap in journal.gaps):
         unsupported(None, UnsupportedCause.PREFIX_GAP)
     for expected, record in enumerate(records, 1):
@@ -541,10 +564,10 @@ def prefix(journal: Journal, target: ModelAnchor) -> tuple[Dependency, ...]:
 
 def material_boundary(journal: Journal) -> int | None:
     """Find the original segment through the existing immutable parent chain."""
-    boundary: int | None = None
+    boundary: int | None = 0 if isinstance(journal.manifest.variant, SceneVariant) else None
     with ExitStack() as resources:
         current = journal
-        while current.manifest.variant is not None:
+        while isinstance(current.manifest.variant, HistoricalVariant):
             parent = current.manifest.parent
             if parent is None:
                 raise ArchiveError("A historical material variant requires its parent prefix.")

@@ -17,6 +17,7 @@ from sts2_harness.headless import (
     OwnedHeadlessInstance,
     StandardRunRecipe,
 )
+from sts2_harness.journal import SceneInitialConditions, SceneRestore
 from sts2_harness.native_template import NativeTemplate
 from sts2_harness_eval.cases import (
     AdmissionFailure,
@@ -84,6 +85,7 @@ class LoadedTarget:
     refs: Mapping[str, str]
     differences: tuple[AllowedMapDifference, ...]
     correspondence: LoadedCorrespondence
+    initial: SceneInitialConditions
 
 
 def _route(observation: native.Observation) -> native.RouteKey:
@@ -101,10 +103,11 @@ def _live(client: ModClient, observation: native.Observation) -> LiveGame:
     )
 
 
-async def _control(client: ModClient, mode: native.ControlIntent) -> None:
+async def _control(client: ModClient, mode: native.ControlIntent) -> native.ControlReply:
     reply = await client.control(mode)
     if not isinstance(reply, native.ControlReply) or reply.mode is not mode:
         raise CheckpointUncertain("The evaluation owner could not verify control intent.")
+    return reply
 
 
 async def _write(
@@ -339,8 +342,38 @@ class NativeRestorer:
                 read = await checkpoints.identity()
                 correspondence.compare(reference.target, read)
                 refs = loaded_refs(binding.target, read)
+                control = await _control(client, native.ControlIntent.PAUSED)
                 yield LoadedTarget(
-                    game, client, checkpoints, read, refs, tuple(differences), correspondence
+                    game,
+                    client,
+                    checkpoints,
+                    read,
+                    refs,
+                    tuple(differences),
+                    correspondence,
+                    SceneInitialConditions(
+                        observation=read.observation,
+                        control=control,
+                        restore=SceneRestore(
+                            checkpoint_sha256=proof.file.sha256,
+                            checkpoint_bytes=proof.file.bytes,
+                            canonical_seed=proof.state.target.canonical_seed,
+                            game_mode=proof.state.target.game_mode,
+                            character=proof.state.target.character,
+                            ascension=proof.state.target.ascension,
+                            act=proof.state.target.act,
+                            floor=proof.state.target.floor,
+                            route=proof.state.route,
+                            native_run_instance_id=proof.state.native_run_instance_id,
+                            native_revision=proof.state.native_revision,
+                        ),
+                        template=owner.template.manifest_sha256,
+                        game_version=owner.game_version,
+                        effective_settings_sha256=owner.template.settings_sha256,
+                        game_assembly_sha256=owner.template.game_assembly_sha256,
+                        mod_version=owner.mod_version,
+                        mod_sha256=owner.mod_sha256,
+                    ),
                 )
 
     async def verify_follow_on(

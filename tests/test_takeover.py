@@ -20,6 +20,8 @@ from sts2_harness.journal import (
     Manifest,
     NativeStartReceipt,
     RecordedGame,
+    SceneInitialConditions,
+    SceneRestore,
     SessionMaterials,
     StandardCharacter,
 )
@@ -49,6 +51,7 @@ from sts2_harness_eval.checkpoints import (
 from sts2_harness_eval.native import LoadedTarget, NativeLaunch, NativeRestorer
 from sts2_harness_eval.sample import SampleBudget
 from sts2_harness_eval.takeover import TakeoverCompleted, TakeoverIncomplete
+from sts2_harness_eval.variants import MaterialVariant, SceneStart
 from sts2_harness_eval.verification import LoadedCorrespondence
 
 
@@ -355,6 +358,31 @@ class FakeRestorer(NativeRestorer):
                     {"card:1:1": "card:9:1", "card:1:2": "card:9:2", "enemy:1:1": "enemy:9:1"},
                     (),
                     LoadedCorrespondence(),
+                    SceneInitialConditions(
+                        observation=self.observation,
+                        control=native.ControlReply(mode=native.ControlIntent.PAUSED),
+                        restore=SceneRestore(
+                            checkpoint_sha256=case.checkpoint.sha256,
+                            checkpoint_bytes=case.checkpoint.bytes,
+                            canonical_seed="SEED",
+                            game_mode="standard",
+                            character="CHARACTER.IRONCLAD",
+                            ascension=0,
+                            act=1,
+                            floor=1,
+                            route=native.RouteKey.model_validate(
+                                self.observation.location.model_dump()
+                            ),
+                            native_run_instance_id=99,
+                            native_revision=7,
+                        ),
+                        template="fresh-template",
+                        game_version="fresh-version",
+                        effective_settings_sha256="fresh-settings",
+                        game_assembly_sha256="fresh-assembly",
+                        mod_version="fresh-mod",
+                        mod_sha256="fresh-mod-sha",
+                    ),
                 )
             finally:
                 self.closed = True
@@ -542,7 +570,10 @@ def test_refusal_never_releases_live_dependencies(tmp_path: Path, failure: str) 
     asyncio.run(scenario())
 
 
-def test_cancellation_during_load_survives_restorer_cleanup_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scene", [False, True])
+def test_cancellation_during_load_survives_restorer_cleanup_failure(
+    tmp_path: Path, scene: bool
+) -> None:
     async def scenario() -> None:
         case = await source_case(tmp_path / "source.sqlite", start=False)
         loading = asyncio.Event()
@@ -575,6 +606,7 @@ def test_cancellation_during_load_survives_restorer_cleanup_failure(tmp_path: Pa
                     PackagedPrompts(),
                     FileDocuments(),
                     SampleBudget(5, 30),
+                    variant=MaterialVariant(SceneStart(""), ()) if scene else None,
                     stop_requested=lambda: False,
                 )
             )
@@ -590,13 +622,22 @@ def test_cancellation_during_load_survives_restorer_cleanup_failure(tmp_path: Pa
 
 
 @pytest.mark.parametrize(
-    ("cancel", "failure"),
-    [(0, None), (1, None), (2, None), (1, "feedback"), (1, "cleanup")],
+    ("cancel", "failure", "scene"),
+    [
+        (0, None, False),
+        (1, None, False),
+        (2, None, False),
+        (1, "feedback", False),
+        (1, "cleanup", False),
+        (1, "feedback", True),
+        (1, "cleanup", True),
+    ],
 )
 def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
     tmp_path: Path,
     cancel: int,
     failure: Literal["feedback", "cleanup"] | None,
+    scene: bool,
 ) -> None:
     async def scenario() -> None:
         case = await source_case(tmp_path / "source.sqlite", start=False)
@@ -631,6 +672,7 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
                                 loaded.refs,
                                 loaded.differences,
                                 loaded.correspondence,
+                                loaded.initial,
                             )
                         finally:
                             if failure == "cleanup":
@@ -664,6 +706,7 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
                     FileDocuments(),
                     SampleBudget(5, 30),
                     stop_requested=stop.is_set,
+                    variant=MaterialVariant(SceneStart(""), ()) if scene else None,
                 )
             )
             await submitted.wait()
@@ -689,9 +732,14 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
         assert restorer.closed
         assert len(restorer.actions) == 2
         with closing(Journal.open(branch)) as journal:
+            operations = (
+                journal.operations()
+                if scene
+                else journal.operations(start=case.source.anchor.model_sequence)
+            )
             settled = [
                 record
-                for record in journal.operations(start=case.source.anchor.model_sequence)
+                for record in operations
                 if isinstance(record.reply.outcome if record.reply else None, Settlement)
             ]
             assert len(settled) == (1 if failure == "feedback" else 2)

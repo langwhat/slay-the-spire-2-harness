@@ -51,6 +51,11 @@ class HistoricalStart:
 
 
 @dataclass(frozen=True, slots=True)
+class SceneStart:
+    initial_notes: str
+
+
+@dataclass(frozen=True, slots=True)
 class MaterialReplacement:
     material_id: str
     expected_versions: frozenset[str]
@@ -59,7 +64,7 @@ class MaterialReplacement:
 
 @dataclass(frozen=True, slots=True)
 class MaterialVariant:
-    start: HistoricalStart
+    start: HistoricalStart | SceneStart
     replacements: tuple[MaterialReplacement, ...]
 
 

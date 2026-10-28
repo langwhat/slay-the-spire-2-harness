@@ -35,27 +35,23 @@ from sts2_harness.journal import (
     ArchiveError,
     HistoricalVariant,
     Journal,
+    Manifest,
     ParentPrefix,
     Record,
     RecordedGame,
+    SceneSource,
+    SceneVariant,
 )
 from sts2_harness.journal_models import AssistantSnapshot, MaterialRecord, ModelRecord
-from sts2_harness.knowledge import (
-    Document,
-    Documents,
-    DocumentView,
-    SkillRead,
-    SkillSummary,
-    SubjectId,
-)
+from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient, ModelInput, ModelReply, ToolDefinition
-from sts2_harness.material_text import MaterialText
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.native_template import TemplateError
 from sts2_harness.prompts import PromptReader
 from sts2_harness.results import Reason
 from sts2_harness.session import RunSession, SessionDependencies
+from sts2_harness_eval._material_boundary import RejectingDocuments, RejectingPrompts
 from sts2_harness_eval._replay import (
     ReplayDocuments,
     ReplayGame,
@@ -67,6 +63,7 @@ from sts2_harness_eval._replay import (
     prefix,
     unsupported,
 )
+from sts2_harness_eval._scene import SceneSession
 from sts2_harness_eval.cases import (
     AdmissionFailure,
     AdmissionRequest,
@@ -109,6 +106,7 @@ from sts2_harness_eval.sample import (
 from sts2_harness_eval.variants import (
     Materials,
     MaterialVariant,
+    SceneStart,
     VariantDocuments,
     VariantError,
     VariantPrompts,
@@ -192,40 +190,6 @@ class _GameProxy:
         return await self._switch.current.game.pause_until_resumed(reason)
 
 
-class _PromptProxy:
-    def __init__(self, switch: _Switch) -> None:
-        self._switch = switch
-
-    def read(self, name: str) -> MaterialText:
-        try:
-            return self._switch.current.prompts.read(name)
-        except VariantError as error:
-            raise ReplayRejected(error.rejection) from error
-
-
-class _DocumentProxy:
-    def __init__(self, switch: _Switch) -> None:
-        self._switch = switch
-
-    async def list(self, role: native.DecisionOwner) -> tuple[SkillSummary, ...]:
-        try:
-            return await self._switch.current.documents.list(role)
-        except VariantError as error:
-            raise ReplayRejected(error.rejection) from error
-
-    async def read(self, request: SkillRead) -> DocumentView:
-        try:
-            return await self._switch.current.documents.read(request)
-        except VariantError as error:
-            raise ReplayRejected(error.rejection) from error
-
-    async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
-        try:
-            return await self._switch.current.documents.lookup(subjects)
-        except VariantError as error:
-            raise ReplayRejected(error.rejection) from error
-
-
 async def take_over(
     case: Case,
     restorer: NativeRestorer,
@@ -270,6 +234,105 @@ async def take_over(
             source = resources.enter_context(closing(Journal.open(case.source.archive)))
             records = prefix(source, case.source.anchor)
             target = source.request(case.source.anchor.model_sequence)
+            if variant is not None and isinstance(variant.start, SceneStart):
+                if source.manifest.variant is not None:
+                    raise VariantError("New scenes require an original verified case.")
+                declared = replacements(variant)
+                materials = Materials(declared)
+                materials.preflight(
+                    tuple(
+                        record
+                        for record in records
+                        if isinstance(record, (ModelRecord, MaterialRecord))
+                    )
+                )
+                with case.source.archive.open("rb") as original:
+                    digest = file_digest(original, "sha256").hexdigest()
+                stage = Stage.LOAD
+                async with restorer.loaded(case) as loaded:
+                    location = loaded.read.observation.location
+                    assert location.run_id is not None
+                    if loaded.initial.observation != loaded.read.observation:
+                        raise CheckpointUncertain(
+                            "The scene target differs from its loaded evidence."
+                        )
+                    control = await loaded.client.control(native.ControlIntent.RUNNING)
+                    if (
+                        not isinstance(control, native.ControlReply)
+                        or control.mode is not native.ControlIntent.RUNNING
+                    ):
+                        raise CheckpointUncertain("The live Start intent was not confirmed.")
+                    initial = loaded.initial.model_copy(update={"control": control})
+                    declaration = SceneVariant(
+                        case_id=case.id,
+                        case_sha256=sha256(case.model_dump_json().encode()).hexdigest(),
+                        source=SceneSource(
+                            archive=case.source.archive.resolve(),
+                            recording_id=case.source.anchor.recording_id,
+                            model_sequence=case.source.anchor.model_sequence,
+                            archive_sha256=digest,
+                        ),
+                        replacements=declared,
+                        initial=initial,
+                    )
+                    manifest = Manifest(
+                        recording_id=uuid4().hex,
+                        core_version="0.1.0",
+                        game_instance_id=location.game_instance_id,
+                        run_id=location.run_id,
+                        materials=plan.manifest.materials,
+                        initial_notes=variant.start.initial_notes,
+                        seed=initial.restore.canonical_seed,
+                        template=initial.template,
+                        game_version=initial.game_version,
+                        variant=declaration,
+                    )
+                    journal = resources.enter_context(closing(Journal.create(branch, manifest)))
+                    endpoint: Endpoint
+                    if isinstance(case.endpoint, AfterDecisionsSpec):
+                        endpoint = AfterDecisions(case.endpoint.count)
+                    else:
+                        assert location.node_id is not None
+                        endpoint = BattleEnd(location.node_id)
+
+                    def scene_stopped() -> bool:
+                        nonlocal operator_stopped
+                        operator_stopped = operator_stopped or stop_requested()
+                        return operator_stopped
+
+                    scene = SceneSession(
+                        loaded,
+                        journal,
+                        model,
+                        prompts,
+                        documents,
+                        budget,
+                        endpoint,
+                        stop_requested=scene_stopped,
+                    )
+                    task = asyncio.create_task(scene.run())
+                    try:
+                        try:
+                            sample = await asyncio.shield(task)
+                        except asyncio.CancelledError as error:
+                            caller_cancellation = error
+                            operator_stopped = True
+                            with suppress(SessionStopped):
+                                while not task.done():
+                                    try:
+                                        await asyncio.shield(task)
+                                    except asyncio.CancelledError:
+                                        continue
+                                task.result()
+                            raise
+                    finally:
+                        anchor = scene.anchor()
+                    if isinstance(sample, Completed):
+                        if anchor is None:
+                            raise ArchiveError("A completed scene has no recorded model request.")
+                        return TakeoverCompleted(branch, anchor, sample)
+                    assert isinstance(sample, Incomplete)
+                    return TakeoverIncomplete(branch, anchor, sample)
             for message in target.input:
                 if isinstance(message, AssistantSnapshot):
                     protocol = message.native_reply.protocol
@@ -290,6 +353,8 @@ async def take_over(
                 archive_sha256=digest,
             )
             declaration = source.manifest.variant
+            if isinstance(declaration, SceneVariant):
+                raise VariantError("Scene history requires its own verified native case.")
             if declaration is not None:
                 if variant is not None and replacements(variant) != declaration.replacements:
                     raise VariantError(
@@ -329,7 +394,6 @@ async def take_over(
                 }
             )
             journal = resources.enter_context(closing(Journal.create(branch, manifest)))
-            endpoint: Endpoint
             if isinstance(case.endpoint, AfterDecisionsSpec):
                 endpoint = AfterDecisions(case.endpoint.count)
             else:
@@ -381,8 +445,8 @@ async def take_over(
 
             dependencies = SessionDependencies(
                 _GameProxy(switch),
-                _PromptProxy(switch),
-                _DocumentProxy(switch),
+                RejectingPrompts(lambda: switch.current.prompts),
+                RejectingDocuments(lambda: switch.current.documents),
                 factory,
             )
 

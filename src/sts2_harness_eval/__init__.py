@@ -9,11 +9,17 @@ from sts2_harness_eval.results import (
     ReplayResult,
 )
 from sts2_harness_eval.takeover import take_over
-from sts2_harness_eval.variants import HistoricalStart, MaterialReplacement, MaterialVariant
+from sts2_harness_eval.variants import (
+    HistoricalStart,
+    MaterialReplacement,
+    MaterialVariant,
+    SceneStart,
+)
 
 __all__ = [
     "ModelAnchor",
     "HistoricalStart",
+    "SceneStart",
     "MaterialReplacement",
     "MaterialVariant",
     "Reached",
