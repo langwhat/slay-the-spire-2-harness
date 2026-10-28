@@ -54,7 +54,7 @@ async def _headless(options: HeadlessOptions, configuration: Configuration) -> N
             loop.remove_signal_handler(name)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _build_parser() -> _Parser:
     parser = _Parser(
         description="Attach a resident backend or inspect configuration and evidence safely."
     )
@@ -88,108 +88,87 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--errors-only", action="store_true")
     parser.add_argument("--expand", action="store_true")
     parser.add_argument("--export", type=Path)
+    return parser
+
+
+def _inspect_evidence(arguments: argparse.Namespace) -> int:
+    archive: Path | None = arguments.archive
+    view: str = arguments.view
+    sequence: int | None = arguments.sequence
+    around: int | None = arguments.around
+    window: int = arguments.window
+    kind: str | None = arguments.kind
+    expand: bool = arguments.expand
+    role: str | None = arguments.role
+    node_id: str | None = arguments.node
+    errors_only: bool = arguments.errors_only
+    destination: Path | None = arguments.export
+    if archive is None:
+        raise ArchiveError("Evidence inspection requires --archive PATH.")
+    if view == "operation" and sequence is None:
+        raise ArchiveError("Operation inspection requires --sequence.")
+    reader = Journal.open(archive)
+    if view in ("model", "request"):
+        selected_kind = DependencyKind.MODEL
+    elif view == "operation":
+        assert sequence is not None
+        selected_kind = reader.operation(sequence).request.kind
+    elif kind in {item.value for item in DependencyKind}:
+        selected_kind = DependencyKind(kind)
+    else:
+        selected_kind = OperationKind(kind) if kind is not None else None
+    output = evidence(
+        reader,
+        expand=expand,
+        kind=selected_kind,
+        around=around,
+        window=window,
+        sequence=sequence,
+        role=DecisionOwner(role) if role is not None else None,
+        node_id=node_id,
+        errors_only=errors_only,
+    )
+    text = output.model_dump_json(indent=2)
+    if destination is not None:
+        try:
+            destination.write_text(text + "\n", encoding="utf-8")
+        except OSError:
+            raise ArchiveError("Cannot write the selected evidence export.") from None
+    print(text)
+    return 0
+
+
+def _overrides(settings: Sequence[str]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for setting in settings:
+        name, separator, value = setting.partition("=")
+        if not separator:
+            raise ConfigurationError("Startup overrides must use NAME=VALUE.")
+        overrides[name] = value
+    return overrides
+
+
+def _headless_options(arguments: argparse.Namespace) -> HeadlessOptions:
+    game: Path | None = arguments.game
+    template: Path | None = arguments.template
+    if game is None or template is None:
+        raise ConfigurationError("Headless startup requires --game and --template.")
+    instance: Path | None = arguments.instance
+    port: int | None = arguments.port
+    character: str = arguments.character
+    ascension: int = arguments.ascension
+    seed: str | None = arguments.seed
     try:
-        arguments = parser.parse_args(argv)
-        command: str = arguments.command
-        if command == "journal":
-            archive: Path | None = arguments.archive
-            view: str = arguments.view
-            sequence: int | None = arguments.sequence
-            around: int | None = arguments.around
-            window: int = arguments.window
-            kind: str | None = arguments.kind
-            expand: bool = arguments.expand
-            role: str | None = arguments.role
-            node_id: str | None = arguments.node
-            errors_only: bool = arguments.errors_only
-            destination: Path | None = arguments.export
-            if archive is None:
-                raise ArchiveError("Evidence inspection requires --archive PATH.")
-            if view == "operation" and sequence is None:
-                raise ArchiveError("Operation inspection requires --sequence.")
-            reader = Journal.open(archive)
-            if view in ("model", "request"):
-                selected_kind = DependencyKind.MODEL
-            elif view == "operation":
-                assert sequence is not None
-                selected_kind = reader.operation(sequence).request.kind
-            elif kind in {item.value for item in DependencyKind}:
-                selected_kind = DependencyKind(kind)
-            else:
-                selected_kind = OperationKind(kind) if kind is not None else None
-            output = evidence(
-                reader,
-                expand=expand,
-                kind=selected_kind,
-                around=around,
-                window=window,
-                sequence=sequence,
-                role=DecisionOwner(role) if role is not None else None,
-                node_id=node_id,
-                errors_only=errors_only,
-            )
-            text = output.model_dump_json(indent=2)
-            if destination is not None:
-                try:
-                    destination.write_text(text + "\n", encoding="utf-8")
-                except OSError:
-                    raise ArchiveError("Cannot write the selected evidence export.") from None
-            print(text)
-            return 0
-        # argparse is confined to this input boundary; extract concrete values immediately.
-        env_file: str = arguments.env_file
-        settings: list[str] = arguments.set
-        overrides: dict[str, str] = {}
-        for setting in settings:
-            name, separator, value = setting.partition("=")
-            if not separator:
-                raise ConfigurationError("Startup overrides must use NAME=VALUE.")
-            overrides[name] = value
-        config = load_configuration(Path(env_file), os.environ, overrides)
-        if command == "headless":
-            game: Path | None = arguments.game
-            template: Path | None = arguments.template
-            if game is None or template is None:
-                raise ConfigurationError("Headless startup requires --game and --template.")
-            instance: Path | None = arguments.instance
-            port: int | None = arguments.port
-            character: str = arguments.character
-            ascension: int = arguments.ascension
-            seed: str | None = arguments.seed
-            try:
-                recipe = StandardRunRecipe(
-                    character=StandardCharacter(character), ascension=ascension, seed=seed
-                )
-            except ValidationError:
-                raise ConfigurationError("Invalid standard headless run recipe.") from None
-            headless_output: Path = arguments.output
-            asyncio.run(
-                _headless(
-                    HeadlessOptions(game, template, headless_output, instance, port, recipe), config
-                )
-            )
-            return 0
-        if command == "start":
-            mod_url: str = arguments.mod_url
-            output_directory: Path = arguments.output
-            tool_port: int = arguments.tool_port
-            asyncio.run(_start(InteractiveOptions(mod_url, output_directory), config, tool_port))
-            return 0
-    except HeadlessError as error:
-        print(f"Headless error: {error}", file=sys.stderr)
-        return 2
-    except ControlWriteError:
-        print(
-            "Control error: The Mod did not confirm Pause; the backend stopped.",
-            file=sys.stderr,
+        recipe = StandardRunRecipe(
+            character=StandardCharacter(character), ascension=ascension, seed=seed
         )
-        return 2
-    except ArchiveError as error:
-        print(f"Archive error: {error}", file=sys.stderr)
-        return 2
-    except ConfigurationError as error:
-        print(f"Configuration error: {error}", file=sys.stderr)
-        return 2
+    except ValidationError:
+        raise ConfigurationError("Invalid standard headless run recipe.") from None
+    headless_output: Path = arguments.output
+    return HeadlessOptions(game, template, headless_output, instance, port, recipe)
+
+
+def _print_configuration_summary(config: Configuration) -> None:
     model = config.model
     # Free-form model IDs, URLs, header names and values can all carry credentials.
     summary = {"driver": config.driver.value, "model_configured": model is not None}
@@ -210,7 +189,46 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
         )
-    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
+    try:
+        arguments = parser.parse_args(argv)
+        command: str = arguments.command
+        if command == "journal":
+            return _inspect_evidence(arguments)
+        # argparse is confined to this input boundary; extract concrete values immediately.
+        env_file: str = arguments.env_file
+        settings: list[str] = arguments.set
+        config = load_configuration(Path(env_file), os.environ, _overrides(settings))
+        if command == "headless":
+            asyncio.run(_headless(_headless_options(arguments), config))
+            return 0
+        if command == "start":
+            mod_url: str = arguments.mod_url
+            output_directory: Path = arguments.output
+            tool_port: int = arguments.tool_port
+            asyncio.run(_start(InteractiveOptions(mod_url, output_directory), config, tool_port))
+            return 0
+        if command == "check-config":
+            _print_configuration_summary(config)
+        return 0
+    except HeadlessError as error:
+        print(f"Headless error: {error}", file=sys.stderr)
+        return 2
+    except ControlWriteError:
+        print(
+            "Control error: The Mod did not confirm Pause; the backend stopped.",
+            file=sys.stderr,
+        )
+        return 2
+    except ArchiveError as error:
+        print(f"Archive error: {error}", file=sys.stderr)
+        return 2
+    except ConfigurationError as error:
+        print(f"Configuration error: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
