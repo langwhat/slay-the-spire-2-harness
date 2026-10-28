@@ -67,6 +67,8 @@ from sts2_harness.journal_models import (
 from sts2_harness.llm.messages import FailureKind
 from sts2_harness.results import Reason
 
+_WRITE_TIMEOUT_SECONDS = 0.1
+
 
 class StandardCharacter(StrEnum):
     IRONCLAD = "IRONCLAD"
@@ -251,7 +253,10 @@ class Journal:
             except FileExistsError:
                 raise ArchiveError("The recording path is occupied by another archive.") from None
             self._owns_path = True
-        with closing(sqlite3.connect(self.path, timeout=0)) as connection, connection:
+        with (
+            closing(sqlite3.connect(self.path, timeout=_WRITE_TIMEOUT_SECONDS)) as connection,
+            connection,
+        ):
             connection.executescript(_SCHEMA)
             connection.execute(
                 "INSERT OR REPLACE INTO manifest VALUES (1,?)", (self.manifest.model_dump_json(),)
@@ -875,7 +880,7 @@ class Journal:
         try:
             if not self._initialized:
                 self._initialize()
-            connection = sqlite3.connect(self.path, timeout=0)
+            connection = sqlite3.connect(self.path, timeout=_WRITE_TIMEOUT_SECONDS)
         except (OSError, sqlite3.OperationalError):
             self._mark_gap()
             yield None

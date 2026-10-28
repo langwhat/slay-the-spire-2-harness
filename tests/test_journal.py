@@ -1,5 +1,10 @@
 import asyncio
+import sqlite3
+import time
+from concurrent.futures import Future
+from contextlib import closing
 from pathlib import Path
+from threading import Event, Thread
 
 import httpx2 as httpx
 import pytest
@@ -10,7 +15,7 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.decisions import ActionDecision, ActionKind, ActionProposal, ActionStep, ActTask
 from sts2_harness.execution import Executed, Execution, ToolRecoveryBudget
-from sts2_harness.game import LiveGame, Settlement
+from sts2_harness.game import LiveGame, Observe, Settlement
 from sts2_harness.journal import Journal, Manifest, Record, RecordedGame, ResultKind
 from sts2_harness.results import ActionUnknown, Reason, ReasonCode
 
@@ -1494,3 +1499,75 @@ def test_settlement_summary_discards_explicit_observation_route_conflicts(tmp_pa
         ).records
     ] == [1, 2]
     reader.close()
+
+
+def test_short_read_transaction_preserves_the_contending_write(tmp_path: Path) -> None:
+    journal = Journal.create(
+        tmp_path / "archive.sqlite",
+        Manifest(recording_id="reader", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    started = Event()
+    written = Future[None]()
+
+    def append() -> None:
+        started.set()
+        try:
+            journal.begin(Observe())
+            journal.end()
+        except BaseException as error:
+            written.set_exception(error)
+        else:
+            written.set_result(None)
+
+    journal.begin(Observe())
+    journal.end()
+    with closing(sqlite3.connect(f"{journal.path.as_uri()}?mode=ro", uri=True)) as lock:
+        lock.execute("BEGIN")
+        lock.execute("SELECT COUNT(*) FROM records").fetchone()
+        writer = Thread(target=append)
+        writer.start()
+        try:
+            assert started.wait(1), "Writer did not start."
+            time.sleep(0.05)
+        finally:
+            lock.rollback()
+            writer.join(timeout=2)
+        assert not writer.is_alive(), "Writer did not finish after releasing the read lock."
+        written.result(timeout=0)
+    journal.begin(Observe())
+    journal.end()
+    journal.close()
+
+    reader = Journal.open(journal.path)
+    try:
+        assert [item.sequence for item in reader.summaries()] == [1, 2, 3]
+        assert reader.gaps == ()
+    finally:
+        reader.close()
+
+
+def test_unreleased_read_transaction_marks_a_gap_and_recovers(tmp_path: Path) -> None:
+    journal = Journal.create(
+        tmp_path / "archive.sqlite",
+        Manifest(recording_id="reader", core_version="test", game_instance_id="game", run_id="run"),
+    )
+    journal.begin(Observe())
+    journal.end()
+    with closing(sqlite3.connect(f"{journal.path.as_uri()}?mode=ro", uri=True)) as lock:
+        lock.execute("BEGIN")
+        lock.execute("SELECT COUNT(*) FROM records").fetchone()
+        started = time.monotonic()
+        journal.begin(Observe())
+        journal.end()
+        assert time.monotonic() - started < 1
+        assert [(gap.first_sequence, gap.last_sequence) for gap in journal.gaps] == [(2, 2)]
+    journal.begin(Observe())
+    journal.end()
+    journal.close()
+
+    reader = Journal.open(journal.path)
+    try:
+        assert [item.sequence for item in reader.summaries()] == [1, 3]
+        assert [(gap.first_sequence, gap.last_sequence) for gap in reader.gaps] == [(2, 2)]
+    finally:
+        reader.close()
