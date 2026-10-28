@@ -8,6 +8,23 @@ from sts2_harness.diagnostics import Diagnostics, Event, EventKind
 from sts2_harness.game import Endpoint
 
 
+@pytest.mark.parametrize(
+    ("event", "component", "level"),
+    [
+        (Event(event=EventKind.LIFECYCLE_CHANGED, result="failed"), "session", "ERROR"),
+        (Event(event=EventKind.MODEL_REQUEST_COMPLETED), "model", "INFO"),
+        (Event(event=EventKind.NATIVE_FAILED, error="timeout"), "game_control", "WARNING"),
+    ],
+)
+def test_events_report_component_and_level(event: Event, component: str, level: str) -> None:
+    console = StringIO()
+    diagnostics = Diagnostics("recording", console=console)
+    diagnostics.emit(event)
+    diagnostics.close()
+    line = json.loads(console.getvalue())
+    assert (line["component"], line["level"]) == (component, level)
+
+
 def test_results_and_retry_windows_preserve_request_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

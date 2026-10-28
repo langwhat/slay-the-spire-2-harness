@@ -246,6 +246,72 @@ class Status(native.WireModel):
     sequence: int | None = None
 
 
+_ORDINARY_RESULTS = ("rejected", "paused", "stopped")
+_SEVERE_ERRORS = (
+    "execution_unconfirmed",
+    native.ErrorCode.EXECUTION_UNCERTAIN.value,
+    "control_unavailable",
+    "dispatch_failed",
+    "identity_unregistered",
+    "catalog_identity_conflict",
+    "native_preview_failed",
+    "internal_error",
+)
+
+
+def _event_level(event: Event) -> Level:
+    if isinstance(event, EncodingMetadata):
+        return Level.DEBUG
+    ordinary = (
+        isinstance(event, ResultEvent) and event.outcome is OutcomeStatus.REJECTED
+    ) or event.result in _ORDINARY_RESULTS
+    if not ordinary and (
+        event.event in (EventKind.MODEL_FAILED, EventKind.TOOL_RECOVERY_EXHAUSTED)
+        or (
+            isinstance(event, (ResultEvent, BatchSettled))
+            and event.reason is ReasonCode.CONTROL_UNAVAILABLE
+        )
+        or (isinstance(event, BattleFinished) and event.ending is BattleEnd.INTERRUPTED)
+        or (event.event is EventKind.LIFECYCLE_CHANGED and event.result == Lifecycle.FAILED.value)
+        or (isinstance(event, ResultEvent) and event.outcome is OutcomeStatus.UNKNOWN)
+        or (
+            isinstance(event, BatchSettled)
+            and event.outcome in (BatchStatus.UNKNOWN, BatchStatus.INTERRUPTED)
+        )
+        or event.result == "unknown"
+        or event.error in _SEVERE_ERRORS
+    ):
+        return Level.ERROR
+    if isinstance(event, ResultEvent):
+        return Level.WARNING if event.outcome is OutcomeStatus.FAILED else Level.INFO
+    if event.error is not None and event.result not in _ORDINARY_RESULTS:
+        return Level.WARNING
+    return Level.INFO
+
+
+def _event_component(event: Event) -> Literal["game_control", "model", "session"]:
+    if isinstance(event, EncodingMetadata):
+        return "model"
+    if event.event in (
+        EventKind.LIFECYCLE_CHANGED,
+        EventKind.CONTROL_CHANGED,
+        EventKind.ROLE_CHANGED,
+        EventKind.ACT_ENTERED,
+        EventKind.BATTLE_STARTED,
+        EventKind.BATTLE_FINISHED,
+    ):
+        return "session"
+    if event.event in (
+        EventKind.MODEL_REQUEST_STARTED,
+        EventKind.MODEL_REQUEST_COMPLETED,
+        EventKind.MODEL_RETRY,
+        EventKind.MODEL_RECOVERED,
+        EventKind.MODEL_FAILED,
+    ):
+        return "model"
+    return "game_control"
+
+
 _SEGMENT_BYTES = 10 * 1024 * 1024
 
 
@@ -366,8 +432,8 @@ class Diagnostics:
             and self._status.operation is OperationKind.PAUSE
         ):
             self.lifecycle(Lifecycle.WAITING_GAME)
-        debug = isinstance(event, EncodingMetadata)
-        if debug and not self._logger.isEnabledFor(logging.DEBUG):
+        level = _event_level(event)
+        if level is Level.DEBUG and not self._logger.isEnabledFor(logging.DEBUG):
             return
         now = time.monotonic()
         native_event = event.event in (
@@ -435,76 +501,11 @@ class Diagnostics:
             self._storage_error = None
             self._storage_suppressed = 0
         # Only selected typed fields enter diagnostics, never native bodies or headers.
-        ordinary = (
-            isinstance(event, ResultEvent)
-            and event.outcome is OutcomeStatus.REJECTED
-            or event.result in ("rejected", "paused", "stopped")
-        )
-        severe = not ordinary and (
-            event.event in (EventKind.MODEL_FAILED, EventKind.TOOL_RECOVERY_EXHAUSTED)
-            or isinstance(event, (ResultEvent, BatchSettled))
-            and event.reason is ReasonCode.CONTROL_UNAVAILABLE
-            or isinstance(event, BattleFinished)
-            and event.ending is BattleEnd.INTERRUPTED
-            or event.event is EventKind.LIFECYCLE_CHANGED
-            and event.result == Lifecycle.FAILED.value
-            or isinstance(event, ResultEvent)
-            and event.outcome is OutcomeStatus.UNKNOWN
-            or isinstance(event, BatchSettled)
-            and event.outcome in (BatchStatus.UNKNOWN, BatchStatus.INTERRUPTED)
-            or event.result == "unknown"
-            or event.error
-            in (
-                "execution_unconfirmed",
-                native.ErrorCode.EXECUTION_UNCERTAIN.value,
-                "control_unavailable",
-                "dispatch_failed",
-                "identity_unregistered",
-                "catalog_identity_conflict",
-                "native_preview_failed",
-                "internal_error",
-            )
-        )
-        warning = (
-            event.outcome is OutcomeStatus.FAILED
-            if isinstance(event, ResultEvent)
-            else event.error is not None and event.result not in ("rejected", "paused", "stopped")
-        )
-        level = (
-            Level.DEBUG
-            if debug
-            else Level.ERROR
-            if severe
-            else Level.WARNING
-            if warning
-            else Level.INFO
-        )
         payload = DiagnosticLine(
             time=datetime.now(UTC).isoformat(),
             level=level,
             recording_id=self._recording_id,
-            component="model"
-            if debug
-            else "session"
-            if event.event
-            in (
-                EventKind.LIFECYCLE_CHANGED,
-                EventKind.CONTROL_CHANGED,
-                EventKind.ROLE_CHANGED,
-                EventKind.ACT_ENTERED,
-                EventKind.BATTLE_STARTED,
-                EventKind.BATTLE_FINISHED,
-            )
-            else "model"
-            if event.event
-            in (
-                EventKind.MODEL_REQUEST_STARTED,
-                EventKind.MODEL_REQUEST_COMPLETED,
-                EventKind.MODEL_RETRY,
-                EventKind.MODEL_RECOVERED,
-                EventKind.MODEL_FAILED,
-            )
-            else "game_control",
+            component=_event_component(event),
             suppressed=suppressed,
         )
         if recovered_from is not None:
@@ -515,16 +516,7 @@ class Diagnostics:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        self._logger.log(
-            logging.DEBUG
-            if debug
-            else logging.ERROR
-            if severe
-            else logging.WARNING
-            if warning
-            else logging.INFO,
-            text,
-        )
+        self._logger.log(logging.getLevelNamesMapping()[level], text)
 
     def tool_finished(
         self, name: str, outcome: Outcome, *, exception: ExceptionDetails | None = None
