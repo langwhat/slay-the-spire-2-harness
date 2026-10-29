@@ -75,7 +75,7 @@ def classify_error(code: str | None, status: int | None = None) -> FailureKind:
         "engine_overloaded",
     }:
         return FailureKind.OVERLOAD
-    if status in {400, 422} or code in {
+    if status in {400, 413, 422} or code in {
         "invalid_request_error",
         "unsupported_parameter",
         "unsupported_value",

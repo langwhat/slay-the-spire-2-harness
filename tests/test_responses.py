@@ -385,6 +385,37 @@ def test_retry_budget_classification_and_attempt_timeout(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("protocol", list(Protocol))
+def test_oversized_requests_do_not_retry_or_expose_provider_payload(
+    tmp_path: Path, protocol: Protocol
+) -> None:
+    async def scenario() -> None:
+        requests = 0
+        waits: list[float] = []
+
+        async def sleep(seconds: float) -> None:
+            waits.append(seconds)
+
+        def oversized(request: httpx.Request) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            return httpx.Response(413, json={"error": {"message": "private-provider-payload"}})
+
+        async with Llm(
+            configuration(tmp_path, LLM_PROTOCOL=protocol.value, LLM_EXTRA_RETRIES="2"),
+            transport=httpx.MockTransport(oversized),
+            sleep=sleep,
+        ) as llm:
+            with pytest.raises(ModelUnavailable) as failure:
+                await llm.complete((), ())
+            assert failure.value.reason is FailureKind.CONFIGURATION
+            assert "private-provider-payload" not in str(failure.value)
+        assert requests == 1
+        assert waits == []
+
+    asyncio.run(scenario())
+
+
 class SlowStream(httpx.AsyncByteStream):
     def __init__(self, chunk_count: int) -> None:
         self.chunk_count = chunk_count
