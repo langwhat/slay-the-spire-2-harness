@@ -10,7 +10,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 
-from sts2_harness.journal import ArchiveError, Journal, Manifest
+from sts2_harness.journal import ArchiveError, Journal, Manifest, SceneVariant
 from sts2_harness.native_template import Sha256, TemplateManifest, digest
 from sts2_harness_eval.cases import Case, CaseStore
 
@@ -53,9 +53,22 @@ class ParentDependency:
 
 
 @dataclass(frozen=True)
+class SceneSourceDependency:
+    child: RunRef
+    source: RunRef
+    model_sequence: int
+    archive_sha256: str
+
+    @property
+    def parent(self) -> RunRef:
+        """The retained source is a dependency, without an inherited software prefix."""
+        return self.source
+
+
+@dataclass(frozen=True)
 class Protection:
     root: RunRef | CaseDependency
-    parents: tuple[ParentDependency, ...]
+    parents: tuple[ParentDependency | SceneSourceDependency, ...]
 
 
 @dataclass(frozen=True)
@@ -168,7 +181,7 @@ class ArchivePruner:
         reasons: dict[RunRef, list[Protection]] = {}
         for root in roots:
             run = root.source if isinstance(root, CaseDependency) else root
-            chain: tuple[ParentDependency, ...] = ()
+            chain: tuple[ParentDependency | SceneSourceDependency, ...] = ()
             while True:
                 reasons.setdefault(run, []).append(Protection(root, chain))
                 edge = parents.get(run)
@@ -213,9 +226,21 @@ class ArchivePruner:
 
     def _parents(
         self, manifests: dict[Path, Manifest], runs: dict[Path, RunRef]
-    ) -> dict[RunRef, ParentDependency]:
-        parents: dict[RunRef, ParentDependency] = {}
+    ) -> dict[RunRef, ParentDependency | SceneSourceDependency]:
+        parents: dict[RunRef, ParentDependency | SceneSourceDependency] = {}
         for path, manifest in manifests.items():
+            if isinstance(manifest.variant, SceneVariant):
+                source = manifest.variant.source
+                source_path = self._file(source.archive)
+                source_run = runs.get(source_path)
+                if source_run is None or source_run.recording_id != source.recording_id:
+                    raise ArchiveError(
+                        "A Scene source archive is outside scope or its identity has changed."
+                    )
+                parents[runs[path]] = SceneSourceDependency(
+                    runs[path], source_run, source.model_sequence, source.archive_sha256
+                )
+                continue
             prefix = manifest.parent
             if prefix is None:
                 continue
@@ -236,7 +261,7 @@ class ArchivePruner:
                 run = parents[run].parent
         for edge in parents.values():
             if digest(edge.parent.archive) != edge.archive_sha256:
-                raise ArchiveError("A whole parent archive hash has changed.")
+                raise ArchiveError("A whole archive dependency hash has changed.")
         return parents
 
     def _cases(

@@ -139,6 +139,7 @@ async def source_case(
     documents: Documents | None = None,
     target_position: int = 2,
     materials: SessionMaterials | None = None,
+    template: str = "test",
 ) -> Case:
     source = source or Source()
     manifest = Manifest(
@@ -151,7 +152,7 @@ async def source_case(
         run_id="run",
         initial_notes="A plan.",
         seed="SEED",
-        template="test",
+        template=template,
         headless=HeadlessInitialConditions(
             requested_character=StandardCharacter.IRONCLAD,
             requested_ascension=0,
@@ -236,7 +237,14 @@ async def source_case(
 
 
 class FakeRestorer(NativeRestorer):
-    def __init__(self, directory: Path, case: Case, *, uncertain: bool = False) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        case: Case,
+        *,
+        uncertain: bool = False,
+        template: str = "fresh-template",
+    ) -> None:
         super().__init__(NativeLaunch(directory, directory, directory), CaseStore(directory))
         plan = plan_admission(
             AdmissionRequest(
@@ -267,6 +275,7 @@ class FakeRestorer(NativeRestorer):
         self.started = False
         self.closed = False
         self.uncertain = uncertain
+        self.template = template
 
     def respond(self, request: httpx.Request) -> httpx.Response:
         if request.url.path == "/control":
@@ -386,7 +395,7 @@ class FakeRestorer(NativeRestorer):
                             native_run_instance_id=99,
                             native_revision=7,
                         ),
-                        template="fresh-template",
+                        template=self.template,
                         game_version="fresh-version",
                         effective_settings_sha256="fresh-settings",
                         game_assembly_sha256="fresh-assembly",

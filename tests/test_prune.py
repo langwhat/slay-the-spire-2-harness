@@ -1,3 +1,4 @@
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,81 @@ def test_inspection_only_lists_explicit_unreferenced_archives(tmp_path: Path) ->
     assert {path: path.read_bytes() for path in before} == before
 
 
+def test_scene_source_is_protected_and_removed_only_after_its_scene(tmp_path: Path) -> None:
+    import asyncio
+    from contextlib import closing
+
+    from test_headless import game_fixture
+    from test_semantic_judge import Actor
+    from test_takeover import FakeRestorer, source_case
+
+    from sts2_harness.materials import FileDocuments
+    from sts2_harness.native_template import NativeTemplate
+    from sts2_harness.prompts import PackagedPrompts
+    from sts2_harness_eval import take_over
+    from sts2_harness_eval.prune import PruneCompleted, PruneRefused, SceneSourceDependency
+    from sts2_harness_eval.sample import SampleBudget
+    from sts2_harness_eval.takeover import TakeoverCompleted
+    from sts2_harness_eval.variants import MaterialVariant, SceneStart
+
+    async def scenario() -> None:
+        _, template_path = game_fixture(tmp_path)
+        template = NativeTemplate(template_path)
+        templates = tmp_path / "templates"
+        template.copy_to(tmp_path / "profile", templates)
+        key = template.evidence.manifest_sha256
+        case = await source_case(tmp_path / "source.sqlite", start=False, template=key)
+        branch = tmp_path / "scene.sqlite"
+        async with Actor(tmp_path, '{"steps":[{"kind":"end_turn"}]}') as actor:
+            result = await take_over(
+                case,
+                FakeRestorer(tmp_path, case, template=key),
+                branch,
+                actor,
+                PackagedPrompts(),
+                FileDocuments(),
+                SampleBudget(3, 30),
+                stop_requested=lambda: False,
+                variant=MaterialVariant(SceneStart(""), ()),
+            )
+        assert isinstance(result, TakeoverCompleted)
+        source = RunRef(case.source.archive.resolve(), case.source.anchor.recording_id)
+        scene = RunRef(branch.resolve(), result.recording_id)
+        scope = PruneScope(
+            archives=(source.archive, scene.archive),
+            complete=True,
+            offline=True,
+            template_roots=(templates,),
+        )
+        before = {run.archive: run.archive.read_bytes() for run in (source, scene)}
+        pruner = ArchivePruner()
+        plan = pruner.inspect(scope, PruneRequest(archives=(source,)))
+        assert isinstance(plan, PrunePlan)
+        assert plan.removable == ()
+        assert plan.protected[0].run == source
+        dependency = plan.protected[0].reasons[0].parents[0]
+        assert isinstance(dependency, SceneSourceDependency)
+        assert dependency.child == scene
+        assert dependency.source == source
+        assert dependency.model_sequence == case.source.anchor.model_sequence
+        assert dependency.archive_sha256 == sha256(before[source.archive]).hexdigest()
+        assert isinstance(pruner.prune(scope, PruneRequest(archives=(source,))), PruneRefused)
+        assert {path: path.read_bytes() for path in before} == before
+        with closing(Journal.open(scene.archive)) as journal:
+            assert journal.requests()
+        outside = PruneScope(archives=(scene.archive,), complete=True, offline=True)
+        assert isinstance(pruner.inspect(outside, PruneRequest(archives=(scene,))), PruneRefused)
+        source.archive.write_bytes(b"changed source")
+        assert isinstance(pruner.prune(scope, PruneRequest(archives=(scene, source))), PruneRefused)
+        assert scene.archive.read_bytes() == before[scene.archive]
+        source.archive.write_bytes(before[source.archive])
+        removed = pruner.prune(scope, PruneRequest(archives=(source, scene)))
+        assert isinstance(removed, PruneCompleted)
+        assert removed.removed == (scene, source)
+
+    asyncio.run(scenario())
+
+
 def test_cases_protect_branches_and_whole_transitive_parents(tmp_path: Path) -> None:
     from hashlib import sha256
 
@@ -47,7 +123,7 @@ def test_cases_protect_branches_and_whole_transitive_parents(tmp_path: Path) -> 
     from sts2_harness.client import models as native
     from sts2_harness.journal import ParentPrefix
     from sts2_harness.journal_models import ConfigurationSnapshot, ToolSet
-    from sts2_harness_eval.prune import CaseDependency
+    from sts2_harness_eval.prune import CaseDependency, ParentDependency
     from sts2_harness_eval.results import ModelAnchor
 
     store = cases_fixture(tmp_path / "store")
@@ -111,6 +187,7 @@ def test_cases_protect_branches_and_whole_transitive_parents(tmp_path: Path) -> 
     assert isinstance(chain.root, CaseDependency)
     assert chain.root.source == branch
     assert [(edge.child, edge.parent) for edge in chain.parents] == [(branch, parent)]
+    assert isinstance(chain.parents[0], ParentDependency)
     assert chain.parents[0].before_sequence == 1
     assert chain.parents[0].archive_sha256 == sha256(before[parent.archive]).hexdigest()
     assert {item.path for item in result.shared} >= {
