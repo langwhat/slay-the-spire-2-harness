@@ -29,6 +29,7 @@ from sts2_harness.context import (
 )
 from sts2_harness.context.models import (
     ActContent,
+    ProjectedResult,
     ResultMessage,
     ReviewContent,
     TaskMessage,
@@ -150,6 +151,38 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
     assert moved.content.updates.objects is MISSING
     assert isinstance(original.content.state, CombatState)
     assert original.content.state.player.powers[0].amount == 0
+
+
+def test_generated_directories_keep_stable_keys_and_card_order_through_changes() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    first_card = observation.generated["c1"][0]
+    second_card = first_card.model_copy(
+        update={"source": first_card.source.model_copy(update={"definition_id": "CARD.TWO"})}
+    )
+    generated = {"c2": (second_card, first_card), "c1": (first_card,)}
+    observation = observation.model_copy(update={"generated": MappingProxyType(generated)})
+    context = Context(DecisionOwner.COMBAT)
+    context.append_task(CombatActInput(), observation)
+    first = context.model_input()[-1]
+    assert isinstance(first, TaskMessage)
+    initial = ActContent.model_validate_json(first.text).observation
+    assert initial.updates.generated is not MISSING
+    assert tuple(initial.updates.generated) == ("c1", "c2")
+    assert initial.updates.generated == generated
+    assert isinstance(initial.state, CombatState)
+    assert initial.state.piles.hand == ("c2", "c1")
+
+    changed = {"c2": (first_card,), "c1": (second_card, first_card)}
+    call = ToolCall("inspect", "combat_inspect", "{}")
+    for directory in (changed, {}):
+        observation = observation.model_copy(update={"generated": MappingProxyType(directory)})
+        context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
+        result = context.model_input()[-1]
+        assert isinstance(result, ResultMessage)
+        updates = ProjectedResult.model_validate_json(result.text).updates
+        assert updates.generated is not MISSING
+        assert tuple(updates.generated) == ("c1", "c2")
+        assert updates.generated == (changed if directory else {"c1": (), "c2": ()})
 
 
 def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics() -> None:

@@ -124,7 +124,7 @@ class Delivery:
             )
         generated = {
             ref: observation.generated.get(ref, ())
-            for ref in _source_refs(observation) | set(observation.generated)
+            for ref in sorted(_source_refs(observation) | set(observation.generated))
         }
         generated_updates = {
             ref: cards
