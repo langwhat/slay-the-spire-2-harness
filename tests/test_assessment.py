@@ -31,7 +31,13 @@ from sts2_harness_eval.assessment import (
     archive_identity,
     assess_sample,
 )
-from sts2_harness_eval.assessment_records import Assessed, Unassessed
+from sts2_harness_eval.assessment_records import (
+    Assessed,
+    ObservationRef,
+    Unassessed,
+    UnassessedReason,
+    Uncertainty,
+)
 from sts2_harness_eval.cases import Case, SourceRef
 from sts2_harness_eval.results import ModelAnchor, Reached
 from sts2_harness_eval.sample import BattleEnd, Completed
@@ -326,11 +332,28 @@ def test_reports_reject_replaced_archive_and_preserve_unstarted_failure(tmp_path
 
 
 @pytest.mark.parametrize("choice", ["c1", "c2", "skip"])
-@pytest.mark.parametrize("confirmed", [True, False])
+@pytest.mark.parametrize(
+    "confirmed, consistent, separate_publication, extra_write",
+    [
+        (True, True, False, None),
+        (False, True, False, None),
+        (True, False, False, None),
+        (True, True, True, None),
+        (False, True, True, None),
+        (True, False, True, None),
+        (True, True, True, "completed"),
+        (True, True, True, "unknown"),
+        (True, True, True, "missing"),
+        (True, True, True, "rejected"),
+    ],
+)
 def test_synthetic_reward_requires_confirmed_choice_and_native_deck_change(
     tmp_path: Path,
     choice: str,
     confirmed: bool,
+    consistent: bool,
+    separate_publication: bool,
+    extra_write: str | None,
 ) -> None:
     cases = cases_fixture(tmp_path / "cases")
     case = cases.load("battle")
@@ -354,10 +377,15 @@ def test_synthetic_reward_requires_confirmed_choice_and_native_deck_change(
     assert isinstance(before.state, native.RunState)
     before = before.model_copy(
         update={
-            "objects": {"c1": card, "c2": card.model_copy(update={"definition_id": "CARD.TWO"})},
+            "objects": {
+                "owned": card,
+                "c1": card,
+                "c2": card.model_copy(update={"definition_id": "CARD.TWO"}),
+            },
             "state": before.state.model_copy(
                 update={
                     "screen": native.RunScreen.REWARDS,
+                    "deck": ("owned",),
                     "selection": native.Selection(
                         prompt="Choose a card",
                         source=None,
@@ -372,13 +400,17 @@ def test_synthetic_reward_requires_confirmed_choice_and_native_deck_change(
     )
     refs = () if choice == "skip" else (choice,)
     selected_card = before.objects[choice] if refs else None
+    if not consistent:
+        selected_card = card.model_copy(update={"definition_id": "CARD.UNEXPECTED"})
     after = before.model_copy(
         update={
-            "objects": {"deck:1": selected_card} if selected_card else {},
+            "objects": {"owned": card, "deck:1": selected_card}
+            if selected_card
+            else {"owned": card},
             "state": before.state.model_copy(
                 update={
                     "selection": None,
-                    "deck": ("deck:1",) if refs else (),
+                    "deck": ("owned", "deck:1") if selected_card else ("owned",),
                 }
             ),
         }
@@ -394,9 +426,52 @@ def test_synthetic_reward_requires_confirmed_choice_and_native_deck_change(
                 before,
                 native.Select(kind=native.StepKind.SELECT, refs=refs),
                 "choice",
-                after,
+                None if separate_publication else after,
             )
-        else:
+        if extra_write == "completed":
+            write_step(
+                journal,
+                before,
+                native.Interact(kind=native.StepKind.INTERACT, action="claim-gold"),
+                "gold",
+                None,
+            )
+        elif extra_write is not None:
+            route = native.RouteKey.model_validate(before.location.model_dump())
+            step = native.Interact(kind=native.StepKind.INTERACT, action="claim-gold")
+            journal.begin(Settle(route=route, step=step))
+            if extra_write != "missing":
+                receipt = (
+                    native.ReceiptUnknown(
+                        operation_id="gold",
+                        status=native.ResultStatus.UNKNOWN,
+                        error=native.UnknownExecution(
+                            code=native.ErrorCode.EXECUTION_UNCERTAIN,
+                            message="Execution unconfirmed.",
+                        ),
+                    )
+                    if extra_write == "unknown"
+                    else native.ReceiptRejected(
+                        operation_id="gold",
+                        status=native.ResultStatus.REJECTED,
+                        error=native.ActionUnavailable(
+                            code=native.ErrorCode.ACTION_UNAVAILABLE,
+                            message="Gold is unavailable.",
+                        ),
+                    )
+                )
+                journal.finish(
+                    GameReply(
+                        outcome=Settlement(
+                            request=native.StepRequest(
+                                operation_id="gold", expected_route=route, step=step
+                            ),
+                            receipt=receipt,
+                        )
+                    )
+                )
+            journal.end()
+        if not confirmed or separate_publication:
             journal.begin(Observe())
             journal.finish(GameReply(outcome=Observed(observation=after), observations=(after,)))
             journal.end()
@@ -411,9 +486,22 @@ def test_synthetic_reward_requires_confirmed_choice_and_native_deck_change(
     report = asyncio.run(
         assess_sample(case, completed(case, branch), store, selection, judgment=judgment)
     )
-    if not confirmed:
+    if not confirmed or not consistent or extra_write in ("completed", "unknown", "missing"):
         assert isinstance(report.quality, Unassessed)
+        assert report.quality.reason is UnassessedReason.INSUFFICIENT_EVIDENCE
         assert report.evidence.metrics.reward is None
+        assert (
+            Uncertainty.INCOMPLETE_RECORDS
+            if extra_write == "missing"
+            else Uncertainty.REWARD_EVIDENCE
+        ) in report.uncertainty
+        if extra_write == "completed":
+            assert tuple(action.operation_id for action in report.evidence.actions) == (
+                "choice",
+                "gold",
+            )
+        elif extra_write is not None:
+            assert tuple(action.operation_id for action in report.evidence.actions) == ("choice",)
         return
     assert isinstance(report.quality, Assessed)
     reward = report.evidence.metrics.reward
@@ -423,8 +511,25 @@ def test_synthetic_reward_requires_confirmed_choice_and_native_deck_change(
         () if choice == "skip" else ("CARD.ONE",) if choice == "c1" else ("CARD.TWO",)
     )
     assert reward.skipped == (choice == "skip")
+    assert reward.before_deck == ("CARD.ONE",)
+    assert reward.after_deck == ("CARD.ONE",) + reward.selected
+    assert reward.operation_id == "choice"
+    assert reward.sequence == 2
+    assert reward.before == ObservationRef(recording_id="reward", sequence=1, index=0)
+    assert reward.after == ObservationRef(
+        recording_id="reward",
+        sequence=3 + int(extra_write is not None) if separate_publication else 2,
+        index=0,
+    )
     reference = store.append_assessment(report, id="reward")
     assert store.assessment(reference) == report
+    unjudged = asyncio.run(
+        assess_sample(case, completed(case, branch), store, selection, judgment=None)
+    )
+    assert unjudged.evidence.metrics.reward == reward
+    assert isinstance(unjudged.quality, Unassessed)
+    assert unjudged.quality.reason is UnassessedReason.NO_JUDGMENT
+    assert Uncertainty.REWARD_EVIDENCE not in unjudged.uncertainty
 
 
 def test_inherited_variant_uses_current_direct_parent_interval(tmp_path: Path) -> None:

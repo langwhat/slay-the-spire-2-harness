@@ -167,10 +167,17 @@ def _evidence(
     before = target
     before_ref: CaseTargetRef | SceneInitialRef | ObservationRef | None = target_ref
     reward: RewardChoice | None = None
+    pending: list[ConfirmedAction] = []
+    writes_known = True
     uncertain: list[Uncertainty] = []
     for record in records:
         outcome = _confirmed(record)
-        action = None
+        if isinstance(record.request, Settle):
+            settlement = record.reply.outcome if record.reply is not None else None
+            if not isinstance(settlement, Settlement) or not isinstance(
+                settlement.receipt, (native.ReceiptCompleted, native.ReceiptRejected)
+            ):
+                writes_known = False
         if outcome is not None and outcome.request.operation_id in seen:
             if seen[outcome.request.operation_id] != outcome.request:
                 raise ValueError("One operation identity has conflicting confirmed actions.")
@@ -183,6 +190,7 @@ def _evidence(
                 route=outcome.request.expected_route,
             )
             actions.append(action)
+            pending.append(action)
             if isinstance(action.step, native.UsePotion):
                 entry = (
                     before.objects.get(action.step.potion)
@@ -211,15 +219,18 @@ def _evidence(
             index=len(record.reply.observations) - 1,
         )
         if (
-            action is not None
+            len(pending) == 1
+            and writes_known
             and before is not None
             and before_ref is not None
             and before.location.game_instance_id == after.location.game_instance_id
             and before.location.run_id == after.location.run_id
         ):
-            choice = _reward(before, before_ref, after, after_ref, action)
+            choice = _reward(before, before_ref, after, after_ref, pending[0])
             if choice is not None:
                 reward = choice
+        pending.clear()
+        writes_known = True
         before, before_ref = after, after_ref
     endpoint = None
     endpoint_ref = None
