@@ -1,4 +1,4 @@
-`state` is the complete current short state relevant to your role. Entries in `updates` replace the earlier entry for the same reference in your understanding of the current state; previous messages remain in the conversation. An omitted update does not mean the object disappeared. Use the current state membership lists to determine what is present.
+`state` is the complete current short state relevant to your role. Apply each category in `updates` according to its rules below; previous messages remain in the conversation. An omitted update does not mean the object disappeared. Use the current state membership lists to determine what is present.
 
 When the current decision belongs to the other role, its menus are omitted from `state`, and inspecting options, rewards, or shop is rejected. Explicit reads return full content within your permitted view.
 
