@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from sts2_harness.client.models import DecisionOwner
 from sts2_harness.config import Configuration, ConfigurationError, Driver, load_configuration
+from sts2_harness.entry_materials import EntryMaterials
 from sts2_harness.external_http import run_external
 from sts2_harness.game import ControlWriteError, OperationKind
 from sts2_harness.headless import HeadlessError, HeadlessOptions, StandardRunRecipe, run_headless
@@ -27,7 +28,12 @@ class _Parser(argparse.ArgumentParser):
         raise ConfigurationError("Invalid command line; use sts2 --help.")
 
 
-async def _start(options: InteractiveOptions, configuration: Configuration, tool_port: int) -> None:
+async def _start(
+    options: InteractiveOptions,
+    configuration: Configuration,
+    tool_port: int,
+    materials: EntryMaterials | None,
+) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in (signal.SIGINT, signal.SIGTERM):
@@ -36,19 +42,21 @@ async def _start(options: InteractiveOptions, configuration: Configuration, tool
         if configuration.driver is Driver.EXTERNAL:
             await run_external(options, configuration, tool_port=tool_port, stop_requested=stop)
         else:
-            await run_interactive(options, configuration, stop_requested=stop)
+            await run_interactive(options, configuration, stop_requested=stop, materials=materials)
     finally:
         for name in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(name)
 
 
-async def _headless(options: HeadlessOptions, configuration: Configuration) -> None:
+async def _headless(
+    options: HeadlessOptions, configuration: Configuration, materials: EntryMaterials | None
+) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(name, stop.set)
     try:
-        await run_headless(options, configuration, stop_requested=stop)
+        await run_headless(options, configuration, stop_requested=stop, materials=materials)
     finally:
         for name in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(name)
@@ -191,7 +199,7 @@ def _print_configuration_summary(config: Configuration) -> None:
         )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None = None) -> int:
     parser = _build_parser()
     try:
         arguments = parser.parse_args(argv)
@@ -203,13 +211,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings: list[str] = arguments.set
         config = load_configuration(Path(env_file), os.environ, _overrides(settings))
         if command == "headless":
-            asyncio.run(_headless(_headless_options(arguments), config))
+            asyncio.run(_headless(_headless_options(arguments), config, materials))
             return 0
         if command == "start":
+            if materials is not None and config.driver is Driver.EXTERNAL:
+                raise ConfigurationError("Entry materials require builtin driving.")
             mod_url: str = arguments.mod_url
             output_directory: Path = arguments.output
             tool_port: int = arguments.tool_port
-            asyncio.run(_start(InteractiveOptions(mod_url, output_directory), config, tool_port))
+            asyncio.run(
+                _start(InteractiveOptions(mod_url, output_directory), config, tool_port, materials)
+            )
             return 0
         if command == "check-config":
             _print_configuration_summary(config)

@@ -285,6 +285,10 @@ class FakeRestorer(NativeRestorer):
                 assert isinstance(state, native.CombatState)
                 self.observation = self.observation.model_copy(
                     update={
+                        "objects": {
+                            **self.observation.objects,
+                            "card:9:3": self.observation.objects["card:9:1"],
+                        },
                         "state": state.model_copy(
                             update={
                                 "piles": native.Piles(

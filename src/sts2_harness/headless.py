@@ -25,6 +25,7 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind, ControlResult, StateResult, StatusResult
 from sts2_harness.config import Configuration, ConfigurationError, Driver
 from sts2_harness.diagnostics import Diagnostics, Lifecycle
+from sts2_harness.entry_materials import EntryMaterials
 from sts2_harness.game import Endpoint, RunEnded, RunEndReason, SessionStopped
 from sts2_harness.journal import (
     HeadlessInitialConditions,
@@ -526,6 +527,7 @@ async def run_headless(
     *,
     stop_requested: asyncio.Event,
     session_factory: SessionFactory | None = None,
+    materials: EntryMaterials | None = None,
 ) -> RunEnded | None:
     if configuration.driver is not Driver.BUILTIN or configuration.model is None:
         raise ConfigurationError(
@@ -579,7 +581,9 @@ async def run_headless(
             run_id = instance.opening.location.run_id
             assert run_id is not None
             manifest = Manifest(
-                materials=SessionMaterials(
+                materials=materials.settings
+                if materials is not None
+                else SessionMaterials(
                     entry_documents_enabled=False, act_guidance={}, battle_guidance=()
                 ),
                 recording_id=uuid4().hex,
@@ -615,6 +619,7 @@ async def run_headless(
                     manifest,
                     archive,
                     model=Llm(model),
+                    documents=materials.documents if materials is not None else None,
                     diagnostics=diagnostics,
                     stop_requested=stop_requested.is_set,
                 )

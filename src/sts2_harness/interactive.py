@@ -12,6 +12,7 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind
 from sts2_harness.config import Configuration, ConfigurationError, Driver, validate_mod_url
 from sts2_harness.diagnostics import Diagnostics, Event, EventKind, Lifecycle
+from sts2_harness.entry_materials import EntryMaterials
 from sts2_harness.game import (
     ControlWriteError,
     Endpoint,
@@ -45,6 +46,7 @@ async def run_interactive(
     stop_requested: asyncio.Event,
     client_factory: Callable[[], ModClient] | None = None,
     session_factory: SessionFactory | None = None,
+    materials: EntryMaterials | None = None,
     wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     if configuration.driver is not Driver.BUILTIN:
@@ -75,6 +77,7 @@ async def run_interactive(
             manifest,
             path,
             model=Llm(model),
+            documents=materials.documents if materials is not None else None,
             diagnostics=diagnostic,
             stop_requested=stop_requested.is_set,
             wait=wait,
@@ -189,7 +192,9 @@ async def run_interactive(
                 recording_id = uuid4().hex
                 archive = directory / recording_id / "archive.sqlite"
                 manifest = Manifest(
-                    materials=SessionMaterials(
+                    materials=materials.settings
+                    if materials is not None
+                    else SessionMaterials(
                         entry_documents_enabled=False, act_guidance={}, battle_guidance=()
                     ),
                     recording_id=recording_id,

@@ -1,5 +1,7 @@
 """Select configured entry guidance through the recorded public IO ports."""
 
+from dataclasses import dataclass
+
 from pydantic import MISSING
 
 from sts2_harness.client import ClientUnavailable
@@ -7,9 +9,16 @@ from sts2_harness.client import models as native
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import DecisionInterrupted
 from sts2_harness.game import GameLifetimeEnded, GameReadError
+from sts2_harness.journal import SessionMaterials
 from sts2_harness.knowledge import Documents, DocumentView, SkillRead, SubjectId, UnknownDocument
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import Reason, ReasonCode
+
+
+@dataclass(frozen=True, slots=True)
+class EntryMaterials:
+    documents: Documents
+    settings: SessionMaterials
 
 
 async def entry_materials(
@@ -19,9 +28,7 @@ async def entry_materials(
     observation: native.Observation,
     configured: tuple[str, ...],
 ) -> tuple[DocumentView, ...]:
-    """Select configured guidance using public act, Boss, and enemy identities."""
-    if not await documents.list(role) and not configured:
-        return ()
+    """Select configured guidance and documents for current public identities."""
     selected: dict[str, DocumentView] = {}
     try:
         for identity in configured:
@@ -60,18 +67,7 @@ async def entry_materials(
                 if isinstance(boss.definition_id, str)
             )
         elif isinstance(observation.state, native.CombatState):
-            encounter = observation.encounter
-            if encounter is not MISSING and encounter.definition_id is not MISSING:
-                subjects.append(
-                    SubjectId(
-                        category=native.NativeCategory.ENCOUNTER,
-                        definition_id=encounter.definition_id,
-                    )
-                )
-            subjects.extend(
-                SubjectId(category=native.NativeCategory.ENEMY, definition_id=enemy.definition_id)
-                for enemy in (*observation.state.enemies, *observation.state.inactive_enemies)
-            )
+            subjects.extend(combat_subjects(observation, role))
         unique = {(subject.category, subject.definition_id): subject for subject in subjects}
         matches = await documents.lookup(tuple(unique.values()))
         for document in matches:
@@ -83,3 +79,65 @@ async def entry_materials(
             "Public identities required for guidance are unavailable."
         ) from error
     return tuple(selected.values())
+
+
+def combat_subjects(
+    observation: native.Observation, role: native.DecisionOwner
+) -> tuple[SubjectId, ...]:
+    """Select identities referenced by the current public battle state."""
+    state = observation.state
+    if not isinstance(state, native.CombatState):
+        return ()
+    subjects: list[SubjectId] = []
+    encounter = observation.encounter
+    if encounter is not MISSING and encounter.definition_id is not MISSING:
+        subjects.append(
+            SubjectId(
+                category=native.NativeCategory.ENCOUNTER, definition_id=encounter.definition_id
+            )
+        )
+    refs = [
+        *state.piles.hand,
+        *state.piles.draw,
+        *state.piles.discard,
+        *state.piles.exhaust,
+        *state.piles.other,
+        *state.relics,
+        *state.potions,
+    ]
+    if observation.location.owner is role and state.selection is not None:
+        refs.extend(state.selection.candidates)
+    for ref in dict.fromkeys(refs):
+        entry = observation.objects.get(ref)
+        if entry is None:
+            raise MaterialUnavailable(f"Current object {ref!r} is unavailable for guidance.")
+        if isinstance(entry, native.CardEntry):
+            category = native.NativeCategory.CARD
+        elif isinstance(entry, native.RelicEntry):
+            category = native.NativeCategory.RELIC
+        elif isinstance(entry, native.PotionEntry):
+            category = native.NativeCategory.POTION
+        else:
+            continue
+        subjects.append(SubjectId(category=category, definition_id=entry.definition_id))
+    powers = list(state.player.powers)
+    for enemy in (*state.enemies, *state.inactive_enemies):
+        subjects.append(
+            SubjectId(category=native.NativeCategory.ENEMY, definition_id=enemy.definition_id)
+        )
+        powers.extend(enemy.powers)
+    if state.allies is not MISSING:
+        for ally in state.allies:
+            powers.extend(ally.powers)
+    subjects.extend(
+        SubjectId(category=native.NativeCategory.POWER, definition_id=power.definition_id)
+        for power in powers
+    )
+    if state.orbs is not MISSING:
+        subjects.extend(
+            SubjectId(category=native.NativeCategory.ORB, definition_id=orb.definition_id)
+            for orb in state.orbs.slots
+            if orb.definition_id is not MISSING
+        )
+    unique = {(subject.category, subject.definition_id): subject for subject in subjects}
+    return tuple(unique.values())
