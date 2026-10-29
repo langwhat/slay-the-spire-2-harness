@@ -26,7 +26,8 @@ from sts2_harness_eval.cases import (
     Case,
     CaseStore,
     CheckpointRef,
-    ReplayWrite,
+    ReplaySpan,
+    ReplayStep,
     ShortcutBinding,
     Unsupported,
     UnsupportedCause,
@@ -39,6 +40,7 @@ from sts2_harness_eval.verification import (
     LoadedCorrespondence,
     Publication,
     Reference,
+    Relation,
     SourceCorrespondence,
     VerificationFailure,
     bind,
@@ -111,12 +113,19 @@ async def _control(client: ModClient, mode: native.ControlIntent) -> native.Cont
 
 
 async def _write(
-    game: LiveGame, client: ModClient, before: native.Observation, step: native.NativeStep
+    game: LiveGame,
+    client: ModClient,
+    before: native.Observation,
+    step: native.NativeStep,
+    source: ReplayStep,
+    relation: Relation = Relation.SOURCE_REPLAY,
 ) -> None:
     await _control(client, native.ControlIntent.RUNNING)
     settlement = unwrap(await game.settle(_route(before), step))
     if not isinstance(settlement.receipt, native.ReceiptCompleted):
         raise CheckpointUncertain("The original confirmed write did not complete in the new run.")
+    if settlement.receipt.boundary != source.boundary:
+        raise VerificationFailure(relation, "receipt.boundary", sequence=source.sequence)
     await _control(client, native.ControlIntent.PAUSED)
 
 
@@ -124,7 +133,6 @@ async def _write(
 class _BoundPublication:
     binding: KeyedRefs
     publication: Publication
-    source_refs: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -141,13 +149,18 @@ class _CaptureReplay:
         self.game = game
         self.correspondence = SourceCorrespondence()
 
-    async def prefix(self, writes: tuple[ReplayWrite, ...]) -> None:
-        for write in writes:
+    async def prefix(self, spans: tuple[ReplaySpan, ...]) -> None:
+        for span in spans:
             read = await self.checkpoints.identity()
-            refs = self.correspondence.compare(write.before, read.observation, write.sequence)
-            await _write(
-                self.game, self.client, read.observation, translated_step(write.step, refs)
+            refs = self.correspondence.compare(
+                span.before, read.observation, span.steps[0].sequence
             )
+            for step in span.steps:
+                await _write(
+                    self.game, self.client, read.observation, translated_step(step.step, refs), step
+                )
+            after = await self.checkpoints.identity()
+            self.correspondence.compare(span.after, after.observation, span.steps[-1].sequence)
 
     async def publication(self, source: native.Observation, sequence: int) -> _BoundPublication:
         read = await self.checkpoints.identity()
@@ -158,25 +171,36 @@ class _CaptureReplay:
             error.sequence = sequence
             raise
         publication = Publication(source_sequence=sequence, source_stamp=source.stamp, read=read)
-        return _BoundPublication(binding, publication, refs)
+        return _BoundPublication(binding, publication)
 
-    async def path(self, writes: tuple[ReplayWrite, ...], *, verify_after: bool) -> _DerivedPath:
+    async def path(self, spans: tuple[ReplaySpan, ...], *, verify_after: bool) -> _DerivedPath:
         bindings: list[KeyedRefs] = []
         before: list[Publication] = []
         after: list[Publication] = []
-        for write in writes:
-            current = await self.publication(write.before, write.sequence)
+        for span in spans:
+            current = await self.publication(span.before, span.steps[0].sequence)
             bindings.append(current.binding)
             before.append(current.publication)
-            await _write(
-                self.game,
-                self.client,
-                current.publication.read.observation,
-                translated_step(write.step, current.source_refs),
-            )
+            read = current.publication.read
+            for index, step in enumerate(span.steps):
+                if index:
+                    read = await self.checkpoints.identity()
+                if read.observation.location != current.publication.read.observation.location:
+                    raise CheckpointUncertain("The replayed batch changed its original route.")
+                refs = loaded_refs(
+                    current.binding, read, step.step, relation=Relation.SOURCE_REPLAY
+                )
+                await _write(
+                    self.game, self.client, read.observation, translated_step(step.step, refs), step
+                )
             if verify_after:
-                following = await self.publication(write.after, write.sequence)
+                following = await self.publication(span.after, span.steps[-1].sequence)
                 after.append(following.publication)
+            else:
+                following_read = await self.checkpoints.identity()
+                self.correspondence.compare(
+                    span.after, following_read.observation, span.steps[-1].sequence
+                )
         return _DerivedPath(tuple(bindings), tuple(before), tuple(after))
 
 
@@ -330,15 +354,14 @@ class NativeRestorer:
                 difference = correspondence.compare(reference.boundary, read, allow_event_map=True)
                 if difference is not None:
                     differences.append(difference)
-                for write, keyed, expected in zip(
+                for span, keyed, expected in zip(
                     plan.suffix, binding.suffix, reference.suffix, strict=True
                 ):
                     read = await checkpoints.identity()
                     difference = correspondence.compare(expected, read, allow_event_map=True)
                     if difference is not None:
                         differences.append(difference)
-                    refs = loaded_refs(keyed, read)
-                    await _write(game, client, read.observation, translated_step(write.step, refs))
+                    await self._loaded_span(game, client, checkpoints, span, keyed, read)
                 read = await checkpoints.identity()
                 correspondence.compare(reference.target, read)
                 refs = loaded_refs(binding.target, read)
@@ -383,7 +406,7 @@ class NativeRestorer:
         reference: Reference,
         binding: ShortcutBinding,
     ) -> None:
-        for write, keyed, before, expected in zip(
+        for span, keyed, before, expected in zip(
             plan.follow_on,
             binding.follow_on,
             reference.follow_on_before,
@@ -392,9 +415,33 @@ class NativeRestorer:
         ):
             read = await loaded.checkpoints.identity()
             loaded.correspondence.compare(before, read)
-            refs = loaded_refs(keyed, read)
-            await _write(
-                loaded.game, loaded.client, read.observation, translated_step(write.step, refs)
+            await self._loaded_span(
+                loaded.game, loaded.client, loaded.checkpoints, span, keyed, read
             )
             after = await loaded.checkpoints.identity()
             loaded.correspondence.compare(expected, after)
+
+    async def _loaded_span(
+        self,
+        game: LiveGame,
+        client: ModClient,
+        checkpoints: CheckpointClient,
+        span: ReplaySpan,
+        binding: KeyedRefs,
+        before: IdentityRead,
+    ) -> None:
+        read = before
+        for index, step in enumerate(span.steps):
+            if index:
+                read = await checkpoints.identity()
+            if read.observation.location != before.observation.location:
+                raise CheckpointUncertain("The loaded batch changed its original route.")
+            refs = loaded_refs(binding, read, step.step)
+            await _write(
+                game,
+                client,
+                read.observation,
+                translated_step(step.step, refs),
+                step,
+                Relation.REPLAY_LOAD,
+            )

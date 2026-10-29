@@ -77,7 +77,7 @@ def test_reward_plan_stops_after_one_confirmed_choice_without_absorbing_later_ac
     )
     assert len(plan.suffix) == 1
     assert len(plan.follow_on) == 1
-    assert plan.follow_on[0].step == native.Select(
+    assert plan.follow_on[0].steps[0].step == native.Select(
         kind=native.StepKind.SELECT, refs=() if skip else ("card:2:1",)
     )
     assert plan.follow_on[0].after.input_readiness is native.InputReadiness.READY

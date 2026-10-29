@@ -279,17 +279,29 @@ def bind(
     return KeyedRefs(source_sequence=sequence, refs=tuple(bindings))
 
 
-def loaded_refs(binding: KeyedRefs, actual: IdentityRead) -> dict[str, str]:
-    identities = native_refs(actual, Relation.REPLAY_LOAD)
+def loaded_refs(
+    binding: KeyedRefs,
+    actual: IdentityRead,
+    step: native.NativeStep | None = None,
+    *,
+    relation: Relation = Relation.REPLAY_LOAD,
+) -> dict[str, str]:
+    identities = native_refs(actual, relation)
     reverse = {key: ref for ref, key in identities.items()}
+    bindings = {item.source_ref: item.native_key for item in binding.refs}
+    required = set(bindings) if step is None else _refs(_JSON.validate_json(step.model_dump_json()))
     refs: dict[str, str] = {}
-    for item in binding.refs:
-        ref = reverse.get(item.native_key)
+    for source in sorted(required):
+        key = bindings.get(source)
+        ref = reverse.get(key) if key is not None else None
         if ref is None:
             raise VerificationFailure(
-                Relation.REPLAY_LOAD, "identities." + item.source_ref, unsupported=True
+                relation,
+                "identities." + source,
+                unsupported=True,
+                sequence=binding.source_sequence,
             )
-        refs[item.source_ref] = ref
+        refs[source] = ref
     return refs
 
 
@@ -333,6 +345,11 @@ def _compare_loaded(
 
 def translated_step(step: native.NativeStep, refs: dict[str, str]) -> native.NativeStep:
     value = _JSON.validate_json(step.model_dump_json())
+    missing = _refs(value) - refs.keys()
+    if missing:
+        raise VerificationFailure(
+            Relation.SOURCE_REPLAY, "identities." + min(missing), unsupported=True
+        )
     return TypeAdapter(native.NativeStep).validate_json(_JSON.dump_json(_translate(value, refs)))
 
 

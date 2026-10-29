@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import os
 import tempfile
-from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
-from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Never
 from uuid import uuid4
@@ -174,11 +172,17 @@ class AdmissionFailure(Exception):
 
 
 @dataclass(frozen=True)
-class ReplayWrite:
+class ReplayStep:
     sequence: int
     cursor: int
-    before: native.Observation
     step: native.NativeStep
+    boundary: native.InputReadiness
+
+
+@dataclass(frozen=True)
+class ReplaySpan:
+    before: native.Observation
+    steps: tuple[ReplayStep, ...]
     after: native.Observation
 
 
@@ -189,10 +193,10 @@ class AdmissionPlan:
     boundary_sequence: int
     boundary_cursor: int
     boundary: native.Observation
-    prefix: tuple[ReplayWrite, ...]
-    suffix: tuple[ReplayWrite, ...]
+    prefix: tuple[ReplaySpan, ...]
+    suffix: tuple[ReplaySpan, ...]
     target: native.Observation
-    follow_on: tuple[ReplayWrite, ...]
+    follow_on: tuple[ReplaySpan, ...]
     staging: Path
 
 
@@ -200,9 +204,7 @@ def _unsupported(cause: UnsupportedCause, sequence: int | None = None) -> Never:
     raise AdmissionFailure(Unsupported(cause=cause, sequence=sequence))
 
 
-def _confirmed_write(
-    record: Record, before: native.Observation | None, publications: Iterable[Record]
-) -> ReplayWrite | None:
+def _confirmed_step(record: Record, before: native.Observation | None) -> ReplayStep | None:
     if not isinstance(record.request, Settle):
         return None
     reply = record.reply
@@ -214,8 +216,6 @@ def _confirmed_write(
         or isinstance(outcome.receipt, native.ReceiptUnknown)
     ):
         _unsupported(UnsupportedCause.UNKNOWN_WRITE, record.sequence)
-    if not isinstance(outcome.receipt, native.ReceiptCompleted):
-        return None
     if (
         outcome.request.expected_route != record.request.route
         or outcome.request.step != record.request.step
@@ -223,21 +223,44 @@ def _confirmed_write(
         or outcome.receipt.operation_id != record.operation_id
     ):
         _unsupported(UnsupportedCause.HISTORY, record.sequence)
-    for publication in publications:
-        if publication.sequence != record.sequence and isinstance(publication.request, Settle):
-            break
-        if publication.reply is None or not publication.reply.observations:
-            continue
-        if before is None:
-            _unsupported(UnsupportedCause.HISTORY, record.sequence)
-        return ReplayWrite(
-            record.sequence,
-            record.confirmed_operation_cursor,
-            before,
-            record.request.step,
-            publication.reply.observations[-1],
-        )
-    _unsupported(UnsupportedCause.HISTORY, record.sequence)
+    if before is None or (
+        record.request.route.game_instance_id != before.location.game_instance_id
+        or record.request.route.run_id != before.location.run_id
+        or record.request.route.node_id != before.location.node_id
+        or record.request.route.owner != before.location.owner
+    ):
+        _unsupported(UnsupportedCause.HISTORY, record.sequence)
+    if not isinstance(outcome.receipt, native.ReceiptCompleted):
+        return None
+    return ReplayStep(
+        record.sequence,
+        record.confirmed_operation_cursor,
+        record.request.step,
+        outcome.receipt.boundary,
+    )
+
+
+def _ends_follow_on(target: native.Observation, span: ReplaySpan, stopped: bool) -> bool:
+    sequence = span.steps[-1].sequence
+    same_node = (
+        span.before.location.node_id == target.location.node_id
+        and span.after.location.node_id == target.location.node_id
+    )
+    if isinstance(target.state, native.RunState):
+        if not same_node or not _reward_follow_on(target, span):
+            _unsupported(UnsupportedCause.FOLLOW_ON, sequence)
+        return True
+    if (
+        not isinstance(span.before.state, native.CombatState)
+        or not isinstance(span.after.state, native.CombatState)
+        or not same_node
+        or any(isinstance(item.step, native.EndTurn) for item in span.steps[:-1])
+    ):
+        _unsupported(UnsupportedCause.FOLLOW_ON, sequence)
+    ends_turn = isinstance(span.steps[-1].step, native.EndTurn)
+    if ends_turn and stopped:
+        _unsupported(UnsupportedCause.FOLLOW_ON, sequence)
+    return ends_turn
 
 
 def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
@@ -268,12 +291,16 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
         boundary: tuple[int, int, native.Observation] | None = None
         target_observation: native.Observation | None = None
         target_selected = False
-        writes: list[ReplayWrite] = []
-        follow: list[ReplayWrite] = []
+        spans: list[ReplaySpan] = []
+        pending: list[ReplayStep] = []
+        stopped = False
+        follow: list[ReplaySpan] = []
         end_sequence: int | None = None
         cursor = 0
-        for index, record in enumerate(records):
+        for record in records:
             if record.sequence >= target.sequence and not target_selected:
+                if pending or target.confirmed_operation_cursor != cursor:
+                    _unsupported(UnsupportedCause.TARGET, target.sequence)
                 target_observation = latest
                 target_selected = True
                 if target_observation is None:
@@ -282,37 +309,31 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
             if reply is None:
                 _unsupported(UnsupportedCause.HISTORY, record.sequence)
             assert reply is not None
-            write = _confirmed_write(record, latest, islice(records, index, None))
-            if write is not None:
-                if write.cursor != cursor + 1:
+            if isinstance(record.request, Settle) and stopped:
+                _unsupported(UnsupportedCause.HISTORY, record.sequence)
+            step = _confirmed_step(record, latest)
+            if step is not None:
+                if step.cursor != cursor + 1:
                     _unsupported(UnsupportedCause.HISTORY, record.sequence)
-                cursor = write.cursor
-                if record.sequence < target.sequence:
-                    writes.append(write)
-                else:
-                    assert target_observation is not None
-                    same_node = (
-                        write.before.location.node_id == target_observation.location.node_id
-                        and write.after.location.node_id == target_observation.location.node_id
-                    )
-                    if isinstance(target_observation.state, native.RunState):
-                        if not same_node or not _reward_follow_on(target_observation, write):
-                            _unsupported(UnsupportedCause.FOLLOW_ON, record.sequence)
-                        follow.append(write)
-                        end_sequence = record.sequence
-                    elif (
-                        not isinstance(write.before.state, native.CombatState)
-                        or not isinstance(write.after.state, native.CombatState)
-                        or not same_node
-                    ):
-                        _unsupported(UnsupportedCause.FOLLOW_ON, record.sequence)
-                    else:
-                        follow.append(write)
-                        if isinstance(write.step, native.EndTurn):
-                            end_sequence = record.sequence
+                cursor = step.cursor
+                pending.append(step)
+            elif isinstance(record.request, Settle):
+                stopped = True
             if record.confirmed_operation_cursor != cursor:
                 _unsupported(UnsupportedCause.HISTORY, record.sequence)
             if reply.observations:
+                if pending:
+                    assert latest is not None
+                    span = ReplaySpan(latest, tuple(pending), reply.observations[-1])
+                    if pending[0].sequence < target.sequence:
+                        spans.append(span)
+                    else:
+                        assert target_observation is not None
+                        if _ends_follow_on(target_observation, span, stopped):
+                            end_sequence = record.sequence
+                        follow.append(span)
+                    pending.clear()
+                stopped = False
                 latest = reply.observations[-1]
                 state = latest.state
                 if (
@@ -326,6 +347,8 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
                     boundary = (record.sequence, record.confirmed_operation_cursor, latest)
             if end_sequence is not None:
                 break
+        if pending:
+            _unsupported(UnsupportedCause.HISTORY, pending[-1].sequence)
         if target_observation is None:
             target_observation = latest
         if target_observation is None or not (
@@ -361,11 +384,11 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
             sequence,
             cursor,
             observation,
-            tuple(write for write in writes if write.cursor <= cursor),
+            tuple(span for span in spans if span.steps[-1].cursor <= cursor),
             tuple(
-                write
-                for write in writes
-                if cursor < write.cursor <= target.confirmed_operation_cursor
+                span
+                for span in spans
+                if cursor < span.steps[-1].cursor <= target.confirmed_operation_cursor
             ),
             target_observation,
             tuple(follow),
@@ -397,12 +420,16 @@ def _card_reward_selection(observation: native.Observation) -> bool:
     )
 
 
-def _reward_follow_on(target: native.Observation, write: ReplayWrite) -> bool:
-    if not _card_reward_selection(target) or not _card_reward_selection(write.before):
+def _reward_follow_on(target: native.Observation, span: ReplaySpan) -> bool:
+    if (
+        len(span.steps) != 1
+        or not _card_reward_selection(target)
+        or not _card_reward_selection(span.before)
+    ):
         return False
-    state = write.before.state
+    state = span.before.state
     assert isinstance(state, native.RunState) and state.selection is not None
-    step = write.step
+    step = span.steps[0].step
     if isinstance(step, native.Select):
         valid_choice = len(step.refs) <= 1 and set(step.refs) <= set(state.selection.candidates)
     elif isinstance(step, native.Interact):
@@ -414,7 +441,7 @@ def _reward_follow_on(target: native.Observation, write: ReplayWrite) -> bool:
         )
     else:
         return False
-    after = write.after
+    after = span.after
     return (
         valid_choice
         and after.input_readiness is native.InputReadiness.READY
