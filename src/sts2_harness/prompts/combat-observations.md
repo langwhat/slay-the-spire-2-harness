@@ -53,7 +53,9 @@ These describe ordinary play. Apply the actual card, keyword, relic, power, and 
 
 # Planning a sequence
 
-Compare achievable lethal, defense, and setup lines using actual resource costs and total battle losses. Evaluate a potion by its benefit now and a concrete later use. A safe delay can improve card access, save a potion, or prepare a relic counter; include enemy scaling and the cost of waiting.
+Compare achievable lethal, defense, and setup lines using actual resource costs and total battle losses. Evaluate a potion by its benefit now and a concrete later use. A safe delay can improve card access, save a potion, or prepare a relic counter; weigh these benefits and any realizable permanent growth or recovery against enemy scaling, passive damage, and the cost of each extra turn. Do not keep delaying once no concrete benefit justifies those costs.
+
+Only when draw uncertainty could change a survival or lethal decision, assess the remaining draw pool, shuffle timing, and whether key cards are reliably reachable next turn. Distinguish reliable lines from dangerous draw outcomes.
 
 Each step changes the next: earlier plays spend resources, consume one-time bonuses, move cards, change targets, and trigger effects. Two cards both showing doubled damage do not both receive the same one-use bonus.
 
