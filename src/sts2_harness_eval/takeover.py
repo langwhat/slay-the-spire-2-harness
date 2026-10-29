@@ -77,6 +77,9 @@ from sts2_harness_eval.cases import (
 from sts2_harness_eval.cases import (
     Unsupported as AdmissionUnsupported,
 )
+from sts2_harness_eval.cases import (
+    UnsupportedCause as AdmissionUnsupportedCause,
+)
 from sts2_harness_eval.checkpoints import (
     CheckpointCause,
     CheckpointRejected,
@@ -250,6 +253,15 @@ async def take_over(
                         if isinstance(record, (ModelRecord, MaterialRecord))
                     )
                 )
+                if not isinstance(plan.target.state, native.CombatState):
+                    return TakeoverUnsupported(
+                        branch,
+                        AdmissionUnsupported(
+                            cause=AdmissionUnsupportedCause.TARGET,
+                            sequence=case.source.anchor.model_sequence,
+                        ),
+                        recording_id=None,
+                    )
                 with case.source.archive.open("rb") as original:
                     digest = file_digest(original, "sha256").hexdigest()
                 stage = Stage.LOAD

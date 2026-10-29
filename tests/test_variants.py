@@ -31,7 +31,13 @@ from sts2_harness.material_text import MaterialText
 from sts2_harness.materials import FileDocuments
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness_eval import ModelAnchor, Reached, Rejected, reach, take_over
-from sts2_harness_eval.cases import AdmissionRequest, plan_admission
+from sts2_harness_eval.cases import (
+    AdmissionRequest,
+    AfterDecisionsSpec,
+    Unsupported,
+    UnsupportedCause,
+    plan_admission,
+)
 from sts2_harness_eval.results import InputComponent, InputDifference, MaterialDifference
 from sts2_harness_eval.sample import SampleBudget
 from sts2_harness_eval.takeover import TakeoverCompleted, TakeoverUnsupported
@@ -726,6 +732,46 @@ def test_scene_starts_fresh_and_reopens_actual_requests(tmp_path: Path, candidat
             async with reach(branch, anchors[0]) as rejected:
                 assert isinstance(rejected, Rejected)
                 assert rejected.detail == InputDifference(InputComponent.REQUEST)
+
+    asyncio.run(scenario())
+
+
+def test_scene_rejects_run_rewards_before_loading_or_starting(tmp_path: Path) -> None:
+    from test_reward_admission import reward_source
+
+    async def scenario() -> None:
+        original = await source_case(tmp_path / "combat.sqlite", start=False)
+        archive, anchor = reward_source(tmp_path, skip=True, initial_notes="")
+        endpoint = AfterDecisionsSpec(count=1)
+        plan = plan_admission(
+            AdmissionRequest(id="reward", archive=archive, anchor=anchor, endpoint=endpoint),
+            tmp_path,
+        )
+        case = original.model_copy(update={"source": plan.source, "endpoint": endpoint})
+        restorer = FakeRestorer(tmp_path, original, uncertain=True)
+        branch = tmp_path / "scene.sqlite"
+        async with Llm(
+            configuration(tmp_path),
+            transport=httpx.MockTransport(lambda _: pytest.fail("No Scene model request.")),
+        ) as model:
+            result = await take_over(
+                case,
+                restorer,
+                branch,
+                model,
+                PackagedPrompts(),
+                FileDocuments(),
+                SampleBudget(3, 30),
+                variant=MaterialVariant(SceneStart(""), ()),
+                stop_requested=lambda: False,
+            )
+        assert isinstance(result, TakeoverUnsupported)
+        assert isinstance(result.evidence, Unsupported)
+        assert result.evidence.cause is UnsupportedCause.TARGET
+        assert result.recording_id is None
+        assert not branch.exists()
+        assert restorer.launches == 0
+        assert not restorer.started and not restorer.actions
 
     asyncio.run(scenario())
 

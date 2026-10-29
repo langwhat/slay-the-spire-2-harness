@@ -102,7 +102,7 @@ def test_reward_plan_rejects_other_run_flows_and_unfinished_settlement(
 
 
 def reward_source(
-    directory: Path, *, skip: bool, failure: str | None = None
+    directory: Path, *, skip: bool, failure: str | None = None, initial_notes: str | None = None
 ) -> tuple[Path, ModelAnchor]:
     opening = run_state(1, "map")
     assert isinstance(opening.state, native.RunState)
@@ -207,6 +207,7 @@ def reward_source(
     )
     archive = directory / "source.sqlite"
     manifest = Manifest(
+        initial_notes=initial_notes,
         materials=SessionMaterials(
             entry_documents_enabled=False, act_guidance={}, battle_guidance=()
         ),
