@@ -257,6 +257,29 @@ def test_resident_external_start_validates_tool_port_without_connecting(tmp_path
     assert not (tmp_path / "runs").exists()
 
 
+@pytest.mark.parametrize("setting", ["LLM_REASONING_EFFORT", "LLM_SERVICE_TIER"])
+def test_check_config_rejects_unsupported_messages_options_without_echoing_values(
+    tmp_path: Path, setting: str
+) -> None:
+    result = cli(
+        tmp_path,
+        "check-config",
+        "--set",
+        "LLM_MODEL=local",
+        "--set",
+        "LLM_AUTH=none",
+        "--set",
+        "LLM_PROTOCOL=messages",
+        "--set",
+        f"{setting}=private-unsupported-value",
+    )
+    assert result.returncode == 2
+    assert "Configuration error: Model request unavailable: configuration." in result.stderr
+    assert "private-unsupported-value" not in result.stdout + result.stderr
+    assert result.stdout == ""
+    assert not (tmp_path / "runs").exists()
+
+
 @pytest.mark.parametrize("command", ["start", "headless"])
 def test_start_rejects_unsupported_messages_options_before_game_connection(
     tmp_path: Path,

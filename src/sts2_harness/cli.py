@@ -20,6 +20,8 @@ from sts2_harness.game import ControlWriteError, OperationKind
 from sts2_harness.headless import HeadlessError, HeadlessOptions, StandardRunRecipe, run_headless
 from sts2_harness.interactive import InteractiveOptions, run_interactive
 from sts2_harness.journal import ArchiveError, DependencyKind, Journal, StandardCharacter, evidence
+from sts2_harness.llm.client import Llm
+from sts2_harness.llm.messages import ModelUnavailable
 
 
 class _Parser(argparse.ArgumentParser):
@@ -224,6 +226,11 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
             )
             return 0
         if command == "check-config":
+            if config.model is not None:
+                try:
+                    Llm.validate_configuration(config.model)
+                except ModelUnavailable as error:
+                    raise ConfigurationError(str(error)) from None
             _print_configuration_summary(config)
         return 0
     except HeadlessError as error:
