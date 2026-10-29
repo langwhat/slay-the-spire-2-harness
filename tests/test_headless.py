@@ -303,6 +303,49 @@ def test_headless_owns_two_concurrent_children_and_runs_one_session_each(tmp_pat
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+def test_explicit_port_in_time_wait_can_start_an_owned_instance(tmp_path: Path) -> None:
+    import asyncio
+    import errno
+    import socket
+
+    from sts2_harness.headless import HeadlessOptions, OwnedHeadlessInstance, StandardRunRecipe
+    from sts2_harness.journal import StandardCharacter
+
+    game, template = game_fixture(tmp_path)
+    with socket.socket() as previous:
+        previous.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        previous.bind(("127.0.0.1", 0))
+        previous.listen()
+        address = previous.getsockname()
+        with socket.create_connection(address, timeout=2) as client:
+            connection, _ = previous.accept()
+            connection.close()
+            assert client.recv(1) == b""
+    with socket.socket() as unavailable:
+        with pytest.raises(OSError) as error:
+            unavailable.bind(address)
+        assert error.value.errno == errno.EADDRINUSE
+
+    async def scenario() -> None:
+        async with OwnedHeadlessInstance(
+            HeadlessOptions(
+                game,
+                template,
+                tmp_path / "runs",
+                tmp_path / "owned",
+                address[1],
+                recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="TIMEWAIT"),
+            )
+        ) as instance:
+            assert instance.port == address[1]
+            assert instance.process is not None and instance.process.returncode is None
+            alias = instance.alias
+        assert not alias.is_symlink()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
 def test_explicit_port_conflict_preserves_the_other_listener_and_cleans_alias(
     tmp_path: Path,
 ) -> None:
@@ -319,7 +362,7 @@ def test_explicit_port_conflict_preserves_the_other_listener_and_cleans_alias(
         port = other.getsockname()[1]
 
         async def scenario() -> None:
-            with pytest.raises(HeadlessError):
+            with pytest.raises(HeadlessError, match="The requested Mod port is unavailable"):
                 async with OwnedHeadlessInstance(
                     HeadlessOptions(game, template, tmp_path / "runs", directory, port)
                 ):
@@ -327,8 +370,8 @@ def test_explicit_port_conflict_preserves_the_other_listener_and_cleans_alias(
 
         asyncio.run(scenario())
         assert other.fileno() >= 0
-    assert not list((directory / "home").rglob("STS2-Harness-*"))
-    assert not (directory / "archive.sqlite").exists()
+    assert not directory.exists()
+    assert not (tmp_path / "runs").exists()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")

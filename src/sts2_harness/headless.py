@@ -87,6 +87,7 @@ func _initialize():
 
 def _candidate_port(requested: int | None) -> int:
     with socket.socket() as candidate:
+        candidate.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             candidate.bind(("127.0.0.1", requested or 0))
         except OSError as error:
