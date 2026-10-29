@@ -1,8 +1,12 @@
 import asyncio
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import zlib
 from contextlib import closing
+from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
 from typing import Never
@@ -441,6 +445,176 @@ def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Pa
                 changed.sequence,
                 InputDifference(InputComponent.OPERATION_ID),
             )
+
+    asyncio.run(scenario())
+
+
+class SnapshotChange(StrEnum):
+    MAPPING_ORDER = "mapping_order"
+    MAPPING_VALUE = "mapping_value"
+    MESSAGE_ORDER = "message_order"
+
+
+@pytest.mark.parametrize("change", list(SnapshotChange))
+def test_reach_compares_typed_input_without_mapping_key_order(
+    tmp_path: Path, change: SnapshotChange
+) -> None:
+    from pydantic import MISSING
+
+    from sts2_harness.context.models import ActContent
+    from sts2_harness.journal import ParentPrefix
+    from sts2_harness.journal_models import TaskSnapshot, ToolSet
+
+    async def scenario() -> None:
+        source_path = tmp_path / "source.sqlite"
+        anchors = await record_campaign(source_path, Campaign())
+        original = source_path.read_bytes()
+        with closing(Journal.open(source_path)) as source:
+            target = source.request(anchors[1].model_sequence)
+            position, snapshot = next(
+                (index, message)
+                for index, message in enumerate(target.input)
+                if isinstance(message, TaskSnapshot)
+            )
+            assert isinstance(snapshot.content, ActContent)
+            observation = snapshot.content.observation
+            objects = observation.updates.objects
+            assert objects is not MISSING
+            reordered = dict(reversed(tuple(objects.items())))
+            assert tuple(reordered) != tuple(objects)
+            if change is SnapshotChange.MAPPING_VALUE:
+                ref, card = next(iter(reordered.items()))
+                assert isinstance(card, native.CardEntry)
+                reordered[ref] = card.model_copy(update={"name": "Changed public fact"})
+            updates = observation.updates.model_copy(update={"objects": reordered})
+            reordered_observation = observation.model_copy(update={"updates": updates})
+            content = snapshot.content.model_copy(update={"observation": reordered_observation})
+            messages = list(target.input)
+            messages[position] = snapshot.model_copy(update={"content": content})
+            if change is SnapshotChange.MESSAGE_ORDER:
+                messages.reverse()
+            assert (tuple(messages) == target.input) is (change is SnapshotChange.MAPPING_ORDER)
+            with closing(
+                Journal.create(
+                    tmp_path / "branch.sqlite",
+                    source.manifest.model_copy(
+                        update={
+                            "recording_id": "branch",
+                            "parent": ParentPrefix(
+                                archive=source_path,
+                                recording_id=source.manifest.recording_id,
+                                before_sequence=target.sequence,
+                                archive_sha256=sha256(original).hexdigest(),
+                            ),
+                        }
+                    ),
+                )
+            ) as branch:
+                sequence = branch.begin_model(
+                    target.role,
+                    target.stream,
+                    tuple(messages),
+                    ToolSet(tools=target.tools),
+                    target.configuration,
+                )
+                branch.finish_model(sequence)
+                branch.end_model()
+        with closing(Journal.open(branch.path)) as reader:
+            recorded = reader.request(sequence)
+            assert (recorded.input == target.input) is (change is SnapshotChange.MAPPING_ORDER)
+            assert recorded.semantic_digest != target.semantic_digest
+        anchor = ModelAnchor("branch", sequence)
+        branch_bytes = branch.path.read_bytes()
+        try:
+            async with reach(branch.path, anchor) as result:
+                if change is SnapshotChange.MAPPING_ORDER:
+                    assert result == Reached(
+                        anchor, target.confirmed_operation_cursor, recorded.semantic_digest
+                    )
+                else:
+                    assert result == Rejected(
+                        RejectReason.INPUT_MISMATCH,
+                        sequence,
+                        InputDifference(InputComponent.MODEL_INPUT),
+                    )
+        finally:
+            assert source_path.read_bytes() == original
+            assert branch.path.read_bytes() == branch_bytes
+
+    asyncio.run(scenario())
+
+
+def test_reach_accepts_generated_directories_across_process_hash_seeds(tmp_path: Path) -> None:
+    from pydantic import MISSING
+
+    from sts2_harness.context.models import ActContent
+    from sts2_harness.journal_models import TaskSnapshot
+
+    path = tmp_path / "source.sqlite"
+    campaign = Campaign()
+    opening = campaign.states[1]
+    campaign.states[1] = opening.model_copy(
+        update={"generated": {**opening.generated, "c2": opening.generated["c1"]}}
+    )
+    anchors = asyncio.run(record_campaign(path, campaign))
+    with closing(Journal.open(path)) as journal:
+        target = journal.request(anchors[1].model_sequence)
+        task = next(message for message in target.input if isinstance(message, TaskSnapshot))
+        assert isinstance(task.content, ActContent)
+        generated = task.content.observation.updates.generated
+        assert generated is not MISSING and len(generated) >= 2
+    original = path.read_bytes()
+    check = """
+import asyncio
+import sys
+from pathlib import Path
+from sts2_harness_eval import ModelAnchor, Reached, reach
+
+async def main() -> None:
+    anchor = ModelAnchor("recording", int(sys.argv[2]))
+    async with reach(Path(sys.argv[1]), anchor) as result:
+        assert result == Reached(anchor, int(sys.argv[3]), sys.argv[4]), result
+
+asyncio.run(main())
+"""
+    for seed in range(4):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                check,
+                str(path),
+                str(target.sequence),
+                str(target.confirmed_operation_cursor),
+                target.semantic_digest,
+            ],
+            env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, (seed, completed.stdout, completed.stderr)
+    assert path.read_bytes() == original
+
+
+def test_reach_rejects_corrupted_input_blob(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        source = tmp_path / "source.sqlite"
+        anchors = await record_campaign(source, Campaign())
+        original = source.read_bytes()
+        damaged = tmp_path / "damaged.sqlite"
+        damaged.write_bytes(original)
+        with closing(sqlite3.connect(damaged)) as connection, connection:
+            connection.execute(
+                "UPDATE blobs SET content=? WHERE digest="
+                "(SELECT input FROM model_requests WHERE sequence=?)",
+                (zlib.compress(b"corrupted input delta"), anchors[0].model_sequence),
+            )
+        async with reach(damaged, anchors[0]) as result:
+            assert isinstance(result, Rejected)
+            assert result.reason is RejectReason.UNSUPPORTED_HISTORY
+            assert isinstance(result.detail, ArchiveUnreadable)
+        assert source.read_bytes() == original
 
     asyncio.run(scenario())
 

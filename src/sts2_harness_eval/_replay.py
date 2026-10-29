@@ -3,7 +3,6 @@
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import ExitStack, asynccontextmanager, closing, suppress
-from hashlib import sha256
 from pathlib import Path
 from typing import Never
 
@@ -49,8 +48,6 @@ from sts2_harness.journal import (
 )
 from sts2_harness.journal_models import (
     AssistantSnapshot,
-    BlobCollector,
-    BlobEncoding,
     DocumentLookup,
     DocumentLookupResult,
     DocumentRead,
@@ -453,11 +450,6 @@ class ReplayModel:
             _different(record.sequence, InputComponent.MODEL_INPUT)
         if tuple(ToolSnapshot.of(tool) for tool in tools) != expected_tools:
             _different(record.sequence, InputComponent.TOOLS)
-        encoding = BlobEncoding(BlobCollector().collect)
-        encoded = tuple(message.model_dump_json(context=encoding).encode() for message in messages)
-        digest = sha256(b"[" + b",".join(encoded) + b"]").hexdigest()
-        if not treated and digest != record.semantic_digest:
-            _different(record.sequence, InputComponent.SEMANTIC_DIGEST)
         if record.sequence == self._target.model_sequence:
             # Native admission stays bound to the source request digest.
             self._reached.set_result(
