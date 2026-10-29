@@ -204,6 +204,16 @@ class SelectedStandards(native.WireModel):
     rubric: RubricRecord | None
 
 
+class EvidenceObservation(native.WireModel):
+    ref: Annotated[CaseTargetRef | SceneInitialRef | ObservationRef, Field(discriminator="kind")]
+    observation: native.Observation
+
+
+class ActionObservation(native.WireModel):
+    operation_id: native.Nonempty
+    before: EvidenceObservation
+
+
 class JudgmentInput(native.WireModel):
     case_id: CaseId
     sample: ArchiveIdentity
@@ -211,6 +221,9 @@ class JudgmentInput(native.WireModel):
     evidence: SampleEvidence
     endpoint_reached: bool
     uncertainty: tuple[Uncertainty, ...]
+    target: EvidenceObservation | None
+    endpoint: EvidenceObservation | None
+    before_actions: tuple[ActionObservation, ...]
 
 
 class SemanticJudge(Protocol):

@@ -1,6 +1,7 @@
 """Assess one executed sample from bounded public evidence and explicit standards."""
 
 from contextlib import closing
+from dataclasses import dataclass
 from hashlib import file_digest, sha256
 from pathlib import Path
 
@@ -11,10 +12,12 @@ from sts2_harness_eval._scene_assessment import validate_scene_sample
 from sts2_harness_eval.annotation_records import CardRewardRubric
 from sts2_harness_eval.annotations import AnnotationStore
 from sts2_harness_eval.assessment_records import (
+    ActionObservation,
     ArchiveIdentity,
     Assessed,
     CaseTargetRef,
     ConfirmedAction,
+    EvidenceObservation,
     JudgeFailed,
     JudgmentInput,
     ObservationRef,
@@ -43,9 +46,16 @@ from sts2_harness_eval.assessment_records import (
     Unscored as Unscored,
 )
 from sts2_harness_eval.cases import AfterDecisionsSpec, Case
-from sts2_harness_eval.execution_record import execution_record
-from sts2_harness_eval.sample import AfterDecisions, BattleEnd
-from sts2_harness_eval.takeover import TakeoverCompleted, TakeoverResult, TakeoverUnsupported
+from sts2_harness_eval.execution_record import (
+    BattleEndpoint,
+    CompletedExecution,
+    DecisionEndpoint,
+    ExecutionRecord,
+    IncompleteExecution,
+    UnsupportedExecution,
+    execution_record,
+)
+from sts2_harness_eval.takeover import TakeoverResult
 
 
 def archive_identity(path: Path) -> ArchiveIdentity:
@@ -155,12 +165,20 @@ def _reward(
     )
 
 
+@dataclass(frozen=True)
+class _Evidence:
+    sample: SampleEvidence
+    endpoint: EvidenceObservation | None
+    before_actions: tuple[ActionObservation, ...]
+    uncertainty: tuple[Uncertainty, ...]
+
+
 def _evidence(
     records: tuple[Record, ...],
     target: native.Observation | None,
     target_ref: CaseTargetRef | SceneInitialRef | None,
     recording_id: str,
-) -> tuple[SampleEvidence, ObservationRef | None, tuple[Uncertainty, ...]]:
+) -> _Evidence:
     actions: list[ConfirmedAction] = []
     uses: list[PotionUse] = []
     seen: dict[str, native.StepRequest] = {}
@@ -170,14 +188,18 @@ def _evidence(
     pending: list[ConfirmedAction] = []
     writes_known = True
     uncertain: list[Uncertainty] = []
+    before_valid = True
+    before_actions: list[ActionObservation] = []
     for record in records:
         outcome = _confirmed(record)
+        unknown_write = False
         if isinstance(record.request, Settle):
             settlement = record.reply.outcome if record.reply is not None else None
             if not isinstance(settlement, Settlement) or not isinstance(
                 settlement.receipt, (native.ReceiptCompleted, native.ReceiptRejected)
             ):
                 writes_known = False
+                unknown_write = True
         if outcome is not None and outcome.request.operation_id in seen:
             if seen[outcome.request.operation_id] != outcome.request:
                 raise ValueError("One operation identity has conflicting confirmed actions.")
@@ -190,6 +212,20 @@ def _evidence(
                 route=outcome.request.expected_route,
             )
             actions.append(action)
+            if (
+                before_valid
+                and writes_known
+                and not pending
+                and before is not None
+                and before_ref is not None
+                and native.Location.model_validate(action.route.model_dump()) == before.location
+            ):
+                before_actions.append(
+                    ActionObservation(
+                        operation_id=action.operation_id,
+                        before=EvidenceObservation(ref=before_ref, observation=before),
+                    )
+                )
             pending.append(action)
             if isinstance(action.step, native.UsePotion):
                 entry = (
@@ -207,7 +243,10 @@ def _evidence(
                         else None,
                     )
                 )
+        if unknown_write or outcome is not None:
+            before_valid = False
         if record.reply is None:
+            before_valid = False
             uncertain.append(Uncertainty.INCOMPLETE_RECORDS)
             continue
         if not record.reply.observations:
@@ -232,6 +271,7 @@ def _evidence(
         pending.clear()
         writes_known = True
         before, before_ref = after, after_ref
+        before_valid = not unknown_write
     endpoint = None
     endpoint_ref = None
     if records:
@@ -272,25 +312,37 @@ def _evidence(
         potion_uses=tuple(uses) if records else None,
         reward=reward,
     )
-    return SampleEvidence(actions=tuple(actions), metrics=metrics), endpoint_ref, tuple(uncertain)
+    return _Evidence(
+        SampleEvidence(actions=tuple(actions), metrics=metrics),
+        EvidenceObservation(ref=endpoint_ref, observation=endpoint)
+        if endpoint_ref is not None and endpoint is not None
+        else None,
+        tuple(before_actions),
+        tuple(uncertain),
+    )
 
 
 async def assess_sample(
     case: Case,
-    execution: TakeoverResult,
+    execution: TakeoverResult | ExecutionRecord,
     annotations: AnnotationStore,
     selection: AssessmentSelection,
     *,
     judgment: HumanJudgment | SemanticJudge | None,
 ) -> SampleAssessment:
-    standards = annotations.select(case, selection)
-    branch = execution.branch.resolve()
-    identity = (
-        archive_identity(branch) if execution.recording_id is not None and branch.exists() else None
+    record = (
+        execution
+        if isinstance(execution, (CompletedExecution, IncompleteExecution, UnsupportedExecution))
+        else execution_record(execution)
     )
-    if identity is not None and identity.recording_id != execution.recording_id:
+    standards = annotations.select(case, selection)
+    branch = record.branch.resolve()
+    identity = (
+        archive_identity(branch) if record.recording_id is not None and branch.exists() else None
+    )
+    if identity is not None and identity.recording_id != record.recording_id:
         raise ValueError("The sample recording does not match this execution.")
-    if identity is None and isinstance(execution, TakeoverCompleted):
+    if identity is None and isinstance(record, CompletedExecution):
         raise ValueError("A completed sample requires its closed recording archive.")
     parent = None
     variant = None
@@ -305,7 +357,7 @@ async def assess_sample(
             parent = journal.manifest.parent
             variant = journal.manifest.variant
             if isinstance(variant, SceneVariant):
-                validate_scene_sample(case, annotations.cases, journal, execution_record(execution))
+                validate_scene_sample(case, annotations.cases, journal, record)
                 target = variant.initial.observation
                 target_ref = SceneInitialRef(recording_id=identity.recording_id)
                 records = journal.operations()
@@ -320,9 +372,10 @@ async def assess_sample(
                     or parent.before_sequence != case.source.anchor.model_sequence
                 ):
                     raise ValueError("The sample parent does not match the case source anchor.")
-                anchor = None if isinstance(execution, TakeoverUnsupported) else execution.anchor
+                anchor = None if isinstance(record, UnsupportedExecution) else record.anchor
                 if anchor is not None and (
-                    anchor.anchor != case.source.anchor
+                    anchor.anchor.recording_id != case.source.anchor.recording_id
+                    or anchor.anchor.model_sequence != case.source.anchor.model_sequence
                     or anchor.confirmed_operation_cursor != case.source.target_cursor
                     or anchor.semantic_digest != case.source.semantic_digest
                 ):
@@ -351,23 +404,30 @@ async def assess_sample(
                 first_sequence = parent.before_sequence
             last_sequence = max((item.sequence for item in summaries), default=None)
             gaps = bool(journal.gaps)
-            if isinstance(execution, TakeoverCompleted):
-                endpoint = execution.sample.endpoint
+            if isinstance(record, CompletedExecution):
+                endpoint = record.endpoint
                 expected = case.endpoint
                 if isinstance(expected, AfterDecisionsSpec):
-                    if not isinstance(endpoint, AfterDecisions) or endpoint.count != expected.count:
+                    if (
+                        not isinstance(endpoint, DecisionEndpoint)
+                        or endpoint.count != expected.count
+                    ):
                         raise ValueError("The completed endpoint does not match the case.")
                 elif (
-                    not isinstance(endpoint, BattleEnd)
+                    not isinstance(endpoint, BattleEndpoint)
                     or endpoint.node_id != target.location.node_id
                 ):
                     raise ValueError("The completed battle endpoint does not match the case.")
-    evidence, endpoint_ref, uncertainty = _evidence(
+    projection = _evidence(
         records,
         target,
         target_ref,
         identity.recording_id if identity else "",
     )
+    evidence = projection.sample
+    endpoint_ref = projection.endpoint.ref if projection.endpoint is not None else None
+    assert endpoint_ref is None or isinstance(endpoint_ref, ObservationRef)
+    uncertainty = projection.uncertainty
     if gaps:
         uncertainty += (Uncertainty.INCOMPLETE_RECORDS,)
     if identity is None:
@@ -393,10 +453,7 @@ async def assess_sample(
     if standards.annotation is None and standards.rubric is None:
         quality = Unscored()
     elif (
-        not isinstance(execution, TakeoverCompleted)
-        or target is None
-        or endpoint_ref is None
-        or gaps
+        not isinstance(record, CompletedExecution) or target is None or endpoint_ref is None or gaps
     ):
         quality = Unassessed(reason=UnassessedReason.INSUFFICIENT_EVIDENCE)
     elif (
@@ -421,6 +478,11 @@ async def assess_sample(
                     evidence=evidence,
                     endpoint_reached=True,
                     uncertainty=tuple(dict.fromkeys(uncertainty)),
+                    target=EvidenceObservation(ref=target_ref, observation=target)
+                    if target_ref is not None
+                    else None,
+                    endpoint=projection.endpoint,
+                    before_actions=projection.before_actions,
                 )
             )
         )
@@ -434,8 +496,8 @@ async def assess_sample(
     if identity is not None and archive_identity(branch) != identity:
         raise ValueError("The sample archive changed during assessment.")
     return SampleAssessment(
-        execution=execution_record(execution),
-        endpoint_reached=isinstance(execution, TakeoverCompleted),
+        execution=record,
+        endpoint_reached=isinstance(record, CompletedExecution),
         evidence=evidence,
         quality=quality,
         provenance=SampleProvenance(

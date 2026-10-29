@@ -130,6 +130,14 @@ def test_scene_assessment_binds_fresh_initial_archive_and_anchor_then_reopens(
             assert isinstance(report.quality, Assessed)
             assert judge.inputs[-1].evidence.metrics.target_hp == 17
             assert judge.inputs[-1].evidence.metrics.net_hp_change == -4
+            received = judge.inputs[-1]
+            assert received.target is not None and received.endpoint is not None
+            assert received.target.ref == report.provenance.target
+            assert received.target.observation.state.player.hp == 17
+            assert received.endpoint.ref == report.provenance.endpoint
+            assert received.endpoint.observation.state.player.hp == 13
+            assert received.before_actions[0].before.observation == received.target.observation
+            assert isinstance(received.target.ref, SceneInitialRef)
             with pytest.raises(ValueError, match="anchor"):
                 await assess_sample(
                     case,

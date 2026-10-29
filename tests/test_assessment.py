@@ -4,6 +4,7 @@ from hashlib import file_digest, sha256
 from pathlib import Path
 
 import pytest
+from pydantic import TypeAdapter
 from test_annotations import cases_fixture
 from test_lifecycle import battle_state, run_state
 from test_responses import configuration
@@ -39,6 +40,12 @@ from sts2_harness_eval.assessment_records import (
     Uncertainty,
 )
 from sts2_harness_eval.cases import Case, SourceRef
+from sts2_harness_eval.execution_record import (
+    BattleEndpoint,
+    CompletedExecution,
+    ExecutionRecord,
+    execution_record,
+)
 from sts2_harness_eval.results import ModelAnchor, Reached
 from sts2_harness_eval.sample import BattleEnd, Completed
 from sts2_harness_eval.takeover import ProtocolMismatch, TakeoverCompleted, TakeoverUnsupported
@@ -96,6 +103,37 @@ def completed(case: Case, branch: Path) -> TakeoverCompleted:
         Completed(BattleEnd("battle"), 1, 1),
         recording_id=archive_identity(branch).recording_id,
     )
+
+
+def test_persisted_execution_can_be_reassessed_without_replaying_game(tmp_path: Path) -> None:
+    cases = cases_fixture(tmp_path / "cases")
+    case = cases.load("battle")
+    branch = tmp_path / "branch.sqlite"
+    observation = battle_state(1, "battle")
+    with closing(new_branch(branch, case)) as journal:
+        write_step(
+            journal, observation, native.EndTurn(kind=native.StepKind.END_TURN), "turn", observation
+        )
+    execution = completed(case, branch)
+    record = TypeAdapter(ExecutionRecord).validate_json(
+        execution_record(execution).model_dump_json()
+    )
+    assert isinstance(record, CompletedExecution)
+    store = AnnotationStore(tmp_path / "annotations", cases)
+    first = asyncio.run(assess_sample(case, execution, store, AssessmentSelection(), judgment=None))
+    saved = store.append_assessment(first, id="first")
+    reopened = AnnotationStore(store.directory, cases).assessment(saved)
+    before = branch.read_bytes()
+    second = asyncio.run(
+        assess_sample(case, reopened.execution, store, AssessmentSelection(), judgment=None)
+    )
+    assert second == first
+    assert record == second.execution
+    assert branch.read_bytes() == before
+    assert isinstance(record.endpoint, BattleEndpoint)
+    bad = record.model_copy(update={"endpoint": BattleEndpoint(node_id="another-battle")})
+    with pytest.raises(ValueError, match="endpoint"):
+        asyncio.run(assess_sample(case, bad, store, AssessmentSelection(), judgment=None))
 
 
 def test_unscored_report_reopens_with_actual_archive_identity(tmp_path: Path) -> None:

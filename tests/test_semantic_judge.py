@@ -1,5 +1,7 @@
 import asyncio
+from contextlib import closing
 from pathlib import Path
+from typing import Literal
 
 import httpx2 as httpx
 import pytest
@@ -7,6 +9,9 @@ from test_combat import reply
 from test_responses import configuration
 from test_takeover import FakeRestorer, retain_case, source_case
 
+from sts2_harness.client import models as native
+from sts2_harness.game import GameReply, Observe, Settle, Settlement
+from sts2_harness.journal import Journal
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelAttemptSink, ModelInput, ModelReply, ToolDefinition
 from sts2_harness.materials import FileDocuments
@@ -29,6 +34,7 @@ from sts2_harness_eval.assessment_records import (
     Judged,
     JudgeFailed,
     JudgmentInput,
+    ObservationRef,
     Unassessed,
     UnassessedReason,
     Unscored,
@@ -158,12 +164,120 @@ def test_injected_judgment_reopens_with_permanent_sources_and_isolated_actor(
             assert judge.inputs[-1].endpoint_reached
             assert len(judge.inputs[-1].evidence.actions) == 2
             assert judge.inputs[-1].evidence.metrics.net_hp_change == 0
+            received = judge.inputs[-1]
+            assert received.target is not None and received.endpoint is not None
+            assert received.target.ref == report.provenance.target
+            assert received.endpoint.ref == report.provenance.endpoint
+            target = annotations.cases.reference(annotations.cases.binding(case)).target
+            assert received.target.observation == target.read.observation
+            with closing(Journal.open(result.branch)) as journal:
+                records = journal.operations(start=case.source.anchor.model_sequence)
+                assert records[-1].reply is not None
+                assert received.endpoint.observation == records[-1].reply.observations[-1]
+                assert tuple(item.operation_id for item in received.before_actions) == tuple(
+                    action.operation_id for action in report.evidence.actions
+                )
+                assert received.before_actions[0].before == received.target
+                previous = next(
+                    record
+                    for record in reversed(records)
+                    if record.sequence < report.evidence.actions[1].sequence
+                    and record.reply is not None
+                    and record.reply.observations
+                )
+                assert previous.reply is not None
+                assert (
+                    received.before_actions[1].before.observation == previous.reply.observations[-1]
+                )
+                assert isinstance(received.before_actions[1].before.ref, ObservationRef)
+                assert received.before_actions[1].before.ref.sequence == previous.sequence
             reference = annotations.append_assessment(report, id=name)
             assert AnnotationStore(annotations.directory, cases).assessment(reference) == report
         assert len(actors[0]) == 2
         assert actors[0] == actors[1] == actors[2]
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("interruption", ["unobserved", "missing", "unknown"])
+def test_judge_does_not_attribute_stale_state_to_an_action(
+    tmp_path: Path, interruption: Literal["unobserved", "missing", "unknown"]
+) -> None:
+    from test_annotations import cases_fixture
+    from test_assessment import completed, new_branch, write_step
+    from test_lifecycle import battle_state
+
+    cases = cases_fixture(tmp_path / "cases")
+    case = cases.load("battle")
+    branch = tmp_path / "branch.sqlite"
+    observation = battle_state(1, "battle")
+    with closing(new_branch(branch, case)) as journal:
+        if interruption == "unobserved":
+            write_step(
+                journal, observation, native.EndTurn(kind=native.StepKind.END_TURN), "earlier", None
+            )
+        elif interruption == "missing":
+            journal.begin(Observe())
+            journal.end()
+        else:
+            route = native.RouteKey.model_validate(observation.location.model_dump())
+            step = native.EndTurn(kind=native.StepKind.END_TURN)
+            journal.begin(Settle(route=route, step=step))
+            journal.finish(
+                GameReply(
+                    outcome=Settlement(
+                        request=native.StepRequest(
+                            operation_id="unknown", expected_route=route, step=step
+                        ),
+                        receipt=native.ReceiptUnknown(
+                            operation_id="unknown",
+                            status=native.ResultStatus.UNKNOWN,
+                            error=native.UnknownExecution(
+                                code=native.ErrorCode.EXECUTION_UNCERTAIN, message="Unknown write."
+                            ),
+                        ),
+                    ),
+                    observations=(observation,),
+                )
+            )
+            journal.end()
+        write_step(
+            journal,
+            observation,
+            native.EndTurn(kind=native.StepKind.END_TURN),
+            "later",
+            observation,
+        )
+        write_step(
+            journal,
+            observation,
+            native.EndTurn(kind=native.StepKind.END_TURN),
+            "fresh",
+            observation,
+        )
+    annotations = AnnotationStore(tmp_path / "annotations", cases)
+    rubric = annotations.append_rubric(
+        RubricRecord(
+            case_id=case.id,
+            id="battle",
+            origin=Origin.HUMAN,
+            author=HumanAuthor(id="reviewer"),
+            criterion=BattleRubric(description="Preserve HP."),
+        )
+    )
+    judge = AcceptableJudge()
+    asyncio.run(
+        assess_sample(
+            case,
+            completed(case, branch),
+            annotations,
+            AssessmentSelection(rubric=rubric),
+            judgment=judge,
+        )
+    )
+    assert len(judge.inputs) == 1
+    expected = ("earlier", "fresh") if interruption == "unobserved" else ("fresh",)
+    assert tuple(item.operation_id for item in judge.inputs[0].before_actions) == expected
 
 
 class FailedJudge:
