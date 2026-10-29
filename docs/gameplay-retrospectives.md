@@ -39,11 +39,13 @@ The current public game state remains observable across acts and roles. Strategi
 
 Include reasonable decisions as controls. Sample across ordinary and difficult situations, not only terminal mistakes. Record how samples were chosen; an initial triage made after seeing outcomes is outcome-aware.
 
+Count recurring evidence gaps across the batch from public operations, accounting for information already available within each Context. A repeated gap can form a testable hypothesis even when individual choices remain reasonable; it does not prove that the model lacked the information or chose badly.
+
 **Done when:** each act has a capability/resource account, plausible pressure points, and at least one reasonable control. Unknown deck contents, unavailable inspections, and unreadable notes remain explicit.
 
 ## 3. Investigate a decision without hindsight
 
-First assess a candidate using only facts available at its decision boundary. Build a boundary packet from the same extractor: the boundary observation, public history up to it, and the legal actions. Exclude later operations, the final floor and result, and the variant identity. Give the packet to an assessor who has not seen the run, and ask for the acceptable choices and the reasons for each before revealing the actual action. Use a fresh assessor for each boundary when later packets from the same trajectory could reveal an earlier choice or its consequences. Keep each assessment locked before exposing its continuation. Then examine the actual continuation to investigate mechanism and impact. If a reviewer already saw later facts, report that limitation rather than claiming blinding.
+First assess a candidate using only facts available at its decision boundary. Build a boundary packet from the same extractor: the boundary observation, public history up to it, and the legal actions. Exclude later operations, the final floor and result, and the variant identity. Give the packet to an assessor who has not seen the run, and ask for the acceptable choices and the reasons for each before revealing the actual action. Use a fresh assessor for each boundary when later packets from the same trajectory could reveal an earlier choice or its consequences. Keep each assessment locked before exposing its continuation. If its acceptable set covers all or nearly all legal choices, report the assessment as having limited ability to distinguish them; acceptance of the actual action supplies no positive evidence of decision quality. Then examine the actual continuation to investigate mechanism and impact. If a reviewer already saw later facts, report that limitation rather than claiming blinding.
 
 For each candidate, record:
 
