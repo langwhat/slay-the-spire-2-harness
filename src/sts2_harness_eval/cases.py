@@ -1,4 +1,4 @@
-"""Admit immutable, individually verified Combat cases without model calls."""
+"""Admit immutable, individually verified gameplay cases without model calls."""
 
 from __future__ import annotations
 
@@ -241,7 +241,7 @@ def _confirmed_write(
 
 
 def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
-    """Select one nearest map and an original confirmed interval through EndTurn."""
+    """Select one nearest map and the original confirmed follow-on interval."""
     with closing(Journal.open(request.archive)) as journal:
         manifest = journal.manifest
         records = journal.operations()
@@ -291,16 +291,25 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
                     writes.append(write)
                 else:
                     assert target_observation is not None
-                    if (
+                    same_node = (
+                        write.before.location.node_id == target_observation.location.node_id
+                        and write.after.location.node_id == target_observation.location.node_id
+                    )
+                    if isinstance(target_observation.state, native.RunState):
+                        if not same_node or not _reward_follow_on(target_observation, write):
+                            _unsupported(UnsupportedCause.FOLLOW_ON, record.sequence)
+                        follow.append(write)
+                        end_sequence = record.sequence
+                    elif (
                         not isinstance(write.before.state, native.CombatState)
                         or not isinstance(write.after.state, native.CombatState)
-                        or write.before.location.node_id != target_observation.location.node_id
-                        or write.after.location.node_id != target_observation.location.node_id
+                        or not same_node
                     ):
                         _unsupported(UnsupportedCause.FOLLOW_ON, record.sequence)
-                    follow.append(write)
-                    if isinstance(write.step, native.EndTurn):
-                        end_sequence = record.sequence
+                    else:
+                        follow.append(write)
+                        if isinstance(write.step, native.EndTurn):
+                            end_sequence = record.sequence
             if record.confirmed_operation_cursor != cursor:
                 _unsupported(UnsupportedCause.HISTORY, record.sequence)
             if reply.observations:
@@ -319,8 +328,13 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
                 break
         if target_observation is None:
             target_observation = latest
-        if target_observation is None or not isinstance(
-            target_observation.state, native.CombatState
+        if target_observation is None or not (
+            isinstance(target_observation.state, native.CombatState)
+            or (
+                isinstance(request.endpoint, AfterDecisionsSpec)
+                and request.endpoint.count == 1
+                and _card_reward_selection(target_observation)
+            )
         ):
             _unsupported(UnsupportedCause.TARGET, target.sequence)
         assert target_observation is not None
@@ -357,6 +371,57 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
             tuple(follow),
             staging,
         )
+
+
+def _card_reward_selection(observation: native.Observation) -> bool:
+    state = observation.state
+    if not isinstance(state, native.RunState) or state.screen is not native.RunScreen.REWARDS:
+        return False
+    selection = state.selection
+    if (
+        observation.input_readiness is not native.InputReadiness.SELECTION
+        or selection is None
+        or selection.min != 0
+        or selection.max != 1
+        or selection.selected
+        or not selection.candidates
+        or not all(
+            isinstance(observation.objects.get(ref), native.CardEntry)
+            for ref in selection.candidates
+        )
+    ):
+        return False
+    return any(
+        offer.kind is native.OfferKind.CARD and set(offer.contents) == set(selection.candidates)
+        for offer in state.offers
+    )
+
+
+def _reward_follow_on(target: native.Observation, write: ReplayWrite) -> bool:
+    if not _card_reward_selection(target) or not _card_reward_selection(write.before):
+        return False
+    state = write.before.state
+    assert isinstance(state, native.RunState) and state.selection is not None
+    step = write.step
+    if isinstance(step, native.Select):
+        valid_choice = len(step.refs) <= 1 and set(step.refs) <= set(state.selection.candidates)
+    elif isinstance(step, native.Interact):
+        valid_choice = any(
+            action.ref == step.action
+            and action.enabled
+            and action.subject in state.selection.candidates
+            for action in state.actions
+        )
+    else:
+        return False
+    after = write.after
+    return (
+        valid_choice
+        and after.input_readiness is native.InputReadiness.READY
+        and isinstance(after.state, native.RunState)
+        and after.state.screen is native.RunScreen.REWARDS
+        and after.state.selection is None
+    )
 
 
 class Artifact(StrEnum):

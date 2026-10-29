@@ -37,6 +37,46 @@ class KeyKind(StrEnum):
     CREATURE = "creature"
     RELIC = "relic"
     MAP = "map"
+    REWARD = "reward"
+
+
+class RewardBindingKind(StrEnum):
+    REWARD_OBJECT = "reward_object"
+    CLAIM_ACTION = "claim_action"
+    CHOICE_SCREEN = "choice_screen"
+    CREATION_CARD = "creation_card"
+    PICK_ACTION = "pick_action"
+    ALTERNATIVE_ACTION = "alternative_action"
+    PROCEED_ACTION = "proceed_action"
+
+
+class RewardAddress(native.WireModel):
+    owner_net_id: Nonnegative
+    native_rewards_set_index: Nonnegative | None
+    binding_kind: RewardBindingKind
+    creation_slot: Nonnegative | None
+    native_option_id: native.Nonempty | None
+
+    @model_validator(mode="after")
+    def require_binding_fields(self) -> Self:
+        parent_required = self.binding_kind is not RewardBindingKind.PROCEED_ACTION
+        slot_required = self.binding_kind in (
+            RewardBindingKind.CREATION_CARD,
+            RewardBindingKind.PICK_ACTION,
+        )
+        option_required = self.binding_kind is RewardBindingKind.ALTERNATIVE_ACTION
+        if (self.native_rewards_set_index is not None) != parent_required:
+            raise ValueError("The reward parent index must match the binding kind.")
+        if (self.creation_slot is not None) != slot_required:
+            raise ValueError("The reward creation slot must match the binding kind.")
+        if (self.native_option_id is not None) != option_required:
+            raise ValueError("The native reward option must match the binding kind.")
+        return self
+
+
+class RewardKey(native.WireModel):
+    kind: Literal[KeyKind.REWARD] = KeyKind.REWARD
+    binding: RewardAddress
 
 
 class CardKey(native.WireModel):
@@ -70,7 +110,7 @@ class MapPointKey(native.WireModel):
 
 
 type NativeKey = Annotated[
-    CardKey | CreatureKey | RelicSlotKey | MapPointKey, Field(discriminator="kind")
+    CardKey | CreatureKey | RelicSlotKey | MapPointKey | RewardKey, Field(discriminator="kind")
 ]
 
 
@@ -98,11 +138,17 @@ class RelicIdentity(native.WireModel):
     slot: Nonnegative
 
 
+class RewardIdentity(native.WireModel):
+    ref: native.Nonempty
+    binding: RewardAddress
+
+
 class IdentityFacts(native.WireModel):
     cards: tuple[CardIdentity, ...]
     creatures: tuple[CreatureIdentity, ...]
     map_travel: tuple[MapIdentity, ...]
     relics: tuple[RelicIdentity, ...]
+    reward_bindings: tuple[RewardIdentity, ...] = ()
 
 
 class IdentityRead(native.WireModel):

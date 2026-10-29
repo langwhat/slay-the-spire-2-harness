@@ -13,6 +13,7 @@ from sts2_harness_eval.checkpoints import (
     MapPointKey,
     NativeKey,
     RelicSlotKey,
+    RewardKey,
 )
 
 
@@ -260,6 +261,8 @@ def native_refs(read: IdentityRead, relation: Relation) -> dict[str, NativeKey]:
         add(relic.ref, RelicSlotKey(owner_net_id=relic.owner_net_id, slot=relic.slot))
     for point in read.identities.map_travel:
         add(point.ref, MapPointKey(act=point.act, row=point.row, col=point.col))
+    for reward in read.identities.reward_bindings:
+        add(reward.ref, RewardKey(binding=reward.binding))
     return refs
 
 
