@@ -8,7 +8,7 @@ from pathlib import Path
 from sts2_harness.client import models as native
 from sts2_harness.game import Settle, Settlement
 from sts2_harness.journal import Journal, Record, SceneVariant
-from sts2_harness_eval._scene_assessment import validate_scene_sample
+from sts2_harness_eval._sample_binding import bind_sample
 from sts2_harness_eval.annotation_records import CardRewardRubric
 from sts2_harness_eval.annotations import AnnotationStore
 from sts2_harness_eval.assessment_records import (
@@ -354,24 +354,16 @@ async def assess_sample(
     target_ref = None
     if identity is not None:
         with closing(Journal.open(branch)) as journal:
-            parent = journal.manifest.parent
-            variant = journal.manifest.variant
-            if isinstance(variant, SceneVariant):
-                validate_scene_sample(case, annotations.cases, journal, record)
-                target = variant.initial.observation
-                target_ref = SceneInitialRef(recording_id=identity.recording_id)
-                records = journal.operations()
-                summaries = journal.summaries()
-                first_sequence = min((item.sequence for item in summaries), default=None)
-            else:
-                if parent is None:
-                    raise ValueError("Historical assessment requires a direct parent.")
-                if (
-                    parent.archive.resolve() != case.source.archive.resolve()
-                    or parent.recording_id != case.source.anchor.recording_id
-                    or parent.before_sequence != case.source.anchor.model_sequence
-                ):
-                    raise ValueError("The sample parent does not match the case source anchor.")
+            binding = bind_sample(case, annotations.cases, journal, record)
+            parent = binding.parent
+            variant = binding.variant
+            target = binding.target
+            target_ref = binding.target_ref
+            first_sequence = binding.first_sequence
+            last_sequence = binding.last_sequence
+            gaps = binding.gaps
+            records = () if first_sequence is None else journal.operations(start=first_sequence)
+            if not isinstance(variant, SceneVariant):
                 anchor = None if isinstance(record, UnsupportedExecution) else record.anchor
                 if anchor is not None and (
                     anchor.anchor.recording_id != case.source.anchor.recording_id
@@ -390,20 +382,6 @@ async def assess_sample(
                         or variant.source.before_sequence != original.source.anchor.model_sequence
                     ):
                         raise ValueError("The material variant does not match its original case.")
-                records = journal.operations(start=parent.before_sequence)
-                summaries = journal.summaries(start=parent.before_sequence)
-                binding = annotations.cases.binding(case)
-                reference = annotations.cases.reference(binding).target
-                target = reference.read.observation
-                target_ref = CaseTargetRef(
-                    case_id=case.id,
-                    reference_sha256=binding.reference,
-                    recording_id=case.source.anchor.recording_id,
-                    sequence=reference.source_sequence,
-                )
-                first_sequence = parent.before_sequence
-            last_sequence = max((item.sequence for item in summaries), default=None)
-            gaps = bool(journal.gaps)
             if isinstance(record, CompletedExecution):
                 endpoint = record.endpoint
                 expected = case.endpoint

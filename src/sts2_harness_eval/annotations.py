@@ -11,8 +11,8 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
-from sts2_harness.journal import Journal, SceneVariant
-from sts2_harness_eval._scene_assessment import validate_scene_sample
+from sts2_harness.journal import Journal
+from sts2_harness_eval._sample_binding import bind_sample
 from sts2_harness_eval.annotation_records import (
     AgentAuthor as AgentAuthor,
 )
@@ -72,9 +72,7 @@ from sts2_harness_eval.assessment_records import (
     AssessmentRecord,
     AssessmentRef,
     AssessmentSelection,
-    CaseTargetRef,
     SampleAssessment,
-    SceneInitialRef,
     SelectedStandards,
     Unassessed,
 )
@@ -218,38 +216,14 @@ class AnnotationStore:
                 digest = file_digest(source, "sha256").hexdigest()
             with closing(Journal.open(provenance.archive)) as journal:
                 manifest = journal.manifest
-                parent = manifest.parent
-                if isinstance(manifest.variant, SceneVariant):
-                    validate_scene_sample(case, self.cases, journal, report.execution)
-                    summaries = journal.summaries()
-                    first_sequence = min((item.sequence for item in summaries), default=None)
-                    expected_target = SceneInitialRef(recording_id=sample.recording_id)
-                else:
-                    if (
-                        parent is None
-                        or parent.archive.resolve() != case.source.archive.resolve()
-                        or parent.recording_id != case.source.anchor.recording_id
-                        or parent.before_sequence != case.source.anchor.model_sequence
-                        or provenance.first_sequence != parent.before_sequence
-                    ):
-                        raise ValueError(
-                            "The report sample does not match the case source interval."
-                        )
-                    summaries = journal.summaries(start=parent.before_sequence)
-                    binding = self.cases.binding(case)
-                    target = self.cases.reference(binding).target
-                    expected_target = CaseTargetRef(
-                        case_id=case.id,
-                        reference_sha256=binding.reference,
-                        recording_id=case.source.anchor.recording_id,
-                        sequence=target.source_sequence,
-                    )
-                    first_sequence = parent.before_sequence
-                if provenance.first_sequence != first_sequence or provenance.last_sequence != max(
-                    (item.sequence for item in summaries), default=None
+                binding = bind_sample(case, self.cases, journal, report.execution)
+                first_sequence = binding.first_sequence
+                if (
+                    provenance.first_sequence != first_sequence
+                    or provenance.last_sequence != binding.last_sequence
                 ):
                     raise ValueError("The report evidence interval differs from its sample.")
-                if provenance.target != expected_target:
+                if provenance.target != binding.target_ref:
                     raise ValueError("The report target is not the verified sample publication.")
                 endpoint = provenance.endpoint
                 if endpoint is not None:

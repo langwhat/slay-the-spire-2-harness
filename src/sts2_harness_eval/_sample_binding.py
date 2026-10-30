@@ -1,10 +1,19 @@
-"""Recheck Scene restore declarations and actual execution anchors for assessment."""
+"""Bind recorded samples to their case, target observation and evidence interval."""
 
 from contextlib import closing
+from dataclasses import dataclass
 from hashlib import file_digest, sha256
 
 from sts2_harness.client import models as native
-from sts2_harness.journal import DependencyKind, Journal, ModelSummary, SceneVariant
+from sts2_harness.journal import (
+    DependencyKind,
+    HistoricalVariant,
+    Journal,
+    ModelSummary,
+    ParentPrefix,
+    SceneVariant,
+)
+from sts2_harness_eval.assessment_records import CaseTargetRef, SceneInitialRef
 from sts2_harness_eval.cases import AfterDecisionsSpec, Case, CaseStore
 from sts2_harness_eval.checkpoints import ReloadTarget
 from sts2_harness_eval.execution_record import (
@@ -18,7 +27,60 @@ from sts2_harness_eval.execution_record import (
 )
 
 
-def validate_scene_sample(
+@dataclass(frozen=True, slots=True)
+class SampleBinding:
+    parent: ParentPrefix | None
+    variant: HistoricalVariant | SceneVariant | None
+    target: native.Observation
+    target_ref: CaseTargetRef | SceneInitialRef
+    first_sequence: int | None
+    last_sequence: int | None
+    gaps: bool
+
+
+def bind_sample(
+    case: Case, cases: CaseStore, journal: Journal, execution: ExecutionRecord
+) -> SampleBinding:
+    parent = journal.manifest.parent
+    variant = journal.manifest.variant
+    if isinstance(variant, SceneVariant):
+        _validate_scene_sample(case, cases, journal, execution)
+        target = variant.initial.observation
+        target_ref = SceneInitialRef(recording_id=journal.manifest.recording_id)
+        summaries = journal.summaries()
+        first_sequence = min((item.sequence for item in summaries), default=None)
+    else:
+        if parent is None:
+            raise ValueError("Historical assessment requires a direct parent.")
+        if (
+            parent.archive.resolve() != case.source.archive.resolve()
+            or parent.recording_id != case.source.anchor.recording_id
+            or parent.before_sequence != case.source.anchor.model_sequence
+        ):
+            raise ValueError("The sample parent does not match the case source anchor.")
+        binding = cases.binding(case)
+        reference = cases.reference(binding).target
+        target = reference.read.observation
+        target_ref = CaseTargetRef(
+            case_id=case.id,
+            reference_sha256=binding.reference,
+            recording_id=case.source.anchor.recording_id,
+            sequence=reference.source_sequence,
+        )
+        summaries = journal.summaries(start=parent.before_sequence)
+        first_sequence = parent.before_sequence
+    return SampleBinding(
+        parent=parent,
+        variant=variant,
+        target=target,
+        target_ref=target_ref,
+        first_sequence=first_sequence,
+        last_sequence=max((item.sequence for item in summaries), default=None),
+        gaps=bool(journal.gaps),
+    )
+
+
+def _validate_scene_sample(
     case: Case, cases: CaseStore, journal: Journal, execution: ExecutionRecord
 ) -> None:
     variant = journal.manifest.variant
