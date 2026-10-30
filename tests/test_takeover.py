@@ -736,6 +736,7 @@ def test_cancellation_during_load_survives_restorer_cleanup_failure(
         (0, None, False),
         (1, None, False),
         (2, None, False),
+        (2, None, True),
         (1, "feedback", False),
         (1, "cleanup", False),
         (1, "feedback", True),

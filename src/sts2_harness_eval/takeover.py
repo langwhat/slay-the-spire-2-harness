@@ -53,6 +53,7 @@ from sts2_harness.results import Reason
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval._material_boundary import RejectingDocuments, RejectingPrompts
 from sts2_harness_eval._replay import (
+    Dependency,
     ReplayDocuments,
     ReplayGame,
     ReplayModel,
@@ -66,6 +67,7 @@ from sts2_harness_eval._replay import (
 from sts2_harness_eval._scene import SceneSession
 from sts2_harness_eval.cases import (
     AdmissionFailure,
+    AdmissionPlan,
     AdmissionRequest,
     AfterDecisionsSpec,
     Case,
@@ -105,6 +107,7 @@ from sts2_harness_eval.sample import (
     SampleBudget,
     SampleHost,
     SampleResult,
+    finish_after_stop,
 )
 from sts2_harness_eval.variants import (
     Materials,
@@ -209,441 +212,479 @@ async def take_over(
     variant: MaterialVariant | None = None,
 ) -> TakeoverResult:
     """Verify both prefixes, then release the held request into recorded live dependencies."""
-    anchor: Reached | None = None
-    recording_id: str | None = None
-    stage = Stage.PREPARATION
-    task: asyncio.Task[SampleResult] | None = None
-    released = False
-    operator_stopped = False
-    caller_cancellation: asyncio.CancelledError | None = None
-    caller = asyncio.current_task()
-    assert caller is not None
-    initial_cancellations = caller.cancelling()
-    try:
-        with ExitStack() as resources:
-            plan = plan_admission(
-                AdmissionRequest(
-                    id=case.id,
-                    archive=case.source.archive,
-                    anchor=case.source.anchor,
-                    endpoint=case.endpoint,
-                ),
-                restorer.store.directory,
-            )
-            if plan.source != case.source:
-                raise ReplayRejected(
-                    Rejected(
-                        RejectReason.INPUT_MISMATCH,
-                        case.source.anchor.model_sequence,
-                        InputDifference(InputComponent.REQUEST),
-                    )
+    return await _Takeover(
+        case, restorer, branch, model, prompts, documents, budget, stop_requested, variant
+    ).run()
+
+
+class _Takeover:
+    def __init__(
+        self,
+        case: Case,
+        restorer: NativeRestorer,
+        branch: Path,
+        model: Llm,
+        prompts: PromptReader,
+        documents: Documents,
+        budget: SampleBudget,
+        stop_requested: Callable[[], bool],
+        variant: MaterialVariant | None,
+    ) -> None:
+        self.case = case
+        self.restorer = restorer
+        self.branch = branch
+        self.model = model
+        self.prompts = prompts
+        self.documents = documents
+        self.budget = budget
+        self.stop_requested = stop_requested
+        self.variant = variant
+        self.anchor: Reached | None = None
+        self.recording_id: str | None = None
+        self.stage = Stage.PREPARATION
+        self.operator_stopped = False
+        self.caller_cancellation: asyncio.CancelledError | None = None
+
+    async def run(self) -> TakeoverResult:
+        caller = asyncio.current_task()
+        assert caller is not None
+        initial_cancellations = caller.cancelling()
+        try:
+            with ExitStack() as resources:
+                plan = plan_admission(
+                    AdmissionRequest(
+                        id=self.case.id,
+                        archive=self.case.source.archive,
+                        anchor=self.case.source.anchor,
+                        endpoint=self.case.endpoint,
+                    ),
+                    self.restorer.store.directory,
                 )
-            source = resources.enter_context(closing(Journal.open(case.source.archive)))
-            records = prefix(source, case.source.anchor)
-            target = source.request(case.source.anchor.model_sequence)
-            if variant is not None and isinstance(variant.start, SceneStart):
-                if source.manifest.variant is not None:
-                    raise VariantError("New scenes require an original verified case.")
-                declared = replacements(variant)
-                materials = Materials(declared)
-                materials.preflight(
-                    tuple(
-                        record
-                        for record in records
-                        if isinstance(record, (ModelRecord, MaterialRecord))
-                    )
-                )
-                if not isinstance(plan.target.state, native.CombatState):
-                    return TakeoverUnsupported(
-                        branch,
-                        AdmissionUnsupported(
-                            cause=AdmissionUnsupportedCause.TARGET,
-                            sequence=case.source.anchor.model_sequence,
-                        ),
-                        recording_id=None,
-                    )
-                with case.source.archive.open("rb") as original:
-                    digest = file_digest(original, "sha256").hexdigest()
-                stage = Stage.LOAD
-                async with restorer.loaded(case) as loaded:
-                    location = loaded.read.observation.location
-                    assert location.run_id is not None
-                    if loaded.initial.observation != loaded.read.observation:
-                        raise CheckpointUncertain(
-                            "The scene target differs from its loaded evidence."
-                        )
-                    control = await loaded.client.control(native.ControlIntent.RUNNING)
-                    if (
-                        not isinstance(control, native.ControlReply)
-                        or control.mode is not native.ControlIntent.RUNNING
-                    ):
-                        raise CheckpointUncertain("The live Start intent was not confirmed.")
-                    initial = loaded.initial.model_copy(update={"control": control})
-                    declaration = SceneVariant(
-                        case_id=case.id,
-                        case_sha256=sha256(case.model_dump_json().encode()).hexdigest(),
-                        source=SceneSource(
-                            archive=case.source.archive.resolve(),
-                            recording_id=case.source.anchor.recording_id,
-                            model_sequence=case.source.anchor.model_sequence,
-                            archive_sha256=digest,
-                        ),
-                        replacements=declared,
-                        initial=initial,
-                    )
-                    manifest = Manifest(
-                        recording_id=uuid4().hex,
-                        core_version="0.1.0",
-                        game_instance_id=location.game_instance_id,
-                        run_id=location.run_id,
-                        materials=plan.manifest.materials,
-                        initial_notes=variant.start.initial_notes,
-                        seed=initial.restore.canonical_seed,
-                        template=initial.template,
-                        game_version=initial.game_version,
-                        variant=declaration,
-                    )
-                    journal = resources.enter_context(closing(Journal.create(branch, manifest)))
-                    recording_id = journal.manifest.recording_id
-                    endpoint: Endpoint
-                    if isinstance(case.endpoint, AfterDecisionsSpec):
-                        endpoint = AfterDecisions(case.endpoint.count)
-                    else:
-                        assert location.node_id is not None
-                        endpoint = BattleEnd(location.node_id)
-
-                    def scene_stopped() -> bool:
-                        nonlocal operator_stopped
-                        operator_stopped = operator_stopped or stop_requested()
-                        return operator_stopped
-
-                    scene = SceneSession(
-                        loaded,
-                        journal,
-                        model,
-                        prompts,
-                        documents,
-                        budget,
-                        endpoint,
-                        stop_requested=scene_stopped,
-                    )
-                    task = asyncio.create_task(scene.run())
-                    try:
-                        try:
-                            sample = await asyncio.shield(task)
-                        except asyncio.CancelledError as error:
-                            caller_cancellation = error
-                            operator_stopped = True
-                            with suppress(SessionStopped):
-                                while not task.done():
-                                    try:
-                                        await asyncio.shield(task)
-                                    except asyncio.CancelledError:
-                                        continue
-                                task.result()
-                            raise
-                    finally:
-                        anchor = scene.anchor()
-                    if isinstance(sample, Completed):
-                        if anchor is None:
-                            raise ArchiveError("A completed scene has no recorded model request.")
-                        return TakeoverCompleted(branch, anchor, sample, recording_id=recording_id)
-                    assert isinstance(sample, Incomplete)
-                    return TakeoverIncomplete(branch, anchor, sample, recording_id=recording_id)
-            for message in target.input:
-                if isinstance(message, AssistantSnapshot):
-                    protocol = message.native_reply.protocol
-                    if protocol is not model.configuration.protocol:
-                        return TakeoverUnsupported(
-                            branch,
-                            ProtocolMismatch(
-                                protocol,
-                                model.configuration.protocol,
-                            ),
-                            recording_id=recording_id,
-                        )
-            with case.source.archive.open("rb") as original:
-                digest = file_digest(original, "sha256").hexdigest()
-            parent = ParentPrefix(
-                archive=case.source.archive.resolve(),
-                recording_id=case.source.anchor.recording_id,
-                before_sequence=case.source.anchor.model_sequence,
-                archive_sha256=digest,
-            )
-            declaration = source.manifest.variant
-            if isinstance(declaration, SceneVariant):
-                raise VariantError("Scene history requires its own verified native case.")
-            if declaration is not None:
-                if variant is not None and replacements(variant) != declaration.replacements:
-                    raise VariantError(
-                        "Different variants require sibling branches from the original case."
-                    )
-            elif variant is not None:
-                declaration = HistoricalVariant(
-                    case_id=case.id,
-                    case_sha256=sha256(case.model_dump_json().encode()).hexdigest(),
-                    source=parent,
-                    replacements=replacements(variant),
-                )
-            materials = Materials(declaration.replacements) if declaration is not None else None
-            original_before = (
-                declaration.source.before_sequence if declaration is not None else None
-            )
-            if materials is not None:
-                original_records = records
-                if source.manifest.variant is not None:
-                    assert declaration is not None
-                    original_source = resources.enter_context(
-                        closing(Journal.open(declaration.source.archive))
-                    )
-                    original_records = original_source.timeline(stop=original_before)
-                materials.preflight(
-                    tuple(
-                        record
-                        for record in original_records
-                        if isinstance(record, (ModelRecord, MaterialRecord))
-                    )
-                )
-            manifest = plan.manifest.model_copy(
-                update={
-                    "recording_id": uuid4().hex,
-                    "parent": parent,
-                    "variant": declaration,
-                }
-            )
-            journal = resources.enter_context(closing(Journal.create(branch, manifest)))
-            recording_id = journal.manifest.recording_id
-            if isinstance(case.endpoint, AfterDecisionsSpec):
-                endpoint = AfterDecisions(case.endpoint.count)
-            else:
-                node = plan.target.location.node_id
-                assert node is not None
-                endpoint = BattleEnd(node)
-            host = SampleHost(budget, endpoint, journal)
-            reached: asyncio.Future[Reached] = asyncio.get_running_loop().create_future()
-            release = asyncio.Event()
-            # Only the original source target still needs material mapping.
-            mapping_before = material_boundary(source)
-            timeline = Timeline(records, materials, mapping_before)
-
-            def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
-                async def continue_live(
-                    input: ModelInput,
-                    tools: tuple[ToolDefinition, ...],
-                ) -> ModelReply:
-                    await release.wait()
-                    return await switch.current.model(role, stream).complete(input, tools)
-
-                historical = ReplayModel(
-                    timeline, role, stream, case.source.anchor, reached, continue_live
-                )
-
-                class Model:
-                    async def complete(
-                        self,
-                        input: ModelInput,
-                        tools: tuple[ToolDefinition, ...],
-                    ) -> ModelReply:
-                        treated_tools = materials.tools(tools) if materials is not None else tools
-                        if switch.live:
-                            return await switch.current.model(role, stream).complete(
-                                input, treated_tools
-                            )
-                        return await historical.complete(input, treated_tools)
-
-                return Model()
-
-            switch = _Switch(
-                SessionDependencies(
-                    ReplayGame(timeline),
-                    ReplayPrompts(timeline),
-                    ReplayDocuments(timeline),
-                    factory,
-                )
-            )
-
-            dependencies = SessionDependencies(
-                _GameProxy(switch),
-                RejectingPrompts(lambda: switch.current.prompts),
-                RejectingDocuments(lambda: switch.current.documents),
-                factory,
-            )
-
-            def stopped() -> bool:
-                nonlocal operator_stopped
-                operator_stopped = operator_stopped or stop_requested()
-                return operator_stopped or host.stop_requested()
-
-            async def run() -> SampleResult:
-                async with RunSession(plan.manifest, dependencies, diagnostics=None) as session:
-                    first = records[0]
-                    if isinstance(first, Record) and first.request == Pause():
-                        await session.start()
-                    elif not isinstance(first, Record) or first.request != Admit():
-                        unsupported(first.sequence, UnsupportedCause.START_MODE)
-                    try:
-                        return await host.run(session)
-                    except SessionStopped:
-                        if not switch.live:
-                            unsupported(None, UnsupportedCause.UNEXPECTED_END)
-                        raise
-
-            task = asyncio.create_task(run())
-            try:
-                await asyncio.wait((task, reached), return_when=asyncio.FIRST_COMPLETED)
-                if task.done():
-                    await task
-                    raise RuntimeError("The replay stopped without reaching its target.")
-                anchor = reached.result()
-                if (
-                    anchor.confirmed_operation_cursor != case.source.target_cursor
-                    or anchor.semantic_digest != case.source.semantic_digest
-                ):
+                if plan.source != self.case.source:
                     raise ReplayRejected(
                         Rejected(
                             RejectReason.INPUT_MISMATCH,
-                            case.source.anchor.model_sequence,
-                            InputDifference(InputComponent.CURSOR),
+                            self.case.source.anchor.model_sequence,
+                            InputDifference(InputComponent.REQUEST),
                         )
                     )
-                stage = Stage.LOAD
-                async with restorer.loaded(case) as loaded:
-                    location = loaded.read.observation.location
-                    assert location.run_id is not None
-
-                    def status(value: native.Status, waiting: bool) -> None:
-                        journal.diagnostics.native_status(value, waiting)
-                        host.native_status(value, waiting)
-
-                    game = IdentityGame(
-                        LiveGame(
-                            loaded.client,
-                            namespace=manifest.recording_id,
-                            audit=journal,
-                            game_instance_id=location.game_instance_id,
-                            run_id=location.run_id,
-                            settle_confirmation_seconds=SETTLE_CONFIRMATION_SECONDS,
-                            on_status=status,
-                            stop_requested=stopped,
-                        ),
-                        TargetIdentity(plan.target.location, location, loaded.refs),
+                source = resources.enter_context(closing(Journal.open(self.case.source.archive)))
+                records = prefix(source, self.case.source.anchor)
+                target = source.request(self.case.source.anchor.model_sequence)
+                if self.variant is not None and isinstance(self.variant.start, SceneStart):
+                    return await self._scene(
+                        resources, plan, source, records, self.variant, self.variant.start
                     )
+                return await self._historical(resources, plan, source, records, target)
 
-                    def live_model(role: native.DecisionOwner, stream: str) -> ModelClient:
-                        return RecordedLlm(model, journal, role=role, stream=stream)
+        except SessionStopped:
+            if not self.operator_stopped:
+                raise
+            return TakeoverIncomplete(
+                self.branch, self.anchor, OperatorStopped(), recording_id=self.recording_id
+            )
+        except ReplayRejected as error:
+            return TakeoverUnsupported(self.branch, error.result, recording_id=self.recording_id)
+        except VariantError as error:
+            return TakeoverUnsupported(self.branch, error.rejection, recording_id=self.recording_id)
+        except AdmissionFailure as error:
+            return TakeoverUnsupported(self.branch, error.result, recording_id=self.recording_id)
+        except VerificationFailure as error:
+            return TakeoverUnsupported(
+                self.branch,
+                Mismatch(
+                    relation=error.relation,
+                    sequence=error.sequence,
+                    field_path=error.field_path,
+                ),
+                recording_id=self.recording_id,
+            )
+        except CheckpointRejected as error:
+            return TakeoverUnsupported(self.branch, error.cause, recording_id=self.recording_id)
+        except (
+            CheckpointUncertain,
+            ClientUnavailable,
+            GameReadError,
+            ControlWriteError,
+            GameLifetimeEnded,
+        ) as error:
+            return TakeoverIncomplete(
+                self.branch,
+                self.anchor,
+                NativeUncertain(
+                    self.stage,
+                    IncompleteCause.NATIVE_UNCERTAIN,
+                    str(error),
+                ),
+                recording_id=self.recording_id,
+            )
+        except (OSError, ArchiveError, httpx.HTTPError, TimeoutError) as error:
+            return TakeoverIncomplete(
+                self.branch,
+                self.anchor,
+                NativeUncertain(self.stage, IncompleteCause.IO, str(error)),
+                recording_id=self.recording_id,
+            )
+        except ValidationError as error:
+            return TakeoverIncomplete(
+                self.branch,
+                self.anchor,
+                NativeUncertain(self.stage, IncompleteCause.PROTOCOL, str(error)),
+                recording_id=self.recording_id,
+            )
+        except (HeadlessError, TemplateError) as error:
+            return TakeoverIncomplete(
+                self.branch,
+                self.anchor,
+                NativeUncertain(self.stage, IncompleteCause.STARTUP, str(error)),
+                recording_id=self.recording_id,
+            )
+        finally:
+            # Cleanup failures must not turn a caller cancellation into a normal result.
+            if self.caller_cancellation is not None:
+                raise self.caller_cancellation
+            if caller.cancelling() > initial_cancellations:
+                raise asyncio.CancelledError
 
-                    live = SessionDependencies(
-                        host.game(RecordedGame(game, journal)),
-                        RecordedPrompts(
-                            VariantPrompts(prompts, materials)
-                            if materials is not None
-                            else prompts,
-                            journal,
-                        ),
-                        RecordedDocuments(
-                            VariantDocuments(documents, materials)
-                            if materials is not None
-                            else documents,
-                            journal,
-                        ),
-                        host.models(live_model),
-                    )
-                    host.arm(game.observation(loaded.read.observation))
-                    control = await loaded.client.control(native.ControlIntent.RUNNING)
-                    if (
-                        not isinstance(control, native.ControlReply)
-                        or control.mode is not native.ControlIntent.RUNNING
-                    ):
-                        raise CheckpointUncertain("The live Start intent was not confirmed.")
-                    switch.current = live
-                    switch.live = True
-                    released = True
-                    release.set()
-                    try:
-                        sample = await asyncio.shield(task)
-                    except asyncio.CancelledError as error:
-                        caller_cancellation = error
-                        operator_stopped = True
-                        with suppress(SessionStopped):
-                            while not task.done():
-                                try:
-                                    await asyncio.shield(task)
-                                except asyncio.CancelledError:
-                                    continue
-                            task.result()
-                        raise
-                    if isinstance(sample, Completed):
-                        return TakeoverCompleted(branch, anchor, sample, recording_id=recording_id)
-                    assert isinstance(sample, Incomplete)
-                    return TakeoverIncomplete(branch, anchor, sample, recording_id=recording_id)
-            finally:
-                if not released:
-                    task.cancel()
-                    with suppress(asyncio.CancelledError, ReplayRejected):
-                        await task
-    except SessionStopped:
-        if not operator_stopped:
+    async def _finish(self, task: asyncio.Task[SampleResult]) -> SampleResult:
+        def stop() -> None:
+            self.operator_stopped = True
+
+        try:
+            return await finish_after_stop(task, stop)
+        except asyncio.CancelledError as error:
+            self.caller_cancellation = error
             raise
-        return TakeoverIncomplete(branch, anchor, OperatorStopped(), recording_id=recording_id)
-    except ReplayRejected as error:
-        return TakeoverUnsupported(branch, error.result, recording_id=recording_id)
-    except VariantError as error:
-        return TakeoverUnsupported(branch, error.rejection, recording_id=recording_id)
-    except AdmissionFailure as error:
-        return TakeoverUnsupported(branch, error.result, recording_id=recording_id)
-    except VerificationFailure as error:
-        return TakeoverUnsupported(
-            branch,
-            Mismatch(
-                relation=error.relation,
-                sequence=error.sequence,
-                field_path=error.field_path,
-            ),
-            recording_id=recording_id,
+
+    async def _scene(
+        self,
+        resources: ExitStack,
+        plan: AdmissionPlan,
+        source: Journal,
+        records: tuple[Dependency, ...],
+        variant: MaterialVariant,
+        start: SceneStart,
+    ) -> TakeoverResult:
+        if source.manifest.variant is not None:
+            raise VariantError("New scenes require an original verified case.")
+        declared = replacements(variant)
+        materials = Materials(declared)
+        materials.preflight(
+            tuple(record for record in records if isinstance(record, (ModelRecord, MaterialRecord)))
         )
-    except CheckpointRejected as error:
-        return TakeoverUnsupported(branch, error.cause, recording_id=recording_id)
-    except (
-        CheckpointUncertain,
-        ClientUnavailable,
-        GameReadError,
-        ControlWriteError,
-        GameLifetimeEnded,
-    ) as error:
-        return TakeoverIncomplete(
-            branch,
-            anchor,
-            NativeUncertain(
-                stage,
-                IncompleteCause.NATIVE_UNCERTAIN,
-                str(error),
-            ),
-            recording_id=recording_id,
+        if not isinstance(plan.target.state, native.CombatState):
+            return TakeoverUnsupported(
+                self.branch,
+                AdmissionUnsupported(
+                    cause=AdmissionUnsupportedCause.TARGET,
+                    sequence=self.case.source.anchor.model_sequence,
+                ),
+                recording_id=None,
+            )
+        with self.case.source.archive.open("rb") as original:
+            digest = file_digest(original, "sha256").hexdigest()
+        self.stage = Stage.LOAD
+        async with self.restorer.loaded(self.case) as loaded:
+            location = loaded.read.observation.location
+            assert location.run_id is not None
+            if loaded.initial.observation != loaded.read.observation:
+                raise CheckpointUncertain("The scene target differs from its loaded evidence.")
+            control = await loaded.client.control(native.ControlIntent.RUNNING)
+            if (
+                not isinstance(control, native.ControlReply)
+                or control.mode is not native.ControlIntent.RUNNING
+            ):
+                raise CheckpointUncertain("The live Start intent was not confirmed.")
+            initial = loaded.initial.model_copy(update={"control": control})
+            declaration = SceneVariant(
+                case_id=self.case.id,
+                case_sha256=sha256(self.case.model_dump_json().encode()).hexdigest(),
+                source=SceneSource(
+                    archive=self.case.source.archive.resolve(),
+                    recording_id=self.case.source.anchor.recording_id,
+                    model_sequence=self.case.source.anchor.model_sequence,
+                    archive_sha256=digest,
+                ),
+                replacements=declared,
+                initial=initial,
+            )
+            manifest = Manifest(
+                recording_id=uuid4().hex,
+                core_version="0.1.0",
+                game_instance_id=location.game_instance_id,
+                run_id=location.run_id,
+                materials=plan.manifest.materials,
+                initial_notes=start.initial_notes,
+                seed=initial.restore.canonical_seed,
+                template=initial.template,
+                game_version=initial.game_version,
+                variant=declaration,
+            )
+            journal = resources.enter_context(closing(Journal.create(self.branch, manifest)))
+            self.recording_id = journal.manifest.recording_id
+            endpoint: Endpoint
+            if isinstance(self.case.endpoint, AfterDecisionsSpec):
+                endpoint = AfterDecisions(self.case.endpoint.count)
+            else:
+                assert location.node_id is not None
+                endpoint = BattleEnd(location.node_id)
+
+            def scene_stopped() -> bool:
+                self.operator_stopped = self.operator_stopped or self.stop_requested()
+                return self.operator_stopped
+
+            scene = SceneSession(
+                loaded,
+                journal,
+                self.model,
+                self.prompts,
+                self.documents,
+                self.budget,
+                endpoint,
+                stop_requested=scene_stopped,
+            )
+            task = asyncio.create_task(scene.run())
+            try:
+                sample = await self._finish(task)
+            finally:
+                self.anchor = scene.anchor()
+            if isinstance(sample, Completed):
+                if self.anchor is None:
+                    raise ArchiveError("A completed scene has no recorded model request.")
+                return TakeoverCompleted(
+                    self.branch, self.anchor, sample, recording_id=self.recording_id
+                )
+            assert isinstance(sample, Incomplete)
+            return TakeoverIncomplete(
+                self.branch, self.anchor, sample, recording_id=self.recording_id
+            )
+
+    async def _historical(
+        self,
+        resources: ExitStack,
+        plan: AdmissionPlan,
+        source: Journal,
+        records: tuple[Dependency, ...],
+        target: ModelRecord,
+    ) -> TakeoverResult:
+        released = False
+        for message in target.input:
+            if isinstance(message, AssistantSnapshot):
+                protocol = message.native_reply.protocol
+                if protocol is not self.model.configuration.protocol:
+                    return TakeoverUnsupported(
+                        self.branch,
+                        ProtocolMismatch(
+                            protocol,
+                            self.model.configuration.protocol,
+                        ),
+                        recording_id=self.recording_id,
+                    )
+        with self.case.source.archive.open("rb") as original:
+            digest = file_digest(original, "sha256").hexdigest()
+        parent = ParentPrefix(
+            archive=self.case.source.archive.resolve(),
+            recording_id=self.case.source.anchor.recording_id,
+            before_sequence=self.case.source.anchor.model_sequence,
+            archive_sha256=digest,
         )
-    except (OSError, ArchiveError, httpx.HTTPError, TimeoutError) as error:
-        return TakeoverIncomplete(
-            branch,
-            anchor,
-            NativeUncertain(stage, IncompleteCause.IO, str(error)),
-            recording_id=recording_id,
+        declaration = source.manifest.variant
+        if isinstance(declaration, SceneVariant):
+            raise VariantError("Scene history requires its own verified native case.")
+        if declaration is not None:
+            if self.variant is not None and replacements(self.variant) != declaration.replacements:
+                raise VariantError(
+                    "Different variants require sibling branches from the original case."
+                )
+        elif self.variant is not None:
+            declaration = HistoricalVariant(
+                case_id=self.case.id,
+                case_sha256=sha256(self.case.model_dump_json().encode()).hexdigest(),
+                source=parent,
+                replacements=replacements(self.variant),
+            )
+        materials = Materials(declaration.replacements) if declaration is not None else None
+        original_before = declaration.source.before_sequence if declaration is not None else None
+        if materials is not None:
+            original_records = records
+            if source.manifest.variant is not None:
+                assert declaration is not None
+                original_source = resources.enter_context(
+                    closing(Journal.open(declaration.source.archive))
+                )
+                original_records = original_source.timeline(stop=original_before)
+            materials.preflight(
+                tuple(
+                    record
+                    for record in original_records
+                    if isinstance(record, (ModelRecord, MaterialRecord))
+                )
+            )
+        manifest = plan.manifest.model_copy(
+            update={
+                "recording_id": uuid4().hex,
+                "parent": parent,
+                "variant": declaration,
+            }
         )
-    except ValidationError as error:
-        return TakeoverIncomplete(
-            branch,
-            anchor,
-            NativeUncertain(stage, IncompleteCause.PROTOCOL, str(error)),
-            recording_id=recording_id,
+        journal = resources.enter_context(closing(Journal.create(self.branch, manifest)))
+        self.recording_id = journal.manifest.recording_id
+        if isinstance(self.case.endpoint, AfterDecisionsSpec):
+            endpoint = AfterDecisions(self.case.endpoint.count)
+        else:
+            node = plan.target.location.node_id
+            assert node is not None
+            endpoint = BattleEnd(node)
+        host = SampleHost(self.budget, endpoint, journal)
+        reached: asyncio.Future[Reached] = asyncio.get_running_loop().create_future()
+        release = asyncio.Event()
+        # Only the original source target still needs material mapping.
+        mapping_before = material_boundary(source)
+        timeline = Timeline(records, materials, mapping_before)
+
+        def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
+            async def continue_live(
+                input: ModelInput,
+                tools: tuple[ToolDefinition, ...],
+            ) -> ModelReply:
+                await release.wait()
+                return await switch.current.model(role, stream).complete(input, tools)
+
+            historical = ReplayModel(
+                timeline, role, stream, self.case.source.anchor, reached, continue_live
+            )
+
+            class Model:
+                async def complete(
+                    self,
+                    input: ModelInput,
+                    tools: tuple[ToolDefinition, ...],
+                ) -> ModelReply:
+                    treated_tools = materials.tools(tools) if materials is not None else tools
+                    if switch.live:
+                        return await switch.current.model(role, stream).complete(
+                            input, treated_tools
+                        )
+                    return await historical.complete(input, treated_tools)
+
+            return Model()
+
+        switch = _Switch(
+            SessionDependencies(
+                ReplayGame(timeline),
+                ReplayPrompts(timeline),
+                ReplayDocuments(timeline),
+                factory,
+            )
         )
-    except (HeadlessError, TemplateError) as error:
-        return TakeoverIncomplete(
-            branch,
-            anchor,
-            NativeUncertain(stage, IncompleteCause.STARTUP, str(error)),
-            recording_id=recording_id,
+
+        dependencies = SessionDependencies(
+            _GameProxy(switch),
+            RejectingPrompts(lambda: switch.current.prompts),
+            RejectingDocuments(lambda: switch.current.documents),
+            factory,
         )
-    finally:
-        # Cleanup failures must not turn a caller cancellation into a normal result.
-        if caller_cancellation is not None:
-            raise caller_cancellation
-        if caller.cancelling() > initial_cancellations:
-            raise asyncio.CancelledError
+
+        def stopped() -> bool:
+            self.operator_stopped = self.operator_stopped or self.stop_requested()
+            return self.operator_stopped or host.stop_requested()
+
+        async def run() -> SampleResult:
+            async with RunSession(plan.manifest, dependencies, diagnostics=None) as session:
+                first = records[0]
+                if isinstance(first, Record) and first.request == Pause():
+                    await session.start()
+                elif not isinstance(first, Record) or first.request != Admit():
+                    unsupported(first.sequence, UnsupportedCause.START_MODE)
+                try:
+                    return await host.run(session)
+                except SessionStopped:
+                    if not switch.live:
+                        unsupported(None, UnsupportedCause.UNEXPECTED_END)
+                    raise
+
+        task = asyncio.create_task(run())
+        try:
+            await asyncio.wait((task, reached), return_when=asyncio.FIRST_COMPLETED)
+            if task.done():
+                await task
+                raise RuntimeError("The replay stopped without reaching its target.")
+            self.anchor = reached.result()
+            if (
+                self.anchor.confirmed_operation_cursor != self.case.source.target_cursor
+                or self.anchor.semantic_digest != self.case.source.semantic_digest
+            ):
+                raise ReplayRejected(
+                    Rejected(
+                        RejectReason.INPUT_MISMATCH,
+                        self.case.source.anchor.model_sequence,
+                        InputDifference(InputComponent.CURSOR),
+                    )
+                )
+            self.stage = Stage.LOAD
+            async with self.restorer.loaded(self.case) as loaded:
+                location = loaded.read.observation.location
+                assert location.run_id is not None
+
+                def status(value: native.Status, waiting: bool) -> None:
+                    journal.diagnostics.native_status(value, waiting)
+                    host.native_status(value, waiting)
+
+                game = IdentityGame(
+                    LiveGame(
+                        loaded.client,
+                        namespace=manifest.recording_id,
+                        audit=journal,
+                        game_instance_id=location.game_instance_id,
+                        run_id=location.run_id,
+                        settle_confirmation_seconds=SETTLE_CONFIRMATION_SECONDS,
+                        on_status=status,
+                        stop_requested=stopped,
+                    ),
+                    TargetIdentity(plan.target.location, location, loaded.refs),
+                )
+
+                def live_model(role: native.DecisionOwner, stream: str) -> ModelClient:
+                    return RecordedLlm(self.model, journal, role=role, stream=stream)
+
+                live = SessionDependencies(
+                    host.game(RecordedGame(game, journal)),
+                    RecordedPrompts(
+                        VariantPrompts(self.prompts, materials)
+                        if materials is not None
+                        else self.prompts,
+                        journal,
+                    ),
+                    RecordedDocuments(
+                        VariantDocuments(self.documents, materials)
+                        if materials is not None
+                        else self.documents,
+                        journal,
+                    ),
+                    host.models(live_model),
+                )
+                host.arm(game.observation(loaded.read.observation))
+                control = await loaded.client.control(native.ControlIntent.RUNNING)
+                if (
+                    not isinstance(control, native.ControlReply)
+                    or control.mode is not native.ControlIntent.RUNNING
+                ):
+                    raise CheckpointUncertain("The live Start intent was not confirmed.")
+                switch.current = live
+                switch.live = True
+                released = True
+                release.set()
+                sample = await self._finish(task)
+                if isinstance(sample, Completed):
+                    return TakeoverCompleted(
+                        self.branch, self.anchor, sample, recording_id=self.recording_id
+                    )
+                assert isinstance(sample, Incomplete)
+                return TakeoverIncomplete(
+                    self.branch, self.anchor, sample, recording_id=self.recording_id
+                )
+        finally:
+            if not released:
+                task.cancel()
+                with suppress(asyncio.CancelledError, ReplayRejected):
+                    await task
