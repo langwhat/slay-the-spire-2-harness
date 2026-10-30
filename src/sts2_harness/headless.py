@@ -25,7 +25,7 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind, ControlResult, StateResult, StatusResult
 from sts2_harness.config import Configuration, ConfigurationError, Driver
 from sts2_harness.diagnostics import Diagnostics, Lifecycle
-from sts2_harness.entry_materials import EntryMaterials
+from sts2_harness.entry_materials import EntryMaterials, MaterialContext
 from sts2_harness.game import Endpoint, RunEnded, RunEndReason, SessionStopped
 from sts2_harness.journal import (
     HeadlessInitialConditions,
@@ -620,7 +620,9 @@ async def run_headless(
                     manifest,
                     archive,
                     model=Llm(model),
-                    documents=materials.documents if materials is not None else None,
+                    documents=materials.documents(MaterialContext(options.recipe.ascension))
+                    if materials is not None
+                    else None,
                     diagnostics=diagnostics,
                     stop_requested=stop_requested.is_set,
                 )

@@ -12,7 +12,7 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind
 from sts2_harness.config import Configuration, ConfigurationError, Driver, validate_mod_url
 from sts2_harness.diagnostics import Diagnostics, Event, EventKind, Lifecycle
-from sts2_harness.entry_materials import EntryMaterials
+from sts2_harness.entry_materials import EntryMaterials, MaterialContext
 from sts2_harness.game import (
     ControlWriteError,
     Endpoint,
@@ -69,21 +69,6 @@ async def run_interactive(
 
     make_client = client_factory or new_client
 
-    def new_session(
-        manifest: Manifest, path: Path, diagnostic: Diagnostics
-    ) -> AbstractAsyncContextManager[RunSession]:
-        return live_session(
-            make_client(),
-            manifest,
-            path,
-            model=Llm(model),
-            documents=materials.documents if materials is not None else None,
-            diagnostics=diagnostic,
-            stop_requested=stop_requested.is_set,
-            wait=wait,
-        )
-
-    make_session = session_factory or new_session
     paused_instance: str | None = None
     finished: tuple[str, str] | None = None
     discovery_failures = 0
@@ -204,7 +189,24 @@ async def run_interactive(
                     initial_notes="",
                 )
                 diagnostics.bind_recording(recording_id, location, archive)
-                async with make_session(manifest, archive, diagnostics) as session:
+
+                session_resource = (
+                    session_factory(manifest, archive, diagnostics)
+                    if session_factory is not None
+                    else live_session(
+                        make_client(),
+                        manifest,
+                        archive,
+                        model=Llm(model),
+                        documents=materials.documents(MaterialContext(status.ascension))
+                        if materials is not None
+                        else None,
+                        diagnostics=diagnostics,
+                        stop_requested=stop_requested.is_set,
+                        wait=wait,
+                    )
+                )
+                async with session_resource as session:
                     try:
                         await session.start()
                         paused_instance = location.game_instance_id

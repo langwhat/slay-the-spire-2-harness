@@ -16,7 +16,7 @@ from test_responses import configuration
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.config import Configuration, Driver
-from sts2_harness.entry_materials import EntryMaterials
+from sts2_harness.entry_materials import EntryMaterials, MaterialContext
 from sts2_harness.headless import HeadlessOptions, StandardRunRecipe, run_headless
 from sts2_harness.interactive import InteractiveOptions, run_interactive
 from sts2_harness.journal import Journal, SessionMaterials, StandardCharacter
@@ -44,9 +44,13 @@ def test_startup_records_supplied_material_settings_and_serves_documents(
     settings = SessionMaterials(
         entry_documents_enabled=False, act_guidance={1: ("guide",)}, battle_guidance=("guide",)
     )
-    materials = EntryMaterials(
-        FileDocuments((DocumentSource("guide", "Guide", "Rules", path),)), settings
-    )
+    contexts: list[MaterialContext] = []
+
+    def documents(context: MaterialContext) -> FileDocuments:
+        contexts.append(context)
+        return FileDocuments((DocumentSource("guide", "Guide", "Rules", path),))
+
+    materials = EntryMaterials(documents, settings)
     inputs: list[bytes] = []
     replies = iter(
         (
@@ -82,6 +86,7 @@ def test_startup_records_supplied_material_settings_and_serves_documents(
             return httpx.Response(
                 200,
                 content=native.Status(
+                    ascension=10,
                     location=observation.location,
                     input_readiness=observation.input_readiness,
                     control_intent=native.ControlIntent.RUNNING,
@@ -122,7 +127,9 @@ def test_startup_records_supplied_material_settings_and_serves_documents(
                         executable,
                         template,
                         tmp_path / "runs",
-                        recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="TEST"),
+                        recipe=StandardRunRecipe(
+                            character=StandardCharacter.IRONCLAD, ascension=10, seed="TEST"
+                        ),
                     ),
                     config,
                     stop_requested=stop,
@@ -146,6 +153,7 @@ def test_startup_records_supplied_material_settings_and_serves_documents(
         server.shutdown()
         server.server_close()
         worker.join()
+    assert contexts == [MaterialContext(10)]
     assert len(inputs) == 2
     result = next(
         item

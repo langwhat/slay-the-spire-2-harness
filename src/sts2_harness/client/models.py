@@ -975,6 +975,7 @@ class ReceiptUnknown(WireModel):
 
 
 class Status(WireModel):
+    ascension: Annotated[int, Field(ge=0)] | None = None
     location: Location
     control_intent: ControlIntent
     input_readiness: InputReadiness

@@ -1,5 +1,6 @@
 """Select configured entry guidance through the recorded public IO ports."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic import MISSING
@@ -16,8 +17,13 @@ from sts2_harness.results import Reason, ReasonCode
 
 
 @dataclass(frozen=True, slots=True)
+class MaterialContext:
+    ascension: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class EntryMaterials:
-    documents: Documents
+    documents: Callable[[MaterialContext], Documents]
     settings: SessionMaterials
 
 
