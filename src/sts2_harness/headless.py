@@ -176,7 +176,7 @@ class OwnedHeadlessInstance:
             name = "STS2-Harness-" + uuid4().hex
             (engine / "game.pck").symlink_to(packs[0])
             (engine / "override.cfg").write_text(
-                "[application]\nconfig/use_custom_user_dir=true\n"
+                '[application]\nrun/main_scene="res://harness_audio/game.tscn"\nconfig/use_custom_user_dir=true\n'
                 f'config/custom_user_dir_name="{name}"\n'
                 '\n[sentry]\nconfig/dsn=""\noptions/auto_init=false\n' + configure_audio(engine)
             )

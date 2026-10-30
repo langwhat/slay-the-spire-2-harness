@@ -1,5 +1,10 @@
 extends Node
 
+const SCENES: Dictionary[String, String] = {
+    "game": "res://harness_audio/game.tscn",
+    "run": "res://scenes/run.tscn",
+}
+
 var _directory: String
 
 func _init() -> void:
@@ -40,7 +45,7 @@ func prepare() -> bool:
         file.close()
         if not _check(result, "Write audio scene"):
             return false
-        if not _check(pack.add_file("res://scenes/" + name + ".tscn", path), "Pack audio scene"):
+        if not _check(pack.add_file(SCENES[name], path), "Pack audio scene"):
             return false
     for name: String in ["audio_proxy", "music_proxy"]:
         if not _check(pack.add_file("res://harness_audio/" + name + ".gd", _directory + "/" + name + ".gd"), "Pack audio proxy"):
@@ -50,7 +55,7 @@ func prepare() -> bool:
     if not ProjectSettings.load_resource_pack(_directory + "/overlay.pck", true):
         return _error("Cannot verify the audio overlay.")
     for name: String in ["game", "run"]:
-        var scene := ResourceLoader.load("res://scenes/" + name + ".tscn", "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
+        var scene := ResourceLoader.load(SCENES[name], "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
         if scene == null:
             return _error("Cannot load the prepared audio scene: " + name)
         var state := scene.get_state()
