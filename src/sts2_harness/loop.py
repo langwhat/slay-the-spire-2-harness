@@ -1,7 +1,7 @@
 """Schedule one run's roles, act entry, and pending battle handoff."""
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, assert_never
 
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatTask
@@ -132,16 +132,19 @@ class DefaultFlow:
                     self._pending = None
                     observation = None
                     continue
-                if isinstance(outcome, Executed):
-                    if outcome.ended is not None:
-                        return outcome.ended
-                    if outcome.handoff_processed:
-                        self._pending = None
-                    observation = outcome.outcome.observation
-                elif isinstance(outcome, (Rejected, RouteChanged)):
-                    observation = outcome.observation
-                else:
-                    observation = None
+                match outcome:
+                    case Executed():
+                        if outcome.ended is not None:
+                            return outcome.ended
+                        if outcome.handoff_processed:
+                            self._pending = None
+                        observation = outcome.outcome.observation
+                    case Rejected() | RouteChanged():
+                        observation = outcome.observation
+                    case Interrupted():
+                        observation = None
+                    case _:
+                        assert_never(outcome)
                 if observation is not None:
                     ended = self._execution.run_ended(observation)
                     if ended is not None:
