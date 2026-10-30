@@ -165,13 +165,15 @@ failures are ERROR. Same-request retry warnings are combined for up to 60 second
 with cumulative failure totals on recovery or exhaustion. Journal attempts remain complete.
 Embedded callers can temporarily construct `Diagnostics(..., level=logging.DEBUG)`
 to include model encoding digests under the same output cap; prompts and wire bodies
-are not diagnostic metadata. Failed destinations are disabled independently.
+are not diagnostic metadata. Failed destinations retry independently after one second.
 The Journal is never rotated with diagnostics. Keep archives outside the repository.
-Inspect an active archive through `sts2 journal` or a SQLite read-only connection, without
-holding a read transaction open. External writers and checkpoint operations are unsupported
-while its Journal is recording. Sealing failures leave the archive and WAL in place and are
-diagnosed without interrupting ordinary gameplay or cancellation; keep both files until the
-archive can be sealed. Evaluation artifacts require a successfully sealed standalone archive.
+Inspect an active archive through `sts2 journal` or a SQLite read-only connection; close
+the connection before recording ends. External writers and checkpoint operations are
+unsupported while its Journal is recording. Sealing failures leave the archive and WAL in
+place and are diagnosed without interrupting ordinary gameplay or cancellation. Preserve
+both files for inspection; no recovery command currently seals them afterward. Evaluation
+binding and admission reject unsealed archives, as does pruning a scope containing one.
+Evaluation artifacts require a successfully sealed standalone archive.
 
 Inspect recorded facts without startup configuration or network access:
 
