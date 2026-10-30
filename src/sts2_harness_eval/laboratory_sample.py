@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import Callable
-from contextlib import closing
 from hashlib import file_digest
 from math import isfinite
 from pathlib import Path
@@ -39,6 +38,7 @@ from sts2_harness_eval.sample import (
     OperatorStopped,
     SampleBudget,
     SampleHost,
+    StopCause,
     finish_after_stop,
 )
 
@@ -224,8 +224,9 @@ async def run_laboratory_sample(
         caller = asyncio.current_task()
         assert caller is not None
         initial_cancellations = caller.cancelling()
+        sealed = False
         try:
-            with closing(journal):
+            try:
                 target = (
                     AfterDecisions(endpoint.count)
                     if isinstance(endpoint, AfterDecisionsSpec)
@@ -257,16 +258,34 @@ async def run_laboratory_sample(
                 host.arm(opening)
                 task = asyncio.create_task(sample.run(manifest, dependencies))
                 outcome = await finish_after_stop(task, sample.stop)
+            finally:
+                journal.close()
+                sealed = True
+        except ArchiveError:
+            if isinstance(outcome, (Completed, Incomplete)):
+                outcome = Incomplete(
+                    StopCause.RECORDING_UNAVAILABLE, outcome.decisions, outcome.requests
+                )
+            elif (
+                isinstance(outcome, OperatorStopped)
+                or caller.cancelling() > initial_cancellations
+            ):
+                outcome = OperatorStopped()
+            else:
+                raise
         except asyncio.CancelledError:
             outcome = OperatorStopped()
             raise
         finally:
             try:
-                archive = ArchiveRef(
-                    path=path,
-                    recording_id=manifest.recording_id,
-                    sha256=_digest(path),
-                )
+                if caller.cancelling() > initial_cancellations:
+                    outcome = OperatorStopped()
+                if sealed:
+                    archive = ArchiveRef(
+                        path=path,
+                        recording_id=manifest.recording_id,
+                        sha256=_digest(path),
+                    )
                 result = _result(directory, archive, outcome, started)
             finally:
                 if caller.cancelling() > initial_cancellations:

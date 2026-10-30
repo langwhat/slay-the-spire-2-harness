@@ -961,6 +961,16 @@ def test_initial_archive_disk_failure_keeps_gameplay_and_recovers_recording(tmp_
                 and "recording_recovered" in console.getvalue()
             )
             assert console.getvalue().count('"event":"recording_gap"') == 1
+            import json
+
+            gap_event = next(
+                json.loads(line)
+                for line in console.getvalue().splitlines()
+                if json.loads(line).get("event") == "recording_gap"
+            )
+            assert gap_event["exception"]["type"] == "PermissionError"
+            assert gap_event["os_error_code"] == 13
+            assert "sqlite_error_code" not in gap_event
         finally:
             directory.chmod(0o700)
 
@@ -1880,7 +1890,12 @@ def test_short_read_transaction_preserves_the_contending_write(tmp_path: Path) -
         reader.close()
 
 
-def test_unreleased_read_transaction_marks_a_gap_and_recovers(tmp_path: Path) -> None:
+def test_public_reader_does_not_drop_game_evidence(tmp_path: Path) -> None:
+    import shutil
+
+    from sts2_harness.game import GameReply, Observed
+
+    observation = native.Observation.model_validate_json(RUN)
     journal = Journal.create(
         tmp_path / "archive.sqlite",
         Manifest(
@@ -1893,23 +1908,106 @@ def test_unreleased_read_transaction_marks_a_gap_and_recovers(tmp_path: Path) ->
             run_id="run",
         ),
     )
+    reply = GameReply(outcome=Observed(observation=observation), observations=(observation,))
     journal.begin(Observe())
+    journal.finish(reply)
     journal.end()
-    with closing(sqlite3.connect(f"{journal.path.as_uri()}?mode=ro", uri=True)) as lock:
-        lock.execute("BEGIN")
-        lock.execute("SELECT COUNT(*) FROM records").fetchone()
+    with closing(sqlite3.connect(f"{journal.path.as_uri()}?mode=ro", uri=True)) as reader:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM records").fetchone()
         started = time.monotonic()
         journal.begin(Observe())
+        journal.finish(reply)
         journal.end()
         assert time.monotonic() - started < 1
-        assert [(gap.first_sequence, gap.last_sequence) for gap in journal.gaps] == [(2, 2)]
-    journal.begin(Observe())
-    journal.end()
+        assert journal.gaps == ()
     journal.close()
 
-    reader = Journal.open(journal.path)
+    retained = tmp_path / "retained" / "archive.sqlite"
+    retained.parent.mkdir()
+    shutil.copyfile(journal.path, retained)
+    retained.chmod(0o444)
+    retained.parent.chmod(0o555)
     try:
-        assert [item.sequence for item in reader.summaries()] == [1, 3]
-        assert [(gap.first_sequence, gap.last_sequence) for gap in reader.gaps] == [(2, 2)]
+        with closing(Journal.open(retained)) as reopened:
+            records = reopened.operations()
+            assert [record.sequence for record in records] == [1, 2]
+            assert all(record.reply is not None for record in records)
+            assert all(
+                record.reply.observations == (observation,) for record in records if record.reply
+            )
+            assert reopened.gaps == ()
+        assert tuple(retained.parent.iterdir()) == (retained,)
     finally:
-        reader.close()
+        retained.parent.chmod(0o700)
+        retained.chmod(0o600)
+
+
+def test_recording_cannot_claim_single_file_seal_while_reader_holds_wal(tmp_path: Path) -> None:
+    from sts2_harness.game import GameReply, Observed
+    from sts2_harness.journal import ArchiveError
+
+    observation = native.Observation.model_validate_json(RUN)
+    journal = Journal.create(
+        tmp_path / "archive.sqlite",
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="sealing",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
+    )
+    journal.begin(Observe())
+    journal.end()
+    with closing(sqlite3.connect(f"{journal.path.as_uri()}?mode=ro", uri=True)) as reader:
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM records").fetchone()
+        journal.begin(Observe())
+        journal.finish(
+            GameReply(outcome=Observed(observation=observation), observations=(observation,))
+        )
+        journal.end()
+        with pytest.raises(ArchiveError, match="Cannot seal"):
+            journal.close()
+    journal.close()
+    with closing(Journal.open(journal.path)) as reopened:
+        assert len(reopened.operations()) == 2
+        assert reopened.operation(2).reply is not None
+        assert reopened.gaps == ()
+
+
+def test_sealing_after_storage_recovers_retains_unwritten_gap_evidence(tmp_path: Path) -> None:
+    from sts2_harness.journal import ArchiveError
+
+    journal = Journal.create(
+        tmp_path / "archive.sqlite",
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="seal-recovery",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
+    )
+    journal.begin(Observe())
+    journal.end()
+    retained = tmp_path / "retained.sqlite"
+    journal.path.rename(retained)
+    journal.path.mkdir()
+    try:
+        journal.begin(Observe())
+        journal.end()
+        with pytest.raises(ArchiveError, match="Cannot seal"):
+            journal.close()
+    finally:
+        journal.path.rmdir()
+        retained.rename(journal.path)
+    journal.close()
+    with closing(Journal.open(journal.path)) as reopened:
+        assert [(gap.first_sequence, gap.last_sequence) for gap in reopened.gaps] == [(2, 2)]
+        assert [record.sequence for record in reopened.operations()] == [1]

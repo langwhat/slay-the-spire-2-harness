@@ -14,7 +14,7 @@ from pydantic import Field, TypeAdapter, ValidationError, field_validator, model
 
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
-from sts2_harness.diagnostics import Diagnostics, Event, EventKind
+from sts2_harness.diagnostics import Diagnostics, Event, EventKind, RecordingGap
 from sts2_harness.game import (
     Admit,
     Admitted,
@@ -350,11 +350,9 @@ class Journal:
             raise
         try:
             journal._initialize()
-        except (OSError, sqlite3.OperationalError):
+        except (OSError, sqlite3.OperationalError) as error:
             journal._storage_error = GapCause.STORAGE_UNAVAILABLE
-            journal.diagnostics.emit(
-                Event(event=EventKind.RECORDING_GAP, error=GapCause.STORAGE_UNAVAILABLE.value)
-            )
+            journal.diagnostics.emit(RecordingGap.capture(error))
         return journal
 
     def _inherit_parent(self) -> None:
@@ -447,6 +445,8 @@ class Journal:
             closing(sqlite3.connect(self.path, timeout=_WRITE_TIMEOUT_SECONDS)) as connection,
             connection,
         ):
+            if connection.execute("PRAGMA journal_mode=WAL").fetchone() != ("wal",):
+                raise sqlite3.OperationalError("Cannot enable concurrent recording reads.")
             connection.executescript(_SCHEMA)
             connection.execute(
                 "INSERT OR REPLACE INTO manifest VALUES (1,?)", (self.manifest.model_dump_json(),)
@@ -1090,7 +1090,7 @@ class Journal:
         self._active_attempt = 0
         self.diagnostics.finished()
 
-    def _mark_gap(self) -> None:
+    def _mark_gap(self, error: OSError | sqlite3.DatabaseError) -> None:
         self._boundary = None
         self._storage_error = GapCause.STORAGE_UNAVAILABLE
         if self._pending_gaps and self._pending_gaps[-1].last_sequence >= self._sequence - 1:
@@ -1102,13 +1102,7 @@ class Journal:
             self._pending_gaps.append(
                 Gap(first_sequence=self._sequence, last_sequence=self._sequence)
             )
-        self.diagnostics.emit(
-            Event(
-                event=EventKind.RECORDING_GAP,
-                sequence=self._sequence,
-                error=GapCause.STORAGE_UNAVAILABLE.value,
-            )
-        )
+        self.diagnostics.emit(RecordingGap.capture(error, self._sequence))
 
     @contextmanager
     def _storage(self) -> Generator[sqlite3.Connection | None]:
@@ -1116,8 +1110,8 @@ class Journal:
             if not self._initialized:
                 self._initialize()
             connection = sqlite3.connect(self.path, timeout=_WRITE_TIMEOUT_SECONDS)
-        except (OSError, sqlite3.OperationalError):
-            self._mark_gap()
+        except (OSError, sqlite3.OperationalError) as error:
+            self._mark_gap(error)
             yield None
             return
         try:
@@ -1129,9 +1123,9 @@ class Journal:
         except (sqlite3.ProgrammingError, sqlite3.IntegrityError):
             connection.close()
             raise
-        except (OSError, sqlite3.DatabaseError):
+        except (OSError, sqlite3.DatabaseError) as error:
             connection.close()
-            self._mark_gap()
+            self._mark_gap(error)
             yield None
             return
         try:
@@ -1139,8 +1133,8 @@ class Journal:
                 yield connection
         except (sqlite3.ProgrammingError, sqlite3.IntegrityError):
             raise
-        except (OSError, sqlite3.DatabaseError):
-            self._mark_gap()
+        except (OSError, sqlite3.DatabaseError) as error:
+            self._mark_gap(error)
         else:
             recovered = self._storage_error is not None
             self._storage_error = None
@@ -1432,8 +1426,30 @@ class Journal:
     def close(self) -> None:
         if self._active_sequence is not None:
             raise RuntimeError("Cannot close an active recording operation.")
+        try:
+            if self._initialized and not self._read_only:
+                with closing(
+                    sqlite3.connect(self.path, timeout=_WRITE_TIMEOUT_SECONDS)
+                ) as connection:
+                    with connection:
+                        for gap in self._pending_gaps:
+                            connection.execute(
+                                "INSERT OR REPLACE INTO gaps VALUES (?,?,?)",
+                                (gap.first_sequence, gap.last_sequence, gap.cause.value),
+                            )
+                    self._pending_gaps.clear()
+                    busy, _, _ = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                    if busy:
+                        raise ArchiveError(
+                            "Cannot seal a recording while database readers are active."
+                        )
+                    if connection.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
+                        raise ArchiveError("Cannot seal the recording as a standalone archive.")
+        except (OSError, sqlite3.DatabaseError):
+            raise ArchiveError("Cannot seal the recording as a standalone archive.") from None
+        finally:
+            self._resources.close()
         self._read_only = True
-        self._resources.close()
 
     @property
     def storage(self) -> "StorageSummary":

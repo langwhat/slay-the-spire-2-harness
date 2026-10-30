@@ -1,4 +1,6 @@
 import asyncio
+import sqlite3
+from contextlib import closing
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -24,7 +26,7 @@ from sts2_harness_eval.laboratory_sample import (
     LaboratorySource,
     run_laboratory_sample,
 )
-from sts2_harness_eval.sample import Completed, OperatorStopped, SampleBudget
+from sts2_harness_eval.sample import Completed, Incomplete, OperatorStopped, SampleBudget, StopCause
 
 MATERIALS = SessionMaterials(entry_documents_enabled=False, act_guidance={}, battle_guidance=())
 
@@ -87,13 +89,13 @@ def test_unconfirmed_construction_preserves_source_without_start_or_model(
 
 @pytest.mark.parametrize(
     ("cancel", "failure"),
-    [(0, None), (1, None), (2, None), (2, "feedback"), (2, "cleanup")],
+    [(0, None), (1, None), (2, None), (2, "feedback"), (2, "cleanup"), (2, "seal")],
 )
 def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cancel: int,
-    failure: Literal["feedback", "cleanup"] | None,
+    failure: Literal["feedback", "cleanup", "seal"] | None,
 ) -> None:
     game = LaboratoryGame()
     game.states.insert(1, game.states[0])
@@ -104,6 +106,12 @@ def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_eviden
     close = Journal.close
 
     def close_recording(journal: Journal) -> None:
+        if failure == "seal":
+            with closing(sqlite3.connect(journal.path)) as reader:
+                reader.execute("BEGIN")
+                reader.execute("SELECT COUNT(*) FROM records").fetchone()
+                close(journal)
+            return
         close(journal)
         if failure == "cleanup":
             raise OSError("Synthetic cleanup failure")
@@ -168,10 +176,13 @@ def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_eviden
     asyncio.run(scenario())
     assert len(game.actions) == 2
     result = LaboratoryResult.model_validate_json((directory / "result.json").read_bytes())
-    assert result.archive is not None
-    assert result.archive.sha256 == sha256(result.archive.path.read_bytes()).hexdigest()
+    if failure in ("cleanup", "seal"):
+        assert result.archive is None
+    else:
+        assert result.archive is not None
+        assert result.archive.sha256 == sha256(result.archive.path.read_bytes()).hexdigest()
     assert game.calls.count("/operator/eval/scenario") == 1
-    journal = Journal.open(result.archive.path)
+    journal = Journal.open(directory / "journal.sqlite")
     try:
         settled = [
             record
@@ -219,15 +230,26 @@ class LaboratoryGame(Campaign):
         return super().mod(request)
 
 
-def test_sample_starts_in_combat_and_closes_an_independently_readable_recording(
-    tmp_path: Path,
+@pytest.mark.parametrize("block_seal", (False, True))
+def test_sample_starts_in_combat_and_requires_an_independently_readable_recording(
+    tmp_path: Path, block_seal: bool
 ) -> None:
     game = LaboratoryGame()
     directory = tmp_path / "sample"
+    reader: sqlite3.Connection | None = None
+
+    def native_reply(request: httpx.Request) -> httpx.Response:
+        nonlocal reader
+        response = game.mod(request)
+        if block_seal and reader is None and request.url.path == "/state" and game.actions:
+            reader = sqlite3.connect(f"{(directory / 'journal.sqlite').as_uri()}?mode=ro", uri=True)
+            reader.execute("BEGIN")
+            reader.execute("SELECT COUNT(*) FROM records").fetchone()
+        return response
 
     async def scenario() -> LaboratoryResult:
         async with (
-            ModClient("http://mod", transport=httpx.MockTransport(game.mod)) as client,
+            ModClient("http://mod", transport=httpx.MockTransport(native_reply)) as client,
             LaboratoryClient("http://mod", transport=httpx.MockTransport(game.mod)) as laboratory,
             Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)) as model,
         ):
@@ -248,7 +270,17 @@ def test_sample_starts_in_combat_and_closes_an_independently_readable_recording(
             assert isinstance(await client.status(), native.Status)
             return result
 
-    result = asyncio.run(scenario())
+    try:
+        result = asyncio.run(scenario())
+    finally:
+        if reader is not None:
+            reader.close()
+    if block_seal:
+        assert result.sample == Incomplete(StopCause.RECORDING_UNAVAILABLE, 1, 1)
+        assert result.archive is None
+        saved = LaboratoryResult.model_validate_json((directory / "result.json").read_bytes())
+        assert saved == result
+        return
     assert isinstance(result.sample, Completed)
     assert result.sample.decisions == 1 and result.sample.requests == 1
     assert game.calls.count("/operator/eval/scenario") == 1

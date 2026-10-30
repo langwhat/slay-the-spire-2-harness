@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import time
 import traceback
@@ -118,6 +119,27 @@ class ExceptionDetails(native.WireModel):
                 )
             )
         return cls(type=type(error).__name__, frames=tuple(frames))
+
+
+class RecordingGap(Event):
+    event: EventKind = EventKind.RECORDING_GAP
+    exception: ExceptionDetails
+    os_error_code: int | None
+    sqlite_error_code: int | None
+
+    @classmethod
+    def capture(
+        cls, error: OSError | sqlite3.DatabaseError, sequence: int | None = None
+    ) -> "RecordingGap":
+        return cls(
+            error="storage_unavailable",
+            sequence=sequence,
+            exception=ExceptionDetails.capture(error),
+            os_error_code=error.errno if isinstance(error, OSError) else None,
+            sqlite_error_code=error.sqlite_errorcode
+            if isinstance(error, sqlite3.DatabaseError) and hasattr(error, "sqlite_errorcode")
+            else None,
+        )
 
 
 class ToolFinished(ResultEvent):
@@ -313,23 +335,26 @@ def _event_component(event: Event) -> Literal["game_control", "model", "session"
 
 
 _SEGMENT_BYTES = 10 * 1024 * 1024
+_SINK_RETRY_SECONDS = 1.0
 
 
 class _BoundedFile(logging.Handler):
     def __init__(self, path: Path) -> None:
         super().__init__()
         self._path = path
-        self._failed = False
+        self._retry_at = 0.0
         self._size = path.stat().st_size if path.exists() else 0
 
     def emit(self, record: logging.LogRecord) -> None:
-        if self._failed:
+        if time.monotonic() < self._retry_at:
             return
         encoded = (self.format(record) + "\n").encode("utf-8")
         # Fixed, bounded event fields keep a structured line below one segment.
         if len(encoded) > _SEGMENT_BYTES:
             return
         try:
+            if self._retry_at:
+                self._size = self._path.stat().st_size if self._path.exists() else 0
             if self._size + len(encoded) > _SEGMENT_BYTES:
                 oldest = self._path.with_name(self._path.name + ".2")
                 oldest.unlink(missing_ok=True)
@@ -342,24 +367,26 @@ class _BoundedFile(logging.Handler):
             with self._path.open("ab") as stream:
                 stream.write(encoded)
             self._size += len(encoded)
+            self._retry_at = 0.0
         except OSError:
-            self._failed = True
+            self._retry_at = time.monotonic() + _SINK_RETRY_SECONDS
 
 
 class _QuietConsole(logging.StreamHandler[TextIO]):
     def __init__(self, stream: TextIO) -> None:
         super().__init__(stream)
-        self._failed = False
+        self._retry_at = 0.0
 
     def emit(self, record: logging.LogRecord) -> None:
-        if self._failed:
+        if time.monotonic() < self._retry_at:
             return
         text = self.format(record) + self.terminator
         try:
             self.stream.write(text)
             self.flush()
+            self._retry_at = 0.0
         except (OSError, UnicodeError, ValueError):
-            self._failed = True
+            self._retry_at = time.monotonic() + _SINK_RETRY_SECONDS
 
 
 class RetryChannel(StrEnum):
@@ -409,7 +436,7 @@ class Diagnostics:
                 handler.setFormatter(logging.Formatter("%(message)s"))
                 self._logger.addHandler(handler)
         self._retry_reports: dict[_RetryKey, _RetryReport] = {}
-        self._status_failed = False
+        self._status_retry_at = 0.0
         self._storage_error: str | None = None
         self._storage_report = 0.0
         self._storage_suppressed = 0
@@ -676,17 +703,18 @@ class Diagnostics:
         )
 
     def _write_status(self, status: Status) -> None:
-        if self._status == status:
+        if self._status == status and not self._status_retry_at:
             return
         self._status = status
-        if self._directory is None or self._status_failed:
+        if self._directory is None or time.monotonic() < self._status_retry_at:
             return
         try:
             temporary = self._directory / "status.json.tmp"
             temporary.write_text(status.model_dump_json(), encoding="utf-8")
             temporary.replace(self._directory / "status.json")
+            self._status_retry_at = 0.0
         except (OSError, UnicodeError):
-            self._status_failed = True
+            self._status_retry_at = time.monotonic() + _SINK_RETRY_SECONDS
 
     def close(self) -> None:
         for handler in self._logger.handlers:

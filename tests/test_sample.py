@@ -287,11 +287,16 @@ def test_recording_failure_prevents_completion_even_after_storage_recovers(
             async with sample(
                 directory / "sample.sqlite", campaign, SampleBudget(10, 10), AfterDecisions(1)
             ) as (host, journal, session):
-                host.arm()
-                assert await host.run(session) == Incomplete(StopCause.RECORDING_UNAVAILABLE, 1, 1)
-                assert journal.gaps
-                assert (journal.availability.error is None) is recover
-                assert len(campaign.actions) == 1
+                try:
+                    host.arm()
+                    assert await host.run(session) == Incomplete(
+                        StopCause.RECORDING_UNAVAILABLE, 1, 1
+                    )
+                    assert journal.gaps
+                    assert (journal.availability.error is None) is recover
+                    assert len(campaign.actions) == 1
+                finally:
+                    campaign.restore()
         finally:
             campaign.restore()
 

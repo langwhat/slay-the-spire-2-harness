@@ -3,6 +3,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import AsyncIterator
+from contextlib import closing
 from dataclasses import replace
 from io import StringIO
 from pathlib import Path
@@ -371,7 +372,7 @@ def test_recording_recovers_from_a_locked_archive_without_using_a_missing_input_
                 TextRole.SYSTEM, MaterialText.create("prompt:test", "Instructions.")
             )
             first = await model.complete((initial,), ())
-            with sqlite3.connect(journal.path, timeout=0) as lock:
+            with closing(sqlite3.connect(journal.path, timeout=0)) as lock, lock:
                 lock.execute("BEGIN EXCLUSIVE")
                 second_input = (initial, first.assistant, TextMessage(TextRole.USER, "Next."))
                 second = await model.complete(second_input, ())
@@ -645,13 +646,13 @@ def test_summary_storage_failure_preserves_gap_and_allows_later_model_recording(
     messages = archive_input((TextMessage(TextRole.USER, "Keep playing after archive failure."),))
     snapshot = ConfigurationSnapshot.of(configuration(tmp_path))
     # A missing index destination simulates a failed SQLite write, not a model failure.
-    with sqlite3.connect(journal.path) as connection:
+    with closing(sqlite3.connect(journal.path)) as connection, connection:
         connection.execute("ALTER TABLE summaries RENAME TO unavailable_summaries")
     failed = journal.begin_model(
         native.DecisionOwner.RUN, "run", messages, ToolSet(tools=()), snapshot
     )
     assert journal.availability.error is not None
-    with sqlite3.connect(journal.path) as connection:
+    with closing(sqlite3.connect(journal.path)) as connection, connection:
         connection.execute("ALTER TABLE unavailable_summaries RENAME TO summaries")
     journal.model_attempt(failed, ModelAttempt(index=1))
     journal.finish_model(failed)

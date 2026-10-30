@@ -118,18 +118,26 @@ def test_debug_metadata_and_utf8_events_share_three_bounded_segments(tmp_path: P
     assert len(quiet.getvalue().splitlines()) == 1
 
 
-def test_failed_destinations_disable_themselves_without_blocking_evidence(tmp_path: Path) -> None:
+def test_transient_destination_failures_recover_without_blocking_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from sts2_harness.diagnostics import Lifecycle
     from sts2_harness.journal import Journal, Manifest
 
-    class BrokenConsole(StringIO):
+    now = 0.0
+    monkeypatch.setattr("sts2_harness.diagnostics.time.monotonic", lambda: now)
+
+    class RecoveringConsole(StringIO):
         writes = 0
+        available = False
 
         def write(self, text: str) -> int:
             self.writes += 1
-            raise OSError("Synthetic sink unavailable")
+            if not self.available:
+                raise OSError("Synthetic sink unavailable")
+            return super().write(text)
 
-    console = BrokenConsole()
+    console = RecoveringConsole()
     broken_file = tmp_path / "diagnostics.jsonl"
     broken_file.mkdir()
     blocked = tmp_path / "status.json.tmp"
@@ -138,7 +146,11 @@ def test_failed_destinations_disable_themselves_without_blocking_evidence(tmp_pa
     diagnostics.lifecycle(Lifecycle.RUNNING)
     blocked.rmdir()
     broken_file.rmdir()
+    console.available = True
     diagnostics.lifecycle(Lifecycle.PAUSED)
+    assert console.writes == 1
+    now = 2.0
+    diagnostics.lifecycle(Lifecycle.RUNNING)
     journal = Journal.create(
         tmp_path / "evidence.sqlite",
         Manifest(
@@ -154,9 +166,9 @@ def test_failed_destinations_disable_themselves_without_blocking_evidence(tmp_pa
     )
     journal.close()
     diagnostics.close()
-    assert console.writes == 1
-    assert not (tmp_path / "status.json").exists()
-    assert not broken_file.exists()
+    assert console.writes == 2
+    assert json.loads((tmp_path / "status.json").read_text())["lifecycle"] == "running"
+    assert json.loads(broken_file.read_text())["result"] == "running"
     reader = Journal.open(journal.path)
     assert reader.operations() == ()
     reader.close()
