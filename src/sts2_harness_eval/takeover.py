@@ -104,6 +104,7 @@ from sts2_harness_eval.sample import (
     Completed,
     Endpoint,
     Incomplete,
+    OperatorStopped,
     SampleBudget,
     SampleHost,
     SampleResult,
@@ -132,11 +133,6 @@ class NativeUncertain:
     stage: Stage
     cause: IncompleteCause
     message: str
-
-
-@dataclass(frozen=True, slots=True)
-class OperatorStopped:
-    """The caller's explicit stop reached a complete execution boundary."""
 
 
 type Refusal = Rejected | AdmissionUnsupported | Mismatch | CheckpointCause | ProtocolMismatch

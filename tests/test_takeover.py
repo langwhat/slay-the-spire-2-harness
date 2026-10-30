@@ -834,7 +834,7 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
                 with pytest.raises(asyncio.CancelledError):
                     await task
             else:
-                from sts2_harness_eval.takeover import OperatorStopped
+                from sts2_harness_eval.sample import OperatorStopped
 
                 result = await task
                 assert isinstance(result, TakeoverIncomplete)

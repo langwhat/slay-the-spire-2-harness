@@ -36,11 +36,11 @@ from sts2_harness_eval.sample import (
     BattleEnd,
     Completed,
     Incomplete,
+    OperatorStopped,
     SampleBudget,
     SampleHost,
     finish_after_stop,
 )
-from sts2_harness_eval.takeover import OperatorStopped
 
 
 class LaboratorySource(native.WireModel):

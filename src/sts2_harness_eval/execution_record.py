@@ -13,10 +13,15 @@ from sts2_harness.journal import DependencyKind
 from sts2_harness_eval import results as replay
 from sts2_harness_eval.cases import IncompleteCause, Mismatch, Stage, Unsupported
 from sts2_harness_eval.checkpoints import CheckpointCause
-from sts2_harness_eval.sample import AfterDecisions, Completed, Incomplete, StopCause
+from sts2_harness_eval.sample import (
+    AfterDecisions,
+    Completed,
+    Incomplete,
+    OperatorStopped,
+    StopCause,
+)
 from sts2_harness_eval.takeover import (
     NativeUncertain,
-    OperatorStopped,
     ProtocolMismatch,
     Refusal,
     TakeoverCompleted,

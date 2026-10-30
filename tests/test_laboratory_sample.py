@@ -24,8 +24,7 @@ from sts2_harness_eval.laboratory_sample import (
     LaboratorySource,
     run_laboratory_sample,
 )
-from sts2_harness_eval.sample import Completed, SampleBudget
-from sts2_harness_eval.takeover import OperatorStopped
+from sts2_harness_eval.sample import Completed, OperatorStopped, SampleBudget
 
 MATERIALS = SessionMaterials(entry_documents_enabled=False, act_guidance={}, battle_guidance=())
 

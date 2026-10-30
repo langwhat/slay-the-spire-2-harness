@@ -83,6 +83,11 @@ class Incomplete:
 
 
 @dataclass(frozen=True, slots=True)
+class OperatorStopped:
+    """The caller's explicit stop reached a complete execution boundary."""
+
+
+@dataclass(frozen=True, slots=True)
 class Unsupported:
     rejection: Rejected
 
