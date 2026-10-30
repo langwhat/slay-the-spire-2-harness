@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import ExitStack, closing, suppress
 from dataclasses import dataclass
-from hashlib import file_digest, sha256
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -377,8 +377,7 @@ class _Takeover:
                 ),
                 recording_id=None,
             )
-        with self.case.source.archive.open("rb") as original:
-            digest = file_digest(original, "sha256").hexdigest()
+        digest = Journal.archive_sha256(self.case.source.archive)
         self.stage = Stage.LOAD
         async with self.restorer.loaded(self.case) as loaded:
             location = loaded.read.observation.location
@@ -476,8 +475,7 @@ class _Takeover:
                         ),
                         recording_id=self.recording_id,
                     )
-        with self.case.source.archive.open("rb") as original:
-            digest = file_digest(original, "sha256").hexdigest()
+        digest = Journal.archive_sha256(self.case.source.archive)
         parent = ParentPrefix(
             archive=self.case.source.archive.resolve(),
             recording_id=self.case.source.anchor.recording_id,

@@ -334,6 +334,18 @@ class Journal:
         self._storage_error: GapCause | None = None
         self._parent: Journal | None = None
 
+    @staticmethod
+    def archive_sha256(path: Path) -> str:
+        """Hash a standalone sealed archive without binding transient WAL pages."""
+        try:
+            with path.open("rb") as source:
+                if source.read(20)[18:20] != b"\x01\x01":
+                    raise ArchiveError("A sealed standalone recording archive is required.")
+                source.seek(0)
+                return hashlib.file_digest(source, "sha256").hexdigest()
+        except OSError:
+            raise ArchiveError("Cannot read the sealed recording archive.") from None
+
     @classmethod
     def create(
         cls, path: Path, manifest: Manifest, *, diagnostics: Diagnostics | None = None
@@ -365,11 +377,7 @@ class Journal:
         prefix = self.manifest.parent
         if prefix is None:
             return
-        try:
-            with prefix.archive.open("rb") as source:
-                digest = hashlib.file_digest(source, "sha256").hexdigest()
-        except OSError:
-            raise ArchiveError("Cannot read the parent recording archive.") from None
+        digest = self.archive_sha256(prefix.archive)
         if digest != prefix.archive_sha256:
             raise ArchiveError("The parent recording has changed.")
         parent = Journal.open(prefix.archive)

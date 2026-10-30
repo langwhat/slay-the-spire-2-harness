@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from contextlib import closing
 from enum import StrEnum
-from hashlib import file_digest, sha256
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -212,8 +212,7 @@ class AnnotationStore:
         ):
             raise ValueError("An unrecorded sample cannot claim recorded evidence.")
         if sample is not None:
-            with provenance.archive.open("rb") as source:
-                digest = file_digest(source, "sha256").hexdigest()
+            digest = Journal.archive_sha256(provenance.archive)
             with closing(Journal.open(provenance.archive)) as journal:
                 manifest = journal.manifest
                 binding = bind_sample(case, self.cases, journal, report.execution)

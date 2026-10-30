@@ -265,6 +265,7 @@ def _ends_follow_on(target: native.Observation, span: ReplaySpan, stopped: bool)
 
 def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
     """Select one nearest map and the original confirmed follow-on interval."""
+    Journal.archive_sha256(request.archive)
     with closing(Journal.open(request.archive)) as journal:
         manifest = journal.manifest
         records = journal.operations()

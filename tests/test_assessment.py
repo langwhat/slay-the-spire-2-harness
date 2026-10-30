@@ -760,3 +760,84 @@ def test_execution_rejects_same_case_sibling_archive(tmp_path: Path) -> None:
     store = AnnotationStore(tmp_path / "annotations", cases)
     with pytest.raises(ValueError, match="recording"):
         asyncio.run(assess_sample(case, execution, store, AssessmentSelection(), judgment=None))
+
+
+def test_archive_identity_requires_a_sealed_copy_stable_recording(tmp_path: Path) -> None:
+    from shutil import copyfile
+
+    cases = cases_fixture(tmp_path / "cases")
+    case = cases.load("battle")
+    branch = tmp_path / "branch.sqlite"
+    journal = new_branch(branch, case)
+    observation = battle_state(1, "battle")
+    write_step(
+        journal, observation, native.EndTurn(kind=native.StepKind.END_TURN), "turn", observation
+    )
+    try:
+        with closing(Journal.open(branch)) as reader:
+            assert len(reader.operations()) > 0
+        with pytest.raises(ArchiveError, match="sealed"):
+            archive_identity(branch)
+        execution = TakeoverCompleted(
+            branch,
+            Reached(case.source.anchor, case.source.target_cursor, case.source.semantic_digest),
+            Completed(BattleEnd("battle"), 1, 1),
+            recording_id=journal.manifest.recording_id,
+        )
+        with pytest.raises(ArchiveError, match="sealed"):
+            asyncio.run(
+                assess_sample(
+                    case,
+                    execution,
+                    AnnotationStore(tmp_path / "annotations", cases),
+                    AssessmentSelection(),
+                    judgment=None,
+                )
+            )
+    finally:
+        journal.close()
+    identity = archive_identity(branch)
+    copy = tmp_path / "copy.sqlite"
+    copyfile(branch, copy)
+    assert archive_identity(copy) == identity
+    assert archive_identity(branch) == identity
+
+
+@pytest.mark.parametrize("binding", ("parent", "case"))
+def test_unsealed_recording_cannot_become_a_parent_or_case_source(
+    tmp_path: Path, binding: Literal["parent", "case"]
+) -> None:
+    from sts2_harness_eval.cases import AdmissionRequest, plan_admission
+
+    cases = cases_fixture(tmp_path / "cases")
+    case = cases.load("battle")
+    with closing(sqlite3.connect(case.source.archive)) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        with closing(Journal.open(case.source.archive)) as source:
+            manifest = source.manifest
+        with pytest.raises(ArchiveError, match="sealed"):
+            if binding == "case":
+                plan_admission(
+                    AdmissionRequest(
+                        id="unsealed",
+                        archive=case.source.archive,
+                        anchor=case.source.anchor,
+                        endpoint=case.endpoint,
+                    ),
+                    tmp_path / "staging",
+                )
+            else:
+                Journal.create(
+                    tmp_path / "child.sqlite",
+                    manifest.model_copy(
+                        update={
+                            "recording_id": "child",
+                            "parent": ParentPrefix(
+                                archive=case.source.archive,
+                                recording_id=manifest.recording_id,
+                                before_sequence=case.source.anchor.model_sequence,
+                                archive_sha256=sha256(case.source.archive.read_bytes()).hexdigest(),
+                            ),
+                        }
+                    ),
+                )

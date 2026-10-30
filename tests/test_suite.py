@@ -595,3 +595,68 @@ def test_unrecorded_failure_keeps_unknown_identity_and_runs_sibling_without_retr
         assert report.partitions[0].completed == 1
 
     asyncio.run(scenario())
+
+
+def test_suite_retains_unsealed_arm_as_unrecorded_and_continues_sibling(tmp_path: Path) -> None:
+    import sqlite3
+
+    readers: list[sqlite3.Connection] = []
+    output = tmp_path / "suite"
+
+    class ReadingRestorer(FreshRestorer):
+        def respond(self, request: httpx.Request) -> httpx.Response:
+            response = super().respond(request)
+            if request.url.path == "/action" and not readers:
+                path = output / "case-0-baseline.sqlite"
+                reader = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+                reader.execute("SELECT COUNT(*) FROM records").fetchone()
+                readers.append(reader)
+            return response
+
+    class Restorer(SuiteRestorer):
+        @asynccontextmanager
+        async def loaded(self, case: Case) -> AsyncGenerator[LoadedTarget]:
+            child = ReadingRestorer(tmp_path, case)
+            async with child.loaded(case) as loaded:
+                yield loaded
+            self.closed += 1
+
+    async def scenario() -> None:
+        source = await source_case(tmp_path / "source.sqlite", start=False)
+        cases, case = retain_case(tmp_path / "cases", source)
+        annotations = AnnotationStore(tmp_path / "annotations", cases)
+        restorer = Restorer(tmp_path, annotations)
+        judge = AcceptableJudge()
+        async with actor(tmp_path) as baseline, actor(tmp_path) as candidate:
+            report = await run_suite(
+                SuiteSpec(cases=(with_rubric(annotations, case).model_copy(update={"pairs": 1}),)),
+                cases,
+                restorer,
+                annotations,
+                ArmDependencies(baseline, PackagedPrompts(), FileDocuments()),
+                ArmDependencies(candidate, PackagedPrompts(), FileDocuments()),
+                output,
+                stop_requested=lambda: False,
+                judge=judge,
+            )
+        first, second = report.pairs[0].baseline, report.pairs[0].candidate
+        assert isinstance(first.progress, AssessmentAvailable)
+        assert first.progress.execution.recording_id is not None
+        assert first.progress.observed_configurations == ()
+        assert first.assessment is not None
+        assert first.assessment.provenance.sample is None
+        assert isinstance(first.assessment.quality, Unassessed)
+        assert len(judge.inputs) == 1
+        assert first.assessment.uncertainty == (Uncertainty.NO_ARCHIVE,)
+        assert first.assessment.evidence.metrics.net_hp_change is None
+        assert second.assessment is not None and second.assessment.endpoint_reached
+        assert report.partitions[0].incomplete == 1
+        assert report.partitions[0].completed == 1
+        assert report.pairs[0].comparison.net_hp_change is None
+        assert read_suite(output, annotations) == report
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        for reader in readers:
+            reader.close()

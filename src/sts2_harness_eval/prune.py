@@ -159,7 +159,10 @@ class ArchivePruner:
     def _inspect(self, scope: PruneScope, request: PruneRequest) -> PrunePlan:
         if not scope.complete or not scope.offline:
             raise ArchiveError("Retention inspection requires a complete offline scope.")
-        manifests = {self._file(path): Journal.read_manifest(path) for path in scope.archives}
+        paths = tuple(self._file(path) for path in scope.archives)
+        for path in paths:
+            Journal.archive_sha256(path)
+        manifests = {path: Journal.read_manifest(path) for path in paths}
         runs = {path: RunRef(path, manifest.recording_id) for path, manifest in manifests.items()}
         requested = tuple(
             RunRef(self._file(run.archive), run.recording_id) for run in request.archives
@@ -260,7 +263,7 @@ class ArchivePruner:
                 visited.add(run)
                 run = parents[run].parent
         for edge in parents.values():
-            if digest(edge.parent.archive) != edge.archive_sha256:
+            if Journal.archive_sha256(edge.parent.archive) != edge.archive_sha256:
                 raise ArchiveError("A whole archive dependency hash has changed.")
         return parents
 

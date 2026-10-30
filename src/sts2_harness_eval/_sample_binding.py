@@ -2,7 +2,7 @@
 
 from contextlib import closing
 from dataclasses import dataclass
-from hashlib import file_digest, sha256
+from hashlib import sha256
 
 from sts2_harness.client import models as native
 from sts2_harness.journal import (
@@ -121,8 +121,7 @@ def _validate_scene_sample(
         or source.model_sequence != case.source.anchor.model_sequence
     ):
         raise ValueError("The Scene declaration does not match this case and source anchor.")
-    with source.archive.open("rb") as original:
-        digest = file_digest(original, "sha256").hexdigest()
+    digest = Journal.archive_sha256(source.archive)
     with closing(Journal.open(source.archive)) as original:
         if digest != source.archive_sha256 or original.manifest.recording_id != source.recording_id:
             raise ValueError("The Scene source archive has changed.")

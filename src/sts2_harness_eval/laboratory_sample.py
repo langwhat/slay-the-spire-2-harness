@@ -283,7 +283,7 @@ async def run_laboratory_sample(
                     archive = ArchiveRef(
                         path=path,
                         recording_id=manifest.recording_id,
-                        sha256=_digest(path),
+                        sha256=Journal.archive_sha256(path),
                     )
                 result = _result(directory, archive, outcome, started)
             finally:

@@ -19,7 +19,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from sts2_harness.client import models as native
-from sts2_harness.journal import HistoricalVariant, Journal, SceneVariant
+from sts2_harness.journal import ArchiveError, HistoricalVariant, Journal, SceneVariant
 from sts2_harness.journal_models import ConfigurationSnapshot
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
@@ -101,7 +101,13 @@ class _Progress:
 def _observed(execution: ExecutionRecord) -> tuple[ConfigurationSnapshot, ...]:
     if execution.recording_id is None:
         return ()
-    if archive_identity(execution.branch).recording_id != execution.recording_id:
+    try:
+        identity = archive_identity(execution.branch)
+    except ArchiveError:
+        if execution.kind is ExecutionKind.COMPLETED:
+            raise
+        return ()
+    if identity.recording_id != execution.recording_id:
         raise ValueError("The suite execution does not match its recording.")
     with closing(Journal.open(execution.branch)) as journal:
         start = journal.manifest.parent.before_sequence if journal.manifest.parent else 1

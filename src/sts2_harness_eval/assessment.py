@@ -2,12 +2,12 @@
 
 from contextlib import closing
 from dataclasses import dataclass
-from hashlib import file_digest, sha256
+from hashlib import sha256
 from pathlib import Path
 
 from sts2_harness.client import models as native
 from sts2_harness.game import Settle, Settlement
-from sts2_harness.journal import Journal, Record
+from sts2_harness.journal import ArchiveError, Journal, Record
 from sts2_harness_eval._sample_binding import bind_sample
 from sts2_harness_eval.annotation_records import CardRewardRubric
 from sts2_harness_eval.annotations import AnnotationStore
@@ -58,8 +58,7 @@ from sts2_harness_eval.takeover import TakeoverResult
 
 def archive_identity(path: Path) -> ArchiveIdentity:
     """Bind a caller-closed archive by its actual bytes and recorded identity."""
-    with path.open("rb") as source:
-        digest = file_digest(source, "sha256").hexdigest()
+    digest = Journal.archive_sha256(path)
     with closing(Journal.open(path)) as journal:
         recording_id = journal.manifest.recording_id
     return ArchiveIdentity(recording_id=recording_id, sha256=digest)
@@ -335,9 +334,13 @@ async def assess_sample(
     )
     standards = annotations.select(case, selection)
     branch = record.branch.resolve()
-    identity = (
-        archive_identity(branch) if record.recording_id is not None and branch.exists() else None
-    )
+    identity = None
+    if record.recording_id is not None and branch.exists():
+        try:
+            identity = archive_identity(branch)
+        except ArchiveError:
+            if isinstance(record, CompletedExecution):
+                raise
     if identity is not None and identity.recording_id != record.recording_id:
         raise ValueError("The sample recording does not match this execution.")
     if identity is None and isinstance(record, CompletedExecution):
