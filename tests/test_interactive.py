@@ -1,10 +1,14 @@
 import asyncio
 import json
+import sqlite3
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
+from io import StringIO
 from pathlib import Path
+from typing import Literal
 
 import httpx2 as httpx
+import pytest
 from pydantic import JsonValue
 from test_combat import reply
 from test_lifecycle import terminal
@@ -19,6 +23,88 @@ from sts2_harness.journal import Journal, Manifest
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.session import RunSession
+
+
+@pytest.mark.parametrize("ending", ("completed", "stopped", "cancelled"))
+def test_live_session_seal_failure_preserves_exit_and_allows_the_next_session(
+    tmp_path: Path, ending: Literal["completed", "stopped", "cancelled"]
+) -> None:
+    from sts2_harness.game import SessionStopped
+    from sts2_harness.journal import SessionMaterials
+
+    console = StringIO()
+    diagnostics = Diagnostics("resident", console=console)
+    reader: sqlite3.Connection | None = None
+    observation = ready_run()
+
+    def native_reply(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/state"
+        return httpx.Response(
+            200,
+            content=native.StateCompleted(
+                status=native.ResultStatus.COMPLETED, observation=observation
+            ).to_json(),
+        )
+
+    def forbidden_model(request: httpx.Request) -> httpx.Response:
+        pytest.fail("Session cleanup must not call the model.")
+
+    async def scenario() -> None:
+        nonlocal reader
+        for index in range(2):
+            archive = tmp_path / f"run-{index}.sqlite"
+            manifest = Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id=f"run-{index}",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            )
+
+            async def run(manifest: Manifest, archive: Path, index: int) -> None:
+                nonlocal reader
+                async with live_session(
+                    ModClient("http://mod", transport=httpx.MockTransport(native_reply)),
+                    manifest,
+                    archive,
+                    model=Llm(
+                        configuration(tmp_path), transport=httpx.MockTransport(forbidden_model)
+                    ),
+                    diagnostics=diagnostics,
+                ) as session:
+                    await session.execution.observe()
+                    if index:
+                        return
+                    reader = sqlite3.connect(f"{archive.as_uri()}?mode=ro", uri=True)
+                    reader.execute("BEGIN")
+                    reader.execute("SELECT COUNT(*) FROM records").fetchone()
+                    await session.execution.observe()
+                    if ending == "stopped":
+                        raise SessionStopped()
+                    if ending == "cancelled":
+                        raise asyncio.CancelledError()
+
+            if index or ending == "completed":
+                await run(manifest, archive, index)
+            elif ending == "stopped":
+                with pytest.raises(SessionStopped):
+                    await run(manifest, archive, index)
+            else:
+                with pytest.raises(asyncio.CancelledError):
+                    await run(manifest, archive, index)
+
+    try:
+        asyncio.run(scenario())
+        assert (tmp_path / "run-0.sqlite-wal").exists()
+    finally:
+        if reader is not None:
+            reader.close()
+    assert '"event":"recording_seal_failed"' in console.getvalue()
+    with closing(Journal.open(tmp_path / "run-1.sqlite")) as reopened:
+        assert len(reopened.operations()) == 1
 
 
 def ready_run() -> native.Observation:

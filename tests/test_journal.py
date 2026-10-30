@@ -1972,6 +1972,17 @@ def test_recording_cannot_claim_single_file_seal_while_reader_holds_wal(tmp_path
         journal.end()
         with pytest.raises(ArchiveError, match="Cannot seal"):
             journal.close()
+        import json
+
+        seal_failure = next(
+            json.loads(line)
+            for line in (tmp_path / "diagnostics.jsonl").read_text().splitlines()
+            if json.loads(line).get("event") == "recording_seal_failed"
+        )
+        assert seal_failure["error"] == "Cannot seal a recording while database readers are active."
+        assert seal_failure["exception"]["type"] == "ArchiveError"
+        assert seal_failure["exception"]["frames"][-1]["function"] == "close"
+        assert journal.gaps == ()
     journal.close()
     with closing(Journal.open(journal.path)) as reopened:
         assert len(reopened.operations()) == 2
@@ -2049,3 +2060,53 @@ def test_uninitialized_recording_cannot_seal_until_storage_recovers(
         assert reopened.manifest.recording_id == "initial-recovery"
         assert [record.sequence for record in reopened.operations()] == [2]
         assert [(gap.first_sequence, gap.last_sequence) for gap in reopened.gaps] == [(1, 1)]
+
+
+@pytest.mark.parametrize("failure", ("os", "sqlite"))
+def test_seal_failure_records_the_original_numeric_cause_before_closing_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    import errno
+    import json
+
+    from sts2_harness.journal import ArchiveError
+
+    journal = Journal.create(
+        tmp_path / "archive.sqlite",
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="seal-error",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
+    )
+    connect = sqlite3.connect
+
+    def unavailable(*args: object, **kwargs: object) -> sqlite3.Connection:
+        if failure == "os":
+            raise OSError(errno.ENOSPC, "Do not copy this private error text.")
+        return connect(tmp_path / "missing" / "archive.sqlite")
+
+    monkeypatch.setattr(sqlite3, "connect", unavailable)
+    with pytest.raises(ArchiveError, match="Cannot seal"):
+        journal.close()
+    content = (tmp_path / "diagnostics.jsonl").read_text()
+    event = next(
+        json.loads(line)
+        for line in content.splitlines()
+        if json.loads(line).get("event") == "recording_seal_failed"
+    )
+    field = "os_error_code" if failure == "os" else "sqlite_error_code"
+    assert event[field] == (errno.ENOSPC if failure == "os" else sqlite3.SQLITE_CANTOPEN)
+    assert event["exception"]["frames"][-1]["function"] == "unavailable"
+    assert "private error text" not in content
+    assert not any(
+        json.loads(line).get("event") == "recording_gap" for line in content.splitlines()
+    )
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    journal.close()
+    with closing(Journal.open(journal.path)) as reopened:
+        assert reopened.gaps == ()

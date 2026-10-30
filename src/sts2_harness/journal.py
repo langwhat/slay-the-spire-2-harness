@@ -14,7 +14,13 @@ from pydantic import Field, TypeAdapter, ValidationError, field_validator, model
 
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
-from sts2_harness.diagnostics import Diagnostics, Event, EventKind, RecordingGap
+from sts2_harness.diagnostics import (
+    Diagnostics,
+    Event,
+    EventKind,
+    RecordingGap,
+    RecordingSealFailed,
+)
 from sts2_harness.game import (
     Admit,
     Admitted,
@@ -1447,7 +1453,13 @@ class Journal:
                         )
                     if connection.execute("PRAGMA journal_mode=DELETE").fetchone() != ("delete",):
                         raise ArchiveError("Cannot seal the recording as a standalone archive.")
-        except (OSError, sqlite3.DatabaseError):
+        except ArchiveError as error:
+            self.diagnostics.emit(
+                RecordingSealFailed.capture(error).model_copy(update={"error": str(error)})
+            )
+            raise
+        except (OSError, sqlite3.DatabaseError) as error:
+            self.diagnostics.emit(RecordingSealFailed.capture(error))
             raise ArchiveError("Cannot seal the recording as a standalone archive.") from None
         finally:
             self._resources.close()

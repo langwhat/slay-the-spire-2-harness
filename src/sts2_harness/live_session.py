@@ -2,14 +2,14 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.game import LiveGame
-from sts2_harness.journal import Journal, Manifest, RecordedGame
+from sts2_harness.journal import ArchiveError, Journal, Manifest, RecordedGame
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
@@ -53,7 +53,13 @@ async def live_session(
         if model is not None:
             await resources.enter_async_context(model)
         journal = Journal.create(archive_path, manifest, diagnostics=diagnostics)
-        resources.callback(journal.close)
+
+        def close_recording() -> None:
+            # Journal reports sealing failures; ordinary gameplay and cancellation still finish.
+            with suppress(ArchiveError):
+                journal.close()
+
+        resources.callback(close_recording)
         game = RecordedGame(
             LiveGame(
                 client,

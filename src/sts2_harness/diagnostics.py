@@ -44,6 +44,7 @@ class EventKind(StrEnum):
     OPERATION_STARTED = "operation_started"
     OPERATION_COMPLETED = "operation_completed"
     RECORDING_GAP = "recording_gap"
+    RECORDING_SEAL_FAILED = "recording_seal_failed"
     RECORDING_RECOVERED = "recording_recovered"
     NATIVE_RETRY = "native_retry"
     NATIVE_RECOVERED = "native_recovered"
@@ -128,9 +129,7 @@ class RecordingGap(Event):
     sqlite_error_code: int | None
 
     @classmethod
-    def capture(
-        cls, error: OSError | sqlite3.DatabaseError, sequence: int | None = None
-    ) -> "RecordingGap":
+    def capture(cls, error: Exception, sequence: int | None = None) -> "RecordingGap":
         return cls(
             error="storage_unavailable",
             sequence=sequence,
@@ -140,6 +139,10 @@ class RecordingGap(Event):
             if isinstance(error, sqlite3.DatabaseError) and hasattr(error, "sqlite_errorcode")
             else None,
         )
+
+
+class RecordingSealFailed(RecordingGap):
+    event: EventKind = EventKind.RECORDING_SEAL_FAILED
 
 
 class ToolFinished(ResultEvent):
