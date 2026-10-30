@@ -219,6 +219,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         value = current()
         if self.path == "/operator/checkpoint/identity":
             assert os.environ["STS2_ALLOW_CHECKPOINTS"] == "true"
+            if (base.parent / "prefix_identity_unavailable").exists() and index < BOUNDARY_INDEX:
+                return self.send({
+                    "status": "failed",
+                    "error": {
+                        "code": "execution_failed",
+                        "message": "Native identities are unavailable before the checkpoint.",
+                    },
+                })
             cards = [
                 {"ref": ref, "combat_card_id": int(ref.split(":")[2]) % 100, "deck_card": None}
                 for ref in value["objects"]
@@ -449,6 +457,7 @@ def test_admission_replays_source_then_independently_loads_and_publishes_after_c
                     )
         output = tmp_path / "native"
         output.mkdir()
+        (output / "prefix_identity_unavailable").touch()
         if failure is not None:
             (output / failure).touch()
 

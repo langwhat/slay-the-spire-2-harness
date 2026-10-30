@@ -151,16 +151,12 @@ class _CaptureReplay:
 
     async def prefix(self, spans: tuple[ReplaySpan, ...]) -> None:
         for span in spans:
-            read = await self.checkpoints.identity()
-            refs = self.correspondence.compare(
-                span.before, read.observation, span.steps[0].sequence
-            )
+            before = unwrap(await self.game.observe()).observation
+            refs = self.correspondence.compare(span.before, before, span.steps[0].sequence)
             for step in span.steps:
-                await _write(
-                    self.game, self.client, read.observation, translated_step(step.step, refs), step
-                )
-            after = await self.checkpoints.identity()
-            self.correspondence.compare(span.after, after.observation, span.steps[-1].sequence)
+                await _write(self.game, self.client, before, translated_step(step.step, refs), step)
+            after = unwrap(await self.game.observe()).observation
+            self.correspondence.compare(span.after, after, span.steps[-1].sequence)
 
     async def publication(self, source: native.Observation, sequence: int) -> _BoundPublication:
         read = await self.checkpoints.identity()
