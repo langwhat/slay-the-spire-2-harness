@@ -346,7 +346,7 @@ class Journal:
         try:
             journal._inherit_parent()
         except ArchiveError:
-            journal.close()
+            journal._resources.close()
             raise
         try:
             journal._initialize()
@@ -502,7 +502,7 @@ class Journal:
         try:
             journal._inherit_parent()
         except ArchiveError:
-            journal.close()
+            journal._resources.close()
             raise
         journal._sequence = max(journal._sequence, sequence)
         journal._cursor = max(journal._cursor, cursor)
@@ -1427,7 +1427,9 @@ class Journal:
         if self._active_sequence is not None:
             raise RuntimeError("Cannot close an active recording operation.")
         try:
-            if self._initialized and not self._read_only:
+            if not self._read_only:
+                if not self._initialized:
+                    raise ArchiveError("Cannot seal a recording without a persisted manifest.")
                 with closing(
                     sqlite3.connect(self.path, timeout=_WRITE_TIMEOUT_SECONDS)
                 ) as connection:

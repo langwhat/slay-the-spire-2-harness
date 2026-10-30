@@ -2011,3 +2011,41 @@ def test_sealing_after_storage_recovers_retains_unwritten_gap_evidence(tmp_path:
     with closing(Journal.open(journal.path)) as reopened:
         assert [(gap.first_sequence, gap.last_sequence) for gap in reopened.gaps] == [(2, 2)]
         assert [record.sequence for record in reopened.operations()] == [1]
+
+
+def test_uninitialized_recording_cannot_seal_until_storage_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sts2_harness.journal import ArchiveError
+
+    connect = sqlite3.connect
+
+    def unavailable(*args: object, **kwargs: object) -> sqlite3.Connection:
+        raise sqlite3.OperationalError("Synthetic initial storage failure")
+
+    monkeypatch.setattr(sqlite3, "connect", unavailable)
+    journal = Journal.create(
+        tmp_path / "archive.sqlite",
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="initial-recovery",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
+    )
+    journal.begin(Observe())
+    journal.end()
+    assert not journal.availability.manifest_persisted
+    with pytest.raises(ArchiveError, match="Cannot seal"):
+        journal.close()
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    journal.begin(Observe())
+    journal.end()
+    journal.close()
+    with closing(Journal.open(journal.path)) as reopened:
+        assert reopened.manifest.recording_id == "initial-recovery"
+        assert [record.sequence for record in reopened.operations()] == [2]
+        assert [(gap.first_sequence, gap.last_sequence) for gap in reopened.gaps] == [(1, 1)]

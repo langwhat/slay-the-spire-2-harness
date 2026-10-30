@@ -303,3 +303,44 @@ def test_sample_starts_in_combat_and_requires_an_independently_readable_recordin
     assert isinstance(source.start, native.ControlReply)
     assert source.opening == game.states[0]
     assert result.source_sha256 == sha256((directory / "source.json").read_bytes()).hexdigest()
+
+
+def test_uninitialized_sample_recording_is_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    game = LaboratoryGame()
+    directory = tmp_path / "sample"
+
+    def unavailable(*args: object, **kwargs: object) -> sqlite3.Connection:
+        raise sqlite3.OperationalError("Synthetic initial storage failure")
+
+    monkeypatch.setattr(sqlite3, "connect", unavailable)
+
+    async def scenario() -> LaboratoryResult:
+        async with (
+            ModClient("http://mod", transport=httpx.MockTransport(game.mod)) as client,
+            LaboratoryClient("http://mod", transport=httpx.MockTransport(game.mod)) as laboratory,
+            Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)) as model,
+        ):
+            return await run_laboratory_sample(
+                client,
+                laboratory,
+                RECIPE,
+                directory,
+                model,
+                PackagedPrompts(),
+                FileDocuments(()),
+                MATERIALS,
+                "",
+                SampleBudget(10, 30),
+                TargetBattle(),
+                stop_requested=lambda: False,
+            )
+
+    result = asyncio.run(scenario())
+    assert result.sample == Incomplete(StopCause.RECORDING_UNAVAILABLE, 0, 0)
+    assert result.archive is None
+    assert not game.actions
+    assert game.calls.count("/operator/eval/scenario") == 1
+    assert game.calls.count("/control") == 1
+    assert LaboratoryResult.model_validate_json((directory / "result.json").read_bytes()) == result

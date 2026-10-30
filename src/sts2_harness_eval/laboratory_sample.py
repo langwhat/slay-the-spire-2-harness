@@ -267,8 +267,7 @@ async def run_laboratory_sample(
                     StopCause.RECORDING_UNAVAILABLE, outcome.decisions, outcome.requests
                 )
             elif (
-                isinstance(outcome, OperatorStopped)
-                or caller.cancelling() > initial_cancellations
+                isinstance(outcome, OperatorStopped) or caller.cancelling() > initial_cancellations
             ):
                 outcome = OperatorStopped()
             else:
