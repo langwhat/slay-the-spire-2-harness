@@ -1,6 +1,7 @@
 """Bound one live sample around the recorded dependencies of a run session."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -21,6 +22,22 @@ from sts2_harness.llm.messages import ModelClient, ModelInput, ModelReply, ToolD
 from sts2_harness.results import Reason
 from sts2_harness.session import ModelFactory, RunSession
 from sts2_harness_eval.results import Rejected
+
+
+async def finish_after_stop[T](task: asyncio.Task[T], stop: Callable[[], None]) -> T:
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        stop()
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            task.result()
+        finally:
+            raise cancellation
 
 
 @dataclass(frozen=True, slots=True)

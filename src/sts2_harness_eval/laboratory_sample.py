@@ -38,6 +38,7 @@ from sts2_harness_eval.sample import (
     Incomplete,
     SampleBudget,
     SampleHost,
+    finish_after_stop,
 )
 from sts2_harness_eval.takeover import OperatorStopped
 
@@ -145,22 +146,8 @@ class _Sample:
                 raise
             return OperatorStopped()
 
-    async def finish(
-        self, task: asyncio.Task[Completed | Incomplete | OperatorStopped]
-    ) -> Completed | Incomplete | OperatorStopped:
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError as cancellation:
-            self.operator_stopped = True
-            try:
-                while not task.done():
-                    try:
-                        await asyncio.shield(task)
-                    except asyncio.CancelledError:
-                        continue
-                task.result()
-            finally:
-                raise cancellation
+    def stop(self) -> None:
+        self.operator_stopped = True
 
 
 async def run_laboratory_sample(
@@ -269,7 +256,7 @@ async def run_laboratory_sample(
                 )
                 host.arm(opening)
                 task = asyncio.create_task(sample.run(manifest, dependencies))
-                outcome = await sample.finish(task)
+                outcome = await finish_after_stop(task, sample.stop)
         except asyncio.CancelledError:
             outcome = OperatorStopped()
             raise

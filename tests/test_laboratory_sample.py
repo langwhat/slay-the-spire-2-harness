@@ -1,6 +1,7 @@
 import asyncio
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 
 import httpx2 as httpx
 import pytest
@@ -11,6 +12,7 @@ from test_responses import configuration
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
+from sts2_harness.game import Settlement
 from sts2_harness.journal import Journal, SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import FileDocuments
@@ -84,9 +86,15 @@ def test_unconfirmed_construction_preserves_source_without_start_or_model(
     assert not (directory / "journal.sqlite").exists()
 
 
-@pytest.mark.parametrize("cancel", (False, True))
+@pytest.mark.parametrize(
+    ("cancel", "failure"),
+    [(0, None), (1, None), (2, None), (2, "feedback"), (2, "cleanup")],
+)
 def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_evidence(
-    tmp_path: Path, cancel: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel: int,
+    failure: Literal["feedback", "cleanup"] | None,
 ) -> None:
     game = LaboratoryGame()
     game.states.insert(1, game.states[0])
@@ -94,6 +102,20 @@ def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_eviden
         [reply(("batch", "combat_act", '{"steps":[{"kind":"end_turn"},{"kind":"end_turn"}]}'))]
     )
     directory = tmp_path / "sample"
+    close = Journal.close
+
+    def close_recording(journal: Journal) -> None:
+        close(journal)
+        if failure == "cleanup":
+            raise OSError("Synthetic cleanup failure")
+
+    monkeypatch.setattr(Journal, "close", close_recording)
+
+    def native_reply(request: httpx.Request) -> httpx.Response:
+        response = game.mod(request)
+        if failure == "feedback" and request.url.path == "/action" and len(game.actions) == 2:
+            raise OSError("Synthetic feedback failure")
+        return response
 
     async def scenario() -> None:
         requested = asyncio.Event()
@@ -106,7 +128,7 @@ def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_eviden
             return game.model(request)
 
         async with (
-            ModClient("http://mod", transport=httpx.MockTransport(game.mod)) as client,
+            ModClient("http://mod", transport=httpx.MockTransport(native_reply)) as client,
             LaboratoryClient("http://mod", transport=httpx.MockTransport(game.mod)) as laboratory,
             Llm(configuration(tmp_path), transport=httpx.MockTransport(model_reply)) as model,
         ):
@@ -128,7 +150,9 @@ def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_eviden
             )
             await asyncio.wait_for(requested.wait(), 5)
             if cancel:
-                task.cancel()
+                for _ in range(cancel):
+                    task.cancel()
+                    await asyncio.sleep(0)
             else:
                 stopped = True
             await asyncio.sleep(0)
@@ -148,6 +172,17 @@ def test_stop_or_cancellation_waits_for_the_whole_model_batch_and_retains_eviden
     assert result.archive is not None
     assert result.archive.sha256 == sha256(result.archive.path.read_bytes()).hexdigest()
     assert game.calls.count("/operator/eval/scenario") == 1
+    journal = Journal.open(result.archive.path)
+    try:
+        settled = [
+            record
+            for record in journal.operations()
+            if isinstance(record.reply.outcome if record.reply else None, Settlement)
+        ]
+        assert len(settled) == (1 if failure == "feedback" else 2)
+        assert len(journal.requests()) == 1
+    finally:
+        close(journal)
 
 
 class LaboratoryGame(Campaign):
