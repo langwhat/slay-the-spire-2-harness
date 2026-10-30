@@ -242,7 +242,7 @@ class OwnedHeadlessInstance:
             self.alias = alias
             if probe_process.returncode != 0 or "HARNESS_SENTRY_PRELAUNCH_CONFIG_OK" not in lines:
                 raise HeadlessError(
-                    "The native isolation probe did not verify user data and telemetry settings."
+                    "The native isolation probe did not complete startup preparation."
                 )
             audio_pack = engine / "audio/overlay.pck"
             if (

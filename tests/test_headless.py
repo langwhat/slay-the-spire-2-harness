@@ -290,6 +290,18 @@ def test_headless_owns_two_concurrent_children_and_runs_one_session_each(tmp_pat
         assert len((archive.parent / "control.jsonl").read_text().splitlines()) == 1
         reader.close()
         status = json.loads((archive.parent / "status.json").read_text())
+        import configparser
+
+        overrides = configparser.ConfigParser()
+        overrides.read(archive.parent / "engine/override.cfg")
+        assert overrides["application"]["run/main_scene"] == '"res://harness_audio/game.tscn"'
+        assert overrides["Fmod"]["General/auto_initialize"] == "false"
+        manager = json.loads(overrides["autoload"]["FmodManager"])
+        assert manager == "*" + (archive.parent / "engine/audio/manager.gd").as_posix()
+        assert all(
+            (archive.parent / f"engine/audio/{name}.gd").is_file()
+            for name in ("manager", "audio_proxy", "music_proxy")
+        )
         assert status["lifecycle"] == "terminal"
         assert not Path(status["user_data_alias"]).exists()
         assert (
