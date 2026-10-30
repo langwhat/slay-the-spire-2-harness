@@ -210,7 +210,7 @@ def test_inspection_translates_typed_details_and_keeps_rules_and_text_opaque() -
         },
         descriptions={"card:2:1": "card:2:1"},
         modifier_descriptions=original.modifier_descriptions,
-        generated={"card:2:1": original.generated["c1"]},
+        generated={"card:2:1": original.generated["c1"], "player": original.generated["c1"]},
         mechanisms=(enemy, shared),
         upgrades={"card:2:1": original.upgrades["c1"]},
     )
@@ -255,12 +255,49 @@ def test_inspection_translates_typed_details_and_keeps_rules_and_text_opaque() -
             assert bundle.members == ("card:12:5", "b:card:2:9")
             assert result.data.descriptions == {"card:12:5": "card:2:1"}
             assert result.data.generated["card:12:5"] == original.generated["c1"]
+            assert result.data.generated["player"] == original.generated["c1"]
             assert result.data.upgrades is not MISSING
             assert result.data.upgrades["card:12:5"] == original.upgrades["c1"]
             assert tuple(item.owner for item in result.data.mechanisms) == ("enemy:12:7", "player")
             assert tuple(item.text for item in result.data.mechanisms) == ("enemy:2:7", "enemy:2:7")
 
     asyncio.run(scenario())
+
+
+def test_player_generation_keeps_its_owner_and_still_compares_its_contents() -> None:
+    from sts2_harness_eval.verification import SourceCorrespondence, VerificationFailure
+
+    encoded = COMBAT
+    for old, new in (
+        ("c1", "card:11:1"),
+        ("c2", "card:11:2"),
+        ("c3", "card:11:3"),
+        ("e1", "enemy:11:4"),
+    ):
+        encoded = encoded.replace('"' + old + '"', '"' + new + '"')
+    source = native.Observation.model_validate_json(encoded)
+    source = source.model_copy(
+        update={"generated": {**source.generated, "player": source.generated["card:11:1"]}}
+    )
+    loaded = native.Observation.model_validate_json(source.to_json().replace(":11:", ":21:"))
+    correspondence = SourceCorrespondence()
+    refs = correspondence.compare(source, loaded, 1)
+    assert refs["card:11:1"] == "card:21:1"
+    assert "player" not in refs
+
+    async def scenario() -> None:
+        async with ModClient("http://unused") as client:
+            logical = IdentityGame(
+                LiveGame(client, namespace="test", game_instance_id="game", run_id="run"),
+                TargetIdentity(source.location, loaded.location, refs),
+            ).observation(loaded)
+            assert logical.generated["player"] == source.generated["player"]
+            assert logical.generated["card:11:1"] == source.generated["card:11:1"]
+
+    asyncio.run(scenario())
+    changed = loaded.model_copy(update={"generated": {**loaded.generated, "player": ()}})
+    with pytest.raises(VerificationFailure, match="generated.player.length"):
+        correspondence.compare(source, changed, 2)
 
 
 def test_admission_pause_and_lifetime_keep_real_run_changes_visible() -> None:

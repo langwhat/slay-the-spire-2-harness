@@ -142,6 +142,16 @@ class IdentityGame:
     def _directory[T](self, values: Mapping[str, T]) -> Mapping[str, T]:
         return MappingProxyType({self._in_ref(key): value for key, value in values.items()})
 
+    def _generated(
+        self, values: Mapping[str, tuple[native.GeneratedCard, ...]]
+    ) -> Mapping[str, tuple[native.GeneratedCard, ...]]:
+        return MappingProxyType(
+            {
+                "player" if key == "player" else self._in_ref(key): cards
+                for key, cards in values.items()
+            }
+        )
+
     def _selection(self, value: native.Selection | None) -> native.Selection | None:
         if value is None:
             return None
@@ -249,7 +259,7 @@ class IdentityGame:
                 ),
                 "descriptions": self._directory(value.descriptions),
                 "modifier_descriptions": self._directory(value.modifier_descriptions),
-                "generated": self._directory(value.generated),
+                "generated": self._generated(value.generated),
                 "upgrades": self._directory(value.upgrades),
                 "mechanisms": tuple(map(self._mechanism, value.mechanisms)),
             }
@@ -263,7 +273,7 @@ class IdentityGame:
                 ),
                 "descriptions": self._directory(value.descriptions),
                 "modifier_descriptions": self._directory(value.modifier_descriptions),
-                "generated": self._directory(value.generated),
+                "generated": self._generated(value.generated),
                 "upgrades": self._directory(value.upgrades)
                 if value.upgrades is not MISSING
                 else MISSING,

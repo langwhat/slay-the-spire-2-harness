@@ -113,7 +113,7 @@ def _refs(value: JsonValue, field: str = "") -> set[str]:
         return {ref for item in value for ref in _refs(item, field)}
     if isinstance(value, dict):
         result = (
-            set(value)
+            {key for key in value if field != "generated" or key != "player"}
             if field
             in ("objects", "descriptions", "modifier_descriptions", "generated", "upgrades")
             else set[str]()
