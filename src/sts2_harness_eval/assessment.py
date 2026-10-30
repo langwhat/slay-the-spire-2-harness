@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sts2_harness.client import models as native
 from sts2_harness.game import Settle, Settlement
-from sts2_harness.journal import Journal, Record, SceneVariant
+from sts2_harness.journal import Journal, Record
 from sts2_harness_eval._sample_binding import bind_sample
 from sts2_harness_eval.annotation_records import CardRewardRubric
 from sts2_harness_eval.annotations import AnnotationStore
@@ -45,11 +45,9 @@ from sts2_harness_eval.assessment_records import (
 from sts2_harness_eval.assessment_records import (
     Unscored as Unscored,
 )
-from sts2_harness_eval.cases import AfterDecisionsSpec, Case
+from sts2_harness_eval.cases import Case
 from sts2_harness_eval.execution_record import (
-    BattleEndpoint,
     CompletedExecution,
-    DecisionEndpoint,
     ExecutionRecord,
     IncompleteExecution,
     UnsupportedExecution,
@@ -363,39 +361,6 @@ async def assess_sample(
             last_sequence = binding.last_sequence
             gaps = binding.gaps
             records = () if first_sequence is None else journal.operations(start=first_sequence)
-            if not isinstance(variant, SceneVariant):
-                anchor = None if isinstance(record, UnsupportedExecution) else record.anchor
-                if anchor is not None and (
-                    anchor.anchor.recording_id != case.source.anchor.recording_id
-                    or anchor.anchor.model_sequence != case.source.anchor.model_sequence
-                    or anchor.confirmed_operation_cursor != case.source.target_cursor
-                    or anchor.semantic_digest != case.source.semantic_digest
-                ):
-                    raise ValueError("The execution anchor does not match the case.")
-                if variant is not None:
-                    original = annotations.cases.load(variant.case_id)
-                    if (
-                        sha256(original.model_dump_json().encode()).hexdigest()
-                        != variant.case_sha256
-                        or variant.source.archive.resolve() != original.source.archive.resolve()
-                        or variant.source.recording_id != original.source.anchor.recording_id
-                        or variant.source.before_sequence != original.source.anchor.model_sequence
-                    ):
-                        raise ValueError("The material variant does not match its original case.")
-            if isinstance(record, CompletedExecution):
-                endpoint = record.endpoint
-                expected = case.endpoint
-                if isinstance(expected, AfterDecisionsSpec):
-                    if (
-                        not isinstance(endpoint, DecisionEndpoint)
-                        or endpoint.count != expected.count
-                    ):
-                        raise ValueError("The completed endpoint does not match the case.")
-                elif (
-                    not isinstance(endpoint, BattleEndpoint)
-                    or endpoint.node_id != target.location.node_id
-                ):
-                    raise ValueError("The completed battle endpoint does not match the case.")
     projection = _evidence(
         records,
         target,

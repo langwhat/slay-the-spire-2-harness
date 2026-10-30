@@ -1,7 +1,9 @@
 import asyncio
+import sqlite3
 from contextlib import closing
 from hashlib import file_digest, sha256
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import TypeAdapter
@@ -34,6 +36,7 @@ from sts2_harness_eval.assessment import (
 )
 from sts2_harness_eval.assessment_records import (
     Assessed,
+    AssessmentRecord,
     ObservationRef,
     Unassessed,
     UnassessedReason,
@@ -134,6 +137,73 @@ def test_persisted_execution_can_be_reassessed_without_replaying_game(tmp_path: 
     bad = record.model_copy(update={"endpoint": BattleEndpoint(node_id="another-battle")})
     with pytest.raises(ValueError, match="endpoint"):
         asyncio.run(assess_sample(case, bad, store, AssessmentSelection(), judgment=None))
+
+
+@pytest.mark.parametrize("change", ["anchor", "endpoint", "variant"])
+@pytest.mark.parametrize("operation", ["append", "read"])
+def test_historical_reports_revalidate_execution_binding(
+    tmp_path: Path,
+    change: Literal["anchor", "endpoint", "variant"],
+    operation: Literal["append", "read"],
+) -> None:
+    cases = cases_fixture(tmp_path / "cases")
+    case = cases.load("battle")
+    branch = tmp_path / "branch.sqlite"
+    observation = battle_state(1, "battle")
+    with closing(new_branch(branch, case)) as journal:
+        write_step(
+            journal, observation, native.EndTurn(kind=native.StepKind.END_TURN), "turn", observation
+        )
+    store = AnnotationStore(tmp_path / "annotations", cases)
+    report = asyncio.run(
+        assess_sample(case, completed(case, branch), store, AssessmentSelection(), judgment=None)
+    )
+    reference = store.append_assessment(report, id="report")
+    execution = report.execution
+    assert isinstance(execution, CompletedExecution)
+    if change == "anchor":
+        execution = execution.model_copy(
+            update={"anchor": execution.anchor.model_copy(update={"semantic_digest": "0" * 64})}
+        )
+    elif change == "endpoint":
+        execution = execution.model_copy(update={"endpoint": BattleEndpoint(node_id="another")})
+    else:
+        with closing(Journal.open(branch)) as journal:
+            manifest = journal.manifest
+        assert manifest.parent is not None
+        variant = HistoricalVariant(
+            case_id=case.id,
+            case_sha256="0" * 64,
+            source=manifest.parent,
+            replacements=(),
+        )
+        with closing(sqlite3.connect(branch)) as connection:
+            connection.execute(
+                "UPDATE manifest SET value = ?",
+                (manifest.model_copy(update={"variant": variant}).model_dump_json(),),
+            )
+            connection.commit()
+        report = report.model_copy(
+            update={
+                "provenance": report.provenance.model_copy(
+                    update={"sample": archive_identity(branch), "variant": variant}
+                )
+            }
+        )
+    forged = report.model_copy(update={"execution": execution})
+    with pytest.raises(ValueError, match=change):
+        asyncio.run(assess_sample(case, execution, store, AssessmentSelection(), judgment=None))
+    if operation == "append":
+        with pytest.raises(ValueError, match=change):
+            store.append_assessment(forged, id="forged")
+        return
+    path = store.directory / case.id / "assessments" / f"{reference.id}.json"
+    path.write_text(
+        AssessmentRecord(case_id=case.id, id=reference.id, assessment=forged).model_dump_json(),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=change):
+        AnnotationStore(store.directory, cases).assessment(reference)
 
 
 def test_unscored_report_reopens_with_actual_archive_identity(tmp_path: Path) -> None:

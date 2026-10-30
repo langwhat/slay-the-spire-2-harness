@@ -58,6 +58,23 @@ def bind_sample(
             or parent.before_sequence != case.source.anchor.model_sequence
         ):
             raise ValueError("The sample parent does not match the case source anchor.")
+        anchor = None if isinstance(execution, UnsupportedExecution) else execution.anchor
+        if anchor is not None and (
+            anchor.anchor.recording_id != case.source.anchor.recording_id
+            or anchor.anchor.model_sequence != case.source.anchor.model_sequence
+            or anchor.confirmed_operation_cursor != case.source.target_cursor
+            or anchor.semantic_digest != case.source.semantic_digest
+        ):
+            raise ValueError("The execution anchor does not match the case.")
+        if variant is not None:
+            original = cases.load(variant.case_id)
+            if (
+                sha256(original.model_dump_json().encode()).hexdigest() != variant.case_sha256
+                or variant.source.archive.resolve() != original.source.archive.resolve()
+                or variant.source.recording_id != original.source.anchor.recording_id
+                or variant.source.before_sequence != original.source.anchor.model_sequence
+            ):
+                raise ValueError("The material variant does not match its original case.")
         binding = cases.binding(case)
         reference = cases.reference(binding).target
         target = reference.read.observation
@@ -69,6 +86,16 @@ def bind_sample(
         )
         summaries = journal.summaries(start=parent.before_sequence)
         first_sequence = parent.before_sequence
+    if isinstance(execution, CompletedExecution):
+        endpoint = execution.endpoint
+        expected = case.endpoint
+        if isinstance(expected, AfterDecisionsSpec):
+            if not isinstance(endpoint, DecisionEndpoint) or endpoint.count != expected.count:
+                raise ValueError("The completed endpoint does not match the case.")
+        elif (
+            not isinstance(endpoint, BattleEndpoint) or endpoint.node_id != target.location.node_id
+        ):
+            raise ValueError("The completed battle endpoint does not match the case.")
     return SampleBinding(
         parent=parent,
         variant=variant,
@@ -126,13 +153,6 @@ def _validate_scene_sample(
         or location.owner != reference.target.read.observation.location.owner
     ):
         raise ValueError("The Scene initial conditions do not match the case restore declarations.")
-    if isinstance(execution, CompletedExecution):
-        endpoint = execution.endpoint
-        if isinstance(case.endpoint, AfterDecisionsSpec):
-            if not isinstance(endpoint, DecisionEndpoint) or endpoint.count != case.endpoint.count:
-                raise ValueError("The completed Scene endpoint does not match the case.")
-        elif not isinstance(endpoint, BattleEndpoint) or endpoint.node_id != location.node_id:
-            raise ValueError("The completed Scene battle endpoint does not match its fresh target.")
     first = next(
         (
             item
