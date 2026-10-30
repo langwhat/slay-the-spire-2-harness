@@ -27,6 +27,7 @@ from sts2_harness.config import Configuration, ConfigurationError, Driver
 from sts2_harness.diagnostics import Diagnostics, Lifecycle
 from sts2_harness.entry_materials import EntryMaterials, MaterialContext
 from sts2_harness.game import Endpoint, RunEnded, RunEndReason, SessionStopped
+from sts2_harness.headless_audio import configure_audio
 from sts2_harness.journal import (
     HeadlessInitialConditions,
     Manifest,
@@ -81,6 +82,11 @@ func _initialize():
     var config_ok = typeof(dsn) == TYPE_STRING and dsn == ""
     if config_ok and typeof(auto_init) == TYPE_BOOL and not auto_init:
         print("HARNESS_SENTRY_PRELAUNCH_CONFIG_OK")
+    var audio = root.get_node_or_null("FmodManager")
+    if audio == null or not audio.call("prepare"):
+        quit(2)
+        return
+    print("HARNESS_AUDIO_PRELAUNCH_OK")
     quit()
 """
 
@@ -172,7 +178,7 @@ class OwnedHeadlessInstance:
             (engine / "override.cfg").write_text(
                 "[application]\nconfig/use_custom_user_dir=true\n"
                 f'config/custom_user_dir_name="{name}"\n'
-                '\n[sentry]\nconfig/dsn=""\noptions/auto_init=false\n'
+                '\n[sentry]\nconfig/dsn=""\noptions/auto_init=false\n' + configure_audio(engine)
             )
             probe = engine / "probe.gd"
             probe.write_text(_PROBE)
@@ -201,6 +207,8 @@ class OwnedHeadlessInstance:
                     *arguments,
                     "--script",
                     str(probe),
+                    "--",
+                    "--harness-prepare-audio",
                     env=self.environment,
                     cwd=game.parent,
                     stdout=asyncio.subprocess.PIPE,
@@ -215,14 +223,8 @@ class OwnedHeadlessInstance:
                 for line in lines
                 if line.startswith("HARNESS_USER_DATA=")
             ]
-            if (
-                probe_process.returncode != 0
-                or len(paths) != 1
-                or "HARNESS_SENTRY_PRELAUNCH_CONFIG_OK" not in lines
-            ):
-                raise HeadlessError(
-                    "The native isolation probe did not verify user data and telemetry settings."
-                )
+            if len(paths) != 1:
+                raise HeadlessError("The native probe did not return one owned user-data path.")
             alias = Path(paths[0])
             parents = (
                 home / "Library/Application Support",
@@ -238,6 +240,17 @@ class OwnedHeadlessInstance:
             alias.symlink_to(self.user_directory, target_is_directory=True)
             self._alias = alias
             self.alias = alias
+            if probe_process.returncode != 0 or "HARNESS_SENTRY_PRELAUNCH_CONFIG_OK" not in lines:
+                raise HeadlessError(
+                    "The native isolation probe did not verify user data and telemetry settings."
+                )
+            audio_pack = engine / "audio/overlay.pck"
+            if (
+                "HARNESS_AUDIO_PRELAUNCH_OK" not in lines
+                or not audio_pack.is_file()
+                or audio_pack.stat().st_size == 0
+            ):
+                raise HeadlessError("The native probe did not prepare headless audio isolation.")
             start = self.directory / "start.json"
             if self._mode is HeadlessLaunchMode.RECIPE:
                 start.write_text(self.options.recipe.model_dump_json())

@@ -115,6 +115,8 @@ if "--script" in sys.argv:
     (user_directory / "logs/godot.log").write_text("probe startup log")
     print("HARNESS_USER_DATA=" + str(user_directory))
     print("HARNESS_SENTRY_PRELAUNCH_CONFIG_OK")
+    print("HARNESS_AUDIO_PRELAUNCH_OK")
+    pathlib.Path(sys.argv[sys.argv.index("--path") + 1], "audio/overlay.pck").write_bytes(b"audio")
     sys.exit(0)
 initial = json.loads(INITIAL)
 ended = json.loads(ENDED)
@@ -748,3 +750,48 @@ def test_probe_termination_survives_timeout_or_cancellation(
             await instance.aclose()
 
     asyncio.run(exercise())
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+@pytest.mark.parametrize("missing", ["marker", "pack", "preparation"])
+def test_audio_isolation_must_be_prepared_before_game_launch(tmp_path: Path, missing: str) -> None:
+    import asyncio
+
+    from sts2_harness.headless import (
+        HeadlessError,
+        HeadlessOptions,
+        OwnedHeadlessInstance,
+        StandardRunRecipe,
+    )
+    from sts2_harness.journal import StandardCharacter
+
+    game, template = game_fixture(tmp_path)
+    if missing == "marker":
+        game.write_text(game.read_text().replace('print("HARNESS_AUDIO_PRELAUNCH_OK")', "None"))
+    elif missing == "pack":
+        game.write_text(game.read_text().replace('.write_bytes(b"audio")', ".exists()"))
+    else:
+        game.write_text(game.read_text().replace("sys.exit(0)", "sys.exit(2)"))
+    directory = tmp_path / "instance"
+
+    async def exercise() -> None:
+        with pytest.raises(HeadlessError, match="probe"):
+            async with OwnedHeadlessInstance(
+                HeadlessOptions(
+                    game,
+                    template,
+                    tmp_path / "runs",
+                    directory,
+                    recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="AUDIO"),
+                )
+            ):
+                pytest.fail("A child without verified audio isolation must not enter gameplay.")
+
+    asyncio.run(exercise())
+    assert not (directory / "game.stdout.log").exists()
+    paths = [
+        line.removeprefix("HARNESS_USER_DATA=")
+        for line in (directory / "probe.stdout.log").read_text().splitlines()
+        if line.startswith("HARNESS_USER_DATA=")
+    ]
+    assert len(paths) == 1 and not Path(paths[0]).exists()
