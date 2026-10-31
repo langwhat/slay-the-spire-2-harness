@@ -181,3 +181,35 @@ def test_minimum_above_trigger_is_not_reinstalled_until_a_group_changes(tmp_path
         journal.close()
 
     asyncio.run(scenario())
+
+
+def test_removed_query_material_can_be_delivered_as_guidance_again() -> None:
+    from sts2_harness.knowledge import GuidanceContent
+    from sts2_harness.llm.messages import TextMessage
+
+    obs = native.Observation.model_validate_json(RUN)
+    context = Context(native.DecisionOwner.RUN)
+    document = DocumentView(
+        id="example",
+        name=MaterialText.create("name", "Example"),
+        text=MaterialText.create("text", "Complete guidance."),
+        resources=(),
+    )
+    context.begin_group(obs, "notes")
+    context.append_task(RunActInput(), obs)
+    context.append_tool_result(
+        call(context, "old-query", "run_skill"), QueryToolResult(ReadCompleted(), obs, document)
+    )
+    context.finish_group()
+    context.begin_group(obs, "notes")
+    context.append_task(RunActInput(strategy_notes="next"), obs)
+    context.finish_group()
+    context.begin_group(obs, "notes")
+    context.append_task(RunActInput(strategy_notes="current"), obs)
+    context.install_compaction(context.compaction_candidate())
+    assert all("Complete guidance." not in message.text for message in context.model_input())
+    context.append_materials((document,))
+    message = context.model_input()[-1]
+    assert isinstance(message, TextMessage)
+    assert isinstance(message.value, GuidanceContent)
+    assert message.value.guidance == (document,)
