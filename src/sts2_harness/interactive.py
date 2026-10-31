@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import ClientUnavailable, ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind
@@ -177,6 +178,7 @@ async def run_interactive(
                 recording_id = uuid4().hex
                 archive = directory / recording_id / "archive.sqlite"
                 manifest = Manifest(
+                    capacity_policy=CapacityPolicy(context_window=model.context_window),
                     materials=materials.settings
                     if materials is not None
                     else SessionMaterials(

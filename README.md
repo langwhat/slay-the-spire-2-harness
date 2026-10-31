@@ -39,6 +39,7 @@ names in the local file fail validation; unrelated process environment keys are 
 | `LLM_REASONING_EFFORT`, `LLM_SERVICE_TIER` | Optional provider-specific settings |
 | `LLM_REQUEST_TIMEOUT_S` | `3600`, positive finite per-attempt timeout |
 | `LLM_EXTRA_RETRIES` | `25`, nonnegative additional attempts |
+| `LLM_CONTEXT_WINDOW` | `300000`, positive input accounting window |
 
 Base URLs must omit userinfo, query strings, and fragments. Endpoint path prefixes are
 retained when the selected client appends `/responses` or `/chat/completions`.

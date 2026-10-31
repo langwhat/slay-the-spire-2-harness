@@ -147,7 +147,12 @@ def test_suite_pairs_real_samples_alternates_order_and_reopens_partitions(tmp_pa
                 ids.add(arm.assessment.provenance.sample.recording_id)
                 assert len(arm.progress.observed_configurations) == 1
                 with closing(Journal.open(arm.assessment.provenance.archive)) as journal:
-                    request = journal.requests()[0]
+                    requests = journal.requests()
+                    request = requests[0]
+                    assert arm.progress.observed_configurations == (request.configuration,)
+                    assert request.configuration.capacity_policy == journal.manifest.capacity_policy
+                    assert request.configuration.capacity_policy.context_window == 300_000
+                    assert len(requests) == 2
                     first_inputs.append((request.input, request.tools))
         assert len(ids) == 6
         # Identical full gameplay inputs across partitions exclude suite-only evaluator data.

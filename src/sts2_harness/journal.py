@@ -12,6 +12,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
 
+from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import (
@@ -125,7 +126,7 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[10] = 10
+    schema_version: Literal[11] = 11
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -134,6 +135,7 @@ class Manifest(native.WireModel):
     game_instance_id: str
     run_id: str
     materials: SessionMaterials
+    capacity_policy: CapacityPolicy = CapacityPolicy()
     seed: str | None = None
     template: str | None = None
     initial_notes: str | None = None
@@ -492,6 +494,7 @@ class Journal:
                 if len(rows) != 1 or not isinstance(rows[0][0], str):
                     raise ArchiveError("The recording manifest is missing or ambiguous.")
                 manifest = Manifest.model_validate_json(rows[0][0])
+                cls._check_capacity_policy(manifest)
                 if not manifest.recording_id or not manifest.core_version:
                     raise ArchiveError("Recording identity and core version are required.")
                 cls._check_summaries(connection)
@@ -509,6 +512,7 @@ class Journal:
                 if row is None or not isinstance(row[0], str):
                     raise ArchiveError("The recording manifest is missing.")
                 manifest = Manifest.model_validate_json(row[0])
+                cls._check_capacity_policy(manifest)
                 cls._check_summaries(connection)
                 sequence, cursor = connection.execute(
                     "SELECT COALESCE(MAX(sequence),0), COALESCE(MAX(cursor),0) FROM ("
@@ -533,6 +537,16 @@ class Journal:
         journal._read_only = True
         journal._initialized = True
         return journal
+
+    @staticmethod
+    def _check_capacity_policy(manifest: Manifest) -> None:
+        if (
+            "capacity_policy" not in manifest.model_fields_set
+            or manifest.capacity_policy.model_fields_set != set(CapacityPolicy.model_fields)
+            or manifest.capacity_policy.capacity_classifier_config.model_fields_set
+            != set(CapacityClassifierConfig.model_fields)
+        ):
+            raise ArchiveError("The recording capacity policy is incomplete.")
 
     @staticmethod
     def _read_connection(path: Path) -> sqlite3.Connection:
@@ -588,6 +602,8 @@ class Journal:
         tools: ToolSet,
         configuration: ConfigurationSnapshot,
     ) -> int:
+        if configuration.capacity_policy != self.manifest.capacity_policy:
+            raise ArchiveError("Model capacity policy does not match the recording manifest.")
         sequence = self._allocate()
         position = self._stream_positions.get(stream, 0) + 1
         self._stream_positions[stream] = position
@@ -774,6 +790,40 @@ class Journal:
                     semantic_digest = hashlib.sha256(b"[" + b",".join(content) + b"]").hexdigest()
                     if semantic_digest != delta.semantic_digest:
                         raise ArchiveError("A model input failed its semantic integrity check.")
+                    configuration = ConfigurationSnapshot.model_validate_json(
+                        self._read_blob(connection, delta.configuration)
+                    )
+                    if (
+                        "capacity_policy" not in configuration.model_fields_set
+                        or configuration.capacity_policy.model_fields_set
+                        != set(CapacityPolicy.model_fields)
+                        or configuration.capacity_policy.capacity_classifier_config.model_fields_set
+                        != set(CapacityClassifierConfig.model_fields)
+                        or configuration.capacity_policy != self.manifest.capacity_policy
+                    ):
+                        raise ArchiveError(
+                            "Model capacity policy does not match the recording manifest."
+                        )
+                    attempts = tuple(
+                        ModelAttempt.model_validate_json(
+                            self._read_blob(connection, row[0]),
+                            context=BlobDecoding(
+                                lambda digest: self._read_blob(connection, digest)
+                            ),
+                        )
+                        for row in connection.execute(
+                            "SELECT value FROM model_attempts WHERE sequence=? ORDER BY attempt",
+                            (sequence,),
+                        ).fetchall()
+                    )
+                    input_digest = hashlib.sha256(
+                        b"[" + b",".join(content) + b"]" + self._read_blob(connection, delta.tools)
+                    ).hexdigest()
+                    if any(
+                        attempt.input_digest is not None and attempt.input_digest != input_digest
+                        for attempt in attempts
+                    ):
+                        raise ArchiveError("A model attempt input failed its integrity check.")
                     result.append(
                         ModelRecord(
                             sequence=sequence,
@@ -800,22 +850,8 @@ class Journal:
                                     lambda digest: self._read_blob(connection, digest)
                                 ),
                             ).tools,
-                            configuration=ConfigurationSnapshot.model_validate_json(
-                                self._read_blob(connection, delta.configuration)
-                            ),
-                            attempts=tuple(
-                                ModelAttempt.model_validate_json(
-                                    self._read_blob(connection, row[0]),
-                                    context=BlobDecoding(
-                                        lambda digest: self._read_blob(connection, digest)
-                                    ),
-                                )
-                                for row in connection.execute(
-                                    "SELECT value FROM model_attempts "
-                                    "WHERE sequence=? ORDER BY attempt",
-                                    (sequence,),
-                                ).fetchall()
-                            ),
+                            configuration=configuration,
+                            attempts=attempts,
                             delivered=bool(delivered),
                             failure=FailureKind(failure) if failure else None,
                         )

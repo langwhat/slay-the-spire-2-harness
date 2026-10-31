@@ -1,7 +1,6 @@
 """Official Chat Completions SDK with complete native continuation."""
 
 import json
-from hashlib import sha256
 from typing import Literal, assert_never
 
 import httpx2 as httpx
@@ -198,13 +197,7 @@ class ChatCompletionsAdapter:
     async def close(self) -> None:
         await self._sdk.close()
 
-    async def complete(
-        self,
-        input: ModelInput,
-        tools: tuple[ToolDefinition, ...],
-        *,
-        evidence: ModelAttemptSink | None = None,
-    ) -> ModelReply:
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> dict[str, JsonValue]:
         try:
             effort = (
                 _REASONING.validate_python(self._configuration.reasoning_effort, strict=True)
@@ -236,37 +229,35 @@ class ChatCompletionsAdapter:
             ),
             strict=True,
         )
+        encoding: dict[str, JsonValue] = {
+            "model": self._configuration.model,
+            "messages": TypeAdapter(JsonValue).validate_python(messages),
+            "tools": TypeAdapter(JsonValue).validate_python(encoded_tools),
+            "store": False,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if not isinstance(effort, Omit):
+            encoding["reasoning_effort"] = effort
+        if not isinstance(tier, Omit):
+            encoding["service_tier"] = tier
+
+        return encoding
+
+    async def complete(
+        self,
+        body: dict[str, JsonValue],
+        *,
+        evidence: ModelAttemptSink | None = None,
+    ) -> ModelReply:
         if evidence is not None:
-            encoding: dict[str, JsonValue] = {
-                "model": self._configuration.model,
-                "messages": TypeAdapter(JsonValue).validate_python(messages),
-                "tools": TypeAdapter(JsonValue).validate_python(encoded_tools),
-                "store": False,
-                "stream": True,
-                "stream_options": {"include_usage": True},
-            }
-            if not isinstance(effort, Omit):
-                encoding["reasoning_effort"] = effort
-            if not isinstance(tier, Omit):
-                encoding["service_tier"] = tier
-            evidence.encoded(
-                sha256(
-                    json.dumps(
-                        encoding, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                    ).encode()
-                ).hexdigest()
-            )
+            evidence.encoded(body)
         stream = await self._sdk.chat.completions.create(
             model=self._configuration.model,
             messages=[],
-            # SDK input TypedDicts omit actual opaque continuation fields and nulls.
-            extra_body={"messages": messages},
-            tools=encoded_tools,
-            store=False,
+            # Preserve opaque continuation fields and explicit nulls.
+            extra_body=body,
             stream=True,
-            stream_options={"include_usage": True},
-            reasoning_effort=effort,
-            service_tier=tier,
             extra_headers=self._headers,
         )
         completed = _CompletionStream()

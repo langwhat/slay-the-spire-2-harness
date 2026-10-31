@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import Protocol, Self
 
 from openai.types.responses import ResponseOutputItem
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from sts2_harness.config import Protocol as ModelProtocol
 from sts2_harness.knowledge import GuidanceContent
@@ -242,6 +242,6 @@ class ModelClient(Protocol):
 
 class ModelAttemptSink(Protocol):
     def started(self, index: int) -> None: ...
-    def encoded(self, digest: str) -> None: ...
+    def encoded(self, body: dict[str, JsonValue]) -> None: ...
     def received(self, reply: ModelReply) -> None: ...
     def failed(self, reason: FailureKind) -> None: ...
