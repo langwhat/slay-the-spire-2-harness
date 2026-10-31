@@ -107,6 +107,7 @@ class Scene(SemanticValue):
     run_id: str | None
     node_id: str | None
     bindings: tuple[Binding, ...]
+    reset: Literal[True] | MISSING = MISSING
     removed: tuple[native.Nonempty, ...] | MISSING = MISSING
 
 

@@ -89,6 +89,7 @@ class RunDelivery:
     next_profile: int = 1
     role: native.DecisionOwner = native.DecisionOwner.RUN
     route_plan: RoutePlan | None = None
+    reset_pending: bool = False
 
     def project(
         self, observation: VisibleObservation, source: native.Observation
@@ -168,6 +169,7 @@ class RunDelivery:
         node_changed = self.scene is None or any(
             scene[k] != self.scene[k] for k in ("game_instance_id", "run_id", "node_id")
         )
+        reset = node_changed or self.reset_pending
         mechanisms: list[JsonValue] = []
         for mechanism in observation.mechanisms:
             body = _json(mechanism)
@@ -270,9 +272,7 @@ class RunDelivery:
         for collection in Collection:
             if collection is not Collection.BINDINGS:
                 current[collection] = ordered(collection, current[collection])
-        changed = {
-            k: v for k, v in current.items() if node_changed or self.current.get(k, MISSING) != v
-        }
+        changed = {k: v for k, v in current.items() if reset or self.current.get(k, MISSING) != v}
         previous_progress = self.current.get("progress")
         if (
             self.scene is not None
@@ -284,7 +284,7 @@ class RunDelivery:
         ):
             changed.pop("map_topology", None)
         changed.update({k: None for k in self.current if k not in current})
-        if not node_changed:
+        if not reset:
             removals: dict[str, JsonValue] = {}
             for collection in Collection:
                 if collection is Collection.BINDINGS:
@@ -348,9 +348,11 @@ class RunDelivery:
         wire: dict[str, JsonValue] = {"decision": decision}
         if additions:
             wire["catalog_additions"] = additions
-        if node_changed or scene != self.scene:
+        if reset or scene != self.scene:
             scene_update = dict(scene)
-            if not node_changed:
+            if reset:
+                scene_update["reset"] = True
+            else:
                 assert self.scene is not None
                 updates, removed = difference(
                     Collection.BINDINGS, self.scene["bindings"], scene["bindings"]
@@ -365,4 +367,5 @@ class RunDelivery:
         self.scene = scene
         self.current = current
         self.phase = state.phase
+        self.reset_pending = False
         return result

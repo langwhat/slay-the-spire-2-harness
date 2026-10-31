@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from test_combat_compaction import action
 from test_mod_client import COMBAT, RUN
 
@@ -11,8 +12,9 @@ from sts2_harness.client.models import (
     ResourceCosts,
 )
 from sts2_harness.context import CombatActInput, Context, QueryToolResult, ReadCompleted
-from sts2_harness.context.models import RunActInput
+from sts2_harness.context.models import AutomaticProgress, RunActInput
 from sts2_harness.llm.messages import ToolCall
+from sts2_harness.results import ActionCompleted, ActionToolResult
 
 
 def test_one_card_cost_change_does_not_repeat_unchanged_cards() -> None:
@@ -29,10 +31,12 @@ def test_one_card_cost_change_does_not_repeat_unchanged_cards() -> None:
     )
     context = Context(DecisionOwner.COMBAT)
     context.append_task(CombatActInput(), observation)
+    context.begin_group(observation, "")
     context.append_tool_result(
         ToolCall("inspect", "combat_inspect", "{}"), QueryToolResult(ReadCompleted(), changed)
     )
     increment = json.loads(context.model_input()[-1].text)["observation"]
+    assert "scene" not in increment
     cards = json.dumps(increment["current"]["cards"])
     assert '"c1"' in cards
     assert '"c2"' not in cards, "A cost change must not resend an unchanged card."
@@ -100,6 +104,66 @@ def test_node_change_keeps_unchanged_act_map_through_compaction() -> None:
     context.finish_group()
     context.begin_group(next_node, "")
     context.install_compaction(context.compaction_candidate())
+
+
+def test_first_group_compaction_preserves_mechanism_multiplicity() -> None:
+    opening = Observation.model_validate_json(COMBAT)
+    context = Context(DecisionOwner.COMBAT)
+    context.begin_group(opening, "")
+    context.append_task(CombatActInput(), opening)
+    first = json.loads(context.model_input()[-1].text)["observation"]
+    assert first["scene"]["reset"] is True
+    baseline = json.loads(context.compaction_candidate()[0].text)["context_baseline"]
+    assert baseline["observation"]["scene"]["reset"] is True
+    context.install_compaction(context.compaction_candidate())
+    context.append_tool_result(
+        ToolCall("inspect", "combat_inspect", "{}"), QueryToolResult(ReadCompleted(), opening)
+    )
+    assert "current" not in json.loads(context.model_input()[-1].text)["observation"]
+
+
+@pytest.mark.parametrize("count", [0, 1, 3])
+def test_changed_group_entry_rebuilds_mechanisms_before_compaction(count: int) -> None:
+    original = Observation.model_validate_json(COMBAT)
+    opening = original.model_copy(update={"mechanisms": (original.mechanisms[0],) * 2})
+    changed = original.model_copy(update={"mechanisms": (original.mechanisms[0],) * count})
+    context = Context(DecisionOwner.COMBAT)
+    context.append_task(CombatActInput(), opening)
+    context.begin_group(changed, "")
+    context.append_task(CombatActInput(), changed)
+    frame = json.loads(context.model_input()[-1].text)["observation"]
+    assert frame["scene"]["reset"] is True
+    assert len(frame["current"]["mechanisms"]) == count
+    context.install_compaction(context.compaction_candidate())
+    context.append_tool_result(
+        ToolCall("inspect", "combat_inspect", "{}"), QueryToolResult(ReadCompleted(), changed)
+    )
+    assert "current" not in json.loads(context.model_input()[-1].text)["observation"]
+
+
+def test_automatic_group_preserves_fresh_pre_action_snapshot() -> None:
+    opening = Observation.model_validate_json(RUN)
+    before = opening.model_copy(
+        update={
+            "state": opening.state.model_copy(
+                update={"player": opening.state.player.model_copy(update={"hp": 7})}
+            )
+        }
+    )
+    context = Context(DecisionOwner.RUN)
+    context.append_task(RunActInput(), opening)
+    context.begin_group(before, "")
+    context.append_automatic(
+        AutomaticProgress(label="Continue", reason="Only one destination."),
+        ActionToolResult(ActionCompleted(completed_steps=1), opening),
+    )
+    retained = context.model_input()[-1]
+    candidate = context.compaction_candidate()
+    baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
+    assert baseline["current"]["player"]["hp"] == 7
+    assert candidate[-1] == retained
+    assert json.loads(retained.text)["observation"]["scene"]["reset"] is True
+    context.install_compaction(candidate)
 
 
 def test_compaction_preserves_entry_removals_defaults_and_mechanism_multiplicity() -> None:

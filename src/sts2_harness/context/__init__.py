@@ -218,6 +218,9 @@ class Context:
         delivery = deepcopy(self._delivery)
         known = set(delivery.catalog.values())
         projected = delivery.project(visible_observation(observation, self._role), observation)
+        if delivery.scene != self._delivery.scene or delivery.current != self._delivery.current:
+            # The next retained frame must not apply an older delta over this fresh baseline.
+            self._delivery.reset_pending = True
         names = {
             ident: f"baseline{self._group_number}.{ident}"
             for ident in delivery.catalog.values()
@@ -226,7 +229,7 @@ class Context:
         wire = _JSON_OBJECT.validate_json(projected.to_json())
         wire.pop("catalog_additions", None)
         if delivery.scene is not None:
-            wire["scene"] = delivery.scene
+            wire["scene"] = {**delivery.scene, "reset": True}
         if delivery.current:
             wire["current"] = dict(delivery.current)
         renamed = _rename_profiles(wire, names)
@@ -359,11 +362,15 @@ class Context:
             receive(observation)
             new_scene = observation.get("scene")
             if isinstance(new_scene, dict):
-                node_changed = reconstructed_scene is None or any(
-                    new_scene.get(key) != reconstructed_scene.get(key)
-                    for key in ("game_instance_id", "run_id", "node_id")
+                reset = (
+                    new_scene.get("reset") is True
+                    or reconstructed_scene is None
+                    or any(
+                        new_scene.get(key) != reconstructed_scene.get(key)
+                        for key in ("game_instance_id", "run_id", "node_id")
+                    )
                 )
-                if node_changed:
+                if reset:
                     updates = observation.get("current")
                     old_progress = reconstructed_current.get("progress")
                     new_progress = updates.get("progress") if isinstance(updates, dict) else None
@@ -384,11 +391,13 @@ class Context:
                     }
                 previous = (
                     reconstructed_scene["bindings"]
-                    if not node_changed and reconstructed_scene is not None
+                    if not reset and reconstructed_scene is not None
                     else []
                 )
                 reconstructed_scene = {
-                    key: value for key, value in new_scene.items() if key != "removed"
+                    key: value
+                    for key, value in new_scene.items()
+                    if key not in ("removed", "reset")
                 }
                 reconstructed_scene["bindings"] = apply_entries(
                     Collection.BINDINGS,
