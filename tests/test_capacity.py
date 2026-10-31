@@ -1,16 +1,17 @@
-import shutil
 import socket
-from http.client import IncompleteRead
-from io import BytesIO
 from pathlib import Path
 
 import pytest
 from pydantic import JsonValue
 
-from sts2_harness import tokenizer
 from sts2_harness.capacity import CapacityPolicy, measure
-from sts2_harness.cli import main
-from sts2_harness.config import ConfigurationError, Protocol
+from sts2_harness.config import Protocol
+
+
+def test_character_estimate_counts_unicode_and_structure_once() -> None:
+    body: dict[str, JsonValue] = {"input": ["中😀a"], "tools": []}
+    # The skeleton has 25 characters; the decoded value adds three, not eight bytes.
+    assert measure(body, Protocol.RESPONSES).estimated_input_tokens == 13
 
 
 @pytest.mark.parametrize("protocol", list(Protocol))
@@ -34,9 +35,9 @@ def test_input_estimate_ignores_transport_settings_but_digest_preserves_them(
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
-        ("中文 <|endoftext|> hello", 1048),
-        ("玩家查看三条路线，比较它们的代价，然后选择预期收益最高的路线。", 1071),
-        ('Line one: "quoted".\nLine two: "quoted".\n' * 100, 2239),
+        ("中文 <|endoftext|> hello", 29),
+        ("玩家查看三条路线，比较它们的代价，然后选择预期收益最高的路线。", 32),
+        ('Line one: "quoted".\nLine two: "quoted".\n' * 100, 1355),
     ],
 )
 def test_measure_counts_decoded_multilingual_text_and_literal_special_tokens(
@@ -59,101 +60,13 @@ def test_input_estimate_includes_opaque_native_continuation() -> None:
     assert continued.estimated_input_tokens > empty.estimated_input_tokens + 300
 
 
-@pytest.mark.parametrize("name", ["cl100k_base", "o200k_base"])
-@pytest.mark.parametrize("damage", ["missing", "corrupt"])
-def test_missing_or_corrupt_tables_fail_without_network(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str, name: str
-) -> None:
-    for table in tokenizer.TABLES:
-        if table != name:
-            shutil.copyfile(
-                tokenizer.TABLE_DIRECTORY / f"{table}.tiktoken", tmp_path / f"{table}.tiktoken"
-            )
-    monkeypatch.setattr(tokenizer, "TABLE_DIRECTORY", tmp_path)
-    if damage == "corrupt":
-        (tmp_path / f"{name}.tiktoken").write_bytes(b"corrupt")
-
+def test_measurement_needs_no_network_or_tokenizer_tables(monkeypatch: pytest.MonkeyPatch) -> None:
     def deny_network(*args: object, **kwargs: object) -> None:
         raise AssertionError("Unexpected network access")
 
     monkeypatch.setattr(socket.socket, "connect", deny_network)
-    tokenizer.encodings.cache_clear()
-    try:
-        with pytest.raises(ConfigurationError, match="uv run sts2 prepare-tokenizers"):
-            measure({"messages": [], "tools": []}, Protocol.CHAT_COMPLETIONS)
-    finally:
-        tokenizer.encodings.cache_clear()
-
-
-def test_start_reports_how_to_prepare_missing_tables(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(tokenizer, "TABLE_DIRECTORY", tmp_path)
-    tokenizer.encodings.cache_clear()
-    try:
-        result = main(
-            [
-                "start",
-                "--env-file",
-                str(tmp_path / "absent.env"),
-                "--set",
-                "LLM_MODEL=example",
-                "--set",
-                "LLM_AUTH=none",
-            ]
-        )
-        assert result == 2
-        assert "uv run sts2 prepare-tokenizers" in capsys.readouterr().err
-    finally:
-        tokenizer.encodings.cache_clear()
-
-
-def test_explicit_preparation_verifies_tables_and_reuses_valid_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tokenizer.TABLE_DIRECTORY
-    monkeypatch.setattr(tokenizer, "TABLE_DIRECTORY", tmp_path)
-    requested: list[str] = []
-
-    def download(url: str, *, timeout: int) -> BytesIO:
-        requested.append(url)
-        return BytesIO((source / url.rsplit("/", 1)[-1]).read_bytes())
-
-    monkeypatch.setattr(tokenizer, "urlopen", download)
-    assert main(["prepare-tokenizers"]) == 0
-    assert len(requested) == 2
-    assert main(["prepare-tokenizers"]) == 0
-    assert len(requested) == 2
-
-    def deny_network(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Unexpected network access")
-
-    monkeypatch.setattr(socket.socket, "connect", deny_network)
-    tokenizer.encodings.cache_clear()
-    try:
-        assert (
-            measure({"messages": [], "tools": []}, Protocol.CHAT_COMPLETIONS).estimated_input_tokens
-            == 1031
-        )
-    finally:
-        tokenizer.encodings.cache_clear()
-
-
-def test_interrupted_table_download_reports_a_configuration_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    class TruncatedResponse(BytesIO):
-        def read(self, size: int | None = -1) -> bytes:
-            raise IncompleteRead(b"partial", 10)
-
-    def download(url: str, *, timeout: int) -> BytesIO:
-        return TruncatedResponse()
-
-    monkeypatch.setattr(tokenizer, "TABLE_DIRECTORY", tmp_path)
-    monkeypatch.setattr(tokenizer, "urlopen", download)
-    assert main(["prepare-tokenizers"]) == 2
-    assert "Could not prepare tokenizer tables" in capsys.readouterr().err
-    assert not tuple(tmp_path.glob("*.tiktoken"))
+    body: dict[str, JsonValue] = {"input": [], "tools": []}
+    assert measure(body, Protocol.RESPONSES).estimated_input_tokens == 8
 
 
 def test_prepared_request_is_sent_unchanged_through_retry(tmp_path: Path) -> None:

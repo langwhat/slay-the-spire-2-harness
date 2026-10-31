@@ -572,7 +572,7 @@ class ModelAttempt(native.WireModel):
     input_digest: str | None = None
     protocol_encoding_digest: str | None = None
     estimated_input_tokens: int | None = None
-    estimator_id: Literal["input_tiktoken_max_v2"] = "input_tiktoken_max_v2"
+    estimator_id: Literal["input_characters_v1"] = "input_characters_v1"
     cause: AttemptCause = AttemptCause.INITIAL
     recovery_of: ModelAttemptReference | None = None
     capacity_signal: str | None = None

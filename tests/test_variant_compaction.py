@@ -209,7 +209,7 @@ def test_variant_owns_compaction_timing_and_reopens(
 ) -> None:
     async def scenario() -> None:
         short = "Use the current public state."
-        long = short + " Think carefully." * 90
+        long = short + " Think carefully." * 30
         source_rules = Rules(short if longer else long)
         calibration = await source_case(
             tmp_path / "calibration.sqlite",

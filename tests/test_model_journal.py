@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import json
-import shutil
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import closing
@@ -11,7 +10,6 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
-import tiktoken
 from pydantic import JsonValue, TypeAdapter
 from test_combat import BattleHTTP, reply
 from test_responses import OUTPUT, completed, configuration
@@ -21,6 +19,7 @@ from sts2_harness.cli import main
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent, CombatTask
+from sts2_harness.config import Protocol
 from sts2_harness.decisions import CombatHandoff
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution import Execution
@@ -49,53 +48,7 @@ from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.results import ActionUnknown
-from sts2_harness.tokenizer import TABLE_DIRECTORY
 from sts2_harness.tools import ToolCatalog
-
-
-@pytest.fixture
-def reference_encodings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[tiktoken.Encoding, tiktoken.Encoding]:
-    for name, cache_key in (
-        ("cl100k_base", "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"),
-        ("o200k_base", "fb374d419588a4632f3f557e76b4b70aebbca790"),
-    ):
-        shutil.copyfile(TABLE_DIRECTORY / f"{name}.tiktoken", tmp_path / cache_key)
-    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
-    return tiktoken.get_encoding("cl100k_base"), tiktoken.get_encoding("o200k_base")
-
-
-def reference_estimate(
-    body: dict[str, JsonValue],
-    keys: tuple[str, ...],
-    encodings: tuple[tiktoken.Encoding, tiktoken.Encoding],
-) -> int:
-    strings: list[str] = []
-
-    def structure(value: JsonValue) -> JsonValue:
-        if isinstance(value, str):
-            strings.append(value)
-            return ""
-        if isinstance(value, list):
-            return [structure(item) for item in value]
-        if isinstance(value, dict):
-            return {key: structure(item) for key, item in value.items()}
-        return value
-
-    text = json.dumps(
-        structure({key: body[key] for key in keys}),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return (
-        max(
-            sum(len(encoding.encode_ordinary(value)) for value in (text, *strings))
-            for encoding in encodings
-        )
-        + 1024
-    )
 
 
 @pytest.mark.parametrize(
@@ -800,9 +753,7 @@ def test_summary_rejects_disagreement_with_authoritative_metadata(
     reader.close()
 
 
-def test_recorded_request_accounts_for_each_attempt_and_wire_input(
-    tmp_path: Path, reference_encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
-) -> None:
+def test_recorded_request_accounts_for_each_attempt_and_wire_input(tmp_path: Path) -> None:
     bodies: list[dict[str, JsonValue]] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -848,15 +799,8 @@ def test_recorded_request_accounts_for_each_attempt_and_wire_input(
         assert len(record.attempts) == 2
         body = bodies[0]
         assert isinstance(body["input"], list) and isinstance(body["tools"], list)
-        expected = reference_estimate(body, ("input", "tools"), reference_encodings)
-        assert archive.manifest.capacity_policy.estimator_id == "input_tiktoken_max_v2"
-        assert archive.manifest.capacity_policy.tokenizer_dependency == "tiktoken==0.12.0"
-        assert archive.manifest.capacity_policy.cl100k_base_sha256 == (
-            "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
-        )
-        assert archive.manifest.capacity_policy.o200k_base_sha256 == (
-            "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
-        )
+        expected = 23
+        assert archive.manifest.capacity_policy.estimator_id == "input_characters_v1"
         assert bodies[0] == bodies[1]
         assert record.attempts[0].input_digest == record.attempts[1].input_digest
         assert record.attempts[0].input_digest is not None
@@ -874,7 +818,7 @@ def test_recorded_request_accounts_for_each_attempt_and_wire_input(
 
 @pytest.mark.parametrize("protocol", ["responses", "chat-completions", "messages"])
 def test_retry_records_the_measurement_of_each_submitted_body(
-    tmp_path: Path, protocol: str, reference_encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
+    tmp_path: Path, protocol: str
 ) -> None:
     from pydantic import BaseModel, ConfigDict
     from test_chat_completions import chat_stream
@@ -943,8 +887,9 @@ def test_retry_records_the_measurement_of_each_submitted_body(
             arrays = [body[key] for key in keys]
             assert all(isinstance(value, list) for value in arrays)
             assert attempt.protocol_encoding_digest == hashlib.sha256(encoded).hexdigest()
-            assert attempt.estimated_input_tokens == reference_estimate(
-                body, keys, reference_encodings
+            assert (
+                attempt.estimated_input_tokens
+                == measure(body, Protocol(protocol)).estimated_input_tokens
             )
         assert attempts[0].reply is None
         assert attempts[1].reply is not None
@@ -954,7 +899,7 @@ def test_retry_records_the_measurement_of_each_submitted_body(
 
 @pytest.mark.parametrize("protocol", ["responses", "chat-completions", "messages"])
 def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
-    tmp_path: Path, protocol: str, reference_encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
+    tmp_path: Path, protocol: str
 ) -> None:
     from test_chat_completions import chat_stream
     from test_messages import events, sse
@@ -1043,8 +988,9 @@ def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
             arrays = [body[key] for key in keys]
             assert all(isinstance(value, list) for value in arrays)
             attempt = record.attempts[0]
-            assert attempt.estimated_input_tokens == reference_estimate(
-                body, keys, reference_encodings
+            assert (
+                attempt.estimated_input_tokens
+                == measure(body, Protocol(protocol)).estimated_input_tokens
             )
             assert (
                 attempt.protocol_encoding_digest
@@ -1139,9 +1085,6 @@ def test_recording_preserves_the_live_classifier_policy(tmp_path: Path) -> None:
     [
         "context_window",
         "estimator_id",
-        "tokenizer_dependency",
-        "cl100k_base_sha256",
-        "o200k_base_sha256",
     ],
 )
 def test_recording_cannot_restore_a_missing_capacity_policy(tmp_path: Path, field: str) -> None:

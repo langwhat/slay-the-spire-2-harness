@@ -10,7 +10,6 @@ from pydantic import Field, JsonValue, model_validator
 
 from sts2_harness.client import models as native
 from sts2_harness.config import ModelConfiguration, Protocol
-from sts2_harness.tokenizer import encodings
 
 
 class CompactionDecision(StrEnum):
@@ -87,14 +86,7 @@ class CapacityPolicy(native.WireModel):
     context_window: Annotated[int, Field(gt=0, strict=True)] = 300_000
     trigger_numerator: Literal[9] = 9
     trigger_denominator: Literal[10] = 10
-    estimator_id: Literal["input_tiktoken_max_v2"] = "input_tiktoken_max_v2"
-    tokenizer_dependency: Literal["tiktoken==0.12.0"] = "tiktoken==0.12.0"
-    cl100k_base_sha256: Literal[
-        "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
-    ] = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
-    o200k_base_sha256: Literal[
-        "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
-    ] = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+    estimator_id: Literal["input_characters_v1"] = "input_characters_v1"
     compaction_policy_id: Literal["latest_complete_group_v1"] = "latest_complete_group_v1"
     capacity_classifier_id: CapacityClassifierId = CapacityClassifierId.UNVERIFIED
     capacity_classifier_config: CapacityClassifierConfig = CapacityClassifierConfig()
@@ -160,11 +152,13 @@ def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
         )
     )
     input_fields: dict[str, JsonValue] = {}
+    items = 0
     for name in names:
         value = body.get(name)
         if not isinstance(value, list):
             raise ValueError("Expected an array in the encoded model request.")
         input_fields[name] = value
+        items += len(value)
     strings: list[str] = []
     structure = json.dumps(
         _input_structure(input_fields, strings),
@@ -172,12 +166,9 @@ def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
         sort_keys=True,
         separators=(",", ":"),
     )
-    # Count decoded strings once, including opaque continuation, without HTTP escaping.
-    tokens = max(
-        len(encoding.encode_ordinary(structure))
-        + sum(len(encoding.encode_ordinary(value)) for value in strings)
-        for encoding in encodings()
-    )
+    # Count decoded characters once, including opaque continuation, without HTTP escaping.
+    characters = len(structure) + sum(len(value) for value in strings)
+    tokens = (characters + 2) // 3 + 3 * items
     text = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     encoded = text.encode()
-    return Measurement(sha256(encoded).hexdigest(), tokens + 1024, len(encoded))
+    return Measurement(sha256(encoded).hexdigest(), tokens, len(encoded))

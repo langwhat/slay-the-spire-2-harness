@@ -11,7 +11,6 @@ Install Python 3.12+ and [uv](https://docs.astral.sh/uv/), then run:
 
 ```sh
 uv sync
-uv run sts2 prepare-tokenizers
 cp .env.example .env
 # Edit .env once with your model and credentials.
 uv run sts2 check-config
@@ -19,21 +18,20 @@ uv run sts2 check-config --set STS2_DRIVER=external
 ./scripts/check
 ```
 
-`prepare-tokenizers` explicitly downloads and SHA-256 verifies the two tiktoken encoding
-tables into `~/.cache/sts2-harness/tokenizers`. Run it once before using the built-in model
-client, or again to repair missing or damaged tables. Once prepared, the model client reads
-them locally and never downloads them implicitly. The Python dependencies and tables must
-already be cached or provisioned for an offline installation. The tiktoken software is MIT
-licensed; this command obtains the tables directly from OpenAI, and their separate licensing
-has not been established here. Use `uv run --offline` when uv itself must not access the
-network. Estimates are approximate, not provider token counts.
-
-The `input_tiktoken_max_v2` estimator counts decoded string values and their JSON structure
-in model-input arrays and tool schemas, taking the larger pinned-tokenizer total plus a
-fixed 1,024-token allowance. HTTP escaping and transport-only settings do not inflate this
-estimate; opaque continuation values still count. Full canonical request digests and byte
-counts cover the unchanged transport body. Estimation uses no provider counting call or
-historical-usage calibration.
+The `input_characters_v1` estimator runs locally without tokenizer packages, downloaded
+tables, provider counting calls, or historical-usage calibration. It counts Unicode
+characters in decoded string values plus a canonical JSON structural skeleton whose
+string values are empty. Keys, non-string scalar values, and structure count once.
+The estimate is `ceil(characters / 3) + 3 * items`, where items are top-level entries
+in the protocol's input-bearing arrays and tool list: Responses `input`/`tools`, Chat
+Completions `messages`/`tools`, and Messages `system`/`messages`/`tools`.
+Opaque continuation strings count at ordinary character length. HTTP escaping and
+transport-only settings do not inflate the estimate. Full canonical request digests
+and byte counts cover the unchanged transport body. The algorithm identity is recorded
+in the Journal alongside the capacity policy and each attempt's estimate and provider usage.
+These are approximate counts, not provider counts or a guaranteed upper bound, especially
+for different languages, content distributions, or providers. Use `uv run --offline`
+when uv itself must not access the network; dependencies must already be cached.
 
 Configuration is read once into an immutable snapshot shared by Run and Combat. Precedence
 is `--set NAME=VALUE`, process environment, local `.env`, then code defaults.

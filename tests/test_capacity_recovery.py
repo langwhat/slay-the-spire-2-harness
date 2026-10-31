@@ -472,9 +472,9 @@ def test_recovery_requires_both_wire_size_and_estimate_to_decrease(
         )
         context = Context(native.DecisionOwner.RUN)
         if case == "more_tokens":
-            old = "a" * 1000
+            old = "中" * 400
         elif case == "more_bytes":
-            old = "".join(random.Random(42).choices(string.ascii_letters + string.digits, k=500))
+            old = "a" * 800
         else:
             old = "x"
         context.begin_group(obs, "old")
