@@ -9,6 +9,7 @@ from pydantic import Field, JsonValue
 
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
+from sts2_harness.tokenizer import encodings
 
 
 class CapacityClassifierConfig(native.WireModel):
@@ -25,7 +26,14 @@ class CapacityPolicy(native.WireModel):
     context_window: Annotated[int, Field(gt=0, strict=True)] = 300_000
     trigger_numerator: Literal[9] = 9
     trigger_denominator: Literal[10] = 10
-    estimator_id: Literal["wire_utf8_conservative_v1"] = "wire_utf8_conservative_v1"
+    estimator_id: Literal["wire_tiktoken_max_v1"] = "wire_tiktoken_max_v1"
+    tokenizer_dependency: Literal["tiktoken==0.12.0"] = "tiktoken==0.12.0"
+    cl100k_base_sha256: Literal[
+        "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+    ] = "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+    o200k_base_sha256: Literal[
+        "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+    ] = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     compaction_policy_id: Literal["latest_complete_group_v1"] = "latest_complete_group_v1"
     capacity_classifier_id: Literal["no_verified_signals_v1"] = "no_verified_signals_v1"
     capacity_classifier_config: CapacityClassifierConfig = CapacityClassifierConfig()
@@ -53,5 +61,6 @@ def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
         if not isinstance(value, list):
             raise ValueError("Expected an array in the encoded model request.")
         count += len(value)
-    encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    return Measurement(sha256(encoded).hexdigest(), len(encoded) + 1024 + 64 * count)
+    text = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    tokens = max(len(encoding.encode_ordinary(text)) for encoding in encodings())
+    return Measurement(sha256(text.encode()).hexdigest(), tokens + 1024 + 64 * count)
