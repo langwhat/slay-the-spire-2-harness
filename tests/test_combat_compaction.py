@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from contextlib import closing
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from test_lifecycle import Campaign
+from test_mod_client import COMBAT
+from test_replay import record_campaign
+from test_responses import configuration
+
+from sts2_harness.capacity import CapacityPolicy, CompactionDecision, measure
+from sts2_harness.client import models as native
+from sts2_harness.config import Protocol
+from sts2_harness.context import Context
+from sts2_harness.context.models import CombatActInput, ReviewContent
+from sts2_harness.journal import Journal, Manifest
+from sts2_harness.journal_models import LiteralText, ResultSnapshot, TaskSnapshot, TextSnapshot
+from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall, ToolResultMessage
+from sts2_harness.results import ActionCompleted, ActionToolResult
+from sts2_harness_eval import Reached, reach
+
+
+def action(context: Context, ident: str, observation: native.Observation) -> None:
+    context.append_reply(
+        AssistantMessage(
+            ResponsesReply.from_json(
+                json.dumps(
+                    [
+                        {
+                            "type": "function_call",
+                            "call_id": ident,
+                            "name": "combat_act",
+                            "arguments": "{}",
+                        }
+                    ]
+                )
+            )
+        )
+    )
+    context.append_tool_result(
+        ToolCall(ident, "combat_act", "{}"),
+        ActionToolResult(ActionCompleted(completed_steps=1), observation),
+    )
+
+
+def test_combat_baseline_precedes_latest_group_and_retains_opening_advice() -> None:
+    opening = native.Observation.model_validate_json(COMBAT)
+    changed = opening.model_copy(
+        update={
+            "state": opening.state.model_copy(
+                update={"player": opening.state.player.model_copy(update={"hp": 7})}
+            )
+        }
+    )
+    context = Context(native.DecisionOwner.COMBAT)
+    context.begin_group(opening, "Opening advice")
+    context.append_task(CombatActInput("Opening advice"), opening)
+    action(context, "a0", changed)
+    context.finish_group()
+    context.begin_group(changed, "Opening advice")
+    context.append_task(CombatActInput(), changed)
+    action(context, "a1", changed)
+    context.finish_group()
+    context.begin_group(changed, "Opening advice")
+    context.append_task(CombatActInput(), changed)
+
+    candidate = context.compaction_candidate()
+    baseline = json.loads(candidate[0].text)["context_baseline"]
+    assert baseline["opening_notes"] == "Opening advice"
+    assert baseline["observation"]["current"]["player"]["hp"] == 7
+    selection = baseline["observation"]["decision"]["selection"]
+    assert selection["selected"] == []
+    assert [candidate["ref"] for candidate in selection["candidates"]] == ["c2", "c1"]
+    assert "strategy_notes" not in baseline and "route_plan" not in baseline
+    assert [item.call_id for item in candidate if isinstance(item, ToolResultMessage)] == ["a1"]
+    context.validate_compaction(candidate)
+    context.install_compaction(candidate)
+    assert context.model_input() == candidate
+
+
+def combat_campaign(protocol: Protocol) -> Campaign:
+    import random
+    import string
+
+    from test_compaction_full_replay import response
+    from test_lifecycle import Campaign
+
+    campaign = Campaign()
+    start, battle, reward, next_act, second_battle, ending = campaign.states
+    battle_two = battle.model_copy(
+        update={
+            "state": battle.state.model_copy(
+                update={"player": battle.state.player.model_copy(update={"hp": 7})}
+            )
+        }
+    )
+    battle_three = battle.model_copy(
+        update={
+            "state": battle.state.model_copy(
+                update={"player": battle.state.player.model_copy(update={"hp": 5})}
+            )
+        }
+    )
+    campaign.states = [
+        start,
+        battle,
+        battle_two,
+        battle_three,
+        reward,
+        next_act,
+        second_battle,
+        ending,
+    ]
+    old_text = "".join(random.Random(53).choices(string.ascii_letters, k=9000))
+    campaign.responses = iter(
+        [
+            response(
+                protocol,
+                ("plan", "run_plan", '{"reason":"Battle.","edges":[{"from":"0:0","to":"1:0"}]}'),
+            ),
+            response(protocol, ("travel", "run_next", '{"reason":"Battle."}')),
+            response(protocol, text=old_text),
+            response(protocol, ("a0", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            response(protocol, ("q1", "combat_inspect", '{"area":"state"}')),
+            response(protocol, ("a1", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            response(protocol, ("q2", "combat_inspect", '{"area":"state"}')),
+            response(protocol, ("a2", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            response(protocol, text="Observed damage; later timing is unknown."),
+            response(
+                protocol, ("notes", "run_notes", '{"mode":"replace","text":"Reserve for act two."}')
+            ),
+            response(
+                protocol,
+                ("advance", "run_act", '{"steps":[{"kind":"interact","action":"advance"}]}'),
+            ),
+            response(
+                protocol,
+                ("plan2", "run_plan", '{"reason":"Battle.","edges":[{"from":"0:0","to":"1:0"}]}'),
+            ),
+            response(protocol, ("travel2", "run_next", '{"reason":"Battle."}')),
+            response(protocol, ("terminal", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+        ]
+    )
+    return campaign
+
+
+@pytest.mark.parametrize("protocol", list(Protocol))
+def test_combat_compaction_recording_replays_without_repeating_actions(
+    tmp_path: Path, protocol: Protocol
+) -> None:
+    async def scenario() -> None:
+        calibration = combat_campaign(protocol)
+        with patch(
+            "test_replay.configuration",
+            return_value=configuration(tmp_path, LLM_PROTOCOL=protocol.value),
+        ):
+            await record_campaign(tmp_path / "calibration.sqlite", calibration)
+        with closing(Journal.open(tmp_path / "calibration.sqlite")) as journal:
+            calibration_records = journal.requests()
+        target = next(
+            index
+            for index, record in enumerate(calibration_records)
+            if record.role is native.DecisionOwner.COMBAT and record.confirmed_operation_cursor == 3
+        )
+        estimate = measure(calibration.inputs[target], protocol).estimated_input_tokens
+        previous = max(
+            measure(calibration.inputs[index], protocol).estimated_input_tokens
+            for index, record in enumerate(calibration_records[:target])
+            if record.role is native.DecisionOwner.COMBAT
+        )
+        window = estimate * 10 // 9
+        assert previous * 10 < window * 9 <= estimate * 10
+        config = replace(
+            configuration(tmp_path, LLM_PROTOCOL=protocol.value), context_window=window
+        )
+
+        def manifest_with_capacity(**kwargs: object) -> Manifest:
+            return Manifest.model_validate(
+                {**kwargs, "capacity_policy": CapacityPolicy(context_window=window)}
+            )
+
+        campaign = combat_campaign(protocol)
+        path = tmp_path / "recording.sqlite"
+        with (
+            patch("test_replay.configuration", return_value=config),
+            patch("test_replay.Manifest", side_effect=manifest_with_capacity),
+        ):
+            anchors = await record_campaign(path, campaign)
+        with closing(Journal.open(path)) as journal:
+            records = journal.requests()
+            operations = journal.operations()
+        compressed = next(
+            record
+            for record in records
+            if record.role is native.DecisionOwner.COMBAT
+            and record.preparation is not None
+            and record.preparation.decision is CompactionDecision.COMPACTED
+        )
+        preparation = compressed.preparation
+        assert preparation is not None and preparation.input_after is not None
+        assert preparation.baseline is not None
+        assert isinstance(preparation.baseline, TextSnapshot)
+        assert isinstance(preparation.baseline.value, LiteralText)
+        baseline = json.loads(preparation.baseline.value.body)["context_baseline"]
+        assert baseline["opening_notes"] == "Opening plan."
+        assert baseline["observation"]["current"]["player"]["hp"] == 7
+        call_ids = [
+            item.call_id for item in preparation.input_after if isinstance(item, ResultSnapshot)
+        ]
+        assert call_ids == ["q1", "a1"]
+        review = next(
+            record
+            for record in records
+            if record.role is native.DecisionOwner.COMBAT
+            and any(
+                isinstance(item, TaskSnapshot) and isinstance(item.content, ReviewContent)
+                for item in record.input
+            )
+        )
+        assert [item.call_id for item in review.input if isinstance(item, ResultSnapshot)] == [
+            "q1",
+            "a1",
+            "q2",
+            "a2",
+        ]
+        actions_before = tuple(campaign.actions)
+        inputs_before = tuple(campaign.inputs)
+        for anchor in anchors:
+            if anchor.model_sequence < compressed.sequence:
+                continue
+            async with reach(path, anchor) as result:
+                assert isinstance(result, Reached), result
+        assert tuple(campaign.actions) == actions_before
+        assert tuple(campaign.inputs) == inputs_before
+        with closing(Journal.open(path)) as journal:
+            assert journal.operations() == operations
+        assert len(campaign.actions) == 7
+        assert records[-1].role is native.DecisionOwner.COMBAT
+        assert records[-1].confirmed_operation_cursor == 6
+
+    asyncio.run(scenario())
+
+
+def test_repeated_combat_compaction_keeps_unknown_result_and_later_facts() -> None:
+    from sts2_harness.results import ActionUnknown, Reason, ReasonCode, Suggestion
+
+    opening = native.Observation.model_validate_json(COMBAT)
+    next_state = opening.model_copy(
+        update={
+            "state": opening.state.model_copy(
+                update={"player": opening.state.player.model_copy(update={"hp": 7})}
+            ),
+            "descriptions": {**opening.descriptions, "c1": "Current modified card text."},
+        }
+    )
+    context = Context(native.DecisionOwner.COMBAT)
+    context.begin_group(opening, "Keep the block engine.")
+    context.append_task(CombatActInput("Keep the block engine."), opening)
+    action(context, "old", next_state)
+    context.finish_group()
+    context.begin_group(next_state, "Keep the block engine.")
+    context.append_task(CombatActInput(), next_state)
+    call = ToolCall("uncertain", "combat_act", "{}")
+    context.append_reply(
+        AssistantMessage(
+            ResponsesReply.from_json(
+                '[{"type":"function_call","call_id":"uncertain",'
+                '"name":"combat_act","arguments":"{}"}]'
+            )
+        )
+    )
+    context.append_tool_result(
+        call,
+        ActionToolResult(
+            ActionUnknown(
+                confirmed_steps=0,
+                uncertain_step=1,
+                reason=Reason(code=ReasonCode.EXECUTION_UNCONFIRMED, message="Not confirmed."),
+                suggested_actions=(Suggestion(message="Inspect before choosing again."),),
+            ),
+            None,
+        ),
+    )
+    context.finish_group()
+    context.begin_group(next_state, "Keep the block engine.")
+    context.append_task(CombatActInput(), next_state)
+    first = context.compaction_candidate()
+    assert '"observation":null' in first[-2].text
+    context.validate_compaction(first)
+    context.install_compaction(first)
+    action(context, "confirmed", next_state)
+    context.finish_group()
+    context.begin_group(next_state, "Keep the block engine.")
+    context.append_task(CombatActInput(), next_state)
+    second = context.compaction_candidate()
+    baseline = json.loads(second[0].text)["context_baseline"]
+    assert baseline["opening_notes"] == "Keep the block engine."
+    assert baseline["observation"]["current"]["player"]["hp"] == 7
+    assert any(
+        item["ref"] == "c1" and item["text"] == "Current modified card text."
+        for item in baseline["observation"]["current"]["card_descriptions"]
+    )
+    assert [item.call_id for item in second if isinstance(item, ToolResultMessage)] == ["confirmed"]
+    context.validate_compaction(second)
+    context.install_compaction(second)

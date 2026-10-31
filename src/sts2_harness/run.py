@@ -9,7 +9,6 @@ from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.agent import Agent, MaterialReader
 from sts2_harness.auto import choose_auto, shop_controls
-from sts2_harness.capacity import CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.map_projection import Plan, PlanEdge
@@ -30,12 +29,7 @@ from sts2_harness.diagnostics import AutoFinished, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import (
-    FailureKind,
     ModelClient,
-    ModelReply,
-    ModelUnavailable,
-    PreparedRequest,
-    RequestPreparation,
     TextMessage,
     TextRole,
     ToolCall,
@@ -301,92 +295,6 @@ class RunAgent(Agent):
         if result.observation is not None:
             self._sync_plan(result.observation)
         return super()._close_query(context, task, bound, call, result)
-
-    async def _request(self, context: Context) -> ModelReply:
-        assert self._llm is not None
-        prepared, evidence = await self.compact(context)
-        return await self._llm.complete_prepared(prepared, preparation=evidence)
-
-    async def compact(self, context: Context) -> tuple[PreparedRequest, RequestPreparation]:
-        assert self._llm is not None
-        client = self._llm
-        tools = self._tools.definitions
-        before = context.model_input()
-        prepared = client.prepare(before, tools)
-        estimate = prepared.measurement.estimated_input_tokens
-        complete_id, active_id = context.group_ids
-        group_id = active_id or complete_id
-        assert group_id is not None
-        candidate, baseline = context.compaction_input()
-        policy = client.capacity_policy
-        below_trigger = (
-            estimate * policy.trigger_denominator < policy.context_window * policy.trigger_numerator
-        )
-        already_minimal = candidate == before and estimate < policy.context_window
-        if below_trigger or already_minimal:
-            evidence = RequestPreparation(
-                group_id,
-                baseline,
-                before,
-                estimate,
-                CompactionDecision.UNCHANGED,
-                before,
-                estimate,
-                complete_id,
-                active_id,
-                CompactionValidation.NOT_NEEDED,
-            )
-            return prepared, evidence
-        try:
-            context.validate_compaction(candidate)
-        except ValueError:
-            evidence = RequestPreparation(
-                group_id,
-                baseline,
-                before,
-                estimate,
-                CompactionDecision.INVALID_CANDIDATE,
-                None,
-                None,
-                complete_id,
-                active_id,
-                CompactionValidation.FAILED,
-            )
-            failure = ModelUnavailable(FailureKind.CAPACITY)
-            await client.interrupt_preparation(evidence, tools, failure)
-            raise failure from None
-        compacted = client.prepare(candidate, tools)
-        after = compacted.measurement.estimated_input_tokens
-        if after >= policy.context_window:
-            evidence = RequestPreparation(
-                group_id,
-                baseline,
-                before,
-                estimate,
-                CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
-                candidate,
-                after,
-                complete_id,
-                active_id,
-                CompactionValidation.PASSED,
-            )
-            failure = ModelUnavailable(FailureKind.CAPACITY)
-            await client.interrupt_preparation(evidence, tools, failure)
-            raise failure
-        context.install_compaction(candidate)
-        evidence = RequestPreparation(
-            group_id,
-            baseline,
-            before,
-            estimate,
-            CompactionDecision.COMPACTED,
-            candidate,
-            after,
-            complete_id,
-            active_id,
-            CompactionValidation.PASSED,
-        )
-        return compacted, evidence
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         if self._pending_auto is not None or self._pending_call is not None:

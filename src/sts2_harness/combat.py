@@ -14,6 +14,7 @@ from sts2_harness.decisions import (
     BattleReport,
     BoundaryValues,
     CombatHandoff,
+    Decision,
     DecisionSource,
     DecisionTask,
     ReviewTask,
@@ -27,7 +28,7 @@ from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.prompts import PackagedPrompts, PromptReader
-from sts2_harness.results import Reason, ReasonCode
+from sts2_harness.results import ActionToolResult, Reason, ReasonCode
 from sts2_harness.tools import ToolCatalog
 
 _LOG = logging.getLogger(__name__)
@@ -71,9 +72,22 @@ class CombatAgent(Agent):
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
         return Context(native.DecisionOwner.COMBAT, system=system)
 
+    async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
+        decision = await super().decide(task, observation)
+        if isinstance(decision, TaskComplete):
+            assert self._context is not None
+            self._context.finish_group()
+        return decision
+
+    async def accept(self, outcome: ActionToolResult) -> None:
+        await super().accept(outcome)
+        assert self._context is not None
+        self._context.finish_group()
+
     def _append_task(
         self, context: Context, task: DecisionTask, observation: native.Observation
     ) -> None:
+        context.begin_group(observation, self._opening_notes)
         if isinstance(task, ReviewTask):
             context.append_task(CombatReviewInput(task.report))
             return

@@ -49,7 +49,7 @@ from sts2_harness.route_plan import RoutePlan
 
 
 @dataclass(frozen=True, slots=True)
-class _RunGroup:
+class _Group:
     id: int
     start: int
     observation: dict[str, JsonValue]
@@ -152,8 +152,8 @@ class Context:
         self._run_delivery = RunDelivery()
         self._documents: dict[tuple[str, str | None], DocumentView] = {}
         self._guidance: dict[tuple[str, str | None], DocumentView] = {}
-        self._last_group: _RunGroup | None = None
-        self._active_group: _RunGroup | None = None
+        self._last_group: _Group | None = None
+        self._active_group: _Group | None = None
         self._group_number = 0
         for message in system:
             if isinstance(message.value, GuidanceContent):
@@ -185,6 +185,12 @@ class Context:
         self._record_documents(changed)
         self._record_guidance(changed)
 
+    @property
+    def _delivery(self) -> RunDelivery:
+        return (
+            self._run_delivery if self._role is native.DecisionOwner.RUN else self._combat_delivery
+        )
+
     def model_input(self) -> ModelInput:
         return tuple(self._history)
 
@@ -205,12 +211,10 @@ class Context:
     def begin_group(
         self, observation: native.Observation, notes: str, route_plan: JsonValue = None
     ) -> None:
-        if self._role is not native.DecisionOwner.RUN:
-            raise ValueError("Only Run supports Run interaction groups.")
         if self._active_group is not None:
             return
         self._group_number += 1
-        delivery = deepcopy(self._run_delivery)
+        delivery = deepcopy(self._delivery)
         known = set(delivery.catalog.values())
         projected = delivery.project(visible_observation(observation, self._role), observation)
         names = {
@@ -235,7 +239,7 @@ class Context:
             for key, ident in delivery.catalog.items()
             if names.get(ident, ident) in baseline_references
         }
-        self._active_group = _RunGroup(
+        self._active_group = _Group(
             self._group_number,
             len(self._history),
             renamed,
@@ -247,7 +251,7 @@ class Context:
 
     def finish_group(self) -> None:
         if self._active_group is None:
-            raise RuntimeError("No Run interaction group is active.")
+            raise RuntimeError("No interaction group is active.")
         self._last_group = self._active_group
         self._active_group = None
 
@@ -257,7 +261,7 @@ class Context:
     def compaction_input(self) -> tuple[ModelInput, TextMessage]:
         group = self._last_group or self._active_group
         if group is None:
-            raise RuntimeError("No Run interaction group exists.")
+            raise RuntimeError("No interaction group exists.")
         retained = tuple(self._history[group.start :])
         references = _profile_references(group.observation)
         additions: set[str] = set()
@@ -273,7 +277,7 @@ class Context:
         needed = _profile_references(group.observation) | (references - additions)
         catalog: dict[str, JsonValue] = {
             ident: _JSON_OBJECT.validate_json(key)
-            for key, ident in self._run_delivery.catalog.items()
+            for key, ident in self._delivery.catalog.items()
             if ident in needed
         }
         catalog.update(group.catalog)
@@ -283,13 +287,12 @@ class Context:
         observation = dict(group.observation)
         if profiles:
             observation["catalog_additions"] = profiles
-        baseline: dict[str, JsonValue] = {
-            "context_baseline": {
-                "observation": observation,
-                "strategy_notes": group.notes,
-                "route_plan": group.route_plan,
-            }
-        }
+        values: dict[str, JsonValue] = {"observation": observation}
+        if self._role is native.DecisionOwner.RUN:
+            values.update(strategy_notes=group.notes, route_plan=group.route_plan)
+        else:
+            values["opening_notes"] = group.notes
+        baseline: dict[str, JsonValue] = {"context_baseline": values}
         system_guidance = {
             (document.id, None if document.resource is MISSING else document.resource): document
             for message in self._system
@@ -321,21 +324,21 @@ class Context:
 
     def _check_compaction(self, candidate: ModelInput, *, install: bool) -> None:
         if candidate != self.compaction_candidate():
-            raise ValueError("The Run compaction candidate changed before installation.")
+            raise ValueError("The compaction candidate changed before installation.")
         group = self._last_group or self._active_group
         assert group is not None
         retained = tuple(self._history[group.start :])
         prefix_length = len(candidate) - len(retained)
         baseline_message = candidate[prefix_length - 1]
         if not isinstance(baseline_message, TextMessage):
-            raise ValueError("The Run compaction baseline is missing.")
+            raise ValueError("The compaction baseline is missing.")
         envelope = _JSON_OBJECT.validate_json(baseline_message.text)
         baseline = envelope.get("context_baseline")
         if not isinstance(baseline, dict):
-            raise ValueError("The Run compaction baseline is invalid.")
+            raise ValueError("The compaction baseline is invalid.")
         initial = baseline.get("observation")
         if not isinstance(initial, dict):
-            raise ValueError("The Run compaction observation is invalid.")
+            raise ValueError("The compaction observation is invalid.")
         RunObservation.model_validate_json(json.dumps(initial, ensure_ascii=False))
         catalog: dict[str, str] = {}
         known: set[str] = set()
@@ -379,13 +382,15 @@ class Context:
             updates = observation.get("current")
             if not isinstance(updates, dict):
                 return
+            decision = observation.get("decision")
+            combat = isinstance(decision, dict) and decision.get("phase") == native.Phase.COMBAT
             for key, value in updates.items():
                 if key == "card_descriptions":
                     if isinstance(value, list):
                         for item in value:
                             if isinstance(item, dict) and isinstance(ref := item.get("ref"), str):
                                 reconstructed_descriptions[ref] = item
-                elif value is None:
+                elif value is None and not (key == "turn" and combat):
                     reconstructed_current.pop(key, None)
                 else:
                     reconstructed_current[key] = value
@@ -408,31 +413,31 @@ class Context:
         if pending:
             raise ValueError("A retained tool call has no result.")
         renamed = {
-            old: catalog[key] for key, old in self._run_delivery.catalog.items() if key in catalog
+            old: catalog[key] for key, old in self._delivery.catalog.items() if key in catalog
         }
-        scene = _rename_profiles(self._run_delivery.scene, renamed)
-        current = _rename_profiles(self._run_delivery.current, renamed)
+        scene = _rename_profiles(self._delivery.scene, renamed)
+        current = _rename_profiles(self._delivery.current, renamed)
         if scene is not None and not isinstance(scene, dict):
-            raise ValueError("The current Run scene is invalid.")
+            raise ValueError("The current scene is invalid.")
         if not isinstance(current, dict):
-            raise ValueError("The current Run state is invalid.")
+            raise ValueError("The current state is invalid.")
         if (
             has_retained_observation
             and not (_profile_references(scene) | _profile_references(current)) <= known
         ):
-            raise ValueError("The current Run state has an undelivered profile.")
+            raise ValueError("The current state has an undelivered profile.")
         if has_retained_observation and (
             reconstructed_scene != scene
             or reconstructed_current != current
-            or reconstructed_descriptions != self._run_delivery.descriptions
+            or reconstructed_descriptions != self._delivery.descriptions
         ):
-            raise ValueError("The retained Run observations do not reproduce the current state.")
+            raise ValueError("The retained observations do not reproduce the current state.")
         if not install:
             return
-        self._run_delivery.catalog = catalog
-        self._run_delivery.scene = reconstructed_scene
-        self._run_delivery.current = reconstructed_current
-        self._run_delivery.descriptions = {
+        self._delivery.catalog = catalog
+        self._delivery.scene = reconstructed_scene
+        self._delivery.current = reconstructed_current
+        self._delivery.descriptions = {
             ref: value
             for ref, value in reconstructed_descriptions.items()
             if isinstance(value, dict)
@@ -440,7 +445,7 @@ class Context:
         if not has_retained_observation:
             decision = initial.get("decision")
             if isinstance(decision, dict) and isinstance(decision.get("phase"), str):
-                self._run_delivery.phase = native.Phase(decision["phase"])
+                self._delivery.phase = native.Phase(decision["phase"])
         self._history = list(candidate)
         if self._last_group is not None:
             self._last_group = replace(
