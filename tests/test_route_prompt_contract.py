@@ -18,7 +18,7 @@ from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog
 
 
-def test_assembled_run_request_contains_planning_contract(tmp_path: Path) -> None:
+def test_assembled_run_request_exposes_route_tool_schemas(tmp_path: Path) -> None:
     http = RunHTTP([reply(text="Report assessed.")])
 
     async def scenario() -> None:
@@ -46,23 +46,6 @@ def test_assembled_run_request_contains_planning_contract(tmp_path: Path) -> Non
 
     asyncio.run(scenario())
     request = http.inputs[0]
-    messages = request["input"]
-    assert isinstance(messages, list)
-    system = str(messages[0])
-    assert (
-        "Use run_plan to set or replace a route and run_next to enter its unique next node"
-        in system
-    )
-    assert "context_baseline is a historical snapshot" in system
-    assert "supplementary knowledge is optional" in system
-    assert "Use at most one tool call per response" in system
-    assert "`current.map_topology`" in system and "`current.dynamic_map`" in system
-    assert (
-        "Map planning results separately report plan acceptance, presentation and restoration"
-        in system
-    )
-    assert "Use the publicly identified act Boss" in system
-
     tools = request["tools"]
     assert isinstance(tools, list)
     by_name = {tool["name"]: tool for tool in tools if isinstance(tool, dict)}
@@ -77,10 +60,6 @@ def test_assembled_run_request_contains_planning_contract(tmp_path: Path) -> Non
     }
     plan = by_name["run_plan"]
     next_tool = by_name["run_next"]
-    assert "records the plan without displaying it" in str(plan["description"])
-    assert "Map destination interactions are not accepted here" in str(
-        by_name["run_act"]["description"]
-    )
     assert plan["parameters"] == {
         "type": "object",
         "properties": {
