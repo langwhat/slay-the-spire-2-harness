@@ -205,6 +205,7 @@ def test_combat_appends_new_or_changed_knowledge_before_the_next_request(tmp_pat
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     location=later.location,
                     input_readiness=later.input_readiness,
                     control_intent=native.ControlIntent.RUNNING,

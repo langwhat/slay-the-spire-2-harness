@@ -113,6 +113,7 @@ class Campaign:
         self.states[2] = native.Observation.model_validate_json(json.dumps(reward))
         self.index = 0
         self.actions: list[native.StepRequest] = []
+        self.presentations: list[native.PresentRequest] = []
         self.map = native.PublicMap(bosses=(), nodes=(), legal_destinations=None)
         self.inputs: list[dict[str, JsonValue]] = []
         first = [
@@ -155,6 +156,7 @@ class Campaign:
                 200,
                 json={
                     "location": self.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "running",
                     "input_readiness": self.current.input_readiness.value,
                     "receipt": None,
@@ -179,6 +181,17 @@ class Campaign:
                     observation=self.current,
                     data=native.MapData(map=self.map),
                 ).to_json(),
+            )
+        if request.url.path == "/map/present":
+            presentation = native.PresentRequest.model_validate_json(request.content)
+            self.presentations.append(presentation)
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": presentation.operation_id,
+                    "status": "rejected",
+                    "error": {"code": "action_unavailable", "message": "Presentation unavailable."},
+                },
             )
         assert request.url.path == "/action"
         step = native.StepRequest.model_validate_json(request.content)
@@ -300,8 +313,26 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
 
         archive = Journal.open(tmp_path / "archive.sqlite")
         assert any(isinstance(item.request, Inspect) for item in archive.operations())
+        from sts2_harness.game import Present, Presented
+        from sts2_harness.journal_models import PlanArchiveData, ResultSnapshot
+
+        presentations = [item for item in archive.operations() if isinstance(item.request, Present)]
+        assert len(campaign.presentations) == len(presentations) == 2
+        assert all(
+            item.reply is not None and isinstance(item.reply.outcome, Presented)
+            for item in presentations
+        )
         assert archive.manifest.initial_notes == "Initial strategy."
         requests = archive.requests()
+        plan_results = [
+            message.data.value
+            for request in requests
+            for message in request.input
+            if isinstance(message, ResultSnapshot) and isinstance(message.data, PlanArchiveData)
+        ]
+        assert len(plan_results) >= 2
+        assert all(result.plan.status == "accepted" for result in plan_results)
+        assert all(result.presentation.status == "not_attempted" for result in plan_results)
         assert {request.stream for request in requests} == (
             {"run:1", "run:2"} if code_combat else {"run:1", "run:2", "combat:1", "combat:2"}
         )
@@ -400,6 +431,7 @@ def test_act_initialization_waits_for_start_and_rechecks_lifetime_without_replay
                 200,
                 json={
                     "location": campaign.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "paused",
                     "input_readiness": "ready",
                     "receipt": None,
@@ -595,6 +627,7 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
                 200,
                 json={
                     "location": campaign.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "paused",
                     "input_readiness": "ready",
                     "receipt": None,

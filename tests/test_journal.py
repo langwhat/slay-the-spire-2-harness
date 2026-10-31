@@ -351,6 +351,7 @@ def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_p
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.PAUSED
                         if paused
@@ -589,6 +590,7 @@ def test_archive_io_gap_does_not_repeat_game_action_and_persists_after_recovery(
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.RUNNING,
                         input_readiness=native.InputReadiness.READY,
@@ -856,6 +858,7 @@ def test_native_control_reply_is_durable_while_start_is_still_waiting(tmp_path: 
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.PAUSED
                         if paused
@@ -971,6 +974,7 @@ def test_initial_archive_disk_failure_keeps_gameplay_and_recovers_recording(tmp_
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.RUNNING,
                         input_readiness=native.InputReadiness.READY,
@@ -1268,6 +1272,7 @@ def test_pause_retry_diagnostics_and_durable_children_without_reply_history(tmp_
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.RUNNING,
                         input_readiness=native.InputReadiness.READY,
@@ -1411,6 +1416,7 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
             200,
             json={
                 "location": observation.location.model_dump(mode="json"),
+                "presentation": None,
                 "control_intent": "paused" if status_index in (1, 5, 6, 7) else "running",
                 "input_readiness": "busy" if status_index in (2, 5) else "ready",
                 "receipt": receipt,
@@ -1515,6 +1521,7 @@ def test_stopping_start_wait_finishes_the_recorded_operation(tmp_path: Path) -> 
             200,
             json={
                 "location": observation.location.model_dump(mode="json"),
+                "presentation": None,
                 "control_intent": "paused",
                 "input_readiness": "ready",
                 "receipt": None,
@@ -1584,6 +1591,7 @@ def test_resident_diagnostics_preserve_lifecycle_and_control_during_inflight_io(
     diagnostics.submitting("recording:1")
     diagnostics.native_status(
         native.Status(
+            presentation=None,
             location=observation.location,
             control_intent=native.ControlIntent.PAUSED,
             input_readiness=native.InputReadiness.BUSY,

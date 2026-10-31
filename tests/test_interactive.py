@@ -152,6 +152,7 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(tmp_path: Path) 
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     location=location,
                     control_intent=control,
                     input_readiness=observation.input_readiness,
@@ -352,6 +353,7 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
                 200,
                 json={
                     "location": observation.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": control.value,
                     "input_readiness": "busy" if pending and status_polls == 1 else "ready",
                     "receipt": receipt,
@@ -449,6 +451,7 @@ def test_session_leaving_run_does_not_publish_terminal(tmp_path: Path) -> None:
         return httpx.Response(
             200,
             content=native.Status(
+                presentation=None,
                 location=observation.location,
                 control_intent=native.ControlIntent.RUNNING,
                 input_readiness=observation.input_readiness,
@@ -536,6 +539,7 @@ def test_discovery_wait_recovery_reports_actual_cumulative_failures(tmp_path: Pa
         return httpx.Response(
             200,
             content=native.Status(
+                presentation=None,
                 location=location,
                 control_intent=native.ControlIntent.PAUSED,
                 input_readiness=native.InputReadiness.UNAVAILABLE,

@@ -14,6 +14,7 @@ from sts2_harness.game import (
     GameReply,
     Inspected,
     Observed,
+    Presented,
     Resumed,
     SessionStopped,
     Settlement,
@@ -168,6 +169,16 @@ class SampleHost:
                 host._require_armed()
                 reply = await recorded.catalog(request)
                 host._remember(reply.observations)
+                return reply
+
+            async def present(
+                self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+            ) -> GameReply[Presented]:
+                host._require_armed()
+                reply = await recorded.present(route, edges)
+                host._remember(reply.observations)
+                if isinstance(reply.outcome, Presented) and reply.outcome.receipt is None:
+                    host._native_unconfirmed = True
                 return reply
 
             async def settle(

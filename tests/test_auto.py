@@ -70,6 +70,7 @@ class AutoHTTP:
                 200,
                 json={
                     "location": self.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "running",
                     "input_readiness": self.current.input_readiness.value,
                     "receipt": None,
@@ -400,6 +401,7 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
                 200,
                 json={
                     "location": http.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "paused",
                     "input_readiness": "ready",
                     "receipt": None,
@@ -510,6 +512,7 @@ def test_unknown_language_uses_strategy_and_shop_stays_with_strategy_after_resum
                 200,
                 json={
                     "location": http.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "paused",
                     "input_readiness": "ready",
                     "receipt": None,

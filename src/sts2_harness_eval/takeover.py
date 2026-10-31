@@ -27,6 +27,7 @@ from sts2_harness.game import (
     LiveGame,
     Observed,
     Pause,
+    Presented,
     Resumed,
     SessionStopped,
     Settlement,
@@ -195,6 +196,11 @@ class _GameProxy:
 
     async def catalog(self, request: native.CatalogRequest) -> GameReply[Cataloged]:
         return await self._switch.current.game.catalog(request)
+
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> GameReply[Presented]:
+        return await self._switch.current.game.present(route, edges)
 
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep

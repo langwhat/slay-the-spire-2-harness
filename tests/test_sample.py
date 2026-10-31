@@ -568,6 +568,7 @@ class FailedActions(Campaign):
                 200,
                 json={
                     "location": self.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "paused",
                     "input_readiness": "ready",
                     "receipt": None,
@@ -737,6 +738,7 @@ class PendingCampaign(Campaign):
                 200,
                 json={
                     "location": self.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "running",
                     "input_readiness": "busy",
                     "receipt": {"operation_id": self.actions[-1].operation_id, "status": "pending"},
@@ -807,6 +809,7 @@ class WaitingAdmission(Campaign):
                 200,
                 json={
                     "location": self.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "paused" if self.mode == "paused" else "running",
                     "input_readiness": "ready"
                     if self.mode == "fresh" and self.polls == 1

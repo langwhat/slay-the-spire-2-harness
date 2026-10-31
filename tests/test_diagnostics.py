@@ -330,6 +330,7 @@ def test_batch_summary_keeps_confirmed_steps_during_interruption(mode: str) -> N
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.RUNNING,
                         input_readiness=native.InputReadiness.READY,
@@ -456,6 +457,7 @@ def test_native_recovery_totals_survive_a_second_failure_in_the_same_operation(
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.RUNNING,
                         input_readiness=native.InputReadiness.READY,
@@ -590,6 +592,7 @@ def test_control_transitions_report_observed_start_and_pause_once() -> None:
     ):
         diagnostics.native_status(
             native.Status(
+                presentation=None,
                 location=observation.location,
                 control_intent=intent,
                 input_readiness=native.InputReadiness.READY,

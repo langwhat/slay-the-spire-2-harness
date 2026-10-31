@@ -590,6 +590,7 @@ async def run_headless(
             diagnostics.configured(configuration, instance.port)
             diagnostics.native_status(
                 native.Status(
+                    presentation=None,
                     location=instance.opening.location,
                     input_readiness=instance.opening.input_readiness,
                     control_intent=native.ControlIntent.PAUSED,

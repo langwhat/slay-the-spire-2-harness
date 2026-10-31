@@ -29,6 +29,7 @@ class FakeMod:
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     location=self.observation.location,
                     control_intent=self.control,
                     input_readiness=self.observation.input_readiness,
@@ -415,6 +416,7 @@ def test_tcp_disconnect_does_not_cancel_settlement_or_expose_unsent_route() -> N
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=mod.observation.location,
                         control_intent=mod.control,
                         input_readiness=native.InputReadiness.READY

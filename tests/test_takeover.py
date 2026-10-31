@@ -340,6 +340,7 @@ class FakeRestorer(NativeRestorer):
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     location=self.observation.location,
                     control_intent=native.ControlIntent.RUNNING,
                     input_readiness=native.InputReadiness.READY,

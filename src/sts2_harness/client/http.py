@@ -33,6 +33,8 @@ from sts2_harness.client.models import (
     LookupData,
     LookupQuery,
     MapData,
+    PresentReply,
+    PresentRequest,
     ResultStatus,
     SearchData,
     StateReply,
@@ -40,10 +42,14 @@ from sts2_harness.client.models import (
     StepReceipt,
     StepRequest,
     TechnicalError,
+    VerifyPresentationReply,
+    VerifyPresentationRequest,
     WireModel,
 )
 
 type ActionResult = StepReceipt | InvalidRequestReply | TechnicalError
+type PresentResult = PresentReply | InvalidRequestReply | TechnicalError
+type VerifyPresentationResult = VerifyPresentationReply | InvalidRequestReply | TechnicalError
 type ControlResult = ControlReply | ControlFailed | InvalidRequestReply | TechnicalError
 
 type StatusResult = Status | InvalidRequestReply | TechnicalError
@@ -53,6 +59,8 @@ type CatalogResult = CatalogReply | InvalidRequestReply | TechnicalError
 type QueryResult = StateResult | InspectResult
 
 _ACTION = TypeAdapter(StepReceipt)
+_PRESENT = TypeAdapter(PresentReply)
+_VERIFY_PRESENTATION = TypeAdapter(VerifyPresentationReply)
 _CONTROL = TypeAdapter(ControlReply | ControlFailed)
 _STATUS = TypeAdapter(Status)
 _STATE = TypeAdapter(StateReply)
@@ -118,6 +126,14 @@ class ModClient:
 
     async def submit(self, request: StepRequest) -> ActionResult:
         return await self._request("POST", "/action", _ACTION, request)
+
+    async def present(self, request: PresentRequest) -> PresentResult:
+        return await self._request("POST", "/map/present", _PRESENT, request)
+
+    async def verify_presentation(
+        self, request: VerifyPresentationRequest
+    ) -> VerifyPresentationResult:
+        return await self._request("POST", "/map/restore/verify", _VERIFY_PRESENTATION, request)
 
     async def control(self, mode: ControlIntent) -> ControlResult:
         return await self._request("POST", "/control", _CONTROL, ControlRequest(mode=mode))

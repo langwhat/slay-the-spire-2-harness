@@ -26,6 +26,7 @@ from sts2_harness.game import (
 )
 from sts2_harness.game import (
     GameIO,
+    Presented,
     RunEnded,
     RunEndReason,
     unwrap,
@@ -119,6 +120,14 @@ class Execution:
 
     async def catalog(self, request: native.CatalogRequest) -> CatalogResult:
         return unwrap(await self._game.catalog(request)).result
+
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> Presented:
+        reply = await self._game.present(route, edges)
+        for observation in reply.observations:
+            self._record_observation(observation)
+        return unwrap(reply)
 
     async def pause_until_resumed(self, reason: Reason | None) -> None:
         unwrap(await self._game.pause_until_resumed(reason))

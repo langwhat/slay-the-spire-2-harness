@@ -57,6 +57,7 @@ class RunHTTP:
                 200,
                 json={
                     "location": self.observation.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "running",
                     "input_readiness": "ready",
                     "receipt": None,

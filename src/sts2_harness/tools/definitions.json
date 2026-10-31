@@ -871,7 +871,7 @@
   },
   {
     "name": "run_plan",
-    "description": "Replace the remaining route plan with a partial directed graph rooted at the current map node. Supply edges and a short reason. The graph may branch later but must have exactly one immediate next destination. This stage records the plan without displaying it. It does not move or resolve a pending choice. Previous ink may remain; only the latest accepted plan controls model-directed movement. Use current native reachability for special movement rather than ordinary map connections alone. Use only current-act node IDs. Every submitted edge must be reachable from the current node; self-loops and cycles are rejected. Later edges may include possible special moves even when they are not ordinary connections; their future legality is not guaranteed.",
+    "description": "Replace the remaining route plan with a partial directed graph rooted at the current map node. Supply edges and a short reason. The graph may branch later but must have exactly one immediate next destination. The tool attempts to display the submitted plan with native map ink and restore the previous interface without moving or resolving a pending choice; its result reports presentation and restoration separately. Previous ink may remain; only the latest accepted plan controls model-directed movement. Use current native reachability for special movement rather than ordinary map connections alone. Use only current-act node IDs. Every submitted edge must be reachable from the current node; self-loops and cycles are rejected. Later edges may include possible special moves even when they are not ordinary connections; their future legality is not guaranteed.",
     "input_schema": {
       "type": "object",
       "properties": {

@@ -9,6 +9,7 @@ from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.agent import Agent, MaterialReader
 from sts2_harness.auto import choose_auto, shop_controls
+from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.map_projection import Plan, PlanEdge
@@ -27,6 +28,7 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.diagnostics import AutoFinished, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
+from sts2_harness.game import GameReadError
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import (
     ModelClient,
@@ -41,8 +43,9 @@ from sts2_harness.results import (
     ActionToolResult,
     PlanAccepted,
     PlanData,
+    PlanPresentation,
     PlanRejected,
-    PresentationUnavailable,
+    PlanRestoration,
     QueryToolResult,
     ReadCompleted,
     Reason,
@@ -146,7 +149,7 @@ class RunAgent(Agent):
                 observation,
                 PlanData(
                     plan=PlanRejected(),
-                    presentation=PresentationUnavailable(status="not_attempted"),
+                    presentation=PlanPresentation(status="not_attempted"),
                 ),
             )
         return QueryToolResult(outcome, observation)
@@ -223,12 +226,57 @@ class RunAgent(Agent):
             assert self._plan is not None and self._plan.next_destination is not None
             assert self._context is not None
             self._context.set_route_plan(self._plan)
+            location = current.location
+            assert location.run_id is not None and location.node_id is not None
+            route = native.RouteKey(
+                game_instance_id=location.game_instance_id,
+                run_id=location.run_id,
+                node_id=location.node_id,
+                owner=native.DecisionOwner.RUN,
+            )
+            edges = tuple(
+                native.PresentationEdge.model_validate(
+                    {"from": edge.source, "to": edge.destination}
+                )
+                for edge in self._plan.edges
+            )
+            try:
+                presented = await self._tools.present(route, edges)
+            except (ClientUnavailable, GameReadError):
+                presented = None
+                display = PlanPresentation(status="unknown")
+                restoration = PlanRestoration(status="unknown")
+                current = None
+            else:
+                receipt = presented.receipt if presented is not None else None
+                if presented is None:
+                    display = PlanPresentation(status="not_available")
+                    restoration = PlanRestoration()
+                elif isinstance(receipt, (native.PresentationRejected, native.InvalidRequestReply)):
+                    display = PlanPresentation(status="not_attempted")
+                    restoration = PlanRestoration()
+                    current = await self._tools.current()
+                elif isinstance(receipt, native.PresentationCompleted):
+                    display = PlanPresentation.model_validate({"status": receipt.drawing.value})
+                    restoration = PlanRestoration.model_validate(
+                        {"status": receipt.restoration.value}
+                    )
+                    current = (
+                        await self._tools.current()
+                        if receipt.gate is native.PresentationGate.OPEN
+                        else None
+                    )
+                else:
+                    display = PlanPresentation(status="unknown")
+                    restoration = PlanRestoration(status="unknown")
+                    current = None
             return QueryToolResult(
                 ReadCompleted(),
                 current,
                 PlanData(
                     plan=PlanAccepted(next=self._plan.next_destination),
-                    presentation=PresentationUnavailable(status="not_available"),
+                    presentation=display,
+                    restoration=restoration,
                 ),
             )
         if not isinstance(task, ActTask):

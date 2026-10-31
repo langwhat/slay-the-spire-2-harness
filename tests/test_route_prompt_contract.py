@@ -59,6 +59,10 @@ def test_assembled_run_request_exposes_route_tool_schemas(tmp_path: Path) -> Non
         "run_next",
     }
     plan = by_name["run_plan"]
+    description = plan["description"]
+    assert isinstance(description, str)
+    assert "attempts to display the submitted plan with native map ink" in description
+    assert "result reports presentation and restoration separately" in description
     next_tool = by_name["run_next"]
     assert plan["parameters"] == {
         "type": "object",

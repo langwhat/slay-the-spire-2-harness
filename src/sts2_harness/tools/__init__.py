@@ -17,7 +17,7 @@ from sts2_harness.decisions import (
     DecisionTask,
     SelectStep,
 )
-from sts2_harness.game import GameReadError
+from sts2_harness.game import GameReadError, Presented
 from sts2_harness.knowledge import (
     DocumentView,
     KnowledgeEntry,
@@ -116,6 +116,10 @@ class ToolCatalog:
         observe: Callable[[], Awaitable[native.Observation]],
         inspect: Callable[[native.InspectQuery], Awaitable[InspectResult]],
         catalog: Callable[[native.CatalogRequest], Awaitable[CatalogResult]],
+        present: Callable[
+            [native.RouteKey, tuple[native.PresentationEdge, ...]], Awaitable[Presented]
+        ]
+        | None = None,
         supplements: SupplementProvider | None = None,
         skills: SkillProvider | None = None,
         notes: Notes | None = None,
@@ -135,6 +139,7 @@ class ToolCatalog:
         self._observe = observe
         self._inspect = inspect
         self._catalog = catalog
+        self._present = present
         self._supplements = supplements
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
@@ -299,6 +304,11 @@ class ToolCatalog:
 
     async def current(self) -> native.Observation | None:
         return await self._current()
+
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> Presented | None:
+        return await self._present(route, edges) if self._present is not None else None
 
     async def dispatch(self, call: ToolCall) -> QueryToolResult:
         if call.name not in self._names or call.name == self.action_name:

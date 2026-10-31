@@ -254,7 +254,11 @@ def test_status_keeps_control_intent_separate_from_native_input(
 ) -> None:
     payload = (
         '{"location":{"game_instance_id":"game","run_id":"run","node_id":"node","owner":"run"},'
-        '"control_intent":"paused","input_readiness":"' + readiness + '","receipt":' + receipt + "}"
+        '"presentation":null,"control_intent":"paused","input_readiness":"'
+        + readiness
+        + '","receipt":'
+        + receipt
+        + "}"
     )
 
     async def read() -> None:
@@ -297,6 +301,7 @@ def test_terminal_status_retains_last_run_and_node_without_a_decision_owner(
                             "node_id": node_id,
                             "owner": owner,
                         },
+                        "presentation": None,
                         "control_intent": "paused",
                         "input_readiness": "terminal",
                         "receipt": None,

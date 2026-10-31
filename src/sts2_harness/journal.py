@@ -51,6 +51,8 @@ from sts2_harness.game import (
     Observed,
     OperationKind,
     Pause,
+    Present,
+    Presented,
     ReadFailure,
     Resumed,
     Settle,
@@ -1129,7 +1131,7 @@ class Journal:
             raise RuntimeError("A recording operation is already active.")
         self._allocate()
         self._active_request = request
-        if isinstance(request, (Settle, Pause)):
+        if isinstance(request, (Settle, Pause, Present)):
             self._boundary = None
         self._active_attempt = 0
         opened = False
@@ -1157,8 +1159,12 @@ class Journal:
                             result=ResultKind.INCOMPLETE,
                             physical_attempts=0,
                             observations=0,
-                            role=request.route.owner if isinstance(request, Settle) else None,
-                            node_id=request.route.node_id if isinstance(request, Settle) else None,
+                            role=request.route.owner
+                            if isinstance(request, (Settle, Present))
+                            else None,
+                            node_id=request.route.node_id
+                            if isinstance(request, (Settle, Present))
+                            else None,
                         ),
                     )
             opened = True
@@ -1167,8 +1173,8 @@ class Journal:
                 self.end()
 
     def submitting(self, operation_id: str) -> None:
-        if not isinstance(self._active_request, Settle):
-            raise RuntimeError("A native submission requires an active settlement operation.")
+        if not isinstance(self._active_request, (Settle, Present)):
+            raise RuntimeError("A native submission requires an active native operation.")
         self.diagnostics.submitting(operation_id)
         with self._storage() as connection:
             if connection is not None:
@@ -1266,7 +1272,9 @@ class Journal:
         outcome = reply.outcome
         if isinstance(outcome, Settlement) and isinstance(outcome.receipt, native.ReceiptCompleted):
             self._cursor += 1
-        operation_id = outcome.request.operation_id if isinstance(outcome, Settlement) else None
+        operation_id = (
+            outcome.request.operation_id if isinstance(outcome, (Settlement, Presented)) else None
+        )
         with self._storage() as connection:
             if connection is not None:
                 stored = StoredReply(
@@ -1289,7 +1297,7 @@ class Journal:
                 location: native.Location | native.RouteKey | None = (
                     reply.observations[0].location if reply.observations else None
                 )
-                if isinstance(request, Settle):
+                if isinstance(request, (Settle, Present)):
                     route = request.route
                     location = route
                     for observation in reply.observations:
@@ -1795,6 +1803,13 @@ class RecordedGame:
     async def catalog(self, request: native.CatalogRequest) -> GameReply[Cataloged]:
         return await self._record(Catalog(request=request), lambda: self._live.catalog(request))
 
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> GameReply[Presented]:
+        return await self._record(
+            Present(route=route, edges=edges), lambda: self._live.present(route, edges)
+        )
+
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep
     ) -> GameReply[Settlement]:
@@ -1839,6 +1854,10 @@ def _result(outcome: GameSuccess | GameFailure) -> tuple[ResultKind, str | None]
         return ResultKind(receipt.status.value), receipt.error.code.value if isinstance(
             receipt, (native.ReceiptFailed, native.ReceiptUnknown)
         ) else None
+    if isinstance(outcome, Presented):
+        if outcome.receipt is None:
+            return ResultKind.UNKNOWN, "presentation_unconfirmed"
+        return ResultKind(outcome.receipt.status.value), None
     if isinstance(outcome, (Inspected, Cataloged)):
         result = outcome.result
         return ResultKind(result.status.value), result.error.code.value if isinstance(

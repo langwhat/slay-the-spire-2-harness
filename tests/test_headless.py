@@ -135,7 +135,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/status":
             value = {"location": state["location"],
                      "input_readiness": "busy" if busy else state["input_readiness"],
-                     "control_intent": mode, "receipt": None}
+                     "control_intent": mode, "receipt": None, "presentation": None}
         else:
             observation = json.loads(json.dumps(state))
             if busy:

@@ -125,6 +125,7 @@ def test_combat_task_queries_executes_ordered_batch_and_reviews_in_same_context(
                 200,
                 json={
                     "location": current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "running",
                     "input_readiness": "ready",
                     "receipt": None,
@@ -280,6 +281,7 @@ class BattleHTTP:
                 200,
                 json={
                     "location": self.current.location.model_dump(mode="json"),
+                    "presentation": None,
                     "control_intent": "paused" if self.paused else "running",
                     "input_readiness": self.current.input_readiness.value
                     if self.current.state.phase is native.Phase.TERMINAL

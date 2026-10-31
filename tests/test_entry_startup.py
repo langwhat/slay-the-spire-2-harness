@@ -86,6 +86,7 @@ def test_startup_records_supplied_material_settings_and_serves_documents(
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     ascension=10,
                     location=observation.location,
                     input_readiness=observation.input_readiness,

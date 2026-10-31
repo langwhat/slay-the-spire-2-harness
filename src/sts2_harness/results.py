@@ -129,18 +129,18 @@ class PlanRejected(SemanticValue):
     status: Literal["rejected"] = "rejected"
 
 
-class PresentationUnavailable(SemanticValue):
-    status: Literal["not_available", "not_attempted"]
+class PlanPresentation(SemanticValue):
+    status: Literal["not_available", "not_attempted", "shown", "failed", "unknown"]
 
 
-class RestorationNotNeeded(SemanticValue):
-    status: Literal["not_needed"] = "not_needed"
+class PlanRestoration(SemanticValue):
+    status: Literal["not_needed", "restored", "failed", "unknown"] = "not_needed"
 
 
 class PlanData(SemanticValue):
     plan: PlanAccepted | PlanRejected
-    presentation: PresentationUnavailable
-    restoration: RestorationNotNeeded = RestorationNotNeeded()
+    presentation: PlanPresentation
+    restoration: PlanRestoration = PlanRestoration()
 
 
 type QueryData = (

@@ -33,6 +33,8 @@ from sts2_harness.game import (
     Observed,
     OperationKind,
     Pause,
+    Present,
+    Presented,
     Resumed,
     SessionStopped,
     Settle,
@@ -297,6 +299,23 @@ class ReplayGame:
         if reply is None:
             unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
         outcome = reply.outcome
+        if isinstance(request, Present) and isinstance(outcome, Presented):
+            if (
+                not record.operation_id
+                or outcome.request.operation_id != record.operation_id
+                or outcome.request.expected_route != request.route
+                or outcome.request.edges != request.edges
+            ):
+                _different(record.sequence, InputComponent.OPERATION_ID)
+            if outcome.receipt is None:
+                unsupported(record.sequence, UnsupportedCause.UNKNOWN_WRITE)
+            if (
+                isinstance(
+                    outcome.receipt, (native.PresentationCompleted, native.PresentationRejected)
+                )
+                and outcome.receipt.operation_id != record.operation_id
+            ):
+                _different(record.sequence, InputComponent.OPERATION_ID)
         if isinstance(request, Settle):
             if isinstance(outcome, Settlement):
                 if (
@@ -313,7 +332,9 @@ class ReplayGame:
                 if isinstance(outcome.receipt, native.ReceiptCompleted):
                     self._timeline.cursor += 1
         self._timeline.check_cursor(record)
-        if isinstance(outcome, (Admitted, Observed, Inspected, Cataloged, Settlement, Resumed)):
+        if isinstance(
+            outcome, (Admitted, Observed, Inspected, Cataloged, Settlement, Resumed, Presented)
+        ):
             if not isinstance(outcome, success):
                 _different(record.sequence, InputComponent.REQUEST)
             return GameReply[T](outcome=outcome, observations=reply.observations)
@@ -330,6 +351,11 @@ class ReplayGame:
 
     async def catalog(self, request: native.CatalogRequest) -> GameReply[Cataloged]:
         return self._reply(Catalog(request=request), Cataloged)
+
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> GameReply[Presented]:
+        return self._reply(Present(route=route, edges=edges), Presented)
 
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep

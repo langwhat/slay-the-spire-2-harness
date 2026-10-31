@@ -18,6 +18,7 @@ from sts2_harness.game import (
     Inspected,
     LifetimeEnded,
     Observed,
+    Presented,
     Resumed,
     Settlement,
 )
@@ -364,6 +365,31 @@ class IdentityGame:
     async def catalog(self, request: native.CatalogRequest) -> GameReply[Cataloged]:
         reply = await self._game.catalog(request)
         return self._reply(reply, reply.outcome)
+
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> GameReply[Presented]:
+        reply = await self._game.present(self._route(route), edges)
+        outcome = reply.outcome
+        if isinstance(outcome, Presented):
+            receipt = outcome.receipt
+            if isinstance(receipt, native.PresentationRejected) and isinstance(
+                receipt.error, native.RouteChanged
+            ):
+                receipt = receipt.model_copy(
+                    update={
+                        "error": receipt.error.model_copy(
+                            update={
+                                "actual_location": self._location(receipt.error.actual_location)
+                            }
+                        )
+                    }
+                )
+            outcome = Presented(
+                request=outcome.request.model_copy(update={"expected_route": route}),
+                receipt=receipt,
+            )
+        return self._reply(reply, outcome)
 
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep

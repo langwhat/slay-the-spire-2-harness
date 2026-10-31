@@ -60,6 +60,7 @@ def test_anticipated_selection_finishes_and_accepts_the_complete_unit() -> None:
                     200,
                     json={
                         "location": observation.location.model_dump(mode="json"),
+                        "presentation": None,
                         "control_intent": "running",
                         "input_readiness": "ready",
                         "receipt": None,
@@ -176,6 +177,7 @@ def test_partial_failure_and_lost_responses_never_resubmit_or_execute_the_tail(m
                             boundary=native.InputReadiness.READY,
                         )
                 status = native.Status(
+                    presentation=None,
                     location=observation.location,
                     control_intent=native.ControlIntent.RUNNING,
                     input_readiness=native.InputReadiness.BUSY
@@ -351,6 +353,7 @@ def test_route_and_task_permissions_are_checked_before_actions() -> None:
                     200,
                     json={
                         "location": observation.location.model_dump(mode="json"),
+                        "presentation": None,
                         "control_intent": "running",
                         "input_readiness": observation.input_readiness,
                         "receipt": None,
@@ -472,6 +475,7 @@ def test_pause_waits_for_the_next_unit_and_explicit_start_after_programmatic_pau
                     200,
                     json={
                         "location": observation.location.model_dump(mode="json"),
+                        "presentation": None,
                         "control_intent": mode,
                         "input_readiness": "ready",
                         "receipt": None,
@@ -601,6 +605,7 @@ def test_shared_budget_counts_failures_once_after_feedback_and_preserves_read_su
                     200,
                     json={
                         "location": observation.location.model_dump(mode="json"),
+                        "presentation": None,
                         "control_intent": "running",
                         "input_readiness": "ready",
                         "receipt": None,
@@ -765,6 +770,7 @@ def test_unconfirmed_pending_work_blocks_the_next_decision_until_native_readines
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.RUNNING,
                         input_readiness=native.InputReadiness.BUSY
@@ -864,6 +870,7 @@ def test_recovery_pause_reports_write_failure_or_run_end_without_reset(failure: 
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     location=observation.location.model_copy(update={"run_id": "new-run"}),
                     control_intent=native.ControlIntent.RUNNING,
                     input_readiness=native.InputReadiness.READY,
@@ -925,6 +932,7 @@ def test_fresh_observation_readiness_and_pending_settlement_precede_new_decision
                     200,
                     json={
                         "location": observation.location.model_dump(mode="json"),
+                        "presentation": None,
                         "control_intent": "paused" if paused else "running",
                         "input_readiness": "ready",
                         "receipt": None
@@ -1029,6 +1037,7 @@ def test_no_run_ends_the_old_lifetime_without_observation_or_recovery_failure(
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=native.ControlIntent.RUNNING,
                         input_readiness=native.InputReadiness.READY,
@@ -1038,6 +1047,7 @@ def test_no_run_ends_the_old_lifetime_without_observation_or_recovery_failure(
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     location=native.Location(
                         game_instance_id="game", run_id=None, node_id=None, owner=None
                     ),
@@ -1115,6 +1125,7 @@ def test_recovery_pause_keeps_waiting_through_status_and_started_observation_fai
                 return httpx.Response(
                     200,
                     content=native.Status(
+                        presentation=None,
                         location=observation.location,
                         control_intent=(
                             native.ControlIntent.PAUSED

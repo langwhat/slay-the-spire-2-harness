@@ -976,12 +976,79 @@ class ReceiptUnknown(WireModel):
     error: UnknownExecution
 
 
+class PresentationPhase(StrEnum):
+    RUNNING = "running"
+    SETTLED_UNVERIFIED = "settled_unverified"
+    VERIFYING = "verifying"
+    RESTORED = "restored"
+
+
+class PresentationDrawing(StrEnum):
+    PENDING = "pending"
+    SHOWN = "shown"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+class PresentationRestoration(StrEnum):
+    PENDING = "pending"
+    RESTORED = "restored"
+    NOT_NEEDED = "not_needed"
+    UNKNOWN = "unknown"
+    FAILED = "failed"
+
+
+class PresentationGate(StrEnum):
+    LOCKED = "locked"
+    OPEN = "open"
+
+
+class Presentation(WireModel):
+    operation_id: Nonempty
+    phase: PresentationPhase
+    drawing: PresentationDrawing
+    restoration: PresentationRestoration
+    gate: PresentationGate
+
+    @model_validator(mode="after")
+    def check_phase(self) -> Self:
+        if self.phase is PresentationPhase.RUNNING:
+            valid = (
+                self.restoration is PresentationRestoration.PENDING
+                and self.gate is PresentationGate.LOCKED
+            )
+        elif self.phase is PresentationPhase.VERIFYING:
+            valid = (
+                self.drawing is not PresentationDrawing.PENDING
+                and self.restoration is PresentationRestoration.PENDING
+                and self.gate is PresentationGate.LOCKED
+            )
+        elif self.phase is PresentationPhase.SETTLED_UNVERIFIED:
+            valid = (
+                self.drawing is not PresentationDrawing.PENDING
+                and self.restoration
+                in (PresentationRestoration.UNKNOWN, PresentationRestoration.FAILED)
+                and self.gate is PresentationGate.LOCKED
+            )
+        else:
+            valid = (
+                self.drawing is not PresentationDrawing.PENDING
+                and self.restoration
+                in (PresentationRestoration.RESTORED, PresentationRestoration.NOT_NEEDED)
+                and self.gate is PresentationGate.OPEN
+            )
+        if not valid:
+            raise ValueError("Inconsistent presentation phase and outcomes.")
+        return self
+
+
 class Status(WireModel):
     ascension: Annotated[int, Field(ge=0)] | None = None
     location: Location
     control_intent: ControlIntent
     input_readiness: InputReadiness
     receipt: StepReceipt | None
+    presentation: Presentation | None
 
     @model_validator(mode="after")
     def check_readiness(self) -> Self:
@@ -990,6 +1057,25 @@ class Status(WireModel):
             and self.input_readiness is not InputReadiness.BUSY
         ):
             raise ValueError("An accepted pending operation owns native input.")
+        if self.presentation is not None:
+            if isinstance(self.receipt, ReceiptPending):
+                raise ValueError("A pending action cannot coexist with a presentation.")
+            phase = self.presentation.phase
+            if (
+                phase in (PresentationPhase.RUNNING, PresentationPhase.VERIFYING)
+                and self.input_readiness is not InputReadiness.BUSY
+            ):
+                raise ValueError("A running presentation owns native input.")
+            if (
+                phase is PresentationPhase.SETTLED_UNVERIFIED
+                and self.input_readiness is not InputReadiness.UNAVAILABLE
+            ):
+                raise ValueError("An unverified presentation keeps native input unavailable.")
+            if (
+                phase is PresentationPhase.RESTORED
+                and self.input_readiness is InputReadiness.TERMINAL
+            ):
+                raise ValueError("A presentation cannot remain restored after the run ends.")
         if self.input_readiness is InputReadiness.TERMINAL and (
             self.location.owner is not None
             or self.location.run_id is None
@@ -1314,6 +1400,104 @@ class RouteKey(WireModel):
     run_id: Nonempty
     node_id: Nonempty
     owner: DecisionOwner
+
+
+class PresentationEdge(WireModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True, populate_by_name=True)
+    source: Nonempty = Field(alias="from")
+    destination: Nonempty = Field(alias="to")
+
+
+class PresentRequest(WireModel):
+    operation_id: Nonempty
+    expected_route: RouteKey
+    edges: Annotated[tuple[PresentationEdge, ...], Field(min_length=1), AfterValidator(_distinct)]
+
+    def to_json(self) -> str:
+        return self.model_dump_json(exclude_unset=True, by_alias=True)
+
+
+class VerifyPresentationRequest(WireModel):
+    operation_id: Nonempty
+    expected_route: RouteKey
+
+
+class PresentationRejection(WireModel):
+    code: Literal[
+        ErrorCode.NATIVE_BUSY,
+        ErrorCode.WRONG_OWNER,
+        ErrorCode.ACTION_UNAVAILABLE,
+        ErrorCode.DUPLICATE_OPERATION,
+    ]
+    message: str
+
+
+class PresentationPending(WireModel):
+    operation_id: Nonempty
+    status: Literal[ResultStatus.PENDING]
+
+
+class PresentationRejected(WireModel):
+    operation_id: Nonempty
+    status: Literal[ResultStatus.REJECTED]
+    error: PresentationRejection | RouteChanged
+
+
+class PresentationCompleted(WireModel):
+    operation_id: Nonempty
+    status: Literal[ResultStatus.COMPLETED]
+    drawing: Literal[
+        PresentationDrawing.SHOWN, PresentationDrawing.FAILED, PresentationDrawing.UNKNOWN
+    ]
+    restoration: Literal[
+        PresentationRestoration.RESTORED,
+        PresentationRestoration.NOT_NEEDED,
+        PresentationRestoration.UNKNOWN,
+        PresentationRestoration.FAILED,
+    ]
+    gate: PresentationGate
+
+    @model_validator(mode="after")
+    def check_gate(self) -> Self:
+        restored = self.restoration in (
+            PresentationRestoration.RESTORED,
+            PresentationRestoration.NOT_NEEDED,
+        )
+        if restored != (self.gate is PresentationGate.OPEN):
+            raise ValueError("Presentation restoration and gate disagree.")
+        return self
+
+
+class PresentationVerificationCompleted(WireModel):
+    operation_id: Nonempty
+    status: Literal[ResultStatus.COMPLETED]
+    restoration: Literal[
+        PresentationRestoration.RESTORED,
+        PresentationRestoration.NOT_NEEDED,
+        PresentationRestoration.UNKNOWN,
+        PresentationRestoration.FAILED,
+    ]
+    gate: PresentationGate
+
+    @model_validator(mode="after")
+    def check_gate(self) -> Self:
+        restored = self.restoration in (
+            PresentationRestoration.RESTORED,
+            PresentationRestoration.NOT_NEEDED,
+        )
+        if restored != (self.gate is PresentationGate.OPEN):
+            raise ValueError("Presentation restoration and gate disagree.")
+        return self
+
+
+type PresentReply = Annotated[
+    PresentationPending | PresentationRejected | PresentationCompleted,
+    Field(discriminator="status"),
+]
+type VerifyPresentationReply = Annotated[
+    PresentationPending | PresentationRejected | PresentationVerificationCompleted,
+    Field(discriminator="status"),
+]
 
 
 class StepKind(StrEnum):

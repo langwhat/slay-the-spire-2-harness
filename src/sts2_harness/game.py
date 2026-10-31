@@ -33,6 +33,7 @@ class OperationKind(StrEnum):
     CATALOG = "catalog"
     SETTLE = "settle"
     PAUSE = "pause"
+    PRESENT = "present"
 
 
 class Admit(native.WireModel):
@@ -64,8 +65,14 @@ class Pause(native.WireModel):
     reason: Reason | None = None
 
 
+class Present(native.WireModel):
+    kind: Literal[OperationKind.PRESENT] = OperationKind.PRESENT
+    route: native.RouteKey
+    edges: tuple[native.PresentationEdge, ...]
+
+
 type GameRequest = Annotated[
-    Admit | Observe | Inspect | Catalog | Settle | Pause, Field(discriminator="kind")
+    Admit | Observe | Inspect | Catalog | Settle | Pause | Present, Field(discriminator="kind")
 ]
 type SettledReceipt = (
     native.ReceiptCompleted | native.ReceiptRejected | native.ReceiptFailed | native.ReceiptUnknown
@@ -103,6 +110,17 @@ class Resumed(native.WireModel):
     observation: native.Observation
 
 
+class Presented(native.WireModel):
+    kind: Literal[OperationKind.PRESENT] = OperationKind.PRESENT
+    request: native.PresentRequest
+    receipt: (
+        native.PresentationCompleted
+        | native.PresentationRejected
+        | native.InvalidRequestReply
+        | None
+    )
+
+
 class FailureKind(StrEnum):
     IO = "io"
     READ = "read"
@@ -136,7 +154,8 @@ class Stopped(native.WireModel):
 
 
 type GameSuccess = Annotated[
-    Admitted | Observed | Inspected | Cataloged | Settlement | Resumed, Field(discriminator="kind")
+    Admitted | Observed | Inspected | Cataloged | Settlement | Resumed | Presented,
+    Field(discriminator="kind"),
 ]
 type GameFailure = Annotated[
     IOFailure | ReadFailure | ControlFailure | LifetimeEnded | Stopped, Field(discriminator="kind")
@@ -150,6 +169,8 @@ class Endpoint(StrEnum):
     CATALOG = "catalog"
     SUBMIT = "submit"
     CONTROL = "control"
+    VERIFY_PRESENTATION = "verify_presentation"
+    PRESENT = "present"
 
 
 type NativeReply = (
@@ -161,6 +182,10 @@ type NativeReply = (
     | native.StepReceipt
     | native.ControlReply
     | native.ControlFailed
+    | native.PresentationPending
+    | native.PresentationRejected
+    | native.PresentationVerificationCompleted
+    | native.PresentationCompleted
     | IOFailure
 )
 
@@ -189,6 +214,9 @@ class GameIO(Protocol):
         self, route: native.RouteKey, step: native.NativeStep
     ) -> GameReply[Settlement]: ...
     async def pause_until_resumed(self, reason: Reason | None) -> GameReply[Resumed]: ...
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> GameReply[Presented]: ...
 
 
 class SessionStopped(Exception):
@@ -247,6 +275,7 @@ class LiveGame:
         self._audit = audit
         self._namespace = namespace
         self._step_number = 0
+        self._presentation_number = 0
         self._game_instance_id = game_instance_id
         self._run_id = run_id
         self._wait_for_start = wait_for_start
@@ -256,6 +285,8 @@ class LiveGame:
         self._settle_confirmation_seconds = settle_confirmation_seconds
         self._observations: list[native.Observation] = []
         self._inflight = False
+        self._presentation_verifications: set[str] = set()
+        self._unresolved_presentation: str | None = None
 
     async def admit(self) -> GameReply[Admitted]:
         return await self._run(self._admission_result)
@@ -304,6 +335,32 @@ class LiveGame:
 
     async def pause_until_resumed(self, reason: Reason | None) -> GameReply[Resumed]:
         return await self._run(lambda: self._resume_result(reason))
+
+    async def present(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> GameReply[Presented]:
+        return await self._run(lambda: self._presentation_result(route, edges))
+
+    async def _presentation_result(
+        self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
+    ) -> Presented:
+        self._presentation_number += 1
+        request = native.PresentRequest(
+            operation_id=f"{self._namespace}:presentation:{self._presentation_number}",
+            expected_route=route,
+            edges=edges,
+        )
+        if self._unresolved_presentation is not None:
+            return Presented(request=request, receipt=None)
+        if self._audit is not None:
+            self._audit.submitting(request.operation_id)
+        receipt = await self._present(request)
+        if receipt is None or (
+            isinstance(receipt, native.PresentationCompleted)
+            and receipt.gate is native.PresentationGate.LOCKED
+        ):
+            self._unresolved_presentation = request.operation_id
+        return Presented(request=request, receipt=receipt)
 
     async def _resume_result(self, reason: Reason | None) -> Resumed:
         return Resumed(observation=await self._pause_until_resumed(reason))
@@ -389,6 +446,7 @@ class LiveGame:
         while True:
             self._check_stop()
             status = await self._status(waiting=True)
+            status = await self._ensure_presentation(status)
             if status.location.run_id is None:
                 raise GameLifetimeEnded(status.location)
             if (
@@ -420,6 +478,7 @@ class LiveGame:
             self._check_stop()
             await self._wait(0.1)
             status = await self._status()
+            status = await self._ensure_presentation(status)
             if status.location.run_id is None:
                 raise GameLifetimeEnded(status.location)
             if not self._same_run(status.location):
@@ -431,6 +490,84 @@ class LiveGame:
                 continue
             observation = await self._observe()
         return observation
+
+    async def _ensure_presentation(self, status: native.Status) -> native.Status:
+        presentation = status.presentation
+        if self._unresolved_presentation is not None and (
+            presentation is None or presentation.operation_id != self._unresolved_presentation
+        ):
+            raise GameReadError("The current map presentation could not be confirmed.")
+        if presentation is None:
+            return status
+        if presentation.phase is native.PresentationPhase.RESTORED:
+            self._unresolved_presentation = None
+            return status
+        operation_id = presentation.operation_id
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while presentation.phase in (
+            native.PresentationPhase.RUNNING,
+            native.PresentationPhase.VERIFYING,
+        ):
+            self._check_stop()
+            if asyncio.get_running_loop().time() >= deadline:
+                raise GameReadError(
+                    "The map presentation is still active; native input remains locked."
+                )
+            await self._wait(0.1)
+            status = await self._status()
+            if status.presentation is None or status.presentation.operation_id != operation_id:
+                raise GameReadError("The current map presentation could not be confirmed.")
+            presentation = status.presentation
+        if presentation.phase is native.PresentationPhase.RESTORED:
+            self._unresolved_presentation = None
+            return status
+        if operation_id in self._presentation_verifications:
+            raise GameReadError("Map restoration remains unconfirmed; native input is locked.")
+        location = status.location
+        if location.run_id is None or location.node_id is None or location.owner is None:
+            raise GameReadError("The original map presentation location is unavailable.")
+        self._presentation_verifications.add(operation_id)
+        request = native.VerifyPresentationRequest(
+            operation_id=operation_id,
+            expected_route=native.RouteKey(
+                game_instance_id=location.game_instance_id,
+                run_id=location.run_id,
+                node_id=location.node_id,
+                owner=location.owner,
+            ),
+        )
+        reply = await self._attempt(
+            Endpoint.VERIFY_PRESENTATION, self._client.verify_presentation(request)
+        )
+        if (
+            not isinstance(
+                reply, (native.PresentationPending, native.PresentationVerificationCompleted)
+            )
+            or reply.operation_id != operation_id
+        ):
+            raise GameReadError("Map restoration could not be confirmed; native input is locked.")
+        while True:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise GameReadError(
+                    "Map restoration verification did not settle; native input is locked."
+                )
+            status = await self._status()
+            presentation = status.presentation
+            if presentation is None or presentation.operation_id != operation_id:
+                raise GameReadError("The current map presentation could not be confirmed.")
+            if isinstance(reply, native.PresentationVerificationCompleted) and (
+                presentation.restoration is not reply.restoration
+                or presentation.gate is not reply.gate
+            ):
+                raise GameReadError("Map restoration response and status disagree.")
+            if presentation.phase is native.PresentationPhase.RESTORED:
+                self._unresolved_presentation = None
+                return status
+            if presentation.phase is native.PresentationPhase.SETTLED_UNVERIFIED:
+                raise GameReadError("Map restoration remains unconfirmed; native input is locked.")
+            if presentation.phase is not native.PresentationPhase.VERIFYING:
+                raise GameReadError("The current map verification could not be confirmed.")
+            await self._wait(0.1)
 
     async def _pause_until_resumed(self, reason: Reason | None) -> native.Observation:
         """Write Pause, await explicit Start, then refresh; a dead run raises GameLifetimeEnded."""
@@ -481,22 +618,27 @@ class LiveGame:
             self._check_stop()
             try:
                 status = await self._status(waiting=True)
-                if (
-                    not self._same_run(status.location)
-                    or status.input_readiness is native.InputReadiness.TERMINAL
-                ):
-                    raise GameLifetimeEnded(status.location)
-                if status.control_intent is native.ControlIntent.RUNNING:
-                    observation = await self._observe()
-                    if (
-                        not self._same_run(observation.location)
-                        or observation.state.phase is native.Phase.TERMINAL
-                    ):
-                        raise GameLifetimeEnded(observation.location)
-                    return observation
             except (ClientUnavailable, GameReadError):
                 await self._wait(1.0)
                 continue
+            if (
+                not self._same_run(status.location)
+                or status.input_readiness is native.InputReadiness.TERMINAL
+            ):
+                raise GameLifetimeEnded(status.location)
+            if status.control_intent is native.ControlIntent.RUNNING:
+                await self._ensure_presentation(status)
+                try:
+                    observation = await self._observe()
+                except (ClientUnavailable, GameReadError):
+                    await self._wait(1.0)
+                    continue
+                if (
+                    not self._same_run(observation.location)
+                    or observation.state.phase is native.Phase.TERMINAL
+                ):
+                    raise GameLifetimeEnded(observation.location)
+                return observation
             await self._wait(1.0)
 
     async def _settle(self, request: native.StepRequest) -> SettledReceipt | None:
@@ -541,3 +683,57 @@ class LiveGame:
             if not isinstance(receipt, native.ReceiptPending):
                 return receipt
             await self._wait(0.1)
+
+    async def _present(
+        self, request: native.PresentRequest
+    ) -> (
+        native.PresentationCompleted
+        | native.PresentationRejected
+        | native.InvalidRequestReply
+        | None
+    ):
+        try:
+            reply = await self._attempt(Endpoint.PRESENT, self._client.present(request))
+        except ClientUnavailable:
+            reply = None
+        if isinstance(reply, native.InvalidRequestReply):
+            return reply
+        if (
+            isinstance(reply, native.PresentationRejected)
+            and reply.operation_id == request.operation_id
+        ):
+            return reply
+        terminal = (
+            reply
+            if isinstance(reply, native.PresentationCompleted)
+            and reply.operation_id == request.operation_id
+            else None
+        )
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while asyncio.get_running_loop().time() < deadline:
+            self._check_stop()
+            try:
+                status = await self._status()
+            except (ClientUnavailable, GameReadError):
+                return None
+            presentation = status.presentation
+            if presentation is None or presentation.operation_id != request.operation_id:
+                return None
+            if presentation.phase in (
+                native.PresentationPhase.RESTORED,
+                native.PresentationPhase.SETTLED_UNVERIFIED,
+            ):
+                resolved = native.PresentationCompleted.model_validate(
+                    {
+                        "operation_id": request.operation_id,
+                        "status": native.ResultStatus.COMPLETED,
+                        "drawing": presentation.drawing,
+                        "restoration": presentation.restoration,
+                        "gate": presentation.gate,
+                    }
+                )
+                if terminal is not None and resolved != terminal:
+                    return None
+                return resolved
+            await self._wait(0.1)
+        return None

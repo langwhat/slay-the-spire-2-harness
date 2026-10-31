@@ -222,6 +222,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send(
                 {
                     "location": location,
+                    "presentation": None,
                     "control_intent": mode,
                     "input_readiness": "unavailable" if index < 0 else current()["input_readiness"],
                     "receipt": None,

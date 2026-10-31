@@ -321,6 +321,7 @@ def test_admission_pause_and_lifetime_keep_real_run_changes_visible() -> None:
             return httpx.Response(
                 200,
                 content=native.Status(
+                    presentation=None,
                     location=current,
                     control_intent=native.ControlIntent.RUNNING,
                     input_readiness=native.InputReadiness.READY,

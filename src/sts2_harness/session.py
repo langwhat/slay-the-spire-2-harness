@@ -133,6 +133,7 @@ class RunSession:
             observe=self.execution.observe,
             inspect=self.execution.inspect,
             catalog=self.execution.catalog,
+            present=self.execution.present if role is native.DecisionOwner.RUN else None,
             notes=self.notes if role is native.DecisionOwner.RUN else None,
             notes_write_guard=self._notes_write_guard,
             skills=self._dependencies.documents,
