@@ -659,6 +659,7 @@ class MapOdds(WireModel):
 class PublicMap(WireModel):
     bosses: tuple[NamedDefinition, ...]
     nodes: tuple[MapNode, ...]
+    legal_destinations: tuple[Nonempty, ...] | None
 
 
 class MapNode(WireModel):
