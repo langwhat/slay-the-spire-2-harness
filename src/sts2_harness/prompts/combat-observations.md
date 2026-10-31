@@ -14,14 +14,131 @@ These describe ordinary play. Apply the actual card, keyword, relic, power, and 
 
 # Planning a sequence
 
-Seek a credible win, then reduce total HP loss across the battle. Compare executable lines over the same relevant enemy actions. Defense that postpones defeat without making enough progress is not safe; faster damage is not worth HP unless it removes a concrete threat or improves the continuation.
+Seek a credible win, then reduce total HP loss across the battle. Compare executable lines over the same relevant enemy actions. Defense that only postpones defeat is not safe. Faster damage is worth HP only when it removes a concrete threat or improves the continuation.
 
-1. Start from the current hand, resources, intents, rules, and public pile membership. Compare the strongest materially different executable alternative, including a different selection or retrieval target or a setup line when it could change the continuation, rather than only omitting a play from the chosen sequence. Check the ordered plays and remaining resources, including resources gained during the sequence and one-use effects. Use current previews and announced intents as current values without applying their included modifiers twice. For draw or retrieval, pay its cost first, then compare the output you can still afford with the best line already in hand. Access is useful for better plays, extra resources, triggers, or later cycling, not automatically for every card seen. Include the payoff of the card consumed as an exhaust or discard input.
-2. Calculate the resulting enemy HP and the HP you actually lose after the announced enemy actions. Count every hit, HP cost, growth, fading protection, and delayed effect at its actual timing; block produced is not necessarily HP saved. If a line takes blockable damage, compare a feasible line that replaces its least useful plays with effective prevention. Compare both lines over the same horizon rather than favoring either attack or defense in isolation.
-3. If neither line kills now, compare both continuations through the same later enemy action that could cause HP loss, after the currently announced actions. Include all intervening player turns and quiet enemy actions. Calculate the damage needed to kill before that later action, including enemy block, growth, and still-active modifiers. Check how much damage those hands can plausibly afford using known pile membership, draw count, real shuffle timing, and any known top-deck order. Earlier lethal adds no direct HP saving by itself when the skipped enemy actions would cause no HP loss; weigh the growth, pollution, resource costs, or bad-draw risk it prevents against the HP saved by defending now. If the difference appears later, continue through the next meaningful attack, setup payoff, or loss of effective draws, including quiet enemy turns.
-4. Separate guaranteed, plausible, and unavailable continuations. Include the result if a needed draw fails; estimate probabilities when they change the choice. Exhausting, retaining, top-decking, or discarding cards changes a future reshuffle and hand; keep the cards that hand is likely to need. Value a retrieved or top-decked card at its expected arrival, with the resources then available, status expiry, and intervening pile changes; retrieval does not necessarily put it into hand immediately or guarantee the next draw. Do not assume a best possible hand or demand guaranteed next-turn lethal from every setup. When poor draws before the next one or two attacks could kill you, weigh that risk above a modest expected saving, and prefer reducing that dependence unless it gives up the credible win. Update the plan after a reveal.
-5. Compare potions and lasting effects by their actual triggers, affordable follow-up actions, and when they start paying off. Include pollution's loss of useful draws as well as any benefit from exhausting it. Delay only for a concrete gain such as better access, preserving a potion, a counter, growth, or recovery; include the extra enemy actions and resource costs.
+Use the questions for the decision at hand. They guide planning; they are not an answer checklist.
+
+## Before choosing a line
+
+- What can the current hand, resources, intents, and public piles actually support?
+- Are the powers and bonuses this line needs already active?
+- What is the strongest materially different line, including a different target, selection, retrieval, or setup?
+- Can each action be paid for when it occurs, including resources gained earlier in the sequence?
+- After every hit, HP cost, trigger, and delayed effect, how much HP does each line actually lose?
+- If a line takes blockable damage, what happens if its least useful plays are replaced with effective prevention?
+
+Use current previews and announced intents without applying their included modifiers twice. Block produced is not necessarily HP saved. Separate guaranteed, plausible, and unavailable continuations. Estimate probabilities only when they affect the choice.
+
+If neither line kills now, compare both through the same later enemy action that could cause HP loss. Include intervening player turns and quiet enemy actions. Calculate the damage needed before that action, including enemy block, growth, and still-active modifiers. Use known pile membership, draw counts, actual shuffle timing, and any known top-deck order to assess what those turns can afford. If the difference occurs later, extend both lines through that attack, setup payoff, or loss of useful draws. Earlier lethal alone saves no HP when the skipped actions would cause no HP loss; include the growth, pollution, resource costs, and bad-draw risk it avoids.
+
+## Before choosing a kill, stun, or phase transition
+
+- Which target's death cancels the most dangerous upcoming action?
+- If a retained kill card is spent now, what handles the next threat?
+- Does extra damage cross a shield or other threshold that actually stops an action or enables the next play?
+- After a stun or phase change, which enemies attack on each coming turn?
+- Does reducing this turn's peak leave a safe setup turn, or require defense on every turn?
+- What handles the first attack of the next phase?
+- Would delaying the transition leave the needed defense, debuff, or card access available?
+- With energy gains, debuffs, and extra damage applied in order, is lethal already available?
+
+Use the supplied enemy rules for death and phase timing. Do not infer those rules from the desired sequence.
+
+## Before drawing, retrieving, or generating cards
+
+- Which possible results fill the current damage, defense, or setup gap?
+- After paying for access, what can still be played?
+- What useful effect is lost by discarding or exhausting the input card?
+- Is the need for more cards, or for particular components together on an affordable turn?
+- Will resource producers arrive before their consumers need them?
+- What does drawing or top-decking now move ahead of a needed component?
+- What reliable progress is lost by stopping draws to keep a card?
+- Is spending this connecting card now worth losing its protection against a stalled next turn?
+- How many hand slots will the action and its extra triggers need?
+- Where will overflow cards go?
+- Will a retrieval target be in an eligible pile when retrieval resolves?
+
+Compare the affordable result with the best line already in hand. Access can improve plays, resources, triggers, or later cycling; seeing more cards is not itself the payoff. Value a retrieved or top-decked card at its actual arrival, with the resources, status durations, and pile contents then available. Retrieval need not put a card in hand immediately or guarantee the next draw.
+
+## Before committing to the next hand or reshuffle
+
+- Which known cards and newly created cards enter the next shuffle?
+- Which negative cards return with them?
+- How do exhaustion, retention, discards, and automatic returns change that pool?
+- Which plausible next hands can kill or defend after each candidate line?
+- If the needed card does not arrive, what affordable sequence remains?
+- Can that sequence survive the next meaningful attack?
+- Does drawing or shuffling now remove a later retrieval target?
+- When replacing the whole hand, which retained defenses or components are lost?
+- Is the unknown replacement hand more reliable than the protection already held?
+
+Do not assume the best possible hand or require guaranteed next-turn lethal from every setup. When poor draws before the next one or two attacks could kill you, weigh that risk above a modest expected HP saving unless avoiding it gives up the credible win.
+
+## Before clearing cards, setting up, or extending a loop
+
+- Is this a safe turn to clear cards that would consume energy or draws at the critical moment?
+- If the clearing effect is spent now, what handles later pollution?
+- After the next exhaustion or persistent consumption, which attacks, defenses, and connectors remain through lethal?
+- Where are the indispensable cards when that consumption resolves?
+- Can the loop start if a key connector arrives late?
+- Can it continue after paying each cycle's energy and pollution-clearing costs?
+- Is a backup card preserving a fallback or occupying the opening draw that starts the loop?
+- Is enemy pollution arriving faster than it can be cleared?
+- Does adding a usable card dilute dangerous statuses or delay the cards that keep the loop alive?
+- Among adding cards, clearing cards, and killing sooner, which preserves useful actions?
+- Does taking damage to set up or attack now avoid a concrete later attack?
+- How much HP is lost before dependable defense resumes?
+- Can the remaining pile and available alternatives bridge that gap?
+- Does another growth or delayed-damage play change lethal timing or release later energy?
+- What defense or connection does that investment displace?
+- If a risky play fails to find its strong random combination, how long can known retention, retrieval, and potions keep the line alive?
+- If ordinary defense only delays defeat, which line still has a credible win?
+
+## Before spending persistent resources or limited triggers
+
+- What later damage or defense is lost by spending this persistent resource now?
+- Can the immediate result replace that contribution or finish the fight in time?
+- How many triggers or actions remain under the current limit?
+- Will this play or an automatic copy consume the opportunity needed by a key card?
+- What counter will be left for the next critical turn?
+- If energy, duplication, or a bonus is saved, will a suitable card, target, and debuff still be available?
+- Which small hit or status damage could consume a one-use defense before the dangerous hit?
+- What must be blocked or cleared first to preserve that defense?
+
+Use the specific rules for resource retention, capacity, and release. Two cards displaying the same one-use bonus cannot both consume it.
+
+## Before using or reserving a potion
+
+- Which failed draws become survivable with this potion?
+- Which required card no longer has to arrive?
+- Does a copying or replay effect have a suitable original and an affordable follow-up?
+- Can an already useful draw or random action reveal its result before choosing a potion?
+- After that action, will the survival or lethal line still have its energy, components, and potion window?
+- How many times can the effect contribute during the enemies' actual attacks and quiet turns?
+- How should the available defenses cover those different turns?
+- What specific later gap justifies keeping this potion?
+- What HP loss or slot pressure does keeping it impose now?
+
+Treat Run's potion reservations as revisable plans. Compare the current danger with the later need and the alternatives available in each fight.
+
+## Before a random action or an optional extra turn
+
+- Which cards or effects can the random action actually select?
+- Which energy, HP, or limited triggers can they consume?
+- Could they dismantle the existing line?
+- Can the counter, available resources, or eligible pool be adjusted first?
+- If a known kill or defense already works, what gap does more random searching fill?
+- Can the known solution be reused without exposing it to an immediate negative effect?
+- What does delaying the finish actually gain in recovery, potions, triggers, or stored resources?
+- What extra enemy actions and resource costs does that delay require?
+- Is the extra gain merely trading a known resource for an uncertain replacement?
+
+## After a reveal or completed action
+
+- Do the actual hand, energy, triggers, and active powers still support the planned continuation?
+- Is a definite solution now available?
+- Does the new state call for another target, a different potion, or no further optional actions?
+
+Earlier steps change later resources, costs, bonuses, targets, and piles. Combine actions, anticipated selections, and follow-up plays when public information supports them, following combat_act's execution and recovery rules.
 
 In combat_act.reason, when the batch is not lethal and lines differ materially, give in one or two short lines, for the chosen line and its main alternative, the expected total own HP loss from now through that same later enemy action, counting that action if it is not prevented, and the chance and HP cost of missing the kill before it. Use estimates or ranges where uncertain; do not invent exact values or narrate the full analysis.
-
-Earlier steps change later resources, costs, bonuses, targets, and piles. Two cards displaying the same one-use bonus cannot both consume it. Combine actions, anticipated selections, and follow-up plays when public information supports them, following combat_act's execution and recovery rules.
