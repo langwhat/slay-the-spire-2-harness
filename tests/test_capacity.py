@@ -125,3 +125,67 @@ def test_interrupted_table_download_reports_a_configuration_error(
     assert main(["prepare-tokenizers"]) == 2
     assert "Could not prepare tokenizer tables" in capsys.readouterr().err
     assert not tuple(tmp_path.glob("*.tiktoken"))
+
+
+def test_prepared_request_is_sent_unchanged_through_retry(tmp_path: Path) -> None:
+    import asyncio
+    import json
+    from dataclasses import replace
+
+    import httpx2 as httpx
+    from test_responses import completed, configuration
+
+    from sts2_harness.llm.client import Llm
+    from sts2_harness.llm.messages import TextMessage, TextRole
+
+    requests: list[dict[str, JsonValue]] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(503, json={"error": {"code": "unavailable"}})
+        return httpx.Response(
+            200, content=completed(), headers={"Content-Type": "text/event-stream"}
+        )
+
+    async def sleep(_: float) -> None:
+        return None
+
+    async def scenario() -> None:
+        config = replace(configuration(tmp_path), extra_retries=1)
+        async with Llm(config, transport=httpx.MockTransport(provider), sleep=sleep) as llm:
+            prepared = llm.prepare((TextMessage(TextRole.USER, "Synthetic 中文"),), ())
+            await llm.complete_prepared(prepared)
+            assert len(requests) == 2 and requests[0] == requests[1]
+            assert prepared.measurement == measure(requests[0], config.protocol)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("protocol", list(Protocol))
+def test_recorded_configuration_reconstructs_identical_request_without_local_defaults(
+    tmp_path: Path, protocol: Protocol
+) -> None:
+    import asyncio
+    from dataclasses import replace
+
+    from test_responses import configuration
+
+    from sts2_harness.journal_models import ConfigurationSnapshot
+    from sts2_harness.llm.client import Llm
+    from sts2_harness.llm.messages import TextMessage, TextRole
+
+    async def scenario() -> None:
+        original = replace(
+            configuration(tmp_path, LLM_PROTOCOL=protocol.value), context_window=42_000
+        )
+        recorded = ConfigurationSnapshot.of(original)
+        reconstructed = recorded.for_offline_preparation()
+        assert reconstructed.context_window == 42_000
+        assert reconstructed.protocol == protocol
+        assert reconstructed.authentication.secret == ""
+        async with Llm(original) as live, Llm(reconstructed) as replay:
+            messages = (TextMessage(TextRole.USER, "Synthetic 中文 <|endoftext|>"),)
+            assert live.prepare(messages, ()) == replay.prepare(messages, ())
+
+    asyncio.run(scenario())

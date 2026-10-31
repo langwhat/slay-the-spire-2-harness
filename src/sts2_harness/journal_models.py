@@ -20,7 +20,7 @@ from pydantic import (
 
 from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import models as native
-from sts2_harness.config import ModelConfiguration, Protocol
+from sts2_harness.config import Authentication, AuthKind, ModelConfiguration, Protocol
 from sts2_harness.context.models import (
     ActContent,
     HandoffContent,
@@ -488,6 +488,20 @@ class ConfigurationSnapshot(native.WireModel):
     extra_retries: int
     capacity_policy: CapacityPolicy = CapacityPolicy()
 
+    def for_offline_preparation(self) -> ModelConfiguration:
+        return ModelConfiguration(
+            protocol=self.protocol,
+            model=self.model,
+            endpoint="https://example.invalid",
+            reasoning_effort=self.reasoning_effort,
+            service_tier=self.service_tier,
+            authentication=Authentication(AuthKind.NONE, "", "", ""),
+            custom_headers=(),
+            timeout_seconds=self.timeout_seconds,
+            extra_retries=self.extra_retries,
+            context_window=self.capacity_policy.context_window,
+        )
+
     @classmethod
     def of(cls, config: ModelConfiguration) -> "ConfigurationSnapshot":
         return cls(
@@ -544,6 +558,51 @@ class ModelAttempt(native.WireModel):
     failure: FailureKind | None = None
 
 
+class PreparationEvidence(native.WireModel):
+    group_id: int
+    baseline: MessageSnapshot | None
+    input_before: tuple[MessageSnapshot, ...]
+    estimate_before: int
+    decision: Literal["unchanged", "compacted", "minimum_exceeds_window", "invalid_candidate"]
+    input_after: tuple[MessageSnapshot, ...] | None
+    estimate_after: int | None
+    retained_complete_group_id: int | None
+    active_group_id: int | None
+    validation: Literal["not_needed", "passed", "failed"]
+
+
+class PreparationInput(native.WireModel):
+    messages: tuple[MessageSnapshot, ...]
+    tools: ToolSet
+
+
+class PreparationBaseline(native.WireModel):
+    message: MessageSnapshot
+
+
+class PreparationReferences(native.WireModel):
+    group_id: int
+    baseline_ref: str | None
+    input_before_ref: str
+    estimate_before: int
+    decision: Literal["unchanged", "compacted", "minimum_exceeds_window", "invalid_candidate"]
+    input_after_ref: str | None
+    estimate_after: int | None
+    retained_complete_group_id: int | None
+    active_group_id: int | None
+    validation: Literal["not_needed", "passed", "failed"]
+
+
+class RecordedPreparation(PreparationEvidence):
+    baseline_ref: str | None
+    baseline_digest: str | None
+    input_before_ref: str
+    input_before_digest: str
+    input_after_ref: str | None
+    input_after_digest: str | None
+    tools: tuple[ToolSnapshot, ...]
+
+
 class InputDelta(native.WireModel):
     base_sequence: int | None
     prefix_length: int
@@ -551,6 +610,7 @@ class InputDelta(native.WireModel):
     semantic_digest: str
     tools: str
     configuration: str
+    preparation: str | None = None
 
 
 class ModelRecord(native.WireModel):
@@ -566,6 +626,7 @@ class ModelRecord(native.WireModel):
     input: tuple[MessageSnapshot, ...]
     tools: tuple[ToolSnapshot, ...]
     configuration: ConfigurationSnapshot
+    preparation: RecordedPreparation | None = None
     attempts: tuple[ModelAttempt, ...]
     delivered: bool
     failure: FailureKind | None

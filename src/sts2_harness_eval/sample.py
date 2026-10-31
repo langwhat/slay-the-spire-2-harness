@@ -1,10 +1,11 @@
 """Bound one live sample around the recorded dependencies of a run session."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import models as native
 from sts2_harness.game import (
     Admitted,
@@ -18,7 +19,15 @@ from sts2_harness.game import (
     Settlement,
 )
 from sts2_harness.journal import ArchiveError, Journal
-from sts2_harness.llm.messages import ModelClient, ModelInput, ModelReply, ToolDefinition
+from sts2_harness.llm.messages import (
+    ModelClient,
+    ModelInput,
+    ModelReply,
+    ModelUnavailable,
+    PreparedRequest,
+    RequestPreparation,
+    ToolDefinition,
+)
 from sts2_harness.results import Reason
 from sts2_harness.session import ModelFactory, RunSession
 from sts2_harness_eval.results import Rejected
@@ -204,9 +213,39 @@ class SampleHost:
             client = recorded(role, stream)
 
             class Model:
+                @property
+                def capacity_policy(self) -> CapacityPolicy:
+                    return client.capacity_policy
+
+                def prepare(
+                    self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+                ) -> PreparedRequest:
+                    return client.prepare(input, tools)
+
+                async def complete_prepared(
+                    self,
+                    prepared: PreparedRequest,
+                    *,
+                    preparation: RequestPreparation | None = None,
+                ) -> ModelReply:
+                    return await self._submit(
+                        lambda: client.complete_prepared(prepared, preparation=preparation)
+                    )
+
+                async def interrupt_preparation(
+                    self,
+                    preparation: RequestPreparation,
+                    tools: tuple[ToolDefinition, ...],
+                    failure: ModelUnavailable,
+                ) -> None:
+                    await client.interrupt_preparation(preparation, tools, failure)
+
                 async def complete(
                     self, input: ModelInput, tools: tuple[ToolDefinition, ...]
                 ) -> ModelReply:
+                    return await self._submit(lambda: client.complete(input, tools))
+
+                async def _submit(self, call: Callable[[], Awaitable[ModelReply]]) -> ModelReply:
                     host._gate()
                     host._requests += 1
                     host._unit_model = True
@@ -214,7 +253,7 @@ class SampleHost:
                     deadline = asyncio.timeout_at(host._deadline)
                     try:
                         async with deadline:
-                            return await client.complete(input, tools)
+                            return await call()
                     except TimeoutError:
                         if not deadline.expired():
                             raise

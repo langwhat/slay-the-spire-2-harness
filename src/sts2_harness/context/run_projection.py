@@ -87,6 +87,7 @@ class RunDelivery:
     )
     phase: native.Phase | None = None
     map_delivered: bool = False
+    next_profile: int = 1
     role: native.DecisionOwner = native.DecisionOwner.RUN
 
     def project(
@@ -105,7 +106,8 @@ class RunDelivery:
             }
             key = json.dumps(profile, sort_keys=True, ensure_ascii=False)
             if key not in self.catalog:
-                ident = f"p{len(self.catalog) + 1}"
+                ident = f"p{self.next_profile}"
+                self.next_profile += 1
                 self.catalog[key] = ident
                 additions[ident] = profile
             return self.catalog[key]

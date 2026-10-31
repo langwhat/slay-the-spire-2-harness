@@ -379,6 +379,7 @@ def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Pa
                         record.input,
                         ToolSet(tools=record.tools),
                         record.configuration,
+                        preparation=record.preparation,
                     )
                     for attempt in record.attempts:
                         branch.model_attempt(sequence, attempt)
