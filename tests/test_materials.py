@@ -10,7 +10,7 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind, ClientUnavailable
 from sts2_harness.client.models import DecisionOwner
 from sts2_harness.context import Context
-from sts2_harness.context.models import ResultMessage, RunResultMessage
+from sts2_harness.context.models import RunResultMessage
 from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import TextMessage, TextRole, ToolCall
@@ -74,7 +74,7 @@ def test_file_skill_delivery_retains_read_snapshot_through_responses(tmp_path: P
         context.append_tool_result(call, first)
         old_input = context.model_input()
         message = old_input[-1]
-        assert isinstance(message, ResultMessage)
+        assert isinstance(message, RunResultMessage)
         document = message.content.data
         assert isinstance(document, DocumentView)
         assert document.text.body == "First complete guide.\n"
@@ -336,7 +336,7 @@ def test_initial_guidance_and_explicit_reads_share_actual_delivery_without_losin
         call = ToolCall("explicit", "combat_skill", '{"mode":"read","id":"guide"}')
         context.append_tool_result(call, await tools.dispatch(call))
         explicit = context.model_input()[-1]
-        assert isinstance(explicit, ResultMessage)
+        assert isinstance(explicit, RunResultMessage)
         assert explicit.content.data == initial
         context.append_materials((initial,))
         assert len(context.model_input()) == 2

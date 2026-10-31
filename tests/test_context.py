@@ -8,6 +8,7 @@ from test_mod_client import COMBAT, RUN
 from sts2_harness.client import ModClient
 from sts2_harness.client.models import (
     CardEntry,
+    CombatPlayer,
     CombatState,
     DecisionOwner,
     DetailData,
@@ -33,11 +34,10 @@ from sts2_harness.context import (
 )
 from sts2_harness.context.models import (
     ActContent,
-    ProjectedResult,
-    ResultMessage,
     ReviewContent,
     RunActInput,
     RunHandoffInput,
+    RunProjectedResult,
     RunResultMessage,
     TaskMessage,
 )
@@ -55,61 +55,54 @@ def test_task_delivers_complete_state_and_latest_details_without_rewriting_histo
     first = first_input[0]
     assert isinstance(first, TaskMessage)
     assert isinstance(first.content, ActContent)
-    assert isinstance(first.content.observation.state, CombatState)
-    assert first.content.observation.state.piles.hand == ("c2", "c1")
-    assert first.content.observation.updates.objects is not MISSING
-    assert first.content.observation.updates.objects["c1"].name == "牌"
+    projected = first.content.observation
+    assert projected.current is not MISSING
+    assert projected.current.piles is not MISSING and projected.current.piles is not None
+    assert tuple(card.ref for card in projected.current.piles.hand) == ("c2", "c1")
+    assert projected.scene is not MISSING
+    assert {binding.ref: binding.name for binding in projected.scene.bindings}["c1"] == "牌"
     context.append_task(CombatActInput(), observation)
     assert context.model_input() == first_input
 
 
 def test_results_deliver_latest_changes_and_full_explicit_data_independently() -> None:
-
     observation = Observation.model_validate_json(COMBAT)
     context = Context(DecisionOwner.COMBAT)
     call = ToolCall("inspect", "combat_inspect", "{}")
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     original = context.model_input()[0]
-    assert isinstance(original, ResultMessage)
+    assert isinstance(original, RunResultMessage)
+    original_projected = original.content.observation
+    assert original_projected is not None and original_projected.current is not MISSING
     card = observation.objects["c1"]
     assert isinstance(card, CardEntry)
-    changed = Observation(
-        game_language="zhs",
-        stamp=observation.stamp,
-        location=observation.location,
-        input_readiness=observation.input_readiness,
-        state=observation.state,
-        objects={
-            **observation.objects,
-            "c1": card.model_copy(update={"cost": ResourceCosts(energy=0)}),
-        },
-        descriptions={**observation.descriptions, "c1": "新正文"},
-        modifier_descriptions={"c1": ModifierDescriptions(enchantment=None, affliction=None)},
-        generated=observation.generated,
-        mechanisms=observation.mechanisms,
-        upgrades=observation.upgrades,
-        map=observation.map,
+    changed = observation.model_copy(
+        update={
+            "objects": {
+                **observation.objects,
+                "c1": card.model_copy(update={"cost": ResourceCosts(energy=0)}),
+            },
+            "descriptions": {**observation.descriptions, "c1": "新正文"},
+            "modifier_descriptions": {
+                "c1": ModifierDescriptions(enchantment=None, affliction=None)
+            },
+        }
     )
-    numeric_only = Observation(
-        game_language="zhs",
-        stamp=changed.stamp,
-        location=changed.location,
-        input_readiness=changed.input_readiness,
-        state=changed.state,
-        objects=changed.objects,
-        descriptions=observation.descriptions,
-        modifier_descriptions=observation.modifier_descriptions,
-        generated=changed.generated,
-        mechanisms=changed.mechanisms,
-        upgrades=changed.upgrades,
-        map=changed.map,
+    numeric_only = changed.model_copy(
+        update={
+            "descriptions": observation.descriptions,
+            "modifier_descriptions": observation.modifier_descriptions,
+        }
     )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), numeric_only))
     numeric_message = context.model_input()[-1]
-    assert isinstance(numeric_message, ResultMessage)
-    assert numeric_message.content.updates.objects == {"c1": changed.objects["c1"]}
-    assert numeric_message.content.updates.descriptions is MISSING
-    assert numeric_message.content.updates.modifier_descriptions is MISSING
+    assert isinstance(numeric_message, RunResultMessage)
+    numeric = numeric_message.content.observation
+    assert numeric is not None and numeric.current is not MISSING
+    assert numeric.current.cards is not MISSING
+    assert next(item for item in numeric.current.cards if item.ref == "c1").cost.energy == 0
+    assert numeric.current.card_descriptions is MISSING
+    assert numeric.current.modifier_descriptions is MISSING
     details = DetailData(
         objects=changed.objects,
         descriptions=changed.descriptions,
@@ -119,23 +112,42 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
     )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), changed, details))
     changed_message = context.model_input()[-1]
-    assert isinstance(changed_message, ResultMessage)
+    assert isinstance(changed_message, RunResultMessage)
     assert changed_message.content.data is details
-    assert changed_message.content.updates.objects is MISSING
-    assert changed_message.content.updates.descriptions == {"c1": "新正文"}
-    assert changed_message.content.updates.modifier_descriptions == {
-        "c1": ModifierDescriptions(enchantment=None, affliction=None)
-    }
-    context.append_tool_result(call, QueryToolResult(ReadCompleted(), changed))
+    projected = changed_message.content.observation
+    assert projected is not None and projected.current is not MISSING
+    assert projected.current.cards is MISSING
+    assert projected.current.card_descriptions is not MISSING
+    assert [(item.ref, item.text) for item in projected.current.card_descriptions] == [
+        ("c1", "新正文")
+    ]
+    assert projected.current.modifier_descriptions is not MISSING
+    assert [
+        (item.ref, item.enchantment, item.affliction)
+        for item in projected.current.modifier_descriptions
+    ] == [("c1", None, MISSING)]
+    context.append_tool_result(call, QueryToolResult(ReadCompleted(), changed, details))
     unchanged = context.model_input()[-1]
-    assert isinstance(unchanged, ResultMessage)
-    assert unchanged.content.updates.to_json() == "{}"
+    assert isinstance(unchanged, RunResultMessage)
+    assert unchanged.content.data is details
+    assert unchanged.content.observation is not None
+    assert unchanged.content.observation.current is MISSING
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     returned = context.model_input()[-1]
-    assert isinstance(returned, ResultMessage)
-    assert returned.content.updates.descriptions == {"c1": None}
-    assert original.content.updates.objects is not MISSING
-    assert original.content.updates.objects["c1"] == card
+    assert isinstance(returned, RunResultMessage)
+    assert (
+        returned.content.observation is not None
+        and returned.content.observation.current is not MISSING
+    )
+    assert returned.content.observation.current.card_descriptions is not MISSING
+    assert [
+        (item.ref, item.text) for item in returned.content.observation.current.card_descriptions
+    ] == [("c1", None)]
+    assert original_projected.current.cards is not MISSING
+    assert (
+        next(item for item in original_projected.current.cards if item.ref == "c1").cost
+        == card.cost
+    )
     state = observation.state
     assert isinstance(state, CombatState)
     departing = observation.model_copy(
@@ -150,14 +162,21 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
     )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), departing))
     moved = context.model_input()[-1]
-    assert isinstance(moved, ResultMessage)
-    assert isinstance(moved.content.state, CombatState)
-    assert moved.content.state.piles.hand == ("c2",)
-    assert moved.content.state.piles.discard == ("c1",)
-    assert moved.content.state.player.powers == ()
-    assert moved.content.updates.objects is MISSING
-    assert isinstance(original.content.state, CombatState)
-    assert original.content.state.player.powers[0].amount == 0
+    assert isinstance(moved, RunResultMessage)
+    assert (
+        moved.content.observation is not None and moved.content.observation.current is not MISSING
+    )
+    current = moved.content.observation.current
+    assert current.piles is not MISSING and current.piles is not None
+    assert tuple(item.ref for item in current.piles.hand) == ("c2",)
+    assert tuple(item.ref for item in current.piles.discard) == ("c1",)
+    assert isinstance(current.player, CombatPlayer)
+    assert current.player.powers == ()
+    assert current.cards is MISSING
+    assert moved.content.observation.decision.hand_previews is not MISSING
+    assert tuple(item.ref for item in moved.content.observation.decision.hand_previews) == ("c2",)
+    assert isinstance(original_projected.current.player, CombatPlayer)
+    assert original_projected.current.player.powers[0].amount == 0
 
 
 def test_generated_directories_keep_stable_keys_and_card_order_through_changes() -> None:
@@ -173,35 +192,48 @@ def test_generated_directories_keep_stable_keys_and_card_order_through_changes()
     first = context.model_input()[-1]
     assert isinstance(first, TaskMessage)
     initial = ActContent.model_validate_json(first.text).observation
-    assert initial.updates.generated is not MISSING
-    assert tuple(initial.updates.generated) == ("c1", "c2")
-    assert initial.updates.generated == generated
-    assert isinstance(initial.state, CombatState)
-    assert initial.state.piles.hand == ("c2", "c1")
-
+    assert initial.current is not MISSING and initial.current.generated is not MISSING
+    assert [entry.source.ref for entry in initial.current.generated] == ["c1", "c2"]
+    assert [entry.source.definition_id for entry in initial.current.generated[1].previews] == [
+        "CARD.TWO",
+        "CARD.ONE",
+    ]
+    assert initial.current.piles is not MISSING and initial.current.piles is not None
+    assert tuple(item.ref for item in initial.current.piles.hand) == ("c2", "c1")
     changed = {"c2": (first_card,), "c1": (second_card, first_card)}
     call = ToolCall("inspect", "combat_inspect", "{}")
     for directory in (changed, {}):
         observation = observation.model_copy(update={"generated": MappingProxyType(directory)})
         context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
         result = context.model_input()[-1]
-        assert isinstance(result, ResultMessage)
-        updates = ProjectedResult.model_validate_json(result.text).updates
-        assert updates.generated is not MISSING
-        assert tuple(updates.generated) == ("c1", "c2")
-        assert updates.generated == (changed if directory else {"c1": (), "c2": ()})
+        assert isinstance(result, RunResultMessage)
+        projected = RunProjectedResult.model_validate_json(result.text).observation
+        assert projected is not None and projected.current is not MISSING
+        assert projected.current.generated is not MISSING
+        assert [entry.source.ref for entry in projected.current.generated] == (
+            ["c1", "c2"] if directory else []
+        )
+        assert [
+            tuple(item.source.definition_id for item in entry.previews)
+            for entry in projected.current.generated
+        ] == ([("CARD.TWO", "CARD.ONE"), ("CARD.ONE",)] if directory else [])
 
 
 def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics() -> None:
-
     observation = Observation.model_validate_json(COMBAT)
     context = Context(DecisionOwner.COMBAT)
     call = ToolCall("inspect", "combat_inspect", "{}")
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     first = context.model_input()[-1]
-    assert isinstance(first, ResultMessage)
-    assert first.content.updates.generated is not MISSING
-    assert tuple(first.content.updates.generated) == ("c1",)
+    assert isinstance(first, RunResultMessage)
+    assert (
+        first.content.observation is not None and first.content.observation.current is not MISSING
+    )
+    assert first.content.observation.current.generated is not MISSING
+    assert [
+        (item.source.ref, len(item.previews))
+        for item in first.content.observation.current.generated
+    ] == [("c1", 1), ("c2", 0)]
     same_definition_new_source = observation.model_copy(
         update={
             "generated": MappingProxyType(
@@ -211,17 +243,39 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), same_definition_new_source))
     second = context.model_input()[-1]
-    assert isinstance(second, ResultMessage)
-    assert second.content.updates.generated == {"c2": observation.generated["c1"]}
+    assert isinstance(second, RunResultMessage)
+    assert (
+        second.content.observation is not None and second.content.observation.current is not MISSING
+    )
+    assert second.content.observation.current.generated is not MISSING
+    assert [
+        (item.source.ref, len(item.previews))
+        for item in second.content.observation.current.generated
+    ] == [("c1", 1), ("c2", 1)]
     cleared = observation.model_copy(update={"generated": MappingProxyType({})})
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), cleared))
     empty = context.model_input()[-1]
-    assert isinstance(empty, ResultMessage)
-    assert empty.content.updates.generated == {"c1": (), "c2": ()}
+    assert isinstance(empty, RunResultMessage)
+    assert (
+        empty.content.observation is not None and empty.content.observation.current is not MISSING
+    )
+    assert empty.content.observation.current.generated is not MISSING
+    assert [
+        (item.source.ref, len(item.previews))
+        for item in empty.content.observation.current.generated
+    ] == []
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     returned = context.model_input()[-1]
-    assert isinstance(returned, ResultMessage)
-    assert returned.content.updates.generated == {"c1": observation.generated["c1"]}
+    assert isinstance(returned, RunResultMessage)
+    assert (
+        returned.content.observation is not None
+        and returned.content.observation.current is not MISSING
+    )
+    assert returned.content.observation.current.generated is not MISSING
+    assert [
+        (item.source.ref, len(item.previews))
+        for item in returned.content.observation.current.generated
+    ] == [("c1", 1), ("c2", 0)]
     changed_text = observation.mechanisms[0].model_copy(update={"text": "甲变化"})
     same_owner_same_id = changed_text.model_copy(update={"text": "同 ID 的第二条正文"})
     mechanisms = observation.model_copy(
@@ -229,26 +283,51 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), mechanisms))
     current = context.model_input()[-1]
-    assert isinstance(current, ResultMessage)
-    assert current.content.updates.mechanisms == (changed_text, same_owner_same_id)
+    assert isinstance(current, RunResultMessage)
+    assert (
+        current.content.observation is not None
+        and current.content.observation.current is not MISSING
+    )
+    assert current.content.observation.current.mechanisms is not MISSING
+    assert len(current.content.observation.current.mechanisms) == 3
+    assert "甲变化" in current.text and "同 ID 的第二条正文" in current.text
     next_node = observation.model_copy(
         update={"location": observation.location.model_copy(update={"node_id": "next"})}
     )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), next_node))
     reset = context.model_input()[-1]
-    assert isinstance(reset, ResultMessage)
-    assert reset.content.updates.objects == observation.objects
-    assert reset.content.updates.generated == {"c1": observation.generated["c1"]}
-    assert reset.content.updates.mechanisms == observation.mechanisms
+    assert isinstance(reset, RunResultMessage)
+    assert reset.content.observation is not None
+    assert reset.content.observation.scene is not MISSING
+    assert {item.ref for item in reset.content.observation.scene.bindings} == set(
+        observation.objects
+    )
+    assert reset.content.observation.current is not MISSING
+    assert reset.content.observation.current.generated is not MISSING
+    assert [
+        (item.source.ref, len(item.previews))
+        for item in reset.content.observation.current.generated
+    ] == [("c1", 1), ("c2", 0)]
+    assert reset.content.observation.current.mechanisms is not MISSING
+    assert len(reset.content.observation.current.mechanisms) == len(observation.mechanisms)
     empty_mechanisms = next_node.model_copy(update={"mechanisms": ()})
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), empty_mechanisms))
     cleared_mechanisms = context.model_input()[-1]
-    assert isinstance(cleared_mechanisms, ResultMessage)
-    assert cleared_mechanisms.content.updates.to_json() == "{}"
+    assert isinstance(cleared_mechanisms, RunResultMessage)
+    assert cleared_mechanisms.content.observation is not None
+    assert cleared_mechanisms.content.observation.current is not MISSING
+    assert cleared_mechanisms.content.observation.current.mechanisms == ()
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), next_node))
     restored_mechanisms = context.model_input()[-1]
-    assert isinstance(restored_mechanisms, ResultMessage)
-    assert restored_mechanisms.content.updates.mechanisms == observation.mechanisms
+    assert isinstance(restored_mechanisms, RunResultMessage)
+    assert (
+        restored_mechanisms.content.observation is not None
+        and restored_mechanisms.content.observation.current is not MISSING
+    )
+    assert restored_mechanisms.content.observation.current.mechanisms is not MISSING
+    assert len(restored_mechanisms.content.observation.current.mechanisms) == len(
+        observation.mechanisms
+    )
 
 
 def test_foreign_role_menus_and_their_details_do_not_leak_or_change_raw_observation() -> None:
@@ -300,17 +379,19 @@ def test_foreign_role_menus_and_their_details_do_not_leak_or_change_raw_observat
         ActionToolResult(ActionCompleted(completed_steps=1), reward),
     )
     final = context.model_input()[-1]
-    assert isinstance(final, ResultMessage)
-    assert final.content.state is not None
-    assert final.content.state.phase.value == "run"
-    assert '"actions"' not in final.text
-    assert '"selection"' not in final.text
+    assert isinstance(final, RunResultMessage)
+    projected = final.content.observation
+    assert projected is not None
+    assert projected.decision.phase.value == "run"
+    assert projected.decision.actions == ()
+    assert projected.decision.selection is None
     assert '"offers"' not in final.text
     assert "奖励正文" not in final.text
     assert "奖励选项" not in final.text
-    assert final.content.updates.objects is not MISSING
-    assert set(final.content.updates.objects) == {"d1"}
-    assert final.content.updates.mechanisms == (local_keyword,)
+    assert projected.scene is not MISSING
+    assert {item.ref for item in projected.scene.bindings} == {"d1"}
+    assert projected.current is not MISSING and projected.current.mechanisms is not MISSING
+    assert [item.definition_id for item in projected.current.mechanisms] == ["KW.LOCAL"]
     assert "保留卡牌机制" in final.text
     assert "奖励专属机制" not in final.text
 
@@ -356,8 +437,15 @@ def test_foreign_role_menus_and_their_details_do_not_leak_or_change_raw_observat
         ActionToolResult(ActionCompleted(completed_steps=1), terminal),
     )
     final = context.model_input()[-1]
-    assert isinstance(final, ResultMessage)
-    assert final.content.updates.mechanisms == terminal_mechanisms
+    assert isinstance(final, RunResultMessage)
+    assert (
+        final.content.observation is not None and final.content.observation.current is not MISSING
+    )
+    assert final.content.observation.current.mechanisms is not MISSING
+    assert {item.definition_id for item in final.content.observation.current.mechanisms} == {
+        "POWER.PLAYER",
+        "POWER.ENEMY",
+    }
     assert "玩家状态机制" in final.text
     assert "敌人状态机制" in final.text
     assert "奖励专属机制" not in final.text
@@ -402,7 +490,7 @@ def test_task_omission_uses_only_the_actual_tail_and_preserves_native_assistant(
     assert context.model_input()[-2] is assistant
     assert len(context.model_input()) == 4
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
-    assert isinstance(context.model_input()[-1], ResultMessage)
+    assert isinstance(context.model_input()[-1], RunResultMessage)
     context.append_task(CombatActInput(), observation)
     assert len(context.model_input()) == 6
     # Technical acquisition identity does not create a different gameplay observation.
@@ -463,19 +551,24 @@ def test_partial_and_failed_reads_preserve_delivery_and_run_map_lasts_for_contex
         ),
     )
     failed = context.model_input()[-1]
-    assert isinstance(failed, ResultMessage)
-    assert failed.content.state is None
+    assert isinstance(failed, RunResultMessage)
+    assert failed.content.observation is None
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     same = context.model_input()[-1]
-    assert isinstance(same, ResultMessage)
-    assert same.content.updates.to_json() == "{}"
+    assert isinstance(same, RunResultMessage)
+    assert same.content.observation is not None
+    assert same.content.observation.current is MISSING
     next_node = observation.model_copy(
         update={"location": observation.location.model_copy(update={"node_id": "next"})}
     )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), next_node))
     reset = context.model_input()[-1]
-    assert isinstance(reset, ResultMessage)
-    assert reset.content.updates.mechanisms == observation.mechanisms[:-1]
+    assert isinstance(reset, RunResultMessage)
+    assert (
+        reset.content.observation is not None and reset.content.observation.current is not MISSING
+    )
+    assert reset.content.observation.current.mechanisms is not MISSING
+    assert len(reset.content.observation.current.mechanisms) == len(observation.mechanisms)
 
     run = Observation.model_validate_json(RUN).model_copy(update={"map": observation.map})
     run_context = Context(DecisionOwner.RUN)
@@ -539,8 +632,12 @@ def test_run_combat_result_keeps_permanent_facts_without_combat_internals() -> N
     combat_message = combat.model_input()[-1]
     assert isinstance(combat_message, TaskMessage)
     assert isinstance(combat_message.content, ActContent)
-    assert combat_message.content.observation.state == observation.state
-    assert combat_message.content.observation.updates.objects == observation.objects
+    combat_projection = combat_message.content.observation
+    assert combat_projection.current is not MISSING
+    assert combat_projection.current.piles is not MISSING
+    assert combat_projection.current.actors is not MISSING
+    assert combat_projection.scene is not MISSING
+    assert {item.ref for item in combat_projection.scene.bindings} == set(observation.objects)
 
 
 def test_run_retains_encounter_only_within_the_same_battle() -> None:

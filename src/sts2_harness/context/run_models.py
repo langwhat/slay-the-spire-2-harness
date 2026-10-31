@@ -56,6 +56,8 @@ class ProfileSchema(StrEnum):
     OPTION = "option/1"
     BUNDLE = "bundle/1"
     MECHANISM = "mechanism/1"
+    ENEMY = "enemy/1"
+    ALLY = "ally/1"
 
 
 type RunObjectKind = Literal[
@@ -66,6 +68,8 @@ type RunObjectKind = Literal[
     native.ObjectKind.EVENT,
     native.ObjectKind.OPTION,
     native.ObjectKind.BUNDLE,
+    native.ObjectKind.ENEMY,
+    native.ObjectKind.ALLY,
 ]
 
 
@@ -107,6 +111,11 @@ class Scene(SemanticValue):
 class Inventory(SemanticValue):
     relics: tuple[Reference, ...]
     potions: tuple[Reference, ...]
+
+
+class TargetPreview(SemanticValue):
+    target: Reference
+    text: str
 
 
 class Card(SemanticValue):
@@ -163,8 +172,8 @@ class Description(Reference):
 
 
 class ModifierDescription(Reference):
-    enchantment: str | None
-    affliction: str | None
+    enchantment: str | None | MISSING = MISSING
+    affliction: str | None | MISSING = MISSING
 
 
 class MechanismBinding(SemanticValue):
@@ -174,8 +183,31 @@ class MechanismBinding(SemanticValue):
     name: native.Nonempty
 
 
-class UpgradeAvailable(native.UpgradeAvailable):
+class CardPreview(SemanticValue):
+    definition_id: native.Nonempty
+    name: native.Nonempty
+    upgrades: int | None
+    card_type: native.Nonempty | None
+    card_pool: native.Nonempty | None
+    rarity: native.Nonempty | None
+    is_upgradable: bool | None
+    is_removable: bool | None
+    keywords: tuple[native.Nonempty, ...]
+    local_keywords: tuple[native.Nonempty, ...] | MISSING = MISSING
+    should_retain_this_turn: bool | None | MISSING = MISSING
+    exhaust_on_next_play: bool | None | MISSING = MISSING
+    has_turn_end_in_hand_effect: bool | None | MISSING = MISSING
+    enchantment: native.Modifier | MISSING = MISSING
+    affliction: native.Modifier | MISSING = MISSING
+    cost: native.ResourceCosts
+    cost_without_global_effects: native.ResourceCosts | MISSING = MISSING
+    text: str | None
+
+
+class UpgradeAvailable(SemanticValue):
+    status: Literal[native.UpgradeStatus.AVAILABLE]
     source: Reference
+    card: CardPreview
 
 
 class UpgradeNotUpgradable(native.UpgradeNotUpgradable):
@@ -189,14 +221,37 @@ class UpgradeUnavailable(native.UpgradeUnavailable):
 type Upgrade = UpgradeAvailable | UpgradeNotUpgradable | UpgradeUnavailable
 
 
+class GeneratedPreview(SemanticValue):
+    source: native.NamedDefinition
+    card: CardPreview
+
+
 class Generated(SemanticValue):
     source: Reference
-    previews: tuple[native.GeneratedCard, ...]
+    previews: tuple[GeneratedPreview, ...]
+
+
+class Piles(SemanticValue):
+    hand: tuple[Reference, ...]
+    draw: tuple[Reference, ...]
+    discard: tuple[Reference, ...]
+    exhaust: tuple[Reference, ...]
+    other: tuple[Reference, ...]
+
+
+class Actors(SemanticValue):
+    enemies: tuple[native.Enemy, ...]
+    inactive_enemies: tuple[native.Enemy, ...]
+    allies: tuple[native.Ally, ...] | MISSING = MISSING
 
 
 class Current(SemanticValue):
     progress: native.Progress | MISSING = MISSING
-    player: native.RunPlayer | MISSING = MISSING
+    player: native.CombatPlayer | native.Player | native.RunPlayer | MISSING = MISSING
+    turn: int | None | MISSING = MISSING
+    piles: Piles | None | MISSING = MISSING
+    actors: Actors | None | MISSING = MISSING
+    orbs: native.Orbs | None | MISSING = MISSING
     inventory: Inventory | MISSING = MISSING
     deck: tuple[Reference, ...] | MISSING = MISSING
     cards: tuple[Card, ...] | MISSING = MISSING
@@ -244,6 +299,10 @@ class Offer(SemanticValue):
     amount: native.Number | None | MISSING = MISSING
 
 
+class HandPreview(Reference):
+    previews: tuple[TargetPreview, ...]
+
+
 class Decision(SemanticValue):
     phase: native.Phase
     screen: native.RunScreen | native.CombatScreen | native.TerminalScreen
@@ -252,6 +311,7 @@ class Decision(SemanticValue):
     selection: Selection | None
     offers: tuple[Offer, ...] | MISSING = MISSING
     event: native.EventState | None | MISSING = MISSING
+    hand_previews: tuple[HandPreview, ...] | MISSING = MISSING
 
 
 class MapUpdate(SemanticValue):

@@ -31,16 +31,6 @@ class CombatActInput:
     opening_notes: str | MISSING = MISSING
 
 
-class Updates(SemanticValue):
-    objects: native.Directory[native.ObjectEntry] | MISSING = MISSING
-    descriptions: native.Directory[str | None] | MISSING = MISSING
-    modifier_descriptions: native.Directory[native.ModifierDescriptions] | MISSING = MISSING
-    upgrades: native.Directory[native.UpgradePreview] | MISSING = MISSING
-    generated: native.Directory[tuple[native.GeneratedCard, ...]] | MISSING = MISSING
-    mechanisms: tuple[native.MechanismView, ...] | MISSING = MISSING
-    map: native.PublicMap | MISSING = MISSING
-
-
 class ForeignState(SemanticValue):
     control: native.StateControl
     progress: native.Progress
@@ -99,15 +89,10 @@ class VisibleObservation(SemanticValue):
     map: native.PublicMap | MISSING = MISSING
 
 
-class ActObservation(SemanticValue):
-    state: ShortState
-    updates: Updates
-
-
 class ActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     instruction: str = "Make the next battle decision using combat_act."
-    observation: ActObservation
+    observation: RunObservation
     opening_notes: str | MISSING = MISSING
 
 
@@ -173,23 +158,10 @@ class TaskMessage(TextMessage):
     observation: native.Observation | None
 
 
-class ProjectedResult(SemanticValue):
-    outcome: Outcome
-    state: ShortState | None
-    updates: Updates
-    data: QueryData | MISSING = MISSING
-
-
 class RunProjectedResult(SemanticValue):
     outcome: Outcome
     observation: RunObservation | None
     data: QueryData | MISSING = MISSING
-
-
-@dataclass(frozen=True, slots=True)
-class ResultMessage(ToolResultMessage):
-    content: ProjectedResult
-    source: ToolResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,23 +175,10 @@ class AutomaticProgress(SemanticValue):
     reason: str
 
 
-class AutomaticContent(SemanticValue):
-    automatic_progress: AutomaticProgress
-    outcome: ActionOutcome
-    state: ShortState | None
-    updates: Updates
-
-
 class RunAutomaticContent(SemanticValue):
     automatic_progress: AutomaticProgress
     outcome: ActionOutcome
     observation: RunObservation | None
-
-
-@dataclass(frozen=True, slots=True)
-class AutomaticMessage(TextMessage):
-    content: AutomaticContent
-    source: ActionToolResult
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,14 +12,11 @@ from sts2_harness.client import models as native
 from sts2_harness.context import repeats_action_result
 from sts2_harness.context.models import (
     ActContent,
-    ActObservation,
     CombatActInput,
-    ResultMessage,
     RunActContent,
     RunActInput,
     RunObservation,
     RunResultMessage,
-    Updates,
 )
 from sts2_harness.game import (
     Admit,
@@ -216,24 +213,23 @@ class Timeline:
             results = tuple(
                 item
                 for item in input
-                if isinstance(item, (ResultMessage, RunResultMessage))
-                and item.call_id == previous.call_id
+                if isinstance(item, RunResultMessage) and item.call_id == previous.call_id
             )
             if len(results) != 1 or archive_input(results) != (previous,):
                 continue
             result = results[0]
             task: CombatActInput | RunActInput
             if record.role is native.DecisionOwner.COMBAT:
-                if not isinstance(result, ResultMessage) or result.content.state is None:
+                if result.content.observation is None:
                     continue
-                projected = ActObservation(state=result.content.state, updates=Updates())
+                projected = RunObservation(decision=result.content.observation.decision)
                 if message != TaskSnapshot(
                     role=TextRole.USER, content=ActContent(observation=projected)
                 ):
                     continue
                 task = CombatActInput()
             else:
-                if not isinstance(result, RunResultMessage) or result.content.observation is None:
+                if result.content.observation is None:
                     continue
                 run_projected = RunObservation(decision=result.content.observation.decision)
                 if message != RunTaskSnapshot(

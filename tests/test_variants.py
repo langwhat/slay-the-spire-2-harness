@@ -11,7 +11,7 @@ from test_responses import configuration
 from test_takeover import FakeRestorer, Source, source_case
 
 from sts2_harness.client import models as native
-from sts2_harness.context.models import ActContent, Updates
+from sts2_harness.context.models import ActContent, RunObservation
 from sts2_harness.game import GameReply, GameSuccess
 from sts2_harness.journal import Journal, ParentPrefix, SceneVariant, SessionMaterials
 from sts2_harness.journal_models import (
@@ -514,9 +514,11 @@ def test_action_boundary_task_omission_requires_complete_recorded_evidence(
         tasks = [item for item in original.input if isinstance(item, TaskSnapshot)]
         assert len(tasks) == 2
         assert isinstance(tasks[-1].content, ActContent)
-        assert tasks[-1].content.observation.updates == Updates()
         action_result = next(item for item in original.input if isinstance(item, ResultSnapshot))
-        assert tasks[-1].content.observation.state == action_result.state
+        assert action_result.observation is not None
+        assert tasks[-1].content.observation == RunObservation(
+            decision=action_result.observation.decision
+        )
         if difference == "notes":
             invalid = tmp_path / "extra-notes.sqlite"
             extra_notes = tasks[-1].model_copy(
@@ -704,10 +706,12 @@ def test_scene_starts_fresh_and_reopens_actual_requests(tmp_path: Path, candidat
             task = next(item for item in first.input if isinstance(item, TaskSnapshot))
             assert isinstance(task.content, ActContent)
             assert task.content.opening_notes == "Fresh plan."
-            objects = task.content.observation.updates.objects
-            assert objects is not MISSING
-            assert set(objects) == {"card:9:1", "card:9:2"}
-            assert task.content.observation.updates.descriptions == {
+            projection = task.content.observation
+            assert projection.scene is not MISSING
+            assert {item.ref for item in projection.scene.bindings} == {"card:9:1", "card:9:2"}
+            assert projection.current is not MISSING
+            assert projection.current.card_descriptions is not MISSING
+            assert {item.ref: item.text for item in projection.current.card_descriptions} == {
                 "card:9:1": None,
                 "card:9:2": "造成3点伤害。",
             }

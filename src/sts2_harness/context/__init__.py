@@ -7,14 +7,10 @@ from pydantic import MISSING
 from sts2_harness.client import models as native
 from sts2_harness.context.models import (
     ActContent,
-    AutomaticContent,
-    AutomaticMessage,
     AutomaticProgress,
     CombatActInput,
     CombatReviewInput,
     HandoffContent,
-    ProjectedResult,
-    ResultMessage,
     ReviewContent,
     RunActContent,
     RunActHandoffContent,
@@ -24,13 +20,10 @@ from sts2_harness.context.models import (
     RunHandoffInput,
     RunProjectedResult,
     RunResultMessage,
-    ShortState,
     TaskContent,
     TaskInput,
     TaskMessage,
-    Updates,
 )
-from sts2_harness.context.projection import Delivery
 from sts2_harness.context.run_projection import RunDelivery
 from sts2_harness.context.view import visible_observation
 from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
@@ -71,7 +64,7 @@ def same_observation(
 
 def repeats_action_result(
     role: native.DecisionOwner,
-    last: ResultMessage | RunResultMessage,
+    last: RunResultMessage,
     task: TaskInput,
     observation: native.Observation,
 ) -> bool:
@@ -93,7 +86,7 @@ class Context:
     def __init__(self, role: native.DecisionOwner, *, system: tuple[TextMessage, ...] = ()) -> None:
         self._role = role
         self._history: list[TextMessage | AssistantMessage | ToolResultMessage] = list(system)
-        self._delivery = Delivery.empty()
+        self._combat_delivery = RunDelivery(role=native.DecisionOwner.COMBAT)
         self._run_delivery = RunDelivery()
         self._documents: dict[tuple[str, str | None], DocumentView] = {}
         for message in system:
@@ -160,15 +153,14 @@ class Context:
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
                 if same_observation(self._role, last.observation, observation):
                     return
-            if isinstance(last, (ResultMessage, RunResultMessage)) and repeats_action_result(
+            if isinstance(last, RunResultMessage) and repeats_action_result(
                 self._role, last, task, observation
             ):
                 return
         if isinstance(task, CombatActInput):
-            projected, delivered = self._delivery.project(
-                visible_observation(observation, self._role), observation.location
+            projected = self._combat_delivery.project(
+                visible_observation(observation, self._role), observation
             )
-            self._delivery = delivered
             content = ActContent(observation=projected, opening_notes=task.opening_notes)
         else:
             run_projected = self._run_delivery.project(
@@ -195,74 +187,40 @@ class Context:
         self._history.append(reply)
 
     def append_automatic(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
-        if self._role is native.DecisionOwner.RUN:
-            observation = (
-                self._run_delivery.project(
-                    visible_observation(result.observation, self._role), result.observation
-                )
-                if result.observation is not None
-                else None
-            )
-            run_content = RunAutomaticContent(
-                automatic_progress=progress, outcome=result.outcome, observation=observation
-            )
-            self._history.append(
-                RunAutomaticMessage(TextRole.USER, run_content.to_json(), run_content, result)
-            )
-            return
-        state: ShortState | None = None
-        updates = Updates()
-        if result.observation is not None:
-            projected, delivered = self._delivery.project(
-                visible_observation(result.observation, self._role), result.observation.location
-            )
-            state, updates = projected.state, projected.updates
-            self._delivery = delivered
-        content = AutomaticContent(
-            automatic_progress=progress, outcome=result.outcome, state=state, updates=updates
+        delivery = (
+            self._run_delivery if self._role is native.DecisionOwner.RUN else self._combat_delivery
         )
-        self._history.append(AutomaticMessage(TextRole.USER, content.to_json(), content, result))
+        observation = (
+            delivery.project(
+                visible_observation(result.observation, self._role), result.observation
+            )
+            if result.observation is not None
+            else None
+        )
+        content = RunAutomaticContent(
+            automatic_progress=progress, outcome=result.outcome, observation=observation
+        )
+        self._history.append(RunAutomaticMessage(TextRole.USER, content.to_json(), content, result))
 
     def append_tool_result(self, call: ToolCall, result: ToolResult) -> None:
-        if self._role is native.DecisionOwner.RUN:
-            observation = (
-                self._run_delivery.project(
-                    visible_observation(result.observation, self._role), result.observation
-                )
-                if result.observation is not None
-                else None
+        delivery = (
+            self._run_delivery if self._role is native.DecisionOwner.RUN else self._combat_delivery
+        )
+        observation = (
+            delivery.project(
+                visible_observation(result.observation, self._role), result.observation
             )
-            run_content = RunProjectedResult(
-                outcome=result.outcome,
-                observation=observation,
-                data=result.data if isinstance(result, QueryToolResult) else MISSING,
-            )
-            self._history.append(RunResultMessage(call.id, run_content, result))
-            if isinstance(result, QueryToolResult):
-                self._record_query_documents(result)
-            return
-        delivered = self._delivery
-        state: ShortState | None = None
-        updates = Updates()
-        if result.observation is not None:
-            projected, delivered = self._delivery.project(
-                visible_observation(result.observation, self._role), result.observation.location
-            )
-            state = projected.state
-            updates = projected.updates
-        content = ProjectedResult(
+            if result.observation is not None
+            else None
+        )
+        content = RunProjectedResult(
             outcome=result.outcome,
-            state=state,
-            updates=updates,
+            observation=observation,
             data=result.data if isinstance(result, QueryToolResult) else MISSING,
         )
-        message = ResultMessage(call.id, content, result)
-        self._history.append(message)
-        self._delivery = delivered
-
-        if not isinstance(result, QueryToolResult):
-            return
-        self._record_query_documents(result)
+        self._history.append(RunResultMessage(call.id, content, result))
+        if isinstance(result, QueryToolResult):
+            self._record_query_documents(result)
 
     def _record_query_documents(self, result: QueryToolResult) -> None:
         data = result.data

@@ -7,7 +7,7 @@ import pytest
 from pydantic import BaseModel, Field, RootModel
 from test_responses import InspectArguments, configuration
 
-from sts2_harness.context.models import ProjectedResult, ResultMessage, Updates
+from sts2_harness.context.models import RunProjectedResult, RunResultMessage
 from sts2_harness.journal import SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
@@ -266,9 +266,9 @@ def test_messages_native_wire_and_recorded_continuation(tmp_path: Path) -> None:
                 (
                     *history,
                     reply.assistant,
-                    ResultMessage(
+                    RunResultMessage(
                         "call_1",
-                        ProjectedResult(outcome=ReadCompleted(), state=None, updates=Updates()),
+                        RunProjectedResult(outcome=ReadCompleted(), observation=None),
                         QueryToolResult(ReadCompleted(), None),
                     ),
                     TextMessage(TextRole.USER, "Auxiliary."),
@@ -310,7 +310,7 @@ def test_messages_native_wire_and_recorded_continuation(tmp_path: Path) -> None:
                 {
                     "type": "tool_result",
                     "tool_use_id": "call_1",
-                    "content": '{"outcome":{"status":"completed"},"state":null,"updates":{}}',
+                    "content": '{"outcome":{"status":"completed"},"observation":null}',
                 }
             ],
         }

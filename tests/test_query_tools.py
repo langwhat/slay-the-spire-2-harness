@@ -8,7 +8,7 @@ from test_mod_client import COMBAT
 from sts2_harness.client import ModClient
 from sts2_harness.client.models import DecisionOwner
 from sts2_harness.context import Context
-from sts2_harness.context.models import ResultMessage
+from sts2_harness.context.models import RunResultMessage
 from sts2_harness.execution import Execution
 from sts2_harness.game import LiveGame
 from sts2_harness.llm.messages import ToolCall
@@ -45,8 +45,8 @@ def test_state_dispatch_delivers_current_state_without_query_data() -> None:
             context = Context(DecisionOwner.COMBAT)
             context.append_tool_result(call, result)
             message = context.model_input()[-1]
-            assert isinstance(message, ResultMessage)
-            assert message.content.state is not None
+            assert isinstance(message, RunResultMessage)
+            assert message.content.observation is not None
             assert message.content.data is MISSING
             assert len(tools.definitions) == 4
 
@@ -130,8 +130,9 @@ def test_inspection_keeps_full_details_and_rejects_bad_arguments_and_foreign_men
                 context.append_tool_result(call, result)
             assert paths == ["/inspect", "/inspect"]
             last = context.model_input()[-1]
-            assert isinstance(last, ResultMessage) and isinstance(last.content.data, DetailData)
-            assert last.content.updates.to_json() == "{}"
+            assert isinstance(last, RunResultMessage) and isinstance(last.content.data, DetailData)
+            assert last.content.observation is not None
+            assert last.content.observation.current is MISSING
             bad = await tools.dispatch(
                 ToolCall("bad", "combat_inspect", '{"area":"hand","refs":["bad"]}')
             )
@@ -347,7 +348,7 @@ def test_supplements_keep_document_identity_and_explicit_reads_and_failures() ->
                     "resources": [{"key": "rules", "description": "Rules"}],
                 }
             ]
-            assert encoded["updates"] == {}
+            assert encoded["observation"]["decision"]["phase"] == "combat"
             provider.failure = SupplementUnavailable("Example source could not be read.")
             failed = await tools.dispatch(call)
             assert isinstance(failed.outcome, Failed)

@@ -936,7 +936,7 @@ def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
     from test_messages import events, sse
     from test_responses import InspectArguments
 
-    from sts2_harness.context.models import ProjectedResult, ResultMessage, Updates
+    from sts2_harness.context.models import RunProjectedResult, RunResultMessage
     from sts2_harness.llm.messages import ToolDefinition
     from sts2_harness.results import QueryToolResult, ReadCompleted
 
@@ -992,9 +992,9 @@ def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
                 (
                     *initial,
                     first.assistant,
-                    ResultMessage(
+                    RunResultMessage(
                         "call_1",
-                        ProjectedResult(outcome=ReadCompleted(), state=None, updates=Updates()),
+                        RunProjectedResult(outcome=ReadCompleted(), observation=None),
                         QueryToolResult(ReadCompleted(), None),
                     ),
                 ),
@@ -1109,16 +1109,11 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
     from pydantic import MISSING
 
     from sts2_harness.context.models import (
-        AutomaticContent,
-        AutomaticMessage,
         AutomaticProgress,
-        ProjectedResult,
-        ResultMessage,
         RunAutomaticContent,
         RunAutomaticMessage,
         RunProjectedResult,
         RunResultMessage,
-        Updates,
     )
     from sts2_harness.journal_models import (
         AutomaticSnapshot,
@@ -1148,13 +1143,11 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
     results = (
         RunProjectedResult(outcome=outcome, observation=observation, data=NotesText(text="note")),
         RunProjectedResult(outcome=outcome, observation=None),
-        ProjectedResult(outcome=outcome, state=None, updates=Updates()),
+        RunProjectedResult(outcome=outcome, observation=None),
     )
     messages = archive_input(
         tuple(
             RunResultMessage(call_id=str(index), content=result, source=source)
-            if isinstance(result, RunProjectedResult)
-            else ResultMessage(call_id=str(index), content=result, source=source)
             for index, result in enumerate(results)
         )
         + (
@@ -1166,11 +1159,11 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
                 ),
                 source=source,
             ),
-            AutomaticMessage(
+            RunAutomaticMessage(
                 role=TextRole.USER,
                 value="automatic",
-                content=AutomaticContent(
-                    automatic_progress=progress, outcome=outcome, state=None, updates=Updates()
+                content=RunAutomaticContent(
+                    automatic_progress=progress, outcome=outcome, observation=None
                 ),
                 source=source,
             ),
@@ -1205,33 +1198,26 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
         assert isinstance(first, ResultSnapshot)
         assert first.observation == observation
         assert isinstance(first.data, NotesData) and first.data.value == NotesText(text="note")
-        assert first.state is MISSING and first.updates is MISSING
         assert isinstance(unavailable, ResultSnapshot) and unavailable.observation is None
         assert isinstance(combat, ResultSnapshot)
-        assert combat.observation is MISSING and combat.state is None
+        assert combat.observation is None
         assert isinstance(automatic_run, AutomaticSnapshot)
         assert isinstance(automatic_run.content, RunAutomaticContent)
         assert isinstance(automatic_combat, AutomaticSnapshot)
-        assert isinstance(automatic_combat.content, AutomaticContent)
+        assert isinstance(automatic_combat.content, RunAutomaticContent)
         assert "state" not in first.model_dump()
-        assert "observation" not in combat.model_dump()
+        assert combat.model_dump()["observation"] is None
 
 
 def test_journal_result_requires_one_projection_shape() -> None:
     from pydantic import ValidationError
 
-    from sts2_harness.context.models import Updates
-    from sts2_harness.results import ReadCompleted
-
-    with pytest.raises(ValidationError, match="require state and updates"):
-        ResultSnapshot(call_id="missing", outcome=ReadCompleted())
-    with pytest.raises(ValidationError, match="cannot contain Combat"):
-        ResultSnapshot(
-            call_id="mixed",
-            outcome=ReadCompleted(),
-            observation=None,
-            state=None,
-            updates=Updates(),
+    with pytest.raises(ValidationError, match="observation"):
+        ResultSnapshot.model_validate_json('{"call_id":"missing","outcome":{"status":"completed"}}')
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ResultSnapshot.model_validate_json(
+            '{"call_id":"mixed","outcome":{"status":"completed"},'
+            '"observation":null,"state":null,"updates":{}}'
         )
 
 

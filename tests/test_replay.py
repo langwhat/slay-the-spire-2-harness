@@ -478,16 +478,14 @@ def test_reach_compares_typed_input_without_mapping_key_order(
             )
             assert isinstance(snapshot.content, ActContent)
             observation = snapshot.content.observation
-            objects = observation.updates.objects
-            assert objects is not MISSING
-            reordered = dict(reversed(tuple(objects.items())))
-            assert tuple(reordered) != tuple(objects)
+            profiles = observation.catalog_additions
+            assert profiles is not MISSING
+            reordered = dict(reversed(tuple(profiles.items())))
+            assert tuple(reordered) != tuple(profiles)
             if change is SnapshotChange.MAPPING_VALUE:
-                ref, card = next(iter(reordered.items()))
-                assert isinstance(card, native.CardEntry)
-                reordered[ref] = card.model_copy(update={"name": "Changed public fact"})
-            updates = observation.updates.model_copy(update={"objects": reordered})
-            reordered_observation = observation.model_copy(update={"updates": updates})
+                key, profile = next(iter(reordered.items()))
+                reordered[key] = profile.model_copy(update={"language": "changed"})
+            reordered_observation = observation.model_copy(update={"catalog_additions": reordered})
             content = snapshot.content.model_copy(update={"observation": reordered_observation})
             messages = list(target.input)
             messages[position] = snapshot.model_copy(update={"content": content})
@@ -561,7 +559,9 @@ def test_reach_accepts_generated_directories_across_process_hash_seeds(tmp_path:
         target = journal.request(anchors[1].model_sequence)
         task = next(message for message in target.input if isinstance(message, TaskSnapshot))
         assert isinstance(task.content, ActContent)
-        generated = task.content.observation.updates.generated
+        current = task.content.observation.current
+        assert current is not MISSING
+        generated = current.generated
         assert generated is not MISSING and len(generated) >= 2
     original = path.read_bytes()
     check = """
