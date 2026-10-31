@@ -210,14 +210,17 @@ def test_generated_directories_keep_stable_keys_and_card_order_through_changes()
         assert isinstance(result, RunResultMessage)
         projected = RunProjectedResult.model_validate_json(result.text).observation
         assert projected is not None and projected.current is not MISSING
+        if not directory:
+            assert projected.current.generated is MISSING
+            assert projected.current.removed is not MISSING
+            assert projected.current.removed.generated == ("c1", "c2")
+            continue
         assert projected.current.generated is not MISSING
-        assert [entry.source.ref for entry in projected.current.generated] == (
-            ["c1", "c2"] if directory else []
-        )
+        assert [entry.source.ref for entry in projected.current.generated] == ["c1", "c2"]
         assert [
             tuple(item.source.definition_id for item in entry.previews)
             for entry in projected.current.generated
-        ] == ([("CARD.TWO", "CARD.ONE"), ("CARD.ONE",)] if directory else [])
+        ] == [("CARD.TWO", "CARD.ONE"), ("CARD.ONE",)]
 
 
 def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics() -> None:
@@ -252,7 +255,7 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     assert [
         (item.source.ref, len(item.previews))
         for item in second.content.observation.current.generated
-    ] == [("c1", 1), ("c2", 1)]
+    ] == [("c2", 1)]
     cleared = observation.model_copy(update={"generated": MappingProxyType({})})
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), cleared))
     empty = context.model_input()[-1]
@@ -260,11 +263,9 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     assert (
         empty.content.observation is not None and empty.content.observation.current is not MISSING
     )
-    assert empty.content.observation.current.generated is not MISSING
-    assert [
-        (item.source.ref, len(item.previews))
-        for item in empty.content.observation.current.generated
-    ] == []
+    assert empty.content.observation.current.generated is MISSING
+    assert empty.content.observation.current.removed is not MISSING
+    assert empty.content.observation.current.removed.generated == ("c1", "c2")
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     returned = context.model_input()[-1]
     assert isinstance(returned, RunResultMessage)
@@ -290,7 +291,10 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
         and current.content.observation.current is not MISSING
     )
     assert current.content.observation.current.mechanisms is not MISSING
-    assert len(current.content.observation.current.mechanisms) == 3
+    assert len(current.content.observation.current.mechanisms) == 2
+    assert current.content.observation.current.removed is not MISSING
+    assert current.content.observation.current.removed.mechanisms is not MISSING
+    assert len(current.content.observation.current.removed.mechanisms) == 1
     assert "甲变化" in current.text and "同 ID 的第二条正文" in current.text
     next_node = observation.model_copy(
         update={"location": observation.location.model_copy(update={"node_id": "next"})}
@@ -317,7 +321,12 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     assert isinstance(cleared_mechanisms, RunResultMessage)
     assert cleared_mechanisms.content.observation is not None
     assert cleared_mechanisms.content.observation.current is not MISSING
-    assert cleared_mechanisms.content.observation.current.mechanisms == ()
+    assert cleared_mechanisms.content.observation.current.mechanisms is MISSING
+    assert cleared_mechanisms.content.observation.current.removed is not MISSING
+    assert (
+        cleared_mechanisms.content.observation.current.removed.mechanisms
+        == reset.content.observation.current.mechanisms
+    )
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), next_node))
     restored_mechanisms = context.model_input()[-1]
     assert isinstance(restored_mechanisms, RunResultMessage)
@@ -595,7 +604,7 @@ def test_partial_and_failed_reads_preserve_delivery_and_run_map_sections() -> No
     assert isinstance(explicit, RunResultMessage)
     assert explicit.content.observation is not None
     assert explicit.content.observation.current is not MISSING
-    assert explicit.content.observation.current.map_topology == topology
+    assert explicit.content.observation.current.map_topology is MISSING
     assert explicit.content.observation.current.dynamic_map == dynamic
     assert isinstance(explicit.content.data, MapData)
     assert explicit.content.data.map is observation.map

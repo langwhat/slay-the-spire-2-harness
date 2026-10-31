@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
+from sts2_harness.context.entries import Collection, difference, ordered
 from sts2_harness.context.map_projection import project_map
 from sts2_harness.context.models import (
     FinishedState,
@@ -84,9 +85,6 @@ class RunDelivery:
     catalog: dict[str, str] = field(default_factory=lambda: dict[str, str]())
     scene: dict[str, JsonValue] | None = None
     current: dict[str, JsonValue] = field(default_factory=lambda: dict[str, JsonValue]())
-    descriptions: dict[str, dict[str, JsonValue]] = field(
-        default_factory=lambda: dict[str, dict[str, JsonValue]]()
-    )
     phase: native.Phase | None = None
     next_profile: int = 1
     role: native.DecisionOwner = native.DecisionOwner.RUN
@@ -165,7 +163,7 @@ class RunDelivery:
             "game_instance_id": location.game_instance_id,
             "run_id": location.run_id,
             "node_id": location.node_id,
-            "bindings": bindings,
+            "bindings": ordered(Collection.BINDINGS, bindings),
         }
         node_changed = self.scene is None or any(
             scene[k] != self.scene[k] for k in ("game_instance_id", "run_id", "node_id")
@@ -194,6 +192,7 @@ class RunDelivery:
             },
             "deck": _refs(observation, state.deck),
             "cards": cards,
+            "card_descriptions": list(descriptions.values()),
             "noncard_objects": noncards,
             "object_descriptions": object_descriptions,
             "modifier_descriptions": [
@@ -268,15 +267,38 @@ class RunDelivery:
             and "encounter" in self.current
         ):
             current["encounter"] = self.current["encounter"]
+        for collection in Collection:
+            if collection is not Collection.BINDINGS:
+                current[collection] = ordered(collection, current[collection])
         changed = {
             k: v for k, v in current.items() if node_changed or self.current.get(k, MISSING) != v
         }
+        previous_progress = self.current.get("progress")
+        if (
+            self.scene is not None
+            and all(scene[k] == self.scene[k] for k in ("game_instance_id", "run_id"))
+            and isinstance(previous_progress, dict)
+            and previous_progress.get("act") == state.progress.act
+            and "map_topology" in current
+            and current["map_topology"] == self.current.get("map_topology")
+        ):
+            changed.pop("map_topology", None)
         changed.update({k: None for k in self.current if k not in current})
-        entries: list[JsonValue] = [
-            v for ref, v in descriptions.items() if node_changed or self.descriptions.get(ref) != v
-        ]
-        if entries:
-            changed["card_descriptions"] = entries
+        if not node_changed:
+            removals: dict[str, JsonValue] = {}
+            for collection in Collection:
+                if collection is Collection.BINDINGS:
+                    continue
+                updates, removed = difference(
+                    collection, self.current[collection], current[collection]
+                )
+                changed.pop(collection, None)
+                if updates:
+                    changed[collection] = updates
+                if removed:
+                    removals[collection] = removed
+            if removals:
+                changed["removed"] = removals
         decision: dict[str, JsonValue] = {
             "phase": state.phase,
             "screen": state.screen,
@@ -327,12 +349,20 @@ class RunDelivery:
         if additions:
             wire["catalog_additions"] = additions
         if node_changed or scene != self.scene:
-            wire["scene"] = scene
+            scene_update = dict(scene)
+            if not node_changed:
+                assert self.scene is not None
+                updates, removed = difference(
+                    Collection.BINDINGS, self.scene["bindings"], scene["bindings"]
+                )
+                scene_update["bindings"] = updates
+                if removed:
+                    scene_update["removed"] = removed
+            wire["scene"] = scene_update
         if changed:
             wire["current"] = changed
         result = RunObservation.model_validate_json(json.dumps(wire, ensure_ascii=False))
         self.scene = scene
         self.current = current
-        self.descriptions = descriptions
         self.phase = state.phase
         return result

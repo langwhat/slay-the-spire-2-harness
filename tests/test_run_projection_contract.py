@@ -78,7 +78,7 @@ def test_profiles_reuse_exact_content_and_refresh_references_across_nodes() -> N
     assert isinstance(bindings[1], dict)
     assert bindings[0] == bindings[1] | {"ref": "d1"}
     assert changed_bindings[0] != bindings[0]
-    assert restored_bindings == bindings
+    assert restored_bindings == [bindings[0]]
     assert last_view.catalog_additions is MISSING
     next_node = first.model_copy(
         update={"location": first.location.model_copy(update={"node_id": "next"})}
@@ -221,7 +221,9 @@ def test_complete_sections_replace_and_selection_explicitly_closes() -> None:
     assert a.decision.selection is not None and a.decision.selection.selected == ()
     assert b is not None and b.current is not MISSING
     assert b.decision.selection is None
-    assert b.current.deck == () and b.current.cards == ()
+    assert b.current.deck == () and b.current.cards is MISSING
+    assert b.current.removed is not MISSING
+    assert b.current.removed.cards == ("d1",)
 
 
 def test_run_noncard_section_excludes_combat_actors() -> None:

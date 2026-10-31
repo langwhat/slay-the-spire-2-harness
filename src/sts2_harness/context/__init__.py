@@ -8,6 +8,7 @@ from typing import overload
 from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
+from sts2_harness.context.entries import Collection, apply_entries, ordered
 from sts2_harness.context.models import (
     ActContent,
     AutomaticProgress,
@@ -227,10 +228,7 @@ class Context:
         if delivery.scene is not None:
             wire["scene"] = delivery.scene
         if delivery.current:
-            current = dict(delivery.current)
-            if delivery.descriptions:
-                current["card_descriptions"] = list(delivery.descriptions.values())
-            wire["current"] = current
+            wire["current"] = dict(delivery.current)
         renamed = _rename_profiles(wire, names)
         assert isinstance(renamed, dict)
         baseline_references = _profile_references(renamed)
@@ -355,45 +353,71 @@ class Context:
 
         reconstructed_scene: dict[str, JsonValue] | None = None
         reconstructed_current: dict[str, JsonValue] = {}
-        reconstructed_descriptions: dict[str, JsonValue] = {}
 
         def apply(observation: dict[str, JsonValue]) -> None:
-            nonlocal reconstructed_scene, reconstructed_current, reconstructed_descriptions
+            nonlocal reconstructed_scene, reconstructed_current
             receive(observation)
             new_scene = observation.get("scene")
             if isinstance(new_scene, dict):
-                if reconstructed_scene is None or any(
+                node_changed = reconstructed_scene is None or any(
                     new_scene.get(key) != reconstructed_scene.get(key)
                     for key in ("game_instance_id", "run_id", "node_id")
-                ):
-                    reconstructed_current = {}
-                    reconstructed_descriptions = {}
-                reconstructed_scene = new_scene
-                bindings = new_scene.get("bindings")
-                if isinstance(bindings, list):
-                    refs = {
-                        ref
-                        for item in bindings
-                        if isinstance(item, dict) and isinstance((ref := item.get("ref")), str)
+                )
+                if node_changed:
+                    updates = observation.get("current")
+                    old_progress = reconstructed_current.get("progress")
+                    new_progress = updates.get("progress") if isinstance(updates, dict) else None
+                    same_act = (
+                        reconstructed_scene is not None
+                        and all(
+                            new_scene.get(key) == reconstructed_scene.get(key)
+                            for key in ("game_instance_id", "run_id")
+                        )
+                        and isinstance(old_progress, dict)
+                        and isinstance(new_progress, dict)
+                        and old_progress.get("act") == new_progress.get("act")
+                    )
+                    reconstructed_current = {
+                        key: value
+                        for key, value in reconstructed_current.items()
+                        if key == "map_topology" and same_act
                     }
-                    reconstructed_descriptions = {
-                        ref: item for ref, item in reconstructed_descriptions.items() if ref in refs
-                    }
+                previous = (
+                    reconstructed_scene["bindings"]
+                    if not node_changed and reconstructed_scene is not None
+                    else []
+                )
+                reconstructed_scene = {
+                    key: value for key, value in new_scene.items() if key != "removed"
+                }
+                reconstructed_scene["bindings"] = apply_entries(
+                    Collection.BINDINGS,
+                    previous,
+                    new_scene["bindings"],
+                    new_scene.get("removed", []),
+                )
             updates = observation.get("current")
             if not isinstance(updates, dict):
                 return
             decision = observation.get("decision")
             combat = isinstance(decision, dict) and decision.get("phase") == native.Phase.COMBAT
             for key, value in updates.items():
-                if key == "card_descriptions":
-                    if isinstance(value, list):
-                        for item in value:
-                            if isinstance(item, dict) and isinstance(ref := item.get("ref"), str):
-                                reconstructed_descriptions[ref] = item
-                elif value is None and not (key == "turn" and combat):
+                if key == "removed" or key in Collection:
+                    continue
+                if value is None and not (key == "turn" and combat):
                     reconstructed_current.pop(key, None)
                 else:
                     reconstructed_current[key] = value
+            removals = updates.get("removed", {})
+            assert isinstance(removals, dict)
+            for collection in Collection:
+                if collection in updates or collection in removals:
+                    reconstructed_current[collection] = apply_entries(
+                        collection,
+                        reconstructed_current.get(collection, []),
+                        updates.get(collection, []),
+                        removals.get(collection, []),
+                    )
 
         apply(initial)
         pending: list[str] = []
@@ -421,15 +445,16 @@ class Context:
             raise ValueError("The current scene is invalid.")
         if not isinstance(current, dict):
             raise ValueError("The current state is invalid.")
+        for collection in Collection:
+            if collection in current:
+                current[collection] = ordered(collection, current[collection])
         if (
             has_retained_observation
             and not (_profile_references(scene) | _profile_references(current)) <= known
         ):
             raise ValueError("The current state has an undelivered profile.")
         if has_retained_observation and (
-            reconstructed_scene != scene
-            or reconstructed_current != current
-            or reconstructed_descriptions != self._delivery.descriptions
+            reconstructed_scene != scene or reconstructed_current != current
         ):
             raise ValueError("The retained observations do not reproduce the current state.")
         if not install:
@@ -437,11 +462,6 @@ class Context:
         self._delivery.catalog = catalog
         self._delivery.scene = reconstructed_scene
         self._delivery.current = reconstructed_current
-        self._delivery.descriptions = {
-            ref: value
-            for ref, value in reconstructed_descriptions.items()
-            if isinstance(value, dict)
-        }
         if not has_retained_observation:
             decision = initial.get("decision")
             if isinstance(decision, dict) and isinstance(decision.get("phase"), str):

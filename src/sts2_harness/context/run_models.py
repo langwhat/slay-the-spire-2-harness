@@ -107,6 +107,7 @@ class Scene(SemanticValue):
     run_id: str | None
     node_id: str | None
     bindings: tuple[Binding, ...]
+    removed: tuple[native.Nonempty, ...] | MISSING = MISSING
 
 
 class Inventory(SemanticValue):
@@ -246,7 +247,19 @@ class Actors(SemanticValue):
     allies: tuple[native.Ally, ...] | MISSING = MISSING
 
 
+class RemovedEntries(SemanticValue):
+    cards: tuple[native.Nonempty, ...] | MISSING = MISSING
+    noncard_objects: tuple[native.Nonempty, ...] | MISSING = MISSING
+    object_descriptions: tuple[native.Nonempty, ...] | MISSING = MISSING
+    card_descriptions: tuple[native.Nonempty, ...] | MISSING = MISSING
+    modifier_descriptions: tuple[native.Nonempty, ...] | MISSING = MISSING
+    mechanisms: tuple[MechanismBinding, ...] | MISSING = MISSING
+    upgrades: tuple[native.Nonempty, ...] | MISSING = MISSING
+    generated: tuple[native.Nonempty, ...] | MISSING = MISSING
+
+
 class Current(SemanticValue):
+    removed: RemovedEntries | MISSING = MISSING
     map_topology: MapTopology | None | MISSING = MISSING
     dynamic_map: DynamicMap | None | MISSING = MISSING
     progress: native.Progress | MISSING = MISSING
