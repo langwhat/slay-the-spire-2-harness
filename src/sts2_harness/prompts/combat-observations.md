@@ -25,7 +25,7 @@ The enchantment and affliction fields describe modifications to this particular 
 
 The cost object lists applicable resources. Each value is a numeric cost, "X", "none" for no consumption of that resource, or null for an unknown cost. For example, cost={"energy":2,"stars":1} spends both resources; cost={"energy":0} has zero energy cost, while cost={"energy":"none"} does not consume energy. An omitted resource is not applicable. Playability is separate from cost.
 
-Native text may represent energy with `[img]res://images/packed/sprite_fonts/<prefix>_energy_icon.png[/img]` and stars with `[img]res://images/packed/sprite_fonts/star_icon.png[/img]`. For an amount shown only as repeated resource icons, count the icons. When a number accompanies an energy icon, that number is the total amount; do not add one for the icon. The energy icon's prefix identifies its appearance, not another resource. A card modification's amount is that modification's parameter, not a universal resource grant: use its text, current status, and trigger rules to determine the actual gain and timing.
+A card modification's amount is that modification's parameter, not a universal resource grant: use its text, current status, and trigger rules to determine the actual gain and timing.
 
 Explicit knowledge lookups and skill reads return the requested full text even if it is already in this conversation. Automatic guidance avoids repeating unchanged retained text; an explicit read is not suppressed by that rule.
 
