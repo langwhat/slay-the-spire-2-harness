@@ -8,6 +8,7 @@ from pydantic import MISSING, Field
 
 from sts2_harness.client import models as native
 from sts2_harness.knowledge import DocumentView, KnowledgeLookup, SkillList
+from sts2_harness.route_plan import PlanStatus
 
 
 class SemanticValue(native.WireModel):
@@ -121,12 +122,12 @@ class NotesUpdated(SemanticValue):
 
 
 class PlanAccepted(SemanticValue):
-    status: Literal["accepted"] = "accepted"
+    status: Literal[PlanStatus.ACCEPTED] = PlanStatus.ACCEPTED
     next: str
 
 
 class PlanRejected(SemanticValue):
-    status: Literal["rejected"] = "rejected"
+    status: Literal[PlanStatus.REJECTED] = PlanStatus.REJECTED
 
 
 class PlanPresentationStatus(StrEnum):

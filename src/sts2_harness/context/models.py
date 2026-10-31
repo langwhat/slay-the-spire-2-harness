@@ -18,6 +18,7 @@ from sts2_harness.results import (
     SemanticValue,
     ToolResult,
 )
+from sts2_harness.route_plan import MovementStatus
 
 
 class TaskKind(StrEnum):
@@ -180,7 +181,7 @@ class AutomaticProgress(SemanticValue):
 
 class RunAutomaticContent(SemanticValue):
     automatic_progress: AutomaticProgress
-    route_plan_status: Literal["invalidated"] | MISSING = MISSING
+    route_plan_status: Literal[MovementStatus.INVALIDATED] | MISSING = MISSING
     outcome: ActionOutcome
     observation: RunObservation | None
 

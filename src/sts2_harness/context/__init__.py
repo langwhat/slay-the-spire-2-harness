@@ -46,7 +46,7 @@ from sts2_harness.results import (
     ReadCompleted,
     ToolResult,
 )
-from sts2_harness.route_plan import RoutePlan
+from sts2_harness.route_plan import MovementStatus, RoutePlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,7 +571,7 @@ class Context:
         )
         content = RunAutomaticContent(
             automatic_progress=progress,
-            route_plan_status="invalidated" if invalidated else MISSING,
+            route_plan_status=MovementStatus.INVALIDATED if invalidated else MISSING,
             outcome=result.outcome,
             observation=observation,
         )
