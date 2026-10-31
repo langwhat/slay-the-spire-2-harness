@@ -184,7 +184,12 @@ def test_terminal_read_failure_ends_roles_before_recovery_pause(
                 result = await CombatTask(execution, source, observation, budget).run()
             else:
                 result = await DefaultFlow(
-                    execution, budget, Notes(""), source, lambda observation, notes: source
+                    execution,
+                    budget,
+                    Notes(""),
+                    source,
+                    lambda observation, notes: source,
+                    new_run=lambda: source,
                 ).run()
         assert result == RunEnded(RunEndReason.TERMINAL, None)
         assert len(source.observations) == 1 and len(source.outcomes) == 1
