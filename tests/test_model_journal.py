@@ -816,6 +816,85 @@ def test_recorded_request_accounts_for_each_attempt_and_wire_input(tmp_path: Pat
 
 
 @pytest.mark.parametrize("protocol", ["responses", "chat-completions", "messages"])
+def test_retry_records_the_measurement_of_each_submitted_body(
+    tmp_path: Path, protocol: str
+) -> None:
+    from pydantic import BaseModel, ConfigDict
+    from test_chat_completions import chat_stream
+    from test_messages import events, sse
+
+    from sts2_harness.llm.messages import ToolDefinition
+
+    schema_extra: dict[str, JsonValue] = {"description": "first schema"}
+
+    class Arguments(BaseModel):
+        model_config = ConfigDict(json_schema_extra=schema_extra)
+        value: str
+
+    bodies: list[dict[str, JsonValue]] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        bodies.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+        if len(bodies) == 1:
+            schema_extra["description"] = "changed schema for the next attempt"
+            return httpx.Response(503, json={"error": {"message": "unavailable"}})
+        response = (
+            completed()
+            if protocol == "responses"
+            else chat_stream(usage=False)
+            if protocol == "chat-completions"
+            else sse(events())
+        )
+        return httpx.Response(200, content=response, headers={"Content-Type": "text/event-stream"})
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    async def scenario() -> None:
+        journal = Journal.create(
+            tmp_path / "retry.sqlite",
+            Manifest(
+                recording_id="retry",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+            ),
+        )
+        config = configuration(tmp_path, LLM_PROTOCOL=protocol, LLM_EXTRA_RETRIES="1")
+        async with Llm(config, transport=httpx.MockTransport(provider), sleep=no_sleep) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.RUN, stream="run:1")
+            tool = ToolDefinition("inspect", MaterialText.create("tool", "Inspect."), Arguments)
+            await model.complete((TextMessage(TextRole.USER, "Look."),), (tool,))
+        journal.close()
+        attempts = Journal.open(journal.path).request(1).attempts
+        assert len(attempts) == len(bodies) == 2
+        assert bodies[0] != bodies[1]
+        for attempt, body in zip(attempts, bodies, strict=True):
+            encoded = json.dumps(
+                body, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+            keys = (
+                ("messages", "tools")
+                if protocol == "chat-completions"
+                else ("input", "tools")
+                if protocol == "responses"
+                else ("system", "messages", "tools")
+            )
+            arrays = [body[key] for key in keys]
+            assert all(isinstance(value, list) for value in arrays)
+            count = sum(len(value) for value in arrays if isinstance(value, list))
+            assert attempt.protocol_encoding_digest == hashlib.sha256(encoded).hexdigest()
+            assert attempt.estimated_input_tokens == len(encoded) + 1024 + 64 * count
+        assert attempts[0].reply is None
+        assert attempts[1].reply is not None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("protocol", ["responses", "chat-completions", "messages"])
 def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
     tmp_path: Path, protocol: str
 ) -> None:
@@ -866,7 +945,15 @@ def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
             prepared = live.prepare(initial, (tool,))
             assert prepared == live.prepare(initial, (tool,))
             first = await model.complete(initial, (tool,))
-            assert prepared == bodies[0]
+            assert prepared.body == bodies[0]
+            assert (
+                prepared.measurement.digest
+                == hashlib.sha256(
+                    json.dumps(
+                        bodies[0], sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                    ).encode()
+                ).hexdigest()
+            )
             await model.complete(
                 (
                     *initial,

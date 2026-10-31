@@ -250,8 +250,6 @@ class ChatCompletionsAdapter:
         *,
         evidence: ModelAttemptSink | None = None,
     ) -> ModelReply:
-        if evidence is not None:
-            evidence.encoded(body)
         stream = await self._sdk.chat.completions.create(
             model=self._configuration.model,
             messages=[],

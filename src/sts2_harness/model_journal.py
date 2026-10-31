@@ -3,11 +3,8 @@
 import hashlib
 import time
 
-from pydantic import JsonValue
-
-from sts2_harness.capacity import measure
+from sts2_harness.capacity import Measurement
 from sts2_harness.client import models as native
-from sts2_harness.config import Protocol
 from sts2_harness.diagnostics import EncodingMetadata, Event, EventKind
 from sts2_harness.journal import Journal
 from sts2_harness.journal_models import (
@@ -61,14 +58,12 @@ class _Attempts:
         journal: Journal,
         sequence: int,
         role: native.DecisionOwner,
-        protocol: Protocol,
         input_digest: str,
     ) -> None:
         self._journal = journal
         self._sequence = sequence
         self._attempt = ModelAttempt(index=1)
         self._role = role
-        self._protocol = protocol
         self._input_digest = input_digest
         self._failures = 0
         self._last_failure: FailureKind | None = None
@@ -93,11 +88,15 @@ class _Attempts:
                 )
             )
 
-    def encoded(self, body: dict[str, JsonValue]) -> None:
-        digest, estimate = measure(body, self._protocol)
-        self._journal.diagnostics.emit(EncodingMetadata(sequence=self._sequence, digest=digest))
+    def encoded(self, measurement: Measurement) -> None:
+        self._journal.diagnostics.emit(
+            EncodingMetadata(sequence=self._sequence, digest=measurement.digest)
+        )
         self._attempt = self._attempt.model_copy(
-            update={"protocol_encoding_digest": digest, "estimated_input_tokens": estimate}
+            update={
+                "protocol_encoding_digest": measurement.digest,
+                "estimated_input_tokens": measurement.estimated_input_tokens,
+            }
         )
         self._journal.model_attempt(self._sequence, self._attempt)
 
@@ -165,9 +164,7 @@ class RecordedLlm:
             tool_set,
             ConfigurationSnapshot.of(self._live.configuration),
         )
-        attempts = _Attempts(
-            self._journal, sequence, self._role, self._live.configuration.protocol, input_digest
-        )
+        attempts = _Attempts(self._journal, sequence, self._role, input_digest)
         self._journal.diagnostics.started_model(self._role, sequence)
         try:
             reply = await self._live.complete(input, tools, evidence=attempts)

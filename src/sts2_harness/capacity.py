@@ -1,6 +1,7 @@
 """Recorded input accounting policy and deterministic request measurement."""
 
 import json
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Annotated, Literal
 
@@ -30,7 +31,13 @@ class CapacityPolicy(native.WireModel):
     capacity_classifier_config: CapacityClassifierConfig = CapacityClassifierConfig()
 
 
-def measure(body: dict[str, JsonValue], protocol: Protocol) -> tuple[str, int]:
+@dataclass(frozen=True, slots=True)
+class Measurement:
+    digest: str
+    estimated_input_tokens: int
+
+
+def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
     names = (
         ("messages", "tools")
         if protocol is Protocol.CHAT_COMPLETIONS
@@ -47,4 +54,4 @@ def measure(body: dict[str, JsonValue], protocol: Protocol) -> tuple[str, int]:
             raise ValueError("Expected an array in the encoded model request.")
         count += len(value)
     encoded = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    return sha256(encoded).hexdigest(), len(encoded) + 1024 + 64 * count
+    return Measurement(sha256(encoded).hexdigest(), len(encoded) + 1024 + 64 * count)

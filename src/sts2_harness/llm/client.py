@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
 
@@ -16,7 +17,7 @@ from openai import (
 )
 from pydantic import JsonValue, ValidationError
 
-from sts2_harness.capacity import measure
+from sts2_harness.capacity import Measurement, measure
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.llm.anthropic_boundary import classify_error as classify_anthropic_error
 from sts2_harness.llm.anthropic_messages import MessagesAdapter
@@ -31,6 +32,12 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.llm.openai_boundary import classify_error
 from sts2_harness.llm.responses import ResponsesAdapter
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRequest:
+    body: dict[str, JsonValue]
+    measurement: Measurement
 
 
 class Llm:
@@ -79,10 +86,9 @@ class Llm:
     ) -> None:
         await self._adapter.close()
 
-    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> dict[str, JsonValue]:
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
         body = self._adapter.prepare(input, tools)
-        measure(body, self._configuration.protocol)
-        return body
+        return PreparedRequest(body, measure(body, self._configuration.protocol))
 
     async def complete(
         self,
@@ -94,12 +100,13 @@ class Llm:
         for attempt in range(self._configuration.extra_retries + 1):
             started = False
             try:
-                body = self.prepare(input, tools)
+                prepared = self.prepare(input, tools)
                 if evidence is not None:
                     evidence.started(attempt + 1)
                     started = True
+                    evidence.encoded(prepared.measurement)
                 async with asyncio.timeout(self._configuration.timeout_seconds):
-                    return await self._adapter.complete(body, evidence=evidence)
+                    return await self._adapter.complete(prepared.body, evidence=evidence)
             except (
                 TimeoutError,
                 APITimeoutError,

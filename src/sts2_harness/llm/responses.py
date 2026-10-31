@@ -180,8 +180,6 @@ class ResponsesAdapter:
         *,
         evidence: ModelAttemptSink | None = None,
     ) -> ModelReply:
-        if evidence is not None:
-            evidence.encoded(body)
         stream = await self._sdk.responses.create(
             model=self._configuration.model,
             # Preserve opaque continuation fields and explicit nulls.

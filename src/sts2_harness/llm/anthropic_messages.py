@@ -290,8 +290,6 @@ class MessagesAdapter:
         *,
         evidence: ModelAttemptSink | None = None,
     ) -> ModelReply:
-        if evidence is not None:
-            evidence.encoded(body)
         completed = _MessageStream()
         reply: ModelReply | None = None
         # Raw continuation fields and explicit nulls must bypass input TypedDict filtering.
