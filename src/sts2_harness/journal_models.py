@@ -18,6 +18,7 @@ from pydantic import (
     model_validator,
 )
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import models as native
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.context.models import (
@@ -488,6 +489,7 @@ class ConfigurationSnapshot(native.WireModel):
     service_tier: str
     timeout_seconds: float
     extra_retries: int
+    capacity_policy: CapacityPolicy = CapacityPolicy()
 
     @classmethod
     def of(cls, config: ModelConfiguration) -> "ConfigurationSnapshot":
@@ -498,6 +500,7 @@ class ConfigurationSnapshot(native.WireModel):
             service_tier=config.service_tier,
             timeout_seconds=config.timeout_seconds,
             extra_retries=config.extra_retries,
+            capacity_policy=CapacityPolicy(context_window=config.context_window),
         )
 
 
@@ -527,9 +530,19 @@ class ReplySnapshot(NativeSnapshot):
         )
 
 
+class AttemptCause(StrEnum):
+    INITIAL = "initial"
+    TRANSPORT_RETRY = "transport_retry"
+
+
 class ModelAttempt(native.WireModel):
     index: int
+    input_digest: str | None = None
     protocol_encoding_digest: str | None = None
+    estimated_input_tokens: int | None = None
+    estimator_id: Literal["wire_utf8_conservative_v1"] = "wire_utf8_conservative_v1"
+    cause: AttemptCause = AttemptCause.INITIAL
+    recovery_of: None = None
     reply: ReplySnapshot | None = None
     failure: FailureKind | None = None
 

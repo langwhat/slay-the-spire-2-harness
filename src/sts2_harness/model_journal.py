@@ -1,11 +1,19 @@
 """Record model and material dependencies at their actual IO boundaries."""
 
+import hashlib
 import time
 
+from pydantic import JsonValue
+
+from sts2_harness.capacity import measure
 from sts2_harness.client import models as native
+from sts2_harness.config import Protocol
 from sts2_harness.diagnostics import EncodingMetadata, Event, EventKind
 from sts2_harness.journal import Journal
 from sts2_harness.journal_models import (
+    AttemptCause,
+    BlobCollector,
+    BlobEncoding,
     ConfigurationSnapshot,
     DocumentLookup,
     DocumentLookupResult,
@@ -48,17 +56,30 @@ from sts2_harness.prompts import PromptReader
 
 
 class _Attempts:
-    def __init__(self, journal: Journal, sequence: int, role: native.DecisionOwner) -> None:
+    def __init__(
+        self,
+        journal: Journal,
+        sequence: int,
+        role: native.DecisionOwner,
+        protocol: Protocol,
+        input_digest: str,
+    ) -> None:
         self._journal = journal
         self._sequence = sequence
         self._attempt = ModelAttempt(index=1)
         self._role = role
+        self._protocol = protocol
+        self._input_digest = input_digest
         self._failures = 0
         self._last_failure: FailureKind | None = None
         self._started = time.monotonic()
 
     def started(self, index: int) -> None:
-        self._attempt = ModelAttempt(index=index)
+        self._attempt = ModelAttempt(
+            index=index,
+            input_digest=self._input_digest,
+            cause=AttemptCause.INITIAL if index == 1 else AttemptCause.TRANSPORT_RETRY,
+        )
         self._journal.model_attempt(self._sequence, self._attempt)
         if self._last_failure is not None:
             self._journal.diagnostics.emit(
@@ -72,9 +93,12 @@ class _Attempts:
                 )
             )
 
-    def encoded(self, digest: str) -> None:
+    def encoded(self, body: dict[str, JsonValue]) -> None:
+        digest, estimate = measure(body, self._protocol)
         self._journal.diagnostics.emit(EncodingMetadata(sequence=self._sequence, digest=digest))
-        self._attempt = self._attempt.model_copy(update={"protocol_encoding_digest": digest})
+        self._attempt = self._attempt.model_copy(
+            update={"protocol_encoding_digest": digest, "estimated_input_tokens": estimate}
+        )
         self._journal.model_attempt(self._sequence, self._attempt)
 
     def received(self, reply: ModelReply) -> None:
@@ -121,14 +145,29 @@ class RecordedLlm:
         self._stream = stream
 
     async def complete(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> ModelReply:
+        messages = archive_input(input)
+        tool_set = ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in tools))
+        collector = BlobCollector()
+        encoding = BlobEncoding(collector.collect)
+        serialized = tuple(
+            message.model_dump_json(context=encoding).encode() for message in messages
+        )
+        input_digest = hashlib.sha256(
+            b"["
+            + b",".join(serialized)
+            + b"]"
+            + tool_set.model_dump_json(context=encoding).encode()
+        ).hexdigest()
         sequence = self._journal.begin_model(
             self._role,
             self._stream,
-            archive_input(input),
-            ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in tools)),
+            messages,
+            tool_set,
             ConfigurationSnapshot.of(self._live.configuration),
         )
-        attempts = _Attempts(self._journal, sequence, self._role)
+        attempts = _Attempts(
+            self._journal, sequence, self._role, self._live.configuration.protocol, input_digest
+        )
         self._journal.diagnostics.started_model(self._role, sequence)
         try:
             reply = await self._live.complete(input, tools, evidence=attempts)

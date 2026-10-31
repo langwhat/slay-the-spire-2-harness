@@ -1,7 +1,6 @@
 """One Messages request with official stream assembly and explicit completion gates."""
 
 import json
-from hashlib import sha256
 from typing import Literal, assert_never
 
 import httpx2 as httpx
@@ -260,13 +259,7 @@ class MessagesAdapter:
     async def close(self) -> None:
         await self._sdk.close()
 
-    async def complete(
-        self,
-        input: ModelInput,
-        tools: tuple[ToolDefinition, ...],
-        *,
-        evidence: ModelAttemptSink | None = None,
-    ) -> ModelReply:
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> dict[str, JsonValue]:
         system, messages = _encode(input)
         body: dict[str, JsonValue] = {
             "model": self._configuration.model,
@@ -289,14 +282,16 @@ class MessagesAdapter:
         }
         body.update(self.request_options(self._configuration))
         _TOOLS.validate_python(body["tools"], strict=True)
+        return body
+
+    async def complete(
+        self,
+        body: dict[str, JsonValue],
+        *,
+        evidence: ModelAttemptSink | None = None,
+    ) -> ModelReply:
         if evidence is not None:
-            evidence.encoded(
-                sha256(
-                    json.dumps(
-                        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                    ).encode()
-                ).hexdigest()
-            )
+            evidence.encoded(body)
         completed = _MessageStream()
         reply: ModelReply | None = None
         # Raw continuation fields and explicit nulls must bypass input TypedDict filtering.

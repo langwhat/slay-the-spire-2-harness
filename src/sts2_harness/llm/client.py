@@ -14,8 +14,9 @@ from openai import (
     APIStatusError,
     APITimeoutError,
 )
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
+from sts2_harness.capacity import measure
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.llm.anthropic_boundary import classify_error as classify_anthropic_error
 from sts2_harness.llm.anthropic_messages import MessagesAdapter
@@ -78,6 +79,11 @@ class Llm:
     ) -> None:
         await self._adapter.close()
 
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> dict[str, JsonValue]:
+        body = self._adapter.prepare(input, tools)
+        measure(body, self._configuration.protocol)
+        return body
+
     async def complete(
         self,
         input: ModelInput,
@@ -86,11 +92,14 @@ class Llm:
         evidence: ModelAttemptSink | None = None,
     ) -> ModelReply:
         for attempt in range(self._configuration.extra_retries + 1):
-            if evidence is not None:
-                evidence.started(attempt + 1)
+            started = False
             try:
+                body = self.prepare(input, tools)
+                if evidence is not None:
+                    evidence.started(attempt + 1)
+                    started = True
                 async with asyncio.timeout(self._configuration.timeout_seconds):
-                    return await self._adapter.complete(input, tools, evidence=evidence)
+                    return await self._adapter.complete(body, evidence=evidence)
             except (
                 TimeoutError,
                 APITimeoutError,
@@ -116,7 +125,7 @@ class Llm:
                 reason = FailureKind.PROTOCOL
             except ModelUnavailable as error:
                 reason = error.reason
-            if evidence is not None:
+            if evidence is not None and started:
                 evidence.failed(reason)
             retryable = reason in {
                 FailureKind.TIMEOUT,

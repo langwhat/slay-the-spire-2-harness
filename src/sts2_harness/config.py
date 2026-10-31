@@ -54,6 +54,7 @@ class ModelConfiguration:
     custom_headers: tuple[tuple[str, str], ...] = field(repr=False)
     timeout_seconds: float
     extra_retries: int
+    context_window: int = 300_000
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ _KEYS = frozenset(
         "HEADERS",
         "REQUEST_TIMEOUT_S",
         "EXTRA_RETRIES",
+        "CONTEXT_WINDOW",
     }
 )
 _HEADER_VALUE = re.compile(r"[\t\x20-\x7e]*\Z")
@@ -137,12 +139,15 @@ def load_configuration(
         )
         timeout = float(get("REQUEST_TIMEOUT_S", "3600"))
         retries = int(get("EXTRA_RETRIES", "25"))
+        context_window = int(get("CONTEXT_WINDOW", "300000"))
     except ValueError:
         raise ConfigurationError(
-            "Invalid protocol, authentication, timeout, or retry setting."
+            "Invalid protocol, authentication, timeout, retry, or context window setting."
         ) from None
-    if not math.isfinite(timeout) or timeout <= 0 or retries < 0:
-        raise ConfigurationError("Timeout must be positive and finite; extra retries nonnegative.")
+    if not math.isfinite(timeout) or timeout <= 0 or retries < 0 or context_window <= 0:
+        raise ConfigurationError(
+            "Timeout and context window must be positive; extra retries nonnegative."
+        )
     messages = protocol is Protocol.MESSAGES
     endpoint = get(
         "BASE_URL", "https://api.anthropic.com" if messages else "https://api.openai.com/v1"
@@ -200,6 +205,7 @@ def load_configuration(
             _headers(get("HEADERS")),
             timeout,
             retries,
+            context_window,
         ),
     )
 

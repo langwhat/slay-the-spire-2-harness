@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import ControlResult
@@ -212,6 +213,7 @@ async def run_laboratory_sample(
         if opening.location != location:
             raise GameReadError("The laboratory opening moved to a different Combat.")
         manifest = Manifest(
+            capacity_policy=CapacityPolicy(context_window=model.configuration.context_window),
             recording_id=uuid4().hex,
             core_version="0.1.0",
             game_instance_id=location.game_instance_id,

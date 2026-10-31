@@ -11,6 +11,7 @@ from uuid import uuid4
 import httpx2 as httpx
 from pydantic import ValidationError
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
@@ -404,6 +405,9 @@ class _Takeover:
                 initial=initial,
             )
             manifest = Manifest(
+                capacity_policy=CapacityPolicy(
+                    context_window=self.model.configuration.context_window
+                ),
                 recording_id=uuid4().hex,
                 core_version="0.1.0",
                 game_instance_id=location.game_instance_id,

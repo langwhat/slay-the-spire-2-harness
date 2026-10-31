@@ -1,7 +1,6 @@
 """Official Responses SDK and native conversation codec."""
 
 import json
-from hashlib import sha256
 from typing import Annotated, Literal, assert_never
 
 import httpx2 as httpx
@@ -138,13 +137,7 @@ class ResponsesAdapter:
     async def close(self) -> None:
         await self._sdk.close()
 
-    async def complete(
-        self,
-        input: ModelInput,
-        tools: tuple[ToolDefinition, ...],
-        *,
-        evidence: ModelAttemptSink | None = None,
-    ) -> ModelReply:
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> dict[str, JsonValue]:
         try:
             reasoning = (
                 _REASONING.validate_python(
@@ -162,41 +155,38 @@ class ResponsesAdapter:
             raise ModelUnavailable(FailureKind.CONFIGURATION) from None
         encoded_input = _encode(input)
         encoded_tools = _tools(tools)
-        if evidence is not None:
-            encoding: dict[str, JsonValue] = {
-                "model": self._configuration.model,
-                "input": TypeAdapter(JsonValue).validate_python(encoded_input),
-                "tools": TypeAdapter(JsonValue).validate_python(
-                    TypeAdapter(list[ToolParam]).dump_python(encoded_tools, mode="json")
-                ),
-                "store": False,
-                "include": ["reasoning.encrypted_content"],
-                "stream": True,
-            }
-            if not isinstance(reasoning, Omit):
-                encoding["reasoning"] = TypeAdapter(JsonValue).validate_python(
-                    TypeAdapter(Reasoning).dump_python(reasoning, mode="json")
-                )
-            if not isinstance(tier, Omit):
-                encoding["service_tier"] = tier
-            evidence.encoded(
-                sha256(
-                    json.dumps(
-                        encoding, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                    ).encode()
-                ).hexdigest()
+        encoding: dict[str, JsonValue] = {
+            "model": self._configuration.model,
+            "input": TypeAdapter(JsonValue).validate_python(encoded_input),
+            "tools": TypeAdapter(JsonValue).validate_python(
+                TypeAdapter(list[ToolParam]).dump_python(encoded_tools, mode="json")
+            ),
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+            "stream": True,
+        }
+        if not isinstance(reasoning, Omit):
+            encoding["reasoning"] = TypeAdapter(JsonValue).validate_python(
+                TypeAdapter(Reasoning).dump_python(reasoning, mode="json")
             )
+        if not isinstance(tier, Omit):
+            encoding["service_tier"] = tier
+
+        return encoding
+
+    async def complete(
+        self,
+        body: dict[str, JsonValue],
+        *,
+        evidence: ModelAttemptSink | None = None,
+    ) -> ModelReply:
+        if evidence is not None:
+            evidence.encoded(body)
         stream = await self._sdk.responses.create(
             model=self._configuration.model,
-            # SDK input TypedDicts reject valid output nulls and discard opaque fields.
-            # The native output has already passed concrete output validation.
-            extra_body={"input": encoded_input},
-            tools=encoded_tools,
-            store=False,
-            include=["reasoning.encrypted_content"],
+            # Preserve opaque continuation fields and explicit nulls.
+            extra_body=body,
             stream=True,
-            reasoning=reasoning,
-            service_tier=tier,
             extra_headers=self._headers,
         )
         async with stream:

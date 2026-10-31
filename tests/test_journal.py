@@ -1461,7 +1461,7 @@ def test_pause_polling_slows_without_changing_busy_settlement_or_native_audit(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_archive_open_rejects_old_versions_and_reads_current_version(
     tmp_path: Path, version: int
 ) -> None:
@@ -1491,10 +1491,10 @@ def test_archive_open_rejects_old_versions_and_reads_current_version(
     with pytest.raises(ArchiveError, match="schema is unsupported"):
         Journal.open(path)
     with sqlite3.connect(path) as connection:
-        manifest["schema_version"] = 10
+        manifest["schema_version"] = 11
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     reopened = Journal.open(path)
-    assert reopened.manifest.schema_version == 10
+    assert reopened.manifest.schema_version == 11
     assert reopened.operations() == ()
     reopened.close()
 

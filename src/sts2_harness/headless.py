@@ -19,6 +19,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.child_output import BoundedChildOutput, ChildStream, capture_probe
 from sts2_harness.client import ClientUnavailable, ModClient
 from sts2_harness.client import models as native
@@ -595,6 +596,7 @@ async def run_headless(
             run_id = instance.opening.location.run_id
             assert run_id is not None
             manifest = Manifest(
+                capacity_policy=CapacityPolicy(context_window=model.context_window),
                 materials=materials.settings
                 if materials is not None
                 else SessionMaterials(

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
+from pydantic import JsonValue, TypeAdapter
 from test_combat import BattleHTTP, reply
 from test_responses import OUTPUT, completed, configuration
 
@@ -747,3 +748,228 @@ def test_summary_rejects_disagreement_with_authoritative_metadata(
         with pytest.raises(ArchiveError, match="summary"):
             evidence(reader, expand=expand, errors_only=errors_only)
     reader.close()
+
+
+def test_recorded_request_accounts_for_each_attempt_and_wire_input(tmp_path: Path) -> None:
+    bodies: list[dict[str, JsonValue]] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        bodies.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(503, json={"error": {"message": "unavailable"}})
+        return httpx.Response(
+            200, content=completed(), headers={"Content-Type": "text/event-stream"}
+        )
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    async def scenario() -> None:
+        config = configuration(tmp_path, LLM_CONTEXT_WINDOW="60000", LLM_EXTRA_RETRIES="1")
+        from sts2_harness.journal import CapacityPolicy
+
+        journal = Journal.create(
+            tmp_path / "accounting.sqlite",
+            Manifest(
+                recording_id="accounting",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                capacity_policy=CapacityPolicy(context_window=config.context_window),
+            ),
+        )
+        async with Llm(config, transport=httpx.MockTransport(provider), sleep=no_sleep) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.RUN, stream="run:1")
+            await model.complete((TextMessage(TextRole.USER, "中文 input"),), ())
+        journal.close()
+        archive = Journal.open(journal.path)
+        record = archive.request(1)
+        assert archive.manifest.capacity_policy.context_window == 60000
+        classifier = archive.manifest.capacity_policy.capacity_classifier_config
+        assert classifier.endpoint_category == "unverified"
+        assert classifier.enabled_signals == ()
+        assert config.protocol in classifier.protocols
+        assert record.configuration.capacity_policy == archive.manifest.capacity_policy
+        assert len(record.attempts) == 2
+        body = bodies[0]
+        expected_bytes = len(
+            json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        )
+        assert isinstance(body["input"], list) and isinstance(body["tools"], list)
+        expected = expected_bytes + 1024 + 64 * (len(body["input"]) + len(body["tools"]))
+        assert bodies[0] == bodies[1]
+        assert record.attempts[0].input_digest == record.attempts[1].input_digest
+        assert record.attempts[0].input_digest is not None
+        assert [attempt.estimated_input_tokens for attempt in record.attempts] == [
+            expected,
+            expected,
+        ]
+        assert record.attempts[0].reply is None
+        assert (
+            record.attempts[1].reply is not None and record.attempts[1].reply.input_tokens == 12000
+        )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("protocol", ["responses", "chat-completions", "messages"])
+def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
+    tmp_path: Path, protocol: str
+) -> None:
+    from test_chat_completions import chat_stream
+    from test_messages import events, sse
+    from test_responses import InspectArguments
+
+    from sts2_harness.context.models import ProjectedResult, ResultMessage, Updates
+    from sts2_harness.llm.messages import ToolDefinition
+    from sts2_harness.results import QueryToolResult, ReadCompleted
+
+    bodies: list[dict[str, JsonValue]] = []
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        bodies.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+        response = (
+            completed()
+            if protocol == "responses"
+            else chat_stream(usage=False)
+            if protocol == "chat-completions"
+            else sse(events())
+        )
+        return httpx.Response(200, content=response, headers={"Content-Type": "text/event-stream"})
+
+    async def scenario() -> None:
+        journal = Journal.create(
+            tmp_path / "protocol.sqlite",
+            Manifest(
+                recording_id="protocol",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+            ),
+        )
+        config = configuration(tmp_path, LLM_PROTOCOL=protocol, LLM_EXTRA_RETRIES="0")
+        async with Llm(config, transport=httpx.MockTransport(provider)) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.COMBAT, stream="combat:1")
+            tool = ToolDefinition(
+                "inspect", MaterialText.create("tool", "Inspect 中文."), InspectArguments
+            )
+            initial = (
+                TextMessage(TextRole.SYSTEM, "System rules."),
+                TextMessage(TextRole.USER, "First."),
+            )
+            prepared = live.prepare(initial, (tool,))
+            assert prepared == live.prepare(initial, (tool,))
+            first = await model.complete(initial, (tool,))
+            assert prepared == bodies[0]
+            await model.complete(
+                (
+                    *initial,
+                    first.assistant,
+                    ResultMessage(
+                        "call_1",
+                        ProjectedResult(outcome=ReadCompleted(), state=None, updates=Updates()),
+                        QueryToolResult(ReadCompleted(), None),
+                    ),
+                ),
+                (tool,),
+            )
+            await model.complete(
+                (TextMessage(TextRole.USER, "Changed material with more text."),), (tool,)
+            )
+        journal.close()
+        records = Journal.open(journal.path).requests()
+        assert len(records) == len(bodies) == 3
+        for record, body in zip(records, bodies, strict=True):
+            keys = (
+                ("messages", "tools")
+                if protocol == "chat-completions"
+                else (
+                    ("input", "tools")
+                    if protocol == "responses"
+                    else ("system", "messages", "tools")
+                )
+            )
+            size = len(
+                json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+            )
+            arrays = [body[key] for key in keys]
+            assert all(isinstance(value, list) for value in arrays)
+            count = sum(len(value) for value in arrays if isinstance(value, list))
+            attempt = record.attempts[0]
+            assert attempt.estimated_input_tokens == size + 1024 + 64 * count
+            assert (
+                attempt.protocol_encoding_digest
+                == hashlib.sha256(
+                    json.dumps(
+                        body, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+                    ).encode()
+                ).hexdigest()
+            )
+            assert attempt.reply is not None
+            if protocol == "chat-completions":
+                assert attempt.reply.input_tokens is None
+        assert (
+            records[0].attempts[0].estimated_input_tokens
+            != records[2].attempts[0].estimated_input_tokens
+        )
+
+    asyncio.run(scenario())
+
+
+def test_recording_rejects_a_different_effective_capacity_policy(tmp_path: Path) -> None:
+    from sts2_harness.journal import ArchiveError
+
+    journal = Journal.create(
+        tmp_path / "mismatch.sqlite",
+        Manifest(
+            recording_id="mismatch",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+        ),
+    )
+
+    async def scenario() -> None:
+        config = configuration(tmp_path, LLM_CONTEXT_WINDOW="60000")
+        async with Llm(config) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.RUN, stream="run:1")
+            with pytest.raises(ArchiveError, match="capacity policy"):
+                await model.complete((TextMessage(TextRole.USER, "Input"),), ())
+
+    asyncio.run(scenario())
+    assert journal.requests() == ()
+    journal.close()
+
+
+def test_recording_cannot_restore_a_missing_capacity_policy(tmp_path: Path) -> None:
+    from sts2_harness.journal import ArchiveError
+
+    path = tmp_path / "missing-policy.sqlite"
+    journal = Journal.create(
+        path,
+        Manifest(
+            recording_id="missing-policy",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+        ),
+    )
+    journal.close()
+    with sqlite3.connect(path) as connection:
+        manifest = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
+        del manifest["capacity_policy"]["context_window"]
+        connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
+    with pytest.raises(ArchiveError, match="capacity policy is incomplete"):
+        Journal.open(path)
