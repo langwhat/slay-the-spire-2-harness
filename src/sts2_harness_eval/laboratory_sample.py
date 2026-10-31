@@ -255,7 +255,7 @@ async def run_laboratory_sample(
         if opening.location != location:
             raise GameReadError("The laboratory opening moved to a different Combat.")
         manifest = Manifest(
-            capacity_policy=CapacityPolicy(context_window=model.configuration.context_window),
+            capacity_policy=model.capacity_policy,
             recording_id=uuid4().hex,
             core_version="0.1.0",
             game_instance_id=location.game_instance_id,

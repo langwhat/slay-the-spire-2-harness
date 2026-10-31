@@ -178,7 +178,7 @@ async def run_interactive(
                 recording_id = uuid4().hex
                 archive = directory / recording_id / "archive.sqlite"
                 manifest = Manifest(
-                    capacity_policy=CapacityPolicy(context_window=model.context_window),
+                    capacity_policy=CapacityPolicy.for_configuration(model),
                     materials=materials.settings
                     if materials is not None
                     else SessionMaterials(

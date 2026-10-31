@@ -13,6 +13,7 @@ from test_interactive import ready_run
 from test_lifecycle import terminal
 from test_responses import configuration
 
+from sts2_harness.capacity import CapacityPolicy, CapacitySignal
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.config import Configuration, Driver
@@ -75,7 +76,12 @@ def test_startup_records_supplied_material_settings_and_serves_documents(
     server = ThreadingHTTPServer(("127.0.0.1", 0), ModelServer)
     worker = threading.Thread(target=server.serve_forever)
     worker.start()
-    model = configuration(tmp_path, LLM_BASE_URL=f"http://127.0.0.1:{server.server_port}")
+    endpoint = f"http://127.0.0.1:{server.server_port}"
+    model = configuration(
+        tmp_path,
+        LLM_BASE_URL=endpoint,
+        LLM_CAPACITY_VERIFIED_ENDPOINT=endpoint,
+    )
     config = Configuration(Driver.BUILTIN, model)
     stop = asyncio.Event()
     observation = ready_run()
@@ -172,6 +178,10 @@ def test_startup_records_supplied_material_settings_and_serves_documents(
     journal = Journal.open(archives[0])
     try:
         assert journal.manifest.materials == settings
+        assert journal.manifest.capacity_policy == CapacityPolicy.for_configuration(model)
+        assert journal.manifest.capacity_policy.capacity_classifier_config.enabled_signals == (
+            CapacitySignal.CONTEXT_TOO_LARGE,
+        )
         assert journal.gaps == ()
     finally:
         journal.close()
