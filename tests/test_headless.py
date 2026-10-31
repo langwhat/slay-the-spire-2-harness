@@ -807,3 +807,188 @@ def test_audio_isolation_must_be_prepared_before_game_launch(tmp_path: Path, mis
         if line.startswith("HARNESS_USER_DATA=")
     ]
     assert len(paths) == 1 and not Path(paths[0]).exists()
+
+
+def test_shutdown_bounds_stalled_output_and_preserves_owned_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import sys
+
+    import sts2_harness.headless as headless
+    from sts2_harness.headless import HeadlessError, HeadlessOptions, OwnedHeadlessInstance
+
+    monkeypatch.setattr(headless, "_CLEANUP_TIMEOUT_SECONDS", 0.05, raising=False)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(profile, target_is_directory=True)
+
+    async def exercise() -> None:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import time; time.sleep(60)"
+        )
+        instance = OwnedHeadlessInstance(HeadlessOptions(tmp_path, tmp_path))
+        instance.process = child
+        instance.user_directory = profile
+        monkeypatch.setattr(instance, "_alias", alias)
+        release = asyncio.Event()
+
+        async def stalled_output() -> None:
+            await release.wait()
+
+        drain = asyncio.create_task(stalled_output())
+        monkeypatch.setattr(instance, "_drains", (drain,))
+        close = asyncio.create_task(instance.aclose())
+        try:
+            done, _ = await asyncio.wait((close,), timeout=1)
+            assert close in done, "Shutdown did not bound the stalled output drain."
+            with pytest.raises(HeadlessError, match="output"):
+                close.result()
+            assert child.returncode is not None
+            assert alias.is_symlink() and alias.readlink() == profile
+            assert profile.is_dir()
+            with pytest.raises(HeadlessError, match="output"):
+                await instance.aclose()
+            assert alias.is_symlink()
+        finally:
+            release.set()
+            await asyncio.gather(close, drain, return_exceptions=True)
+            if child.returncode is None:
+                child.kill()
+                await child.wait()
+
+    asyncio.run(exercise())
+
+
+def test_shutdown_bounds_unconfirmed_exit_after_kill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import signal
+    import sys
+
+    import sts2_harness.headless as headless
+    from sts2_harness.headless import HeadlessError, HeadlessOptions, OwnedHeadlessInstance
+
+    monkeypatch.setattr(headless, "_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(headless, "_TERMINATE_TIMEOUT_SECONDS", 0.05)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(profile, target_is_directory=True)
+
+    async def exercise() -> None:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(60)",
+            stdout=asyncio.subprocess.PIPE,
+        )
+        assert child.stdout is not None
+        assert await child.stdout.readline() == b"ready\n"
+        wait_for_child = child.wait
+        release = asyncio.Event()
+
+        async def unconfirmed_exit() -> int:
+            await release.wait()
+            return await wait_for_child()
+
+        monkeypatch.setattr(child, "wait", unconfirmed_exit)
+        instance = OwnedHeadlessInstance(HeadlessOptions(tmp_path, tmp_path))
+        instance.process = child
+        instance.user_directory = profile
+        monkeypatch.setattr(instance, "_alias", alias)
+        close = asyncio.create_task(instance.aclose())
+        try:
+            done, _ = await asyncio.wait((close,), timeout=1)
+            assert close in done, "Shutdown did not bound the unconfirmed exit."
+            with pytest.raises(HeadlessError, match="exit could not be confirmed"):
+                close.result()
+            assert await wait_for_child() == -signal.SIGKILL
+            assert instance.process is child
+            assert alias.is_symlink() and alias.readlink() == profile
+            retry = asyncio.create_task(instance.aclose())
+            done, _ = await asyncio.wait((retry,), timeout=0.03)
+            if retry not in done:
+                await asyncio.gather(retry, return_exceptions=True)
+            assert retry in done, "Repeated shutdown retried an already unconfirmed exit."
+            with pytest.raises(HeadlessError, match="exit could not be confirmed"):
+                retry.result()
+        finally:
+            release.set()
+            if child.returncode is None:
+                child.kill()
+            await wait_for_child()
+            await asyncio.gather(close, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
+def test_shutdown_refuses_changed_alias(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from sts2_harness.headless import HeadlessError, HeadlessOptions, OwnedHeadlessInstance
+
+    profile = tmp_path / "profile"
+    other = tmp_path / "other"
+    profile.mkdir()
+    other.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(other, target_is_directory=True)
+    instance = OwnedHeadlessInstance(HeadlessOptions(tmp_path, tmp_path))
+    instance.user_directory = profile
+    monkeypatch.setattr(instance, "_alias", alias)
+    with pytest.raises(HeadlessError, match="alias no longer matches"):
+        asyncio.run(instance.aclose())
+    assert alias.is_symlink() and alias.readlink() == other
+    assert profile.is_dir() and other.is_dir()
+
+
+def test_repeated_cancellation_waits_for_owned_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import sys
+
+    from sts2_harness.headless import HeadlessOptions, OwnedHeadlessInstance
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(profile, target_is_directory=True)
+
+    async def exercise() -> None:
+        child = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "import signal, time, sys\n"
+            "def stop(signum, frame):\n    time.sleep(0.2); sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, stop)\nprint('ready', flush=True)\ntime.sleep(60)",
+            stdout=asyncio.subprocess.PIPE,
+        )
+        assert child.stdout is not None
+        assert await child.stdout.readline() == b"ready\n"
+        instance = OwnedHeadlessInstance(HeadlessOptions(tmp_path, tmp_path))
+        instance.process = child
+        instance.user_directory = profile
+        monkeypatch.setattr(instance, "_alias", alias)
+        close = asyncio.create_task(instance.aclose())
+        try:
+            await asyncio.sleep(0.03)
+            close.cancel()
+            await asyncio.sleep(0.03)
+            close.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(close, timeout=2)
+            assert child.returncode == 0
+            assert instance.process is None
+            assert not alias.is_symlink()
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await child.wait()
+            await asyncio.gather(close, return_exceptions=True)
+
+    asyncio.run(exercise())

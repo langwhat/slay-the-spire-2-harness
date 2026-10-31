@@ -91,6 +91,9 @@ func _initialize():
     quit()
 """
 
+_CLEANUP_TIMEOUT_SECONDS = 5.0
+_TERMINATE_TIMEOUT_SECONDS = 10.0
+
 
 def _candidate_port(requested: int | None) -> int:
     with socket.socket() as candidate:
@@ -126,6 +129,8 @@ class OwnedHeadlessInstance:
         self._outputs: tuple[BoundedChildOutput, ...] = ()
         self._drains: tuple[asyncio.Task[None], ...] = ()
         self._captures: tuple[asyncio.Task[bytes], ...] = ()
+        self._output_incomplete = False
+        self._exit_unconfirmed = False
 
     async def __aenter__(self) -> Self:
         try:
@@ -469,21 +474,39 @@ class OwnedHeadlessInstance:
             raise cancellation
 
     async def _reap_child(self) -> None:
+        if self._exit_unconfirmed:
+            raise HeadlessError("The owned native process exit could not be confirmed.")
+        if self._output_incomplete:
+            raise HeadlessError("The owned native output did not finish draining.")
         process = self.process
         if process is None:
             return
+        exited = asyncio.create_task(process.wait())
         if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=10.0)
-            except TimeoutError:
+            with suppress(ProcessLookupError):
+                process.terminate()
+            await asyncio.wait((exited,), timeout=_TERMINATE_TIMEOUT_SECONDS)
+        if not exited.done() and process.returncode is None:
+            with suppress(ProcessLookupError):
                 process.kill()
-                await process.wait()
-        else:
-            await process.wait()
-        self.process = None
-        drains, self._drains = self._drains, ()
-        captures, self._captures = self._captures, ()
+        if not exited.done():
+            await asyncio.wait((exited,), timeout=_CLEANUP_TIMEOUT_SECONDS)
+        if not exited.done():
+            exited.cancel()
+            self._exit_unconfirmed = True
+            raise HeadlessError("The owned native process exit could not be confirmed.")
+        exited.result()
+        drains = self._drains
+        captures = self._captures
+        output_tasks = (*drains, *captures)
+        if output_tasks:
+            _, pending = await asyncio.wait(output_tasks, timeout=_CLEANUP_TIMEOUT_SECONDS)
+            if pending:
+                self._output_incomplete = True
+                for task in pending:
+                    task.cancel()
+                await asyncio.wait(pending, timeout=_CLEANUP_TIMEOUT_SECONDS)
+                raise HeadlessError("The owned native output did not finish draining.")
         drain_results = await asyncio.gather(*drains, return_exceptions=True)
         capture_results = await asyncio.gather(*captures, return_exceptions=True)
         for stream, capture in zip(ChildStream, captures, strict=False):
@@ -492,31 +515,35 @@ class OwnedHeadlessInstance:
         for result in (*drain_results, *capture_results):
             if isinstance(result, BaseException):
                 raise result
+        self.process = None
+        self._drains = ()
+        self._captures = ()
 
     async def _close(self) -> None:
         try:
             await self._stop_child()
+            if self._alias is not None:
+                if not self._alias.is_symlink() or self._alias.readlink() != self.user_directory:
+                    raise HeadlessError("The owned native user-data alias no longer matches.")
+                self._alias.unlink()
+                self._alias = None
         finally:
             for output in self._outputs:
                 output.close()
-            try:
-                if (
-                    self._alias is not None
-                    and self._alias.is_symlink()
-                    and self._alias.readlink() == self.user_directory
-                ):
-                    self._alias.unlink()
-            finally:
-                if self.diagnostics is not None:
-                    self.diagnostics.close()
+            if self.diagnostics is not None:
+                self.diagnostics.close()
 
     async def aclose(self) -> None:
         cleanup = asyncio.create_task(self._close())
-        try:
-            await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            await cleanup
-            raise
+        cancellation: asyncio.CancelledError | None = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as error:
+                cancellation = error
+        cleanup.result()
+        if cancellation is not None:
+            raise cancellation
 
     async def __aexit__(
         self,
