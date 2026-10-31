@@ -500,3 +500,194 @@ def test_uncertain_presentation_blocks_gameplay_until_same_operation_is_restored
             assert calls.count("/action") == 1
 
     asyncio.run(run())
+
+
+def test_explicit_restart_retries_restoration_once_per_pause() -> None:
+    from test_mod_client import RUN
+
+    from sts2_harness.client import models as native
+    from sts2_harness.game import LiveGame, ReadFailure, Resumed
+
+    observation = native.Observation.model_validate_json(RUN)
+    calls: list[str] = []
+    verifications = 0
+    pauses = 0
+    status_after_pause = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal verifications, pauses, status_after_pause
+        calls.append(request.url.path)
+        if request.url.path == "/control":
+            assert (
+                native.ControlRequest.model_validate_json(request.content).mode
+                is native.ControlIntent.PAUSED
+            )
+            pauses += 1
+            status_after_pause = 0
+            return httpx.Response(200, json={"mode": "paused"})
+        if request.url.path == "/map/restore/verify":
+            body = native.VerifyPresentationRequest.model_validate_json(request.content)
+            assert body.operation_id == "display"
+            verifications += 1
+            restored = verifications == 3
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "display",
+                    "status": "completed",
+                    "restoration": "restored" if restored else "unknown",
+                    "gate": "open" if restored else "locked",
+                },
+            )
+        if request.url.path == "/status":
+            status_after_pause += 1
+            restored = verifications == 3
+            return httpx.Response(
+                200,
+                json={
+                    "location": observation.location.model_dump(mode="json"),
+                    "control_intent": "paused" if pauses and status_after_pause == 1 else "running",
+                    "input_readiness": "ready" if restored else "unavailable",
+                    "receipt": None,
+                    "presentation": {
+                        "operation_id": "display",
+                        "phase": "restored" if restored else "settled_unverified",
+                        "drawing": "shown",
+                        "restoration": "restored" if restored else "unknown",
+                        "gate": "open" if restored else "locked",
+                    },
+                },
+            )
+        assert request.url.path == "/state"
+        return httpx.Response(
+            200,
+            content=native.StateCompleted(
+                status=native.ResultStatus.COMPLETED, observation=observation
+            ).to_json(),
+        )
+
+    async def run() -> None:
+        async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
+
+            async def wait(_: float) -> None:
+                return None
+
+            game = LiveGame(
+                client, namespace="test", game_instance_id="game", run_id="run", wait=wait
+            )
+            assert isinstance((await game.admit()).outcome, ReadFailure)
+            assert isinstance((await game.admit()).outcome, ReadFailure)
+            assert verifications == 1
+            resumed = await game.pause_until_resumed(None)
+            assert isinstance(resumed.outcome, Resumed)
+            assert resumed.outcome.observation == observation
+        assert verifications == 3
+        assert pauses == 2
+        assert calls == [
+            "/status",
+            "/map/restore/verify",
+            "/status",
+            "/status",
+            "/control",
+            "/status",
+            "/status",
+            "/map/restore/verify",
+            "/status",
+            "/control",
+            "/status",
+            "/status",
+            "/map/restore/verify",
+            "/status",
+            "/state",
+        ]
+
+    asyncio.run(run())
+
+
+def test_restart_waits_for_presentation_worker_before_verifying() -> None:
+    from test_mod_client import RUN
+
+    from sts2_harness.client import models as native
+    from sts2_harness.game import LiveGame, Resumed
+
+    observation = native.Observation.model_validate_json(RUN)
+    calls: list[str] = []
+    status_reads = 0
+    restored = False
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal status_reads, restored
+        calls.append(request.url.path)
+        if request.url.path == "/control":
+            return httpx.Response(200, json={"mode": "paused"})
+        if request.url.path == "/status":
+            status_reads += 1
+            running = status_reads <= 2
+            return httpx.Response(
+                200,
+                json={
+                    "location": observation.location.model_dump(mode="json"),
+                    "control_intent": "running",
+                    "receipt": None,
+                    "input_readiness": "ready"
+                    if restored
+                    else "busy"
+                    if running
+                    else "unavailable",
+                    "presentation": {
+                        "operation_id": "display",
+                        "phase": "restored"
+                        if restored
+                        else "running"
+                        if running
+                        else "settled_unverified",
+                        "drawing": "shown" if not running else "pending",
+                        "restoration": "restored"
+                        if restored
+                        else "pending"
+                        if running
+                        else "unknown",
+                        "gate": "open" if restored else "locked",
+                    },
+                },
+            )
+        if request.url.path == "/map/restore/verify":
+            assert status_reads == 3
+            restored = True
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": "display",
+                    "status": "completed",
+                    "restoration": "restored",
+                    "gate": "open",
+                },
+            )
+        assert request.url.path == "/state"
+        return httpx.Response(
+            200,
+            content=native.StateCompleted(
+                status=native.ResultStatus.COMPLETED, observation=observation
+            ).to_json(),
+        )
+
+    async def run() -> None:
+        async def wait(_: float) -> None:
+            return None
+
+        async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
+            game = LiveGame(
+                client, namespace="test", game_instance_id="game", run_id="run", wait=wait
+            )
+            assert isinstance((await game.pause_until_resumed(None)).outcome, Resumed)
+        assert calls == [
+            "/control",
+            "/status",
+            "/status",
+            "/status",
+            "/map/restore/verify",
+            "/status",
+            "/state",
+        ]
+
+    asyncio.run(run())

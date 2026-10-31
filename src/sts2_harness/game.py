@@ -493,7 +493,9 @@ class LiveGame:
             observation = await self._observe()
         return observation
 
-    async def _ensure_presentation(self, status: native.Status) -> native.Status:
+    async def _ensure_presentation(
+        self, status: native.Status, *, retry_verification: bool = False
+    ) -> native.Status:
         presentation = status.presentation
         if self._unresolved_presentation is not None and (
             presentation is None or presentation.operation_id != self._unresolved_presentation
@@ -523,7 +525,7 @@ class LiveGame:
         if presentation.phase is native.PresentationPhase.RESTORED:
             self._unresolved_presentation = None
             return status
-        if operation_id in self._presentation_verifications:
+        if operation_id in self._presentation_verifications and not retry_verification:
             raise GameReadError("Map restoration remains unconfirmed; native input is locked.")
         location = status.location
         if location.run_id is None or location.node_id is None or location.owner is None:
@@ -574,6 +576,39 @@ class LiveGame:
     async def _pause_until_resumed(self, reason: Reason | None) -> native.Observation:
         """Write Pause, await explicit Start, then refresh; a dead run raises GameLifetimeEnded."""
         while True:
+            await self._pause()
+            while True:
+                self._check_stop()
+                try:
+                    status = await self._status(waiting=True)
+                except (ClientUnavailable, GameReadError):
+                    await self._wait(1.0)
+                    continue
+                if (
+                    not self._same_run(status.location)
+                    or status.input_readiness is native.InputReadiness.TERMINAL
+                ):
+                    raise GameLifetimeEnded(status.location)
+                if status.control_intent is native.ControlIntent.RUNNING:
+                    try:
+                        await self._ensure_presentation(status, retry_verification=True)
+                    except (ClientUnavailable, GameReadError):
+                        break
+                    try:
+                        observation = await self._observe()
+                    except (ClientUnavailable, GameReadError):
+                        await self._wait(1.0)
+                        continue
+                    if (
+                        not self._same_run(observation.location)
+                        or observation.state.phase is native.Phase.TERMINAL
+                    ):
+                        raise GameLifetimeEnded(observation.location)
+                    return observation
+                await self._wait(1.0)
+
+    async def _pause(self) -> None:
+        while True:
             self._check_stop()
             try:
                 result = await self._attempt(
@@ -616,32 +651,6 @@ class LiveGame:
                     )
                 )
             break
-        while True:
-            self._check_stop()
-            try:
-                status = await self._status(waiting=True)
-            except (ClientUnavailable, GameReadError):
-                await self._wait(1.0)
-                continue
-            if (
-                not self._same_run(status.location)
-                or status.input_readiness is native.InputReadiness.TERMINAL
-            ):
-                raise GameLifetimeEnded(status.location)
-            if status.control_intent is native.ControlIntent.RUNNING:
-                await self._ensure_presentation(status)
-                try:
-                    observation = await self._observe()
-                except (ClientUnavailable, GameReadError):
-                    await self._wait(1.0)
-                    continue
-                if (
-                    not self._same_run(observation.location)
-                    or observation.state.phase is native.Phase.TERMINAL
-                ):
-                    raise GameLifetimeEnded(observation.location)
-                return observation
-            await self._wait(1.0)
 
     async def _settle(self, request: native.StepRequest) -> SettledReceipt | None:
         try:
