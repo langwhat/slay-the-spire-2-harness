@@ -471,6 +471,8 @@ class Context:
         self._delivery.catalog = catalog
         self._delivery.scene = reconstructed_scene
         self._delivery.current = reconstructed_current
+        if self._active_group is None or self._active_group is group:
+            self._delivery.reset_pending = False
         if not has_retained_observation:
             decision = initial.get("decision")
             if isinstance(decision, dict) and isinstance(decision.get("phase"), str):
