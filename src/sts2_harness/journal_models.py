@@ -18,7 +18,14 @@ from pydantic import (
     model_validator,
 )
 
-from sts2_harness.capacity import CapacityPolicy, CompactionDecision, CompactionValidation
+from sts2_harness.capacity import (
+    CapacityPolicy,
+    CompactionDecision,
+    CompactionValidation,
+    ModelAttemptReference,
+    RecoveryComparison,
+    RecoveryDecision,
+)
 from sts2_harness.client import models as native
 from sts2_harness.config import Authentication, AuthKind, ModelConfiguration, Protocol
 from sts2_harness.context.models import (
@@ -554,6 +561,7 @@ class ReplySnapshot(NativeSnapshot):
 class AttemptCause(StrEnum):
     INITIAL = "initial"
     TRANSPORT_RETRY = "transport_retry"
+    CAPACITY_RETRY = "capacity_retry"
 
 
 class ModelAttempt(native.WireModel):
@@ -563,7 +571,8 @@ class ModelAttempt(native.WireModel):
     estimated_input_tokens: int | None = None
     estimator_id: Literal["wire_tiktoken_max_v1"] = "wire_tiktoken_max_v1"
     cause: AttemptCause = AttemptCause.INITIAL
-    recovery_of: None = None
+    recovery_of: ModelAttemptReference | None = None
+    capacity_signal: str | None = None
     reply: ReplySnapshot | None = None
     failure: FailureKind | None = None
 
@@ -584,6 +593,22 @@ class PreparationEvidence(native.WireModel):
 class PreparationInput(native.WireModel):
     messages: tuple[MessageSnapshot, ...]
     tools: ToolSet
+
+
+class RecoveryRecord(native.WireModel):
+    rejected: ModelAttemptReference
+    classification: Literal["capacity_rejected"] = "capacity_rejected"
+    signal: str
+    candidate_input_ref: str | None
+    candidate_input_digest: str | None
+    candidate_estimate: int | None
+    comparison: RecoveryComparison
+    decision: RecoveryDecision
+    retry_sequence: int | None = None
+
+
+class RecordedRecovery(RecoveryRecord):
+    candidate_input: PreparationInput | None
 
 
 class PreparationBaseline(native.WireModel):
@@ -640,6 +665,7 @@ class ModelRecord(native.WireModel):
     attempts: tuple[ModelAttempt, ...]
     delivered: bool
     failure: FailureKind | None
+    capacity_recovery: RecordedRecovery | None = None
 
 
 class MaterialKind(StrEnum):

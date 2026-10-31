@@ -26,6 +26,23 @@ class CompactionValidation(StrEnum):
     FAILED = "failed"
 
 
+class RecoveryComparison(StrEnum):
+    STRICTLY_SMALLER = "strictly_smaller"
+    UNCHANGED = "unchanged"
+    INVALID = "invalid"
+    OVER_WINDOW = "over_window"
+
+
+class RecoveryDecision(StrEnum):
+    RETRY = "retry"
+    INTERRUPT = "interrupt"
+
+
+class ModelAttemptReference(native.WireModel):
+    sequence: Annotated[int, Field(gt=0)]
+    attempt: Annotated[int, Field(gt=0)]
+
+
 class CapacityClassifierConfig(native.WireModel):
     protocols: tuple[Protocol, ...] = (
         Protocol.RESPONSES,
@@ -34,6 +51,9 @@ class CapacityClassifierConfig(native.WireModel):
     )
     endpoint_category: Literal["unverified"] = "unverified"
     enabled_signals: tuple[str, ...] = Field(default=(), max_length=0)
+
+    def supports(self, protocol: Protocol, signal: str) -> bool:
+        return protocol in self.protocols and signal in self.enabled_signals
 
 
 class CapacityPolicy(native.WireModel):
@@ -57,6 +77,7 @@ class CapacityPolicy(native.WireModel):
 class Measurement:
     digest: str
     estimated_input_tokens: int
+    encoded_bytes: int
 
 
 def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
@@ -77,4 +98,5 @@ def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
         count += len(value)
     text = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     tokens = max(len(encoding.encode_ordinary(text)) for encoding in encodings())
-    return Measurement(sha256(text.encode()).hexdigest(), tokens + 1024 + 64 * count)
+    encoded = text.encode()
+    return Measurement(sha256(encoded).hexdigest(), tokens + 1024 + 64 * count, len(encoded))

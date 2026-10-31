@@ -9,6 +9,7 @@ from sts2_harness.journal import ArchiveError, Journal, RecordedGame, SceneVaria
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
+    CapacityRecovery,
     ModelClient,
     ModelInput,
     ModelReply,
@@ -78,6 +79,9 @@ class SceneSession:
                     self, input: ModelInput, tools: tuple[ToolDefinition, ...]
                 ) -> PreparedRequest:
                     return recorded.prepare(input, materials.tools(tools))
+
+                async def record_recovery(self, recovery: CapacityRecovery) -> None:
+                    await recorded.record_recovery(recovery)
 
                 async def complete_prepared(
                     self,

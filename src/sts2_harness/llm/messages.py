@@ -15,6 +15,9 @@ from sts2_harness.capacity import (
     CompactionDecision,
     CompactionValidation,
     Measurement,
+    ModelAttemptReference,
+    RecoveryComparison,
+    RecoveryDecision,
 )
 from sts2_harness.config import Protocol as ModelProtocol
 from sts2_harness.knowledge import GuidanceContent
@@ -171,6 +174,7 @@ class RequestPreparation:
     retained_complete_group_id: int | None
     active_group_id: int | None
     validation: CompactionValidation
+    recovery_of: ModelAttemptReference | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,11 +267,37 @@ class ModelUnavailable(Exception):
         super().__init__(f"Model request unavailable: {reason.value}.")
 
 
+class CapacityRejected(ModelUnavailable):
+    """A request was rejected by a verified structured capacity signal."""
+
+    def __init__(self, signal: str, *, attempt: int) -> None:
+        self.signal = signal
+        self.attempt = attempt
+        self.sequence: int | None = None
+        super().__init__(FailureKind.CAPACITY)
+
+    @property
+    def reference(self) -> ModelAttemptReference | None:
+        if self.sequence is None:
+            return None
+        return ModelAttemptReference(sequence=self.sequence, attempt=self.attempt)
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityRecovery:
+    rejected: CapacityRejected
+    candidate: PreparedRequest | None
+    comparison: RecoveryComparison
+    decision: RecoveryDecision
+
+
 class ModelClient(Protocol):
     @property
     def capacity_policy(self) -> CapacityPolicy: ...
 
     def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest: ...
+
+    async def record_recovery(self, recovery: CapacityRecovery) -> None: ...
 
     async def complete_prepared(
         self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
@@ -289,4 +319,4 @@ class ModelAttemptSink(Protocol):
     def started(self, index: int) -> None: ...
     def encoded(self, measurement: Measurement) -> None: ...
     def received(self, reply: ModelReply) -> None: ...
-    def failed(self, reason: FailureKind) -> None: ...
+    def failed(self, reason: FailureKind, *, capacity_signal: str | None = None) -> None: ...

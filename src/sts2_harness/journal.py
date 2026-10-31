@@ -12,7 +12,14 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
 
-from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy, CompactionDecision
+from sts2_harness.capacity import (
+    CapacityClassifierConfig,
+    CapacityPolicy,
+    CompactionDecision,
+    ModelAttemptReference,
+    RecoveryComparison,
+    RecoveryDecision,
+)
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import (
@@ -74,6 +81,8 @@ from sts2_harness.journal_models import (
     PreparationInput,
     PreparationReferences,
     RecordedPreparation,
+    RecordedRecovery,
+    RecoveryRecord,
     SkillListing,
     ToolSet,
 )
@@ -131,7 +140,7 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[11] = 11
+    schema_version: Literal[12] = 12
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -293,6 +302,7 @@ CREATE TABLE IF NOT EXISTS model_requests (sequence INTEGER PRIMARY KEY, cursor 
     delivered INTEGER NOT NULL DEFAULT 0, failure TEXT);
 CREATE TABLE IF NOT EXISTS model_attempts (sequence INTEGER NOT NULL, attempt INTEGER NOT NULL,
     value TEXT NOT NULL, PRIMARY KEY(sequence,attempt));
+CREATE TABLE IF NOT EXISTS model_recoveries (sequence INTEGER PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS materials (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
     request TEXT NOT NULL, reply TEXT);
 CREATE TABLE IF NOT EXISTS summaries (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
@@ -728,6 +738,53 @@ class Journal:
                         connection, summary.model_copy(update={"physical_attempts": attempt.index})
                     )
 
+    def record_model_recovery(
+        self,
+        rejected: ModelAttemptReference,
+        signal: str,
+        candidate: PreparationInput | None,
+        estimate: int | None,
+        comparison: RecoveryComparison,
+        decision: RecoveryDecision,
+    ) -> None:
+        with self._storage() as connection:
+            if connection is not None:
+                candidate_ref = self._blob(connection, candidate) if candidate is not None else None
+                record = RecoveryRecord(
+                    rejected=rejected,
+                    signal=signal,
+                    candidate_input_ref=candidate_ref,
+                    candidate_input_digest=candidate_ref,
+                    candidate_estimate=estimate,
+                    comparison=comparison,
+                    decision=decision,
+                )
+                connection.execute(
+                    "INSERT INTO model_recoveries VALUES (?,?)",
+                    (rejected.sequence, self._blob(connection, record)),
+                )
+
+    def link_model_recovery(self, rejected: ModelAttemptReference, retry_sequence: int) -> None:
+        with self._storage() as connection:
+            if connection is not None:
+                row = connection.execute(
+                    "SELECT value FROM model_recoveries WHERE sequence=?", (rejected.sequence,)
+                ).fetchone()
+                if row is None:
+                    raise ArchiveError("The capacity recovery decision is missing.")
+                record = RecoveryRecord.model_validate_json(self._read_blob(connection, row[0]))
+                if (
+                    record.rejected != rejected
+                    or record.decision is not RecoveryDecision.RETRY
+                    or record.retry_sequence is not None
+                ):
+                    raise ArchiveError("The capacity recovery link is inconsistent.")
+                updated = record.model_copy(update={"retry_sequence": retry_sequence})
+                connection.execute(
+                    "UPDATE model_recoveries SET value=? WHERE sequence=?",
+                    (self._blob(connection, updated), rejected.sequence),
+                )
+
     def finish_model(self, sequence: int, *, failure: FailureKind | None = None) -> None:
         with self._storage() as connection:
             if connection is not None:
@@ -886,6 +943,52 @@ class Journal:
                         )
                         for item in content
                     )
+                    recovery_row = connection.execute(
+                        "SELECT value FROM model_recoveries WHERE sequence=?", (sequence,)
+                    ).fetchone()
+                    recovery = None
+                    if recovery_row is not None:
+                        recovery_refs = RecoveryRecord.model_validate_json(
+                            self._read_blob(connection, recovery_row[0])
+                        )
+                        candidate = (
+                            PreparationInput.model_validate_json(
+                                self._read_blob(connection, recovery_refs.candidate_input_ref),
+                                context=BlobDecoding(
+                                    lambda digest: self._read_blob(connection, digest)
+                                ),
+                            )
+                            if recovery_refs.candidate_input_ref is not None
+                            else None
+                        )
+                        rejected = recovery_refs.rejected
+                        if (
+                            rejected.sequence != sequence
+                            or rejected.attempt > len(attempts)
+                            or rejected.attempt != len(attempts)
+                            or attempts[rejected.attempt - 1].index != rejected.attempt
+                            or attempts[rejected.attempt - 1].failure is not FailureKind.CAPACITY
+                            or attempts[rejected.attempt - 1].capacity_signal
+                            != recovery_refs.signal
+                            or failure != FailureKind.CAPACITY.value
+                            or (candidate is None) != (recovery_refs.candidate_estimate is None)
+                            or recovery_refs.candidate_input_digest
+                            != recovery_refs.candidate_input_ref
+                            or (candidate is not None and candidate.tools != tools)
+                            or (
+                                recovery_refs.decision is RecoveryDecision.INTERRUPT
+                                and recovery_refs.retry_sequence is not None
+                            )
+                            or (
+                                recovery_refs.decision is RecoveryDecision.RETRY
+                                and recovery_refs.comparison
+                                is not RecoveryComparison.STRICTLY_SMALLER
+                            )
+                        ):
+                            raise ArchiveError("A capacity recovery record is inconsistent.")
+                        recovery = RecordedRecovery(
+                            **recovery_refs.model_dump(), candidate_input=candidate
+                        )
                     if (
                         preparation is not None
                         and preparation.decision
@@ -912,6 +1015,7 @@ class Journal:
                             attempts=attempts,
                             delivered=bool(delivered),
                             failure=FailureKind(failure) if failure else None,
+                            capacity_recovery=recovery,
                         )
                     )
                 return inherited + tuple(result)

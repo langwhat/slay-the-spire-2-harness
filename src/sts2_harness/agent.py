@@ -3,7 +3,12 @@
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 
-from sts2_harness.capacity import CompactionDecision, CompactionValidation
+from sts2_harness.capacity import (
+    CompactionDecision,
+    CompactionValidation,
+    RecoveryComparison,
+    RecoveryDecision,
+)
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.decisions import (
@@ -19,6 +24,8 @@ from sts2_harness.execution.recovery import DecisionInterrupted, ModelFailure, T
 from sts2_harness.game import GameLifetimeEnded
 from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.messages import (
+    CapacityRecovery,
+    CapacityRejected,
     FailureKind,
     ModelClient,
     ModelReply,
@@ -102,7 +109,61 @@ class Agent(ABC):
     async def _request(self, context: Context) -> ModelReply:
         assert self._llm is not None
         prepared, evidence = await self.compact(context)
-        return await self._llm.complete_prepared(prepared, preparation=evidence)
+        try:
+            return await self._llm.complete_prepared(prepared, preparation=evidence)
+        except CapacityRejected as rejected:
+            candidate, baseline = context.compaction_input()
+            try:
+                context.validate_compaction(candidate)
+            except ValueError:
+                await self._llm.record_recovery(
+                    CapacityRecovery(
+                        rejected, None, RecoveryComparison.INVALID, RecoveryDecision.INTERRUPT
+                    )
+                )
+                raise ModelUnavailable(FailureKind.CAPACITY) from None
+            compacted = self._llm.prepare(candidate, self._tools.definitions)
+            if (
+                compacted.measurement.estimated_input_tokens
+                >= self._llm.capacity_policy.context_window
+            ):
+                comparison = RecoveryComparison.OVER_WINDOW
+            elif (
+                compacted.measurement.encoded_bytes >= prepared.measurement.encoded_bytes
+                or compacted.measurement.estimated_input_tokens
+                >= prepared.measurement.estimated_input_tokens
+            ):
+                comparison = RecoveryComparison.UNCHANGED
+            else:
+                comparison = RecoveryComparison.STRICTLY_SMALLER
+            decision = (
+                RecoveryDecision.RETRY
+                if comparison is RecoveryComparison.STRICTLY_SMALLER
+                else RecoveryDecision.INTERRUPT
+            )
+            await self._llm.record_recovery(
+                CapacityRecovery(rejected, compacted, comparison, decision)
+            )
+            if decision is RecoveryDecision.INTERRUPT:
+                raise ModelUnavailable(FailureKind.CAPACITY) from None
+            complete_id, active_id = context.group_ids
+            group_id = active_id or complete_id
+            assert group_id is not None
+            context.install_compaction(candidate)
+            recovery = RequestPreparation(
+                group_id,
+                baseline,
+                prepared.input,
+                prepared.measurement.estimated_input_tokens,
+                CompactionDecision.COMPACTED,
+                candidate,
+                compacted.measurement.estimated_input_tokens,
+                complete_id,
+                active_id,
+                CompactionValidation.PASSED,
+                rejected.reference,
+            )
+            return await self._llm.complete_prepared(compacted, preparation=recovery)
 
     async def compact(self, context: Context) -> tuple[PreparedRequest, RequestPreparation]:
         assert self._llm is not None

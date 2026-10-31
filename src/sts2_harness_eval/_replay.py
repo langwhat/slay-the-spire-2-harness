@@ -8,7 +8,7 @@ from typing import Never
 
 from pydantic import MISSING
 
-from sts2_harness.capacity import CapacityPolicy
+from sts2_harness.capacity import CapacityPolicy, RecoveryDecision
 from sts2_harness.client import models as native
 from sts2_harness.context import repeats_action_result
 from sts2_harness.context.models import (
@@ -48,6 +48,7 @@ from sts2_harness.journal import (
 )
 from sts2_harness.journal_models import (
     AssistantSnapshot,
+    AttemptCause,
     ConfigurationSnapshot,
     DocumentLookup,
     DocumentLookupResult,
@@ -62,13 +63,16 @@ from sts2_harness.journal_models import (
     MaterialSnapshot,
     ModelRecord,
     PreparationEvidence,
+    PreparationInput,
     PromptRead,
     PromptReadResult,
+    RecordedRecovery,
     ResultSnapshot,
     RunTaskSnapshot,
     SkillListing,
     SkillListingResult,
     TaskSnapshot,
+    ToolSet,
     ToolSnapshot,
     archive_input,
 )
@@ -84,6 +88,8 @@ from sts2_harness.knowledge import (
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
     AssistantMessage,
+    CapacityRecovery,
+    CapacityRejected,
     ModelClient,
     ModelInput,
     ModelMetadata,
@@ -435,6 +441,7 @@ class ReplayModel:
         self._reached = reached
         self._continuation = continuation
         self._preparers: dict[str, Llm] = {}
+        self._rejected_record: ModelRecord | None = None
 
     def _next_record(self) -> ModelRecord:
         for record in self._timeline.records[self._timeline.index :]:
@@ -446,6 +453,8 @@ class ReplayModel:
         unsupported(None, UnsupportedCause.UNEXPECTED_END)
 
     def _next_configuration(self) -> ConfigurationSnapshot:
+        if self._rejected_record is not None:
+            return self._rejected_record.configuration
         return self._next_record().configuration
 
     @property
@@ -461,6 +470,44 @@ class ReplayModel:
             preparer = Llm(configuration.for_offline_preparation())
             self._preparers[key] = preparer
         return preparer.prepare(input, tools)
+
+    async def record_recovery(self, recovery: CapacityRecovery) -> None:
+        record = self._rejected_record
+        if record is None or record.capacity_recovery is None:
+            unsupported(None, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+        expected: RecordedRecovery = record.capacity_recovery
+        candidate = recovery.candidate
+        actual = (
+            PreparationInput(
+                messages=archive_input(candidate.input),
+                tools=ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in candidate.tools)),
+            )
+            if candidate is not None
+            else None
+        )
+        if (
+            expected.rejected != recovery.rejected.reference
+            or expected.signal != recovery.rejected.signal
+            or expected.candidate_input != actual
+            or expected.candidate_estimate
+            != (candidate.measurement.estimated_input_tokens if candidate is not None else None)
+            or expected.comparison is not recovery.comparison
+            or expected.decision is not recovery.decision
+            or (expected.decision is RecoveryDecision.RETRY)
+            != (expected.retry_sequence is not None)
+        ):
+            _different(record.sequence, InputComponent.MODEL_INPUT)
+        self._rejected_record = None
+        if expected.retry_sequence is not None:
+            next_record = self._next_record()
+            if (
+                next_record.sequence != expected.retry_sequence
+                or next_record.confirmed_operation_cursor != record.confirmed_operation_cursor
+                or not next_record.attempts
+                or next_record.attempts[0].cause is not AttemptCause.CAPACITY_RETRY
+                or next_record.attempts[0].recovery_of != expected.rejected
+            ):
+                unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
 
     def _check_preparation(
         self, record: ModelRecord, preparation: RequestPreparation | None
@@ -567,6 +614,17 @@ class ReplayModel:
                 return await self._continuation(input, tools, preparation)
             await asyncio.Future[None]()
         if record.failure is not None:
+            if record.attempts and record.attempts[-1].capacity_signal is not None:
+                attempt = record.attempts[-1]
+                assert attempt.capacity_signal is not None
+                if not record.configuration.capacity_policy.capacity_classifier_config.supports(
+                    record.configuration.protocol, attempt.capacity_signal
+                ):
+                    unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+                rejection = CapacityRejected(attempt.capacity_signal, attempt=attempt.index)
+                rejection.sequence = record.sequence
+                self._rejected_record = record
+                raise rejection
             raise ModelUnavailable(record.failure)
         if not record.delivered or not record.attempts:
             unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
@@ -612,6 +670,9 @@ async def _run(
                 return historical.prepare(
                     input, materials.tools(tools) if materials is not None else tools
                 )
+
+            async def record_recovery(self, recovery: CapacityRecovery) -> None:
+                await historical.record_recovery(recovery)
 
             async def complete_prepared(
                 self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None

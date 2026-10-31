@@ -47,6 +47,7 @@ from sts2_harness.journal_models import AssistantSnapshot, MaterialRecord, Model
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
+    CapacityRecovery,
     ModelClient,
     ModelInput,
     ModelReply,
@@ -589,6 +590,12 @@ class _Takeover:
                     if switch.live:
                         return switch.current.model(role, stream).prepare(input, treated_tools)
                     return historical.prepare(input, treated_tools)
+
+                async def record_recovery(self, recovery: CapacityRecovery) -> None:
+                    if switch.live:
+                        await switch.current.model(role, stream).record_recovery(recovery)
+                    else:
+                        await historical.record_recovery(recovery)
 
                 async def complete_prepared(
                     self,

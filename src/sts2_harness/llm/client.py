@@ -22,6 +22,8 @@ from sts2_harness.llm.anthropic_boundary import classify_error as classify_anthr
 from sts2_harness.llm.anthropic_messages import MessagesAdapter
 from sts2_harness.llm.chat_completions import ChatCompletionsAdapter
 from sts2_harness.llm.messages import (
+    CapacityRecovery,
+    CapacityRejected,
     FailureKind,
     ModelAttemptSink,
     ModelInput,
@@ -91,6 +93,9 @@ class Llm:
         body = self._adapter.prepare(input, tools)
         return PreparedRequest(input, tools, measure(body, self._configuration.protocol), body)
 
+    async def record_recovery(self, recovery: CapacityRecovery) -> None:
+        return None
+
     async def complete(
         self,
         input: ModelInput,
@@ -153,6 +158,17 @@ class Llm:
                 reason = classify_error(error.code)
             except (ValidationError, ValueError):
                 reason = FailureKind.PROTOCOL
+            except CapacityRejected as error:
+                if not self.capacity_policy.capacity_classifier_config.supports(
+                    self._configuration.protocol, error.signal
+                ):
+                    if evidence is not None and started:
+                        evidence.failed(FailureKind.CONFIGURATION)
+                    raise ModelUnavailable(FailureKind.CONFIGURATION) from None
+                if evidence is not None and started:
+                    evidence.failed(error.reason, capacity_signal=error.signal)
+                error.attempt = attempt + 1
+                raise
             except ModelUnavailable as error:
                 reason = error.reason
             if evidence is not None and started:

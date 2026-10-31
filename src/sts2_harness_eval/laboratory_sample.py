@@ -20,6 +20,7 @@ from sts2_harness.journal import ArchiveError, Journal, Manifest, RecordedGame, 
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
+    CapacityRecovery,
     ModelClient,
     ModelInput,
     ModelReply,
@@ -137,6 +138,9 @@ class _Sample:
                     self, input: ModelInput, tools: tuple[ToolDefinition, ...]
                 ) -> PreparedRequest:
                     return recorded.prepare(input, tools)
+
+                async def record_recovery(self, recovery: CapacityRecovery) -> None:
+                    await recorded.record_recovery(recovery)
 
                 def _check_first(self) -> None:
                     if sample._first_request:

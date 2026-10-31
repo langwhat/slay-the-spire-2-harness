@@ -20,6 +20,7 @@ from sts2_harness.game import (
 )
 from sts2_harness.journal import ArchiveError, Journal
 from sts2_harness.llm.messages import (
+    CapacityRecovery,
     ModelClient,
     ModelInput,
     ModelReply,
@@ -221,6 +222,9 @@ class SampleHost:
                     self, input: ModelInput, tools: tuple[ToolDefinition, ...]
                 ) -> PreparedRequest:
                     return client.prepare(input, tools)
+
+                async def record_recovery(self, recovery: CapacityRecovery) -> None:
+                    await client.record_recovery(recovery)
 
                 async def complete_prepared(
                     self,

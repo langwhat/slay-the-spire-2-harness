@@ -3,7 +3,7 @@
 import hashlib
 import time
 
-from sts2_harness.capacity import CapacityPolicy, Measurement
+from sts2_harness.capacity import CapacityPolicy, Measurement, ModelAttemptReference
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import EncodingMetadata, Event, EventKind
 from sts2_harness.journal import Journal
@@ -22,6 +22,7 @@ from sts2_harness.journal_models import (
     MaterialSnapshot,
     ModelAttempt,
     PreparationEvidence,
+    PreparationInput,
     PromptRead,
     PromptReadResult,
     ReplySnapshot,
@@ -43,6 +44,8 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
+    CapacityRecovery,
+    CapacityRejected,
     FailureKind,
     ModelInput,
     ModelReply,
@@ -62,12 +65,14 @@ class _Attempts:
         sequence: int,
         role: native.DecisionOwner,
         input_digest: str,
+        recovery_of: ModelAttemptReference | None,
     ) -> None:
         self._journal = journal
         self._sequence = sequence
         self._attempt = ModelAttempt(index=1)
         self._role = role
         self._input_digest = input_digest
+        self._recovery_of = recovery_of
         self._failures = 0
         self._last_failure: FailureKind | None = None
         self._started = time.monotonic()
@@ -76,7 +81,14 @@ class _Attempts:
         self._attempt = ModelAttempt(
             index=index,
             input_digest=self._input_digest,
-            cause=AttemptCause.INITIAL if index == 1 else AttemptCause.TRANSPORT_RETRY,
+            cause=(
+                AttemptCause.TRANSPORT_RETRY
+                if index != 1
+                else AttemptCause.CAPACITY_RETRY
+                if self._recovery_of is not None
+                else AttemptCause.INITIAL
+            ),
+            recovery_of=self._recovery_of,
         )
         self._journal.model_attempt(self._sequence, self._attempt)
         if self._last_failure is not None:
@@ -107,8 +119,10 @@ class _Attempts:
         self._attempt = self._attempt.model_copy(update={"reply": ReplySnapshot.of(reply)})
         self._journal.model_attempt(self._sequence, self._attempt)
 
-    def failed(self, reason: FailureKind) -> None:
-        self._attempt = self._attempt.model_copy(update={"failure": reason})
+    def failed(self, reason: FailureKind, *, capacity_signal: str | None = None) -> None:
+        self._attempt = self._attempt.model_copy(
+            update={"failure": reason, "capacity_signal": capacity_signal}
+        )
         self._journal.model_attempt(self._sequence, self._attempt)
         self._failures += 1
         self._last_failure = reason
@@ -155,6 +169,28 @@ class RecordedLlm:
 
     def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
         return self._live.prepare(input, tools)
+
+    async def record_recovery(self, recovery: CapacityRecovery) -> None:
+        reference = recovery.rejected.reference
+        if reference is None:
+            raise RuntimeError("Recorded recovery requires the rejected attempt identity.")
+        candidate = recovery.candidate
+        candidate_input = (
+            PreparationInput(
+                messages=archive_input(candidate.input),
+                tools=ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in candidate.tools)),
+            )
+            if candidate is not None
+            else None
+        )
+        self._journal.record_model_recovery(
+            reference,
+            recovery.rejected.signal,
+            candidate_input,
+            candidate.measurement.estimated_input_tokens if candidate is not None else None,
+            recovery.comparison,
+            recovery.decision,
+        )
 
     async def complete_prepared(
         self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
@@ -231,7 +267,10 @@ class RecordedLlm:
             ConfigurationSnapshot.of(self._live.configuration),
             preparation=self._preparation(preparation) if preparation is not None else None,
         )
-        attempts = _Attempts(self._journal, sequence, self._role, input_digest)
+        recovery_of = preparation.recovery_of if preparation is not None else None
+        if recovery_of is not None:
+            self._journal.link_model_recovery(recovery_of, sequence)
+        attempts = _Attempts(self._journal, sequence, self._role, input_digest, recovery_of)
         self._journal.diagnostics.started_model(self._role, sequence)
         try:
             if prepared is None:
@@ -241,6 +280,8 @@ class RecordedLlm:
         except ModelUnavailable as error:
             self._journal.finish_model(sequence, failure=error.reason)
             attempts.finished(error.reason)
+            if isinstance(error, CapacityRejected):
+                error.sequence = sequence
             raise
         else:
             self._journal.finish_model(sequence)
