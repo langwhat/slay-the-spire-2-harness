@@ -330,6 +330,7 @@ class Journal:
         self._active_attempt = 0
         self._read_only = False
         self._initialized = False
+        self._wal_connection: sqlite3.Connection | None = None
         self._owns_path = False
         self._storage_error: GapCause | None = None
         self._parent: Journal | None = None
@@ -455,16 +456,25 @@ class Journal:
             except FileExistsError:
                 raise ArchiveError("The recording path is occupied by another archive.") from None
             self._owns_path = True
-        with (
-            closing(sqlite3.connect(self.path, timeout=_WRITE_TIMEOUT_SECONDS)) as connection,
-            connection,
-        ):
-            if connection.execute("PRAGMA journal_mode=WAL").fetchone() != ("wal",):
-                raise sqlite3.OperationalError("Cannot enable concurrent recording reads.")
-            connection.executescript(_SCHEMA)
-            connection.execute(
-                "INSERT OR REPLACE INTO manifest VALUES (1,?)", (self.manifest.model_dump_json(),)
+        with ExitStack() as resources:
+            connection = resources.enter_context(
+                closing(
+                    sqlite3.connect(
+                        self.path, timeout=_WRITE_TIMEOUT_SECONDS, check_same_thread=False
+                    )
+                )
             )
+            with connection:
+                if connection.execute("PRAGMA journal_mode=WAL").fetchone() != ("wal",):
+                    raise sqlite3.OperationalError("Cannot enable concurrent recording reads.")
+                connection.executescript(_SCHEMA)
+                connection.execute(
+                    "INSERT OR REPLACE INTO manifest VALUES (1,?)",
+                    (self.manifest.model_dump_json(),),
+                )
+            # Only holds WAL resources after initialization; cleanup may run on another thread.
+            self._wal_connection = connection
+            self._resources.enter_context(resources.pop_all())
         self._initialized = True
 
     @property
@@ -1441,6 +1451,9 @@ class Journal:
         if self._active_sequence is not None:
             raise RuntimeError("Cannot close an active recording operation.")
         try:
+            if self._wal_connection is not None:
+                self._wal_connection.close()
+                self._wal_connection = None
             if not self._read_only:
                 if not self._initialized:
                     raise ArchiveError("Cannot seal a recording without a persisted manifest.")

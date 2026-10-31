@@ -1,10 +1,13 @@
 import asyncio
 import sqlite3
+import subprocess
+import sys
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from threading import Event, Thread
+from unittest.mock import patch
 
 import httpx2 as httpx
 import pytest
@@ -25,6 +28,90 @@ from sts2_harness.journal import (
     SessionMaterials,
 )
 from sts2_harness.results import ActionUnknown, Reason, ReasonCode
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Requires POSIX file size limits.")
+def test_recording_keeps_wal_resources_through_temporary_file_growth_limits(
+    tmp_path: Path,
+) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import resource
+import signal
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+from sts2_harness.game import Observe
+from sts2_harness.journal import Journal, Manifest, SessionMaterials
+
+path = Path(sys.argv[1]) / "archive.sqlite"
+journal = Journal.create(path, Manifest(
+    recording_id="session", core_version="test", game_instance_id="game", run_id="run",
+    materials=SessionMaterials(entry_documents_enabled=False, act_guidance={}, battle_guidance=()),
+))
+with closing(sqlite3.connect(path)) as connection:
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+previous_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+try:
+    # The transaction fits below 32 KiB; recreating SQLite's shared memory does not.
+    resource.setrlimit(resource.RLIMIT_FSIZE, (32767, hard))
+    journal.begin(Observe())
+    journal.end()
+finally:
+    resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+    signal.signal(signal.SIGXFSZ, previous_handler)
+gaps = journal.gaps
+journal.close()
+assert not gaps, gaps
+with closing(Journal.open(path)) as reader:
+    assert reader.operation(1).request == Observe()
+assert not Path(str(path) + "-wal").exists()
+assert not Path(str(path) + "-shm").exists()
+Journal.archive_sha256(path)
+""",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_recording_recovered_on_another_thread_can_be_sealed_by_its_owner(
+    tmp_path: Path,
+) -> None:
+    with patch(
+        "sts2_harness.journal.sqlite3.connect",
+        side_effect=sqlite3.OperationalError("Storage temporarily unavailable"),
+    ):
+        journal = Journal.create(
+            tmp_path / "archive.sqlite",
+            Manifest(
+                recording_id="session",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+            ),
+        )
+    assert not journal.availability.manifest_persisted
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(journal.begin, Observe()).result()
+    journal.end()
+    journal.close()
+    with closing(Journal.open(journal.path)) as reader:
+        assert reader.operation(1).request == Observe()
+        assert not reader.gaps
+    Journal.archive_sha256(journal.path)
 
 
 def test_branch_readers_join_the_parent_prefix_with_local_evidence(tmp_path: Path) -> None:
