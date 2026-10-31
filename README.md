@@ -383,7 +383,10 @@ dependencies and owns one Notes instance, recovery budget, and role flow. It doe
 injected dependencies. Automatic entry guidance is enabled separately from tool documents.
 `DefaultFlow` waits for Start,
 schedules Run and Combat, completes pending battle handoffs before creating the next
-Combat, rebuilds Run context at act boundaries, and returns on termination or run change.
+Combat, and replaces the Run role and its context when the native act changes. An unknown
+act does not establish a transition. Boss encounters and rewards do not define the role
+lifetime. A native terminal state ends the run without a battle review or further model call.
+Strategy notes remain available across acts and are supplied to each Combat at its opening.
 `start()` records a real Pause and waits for explicit Start before `run()` enters gameplay.
 A supplied process Diagnostics instance is borrowed and remains open across run sessions.
 It does not launch a game or select a character. Run chooses automatic progression or
@@ -401,9 +404,10 @@ in memory. Reads return the full text; replacement permits clearing; an edit req
 exact unique match, including overlapping occurrences, and permits deletion. Failed edits
 leave notes unchanged, while successful writes return only `{"updated":true}`.
 
-`await role.enter_act(ActStart(observation))` fully loads guidance and packaged instructions
-before installing a fresh Context and delivery ledger. A required-material failure requests
-Pause through `DecisionInterrupted`; explicit retry preserves the same notes owner. Finish
-pending action feedback before entering an act. The first actual act or handoff task in the
-new Context carries current notes, including an empty string; construction alone does not
-consume them. Session orchestration owns act scheduling and recording stream assembly.
+`await role.enter_act(ActStart(observation))` loads guidance and packaged instructions for
+that role's single act before installing its Context and delivery ledger. A required-material
+failure requests Pause through `DecisionInterrupted`; explicit retry preserves the same notes
+owner. Finish pending action feedback before entering an act. The first actual act or handoff
+task in the new Context carries current notes, including an empty string; construction alone
+does not consume them. Session orchestration creates a new Run role for each confirmed native
+act transition and owns recording stream assembly.

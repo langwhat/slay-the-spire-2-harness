@@ -36,6 +36,7 @@ class DefaultFlow:
         run: RunRole,
         combat: CombatFactory,
         *,
+        new_run: Callable[[], RunRole],
         diagnostics: Diagnostics | None = None,
     ) -> None:
         self._diagnostics = diagnostics
@@ -44,6 +45,7 @@ class DefaultFlow:
         self._recovery = recovery
         self._notes = notes
         self._run = run
+        self._new_run = new_run
         self._combat = combat
         self._initialized = False
         self._act: int | None = None
@@ -86,10 +88,15 @@ class DefaultFlow:
                 if ended is not None:
                     return ended
                 act = observation.state.progress.act
-                if not self._initialized or act != self._act:
+                if self._initialized and self._act is None and act is not None:
+                    self._act = act
+                act_changed = act is not None and self._act is not None and act != self._act
+                if not self._initialized or act_changed:
                     if not entry_admitted:
                         observation = None
                         continue
+                    if self._initialized:
+                        self._run = self._new_run()
                     try:
                         await self._run.enter_act(ActStart(observation))
                     except DecisionInterrupted as error:

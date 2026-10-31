@@ -1,4 +1,4 @@
-"""One run's model role retains notes while its act contexts are replaceable."""
+"""One act's model role uses notes retained by the run session."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -113,6 +113,8 @@ class RunAgent(Agent):
     async def enter_act(self, start: ActStart) -> None:
         if self._pending_call is not None or self._pending_auto is not None:
             raise RuntimeError("Accept the previous action result before entering an act.")
+        if self._context is not None:
+            raise RuntimeError("A Run Agent cannot enter more than one act.")
         try:
             documents = (
                 await self._materials(start.observation) if self._materials is not None else ()

@@ -525,6 +525,7 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
                 first = await execution.run_unit(agent, HandoffTask(handoff()))
                 assert isinstance(first, TaskComplete)
                 notes.replace("Notes persist across acts.")
+                agent = RunAgent(lambda: llm, tools, budget, materials=materials)
                 path.unlink()
                 next_act = ActStart(http.observation)
                 with pytest.raises(DecisionInterrupted) as caught:

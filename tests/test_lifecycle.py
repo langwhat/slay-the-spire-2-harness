@@ -621,3 +621,132 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
         archive.close()
 
     asyncio.run(scenario())
+
+
+def test_session_keeps_same_act_history_and_starts_fresh_after_reward_free_transition(
+    tmp_path: Path,
+) -> None:
+    from sts2_harness.decisions import HandoffTask
+    from sts2_harness.execution import Execution
+    from sts2_harness.execution.recovery import ToolRecoveryBudget
+    from sts2_harness.notes import Notes
+    from sts2_harness.run import ActStart
+
+    campaign = Campaign(code_combat=True)
+    campaign.states = [
+        run_state(1, "start"),
+        battle_state(1, "boss-one"),
+        battle_state(1, "boss-two"),
+        run_state(2, "next-act"),
+        battle_state(2, "next-battle"),
+        terminal(battle_state(2, "next-battle")),
+    ]
+    openings: list[str] = []
+
+    class Run:
+        def __init__(self, notes: Notes) -> None:
+            self.notes = notes
+            self.saw_first_boss = False
+
+        async def enter_act(self, start: ActStart) -> None:
+            pass
+
+        async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
+            if isinstance(task, HandoffTask):
+                if observation.location.node_id == "boss-two":
+                    self.notes.replace(
+                        "First boss reviewed."
+                        if self.saw_first_boss
+                        else "First boss history lost."
+                    )
+                return TaskComplete()
+            if observation.location.node_id == "start":
+                self.saw_first_boss = True
+            if observation.location.node_id == "next-act":
+                self.notes.replace(
+                    self.notes.read() + (" Same history." if self.saw_first_boss else " Fresh act.")
+                )
+            return ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "travel"),)))
+
+        async def accept(self, outcome: ActionToolResult) -> None:
+            pass
+
+    def combat(
+        execution: Execution,
+        recovery: ToolRecoveryBudget,
+        observation: native.Observation,
+        notes: str,
+    ) -> CodeCombat:
+        openings.append(notes)
+        return CodeCombat()
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="double-boss",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="Initial strategy.",
+            ),
+            tmp_path / "archive.sqlite",
+            run_factory=lambda execution, notes, recovery: Run(notes),
+            combat_factory=combat,
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+            assert session.notes.read() == "First boss reviewed. Fresh act."
+        assert openings == [
+            "Initial strategy.",
+            "First boss reviewed.",
+            "First boss reviewed. Fresh act.",
+        ]
+        assert [action.expected_route.node_id for action in campaign.actions] == [
+            "start",
+            "boss-one",
+            "boss-two",
+            "next-act",
+            "next-battle",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_unknown_act_does_not_start_a_new_run_context(tmp_path: Path) -> None:
+    campaign = Campaign(code_combat=True)
+    reward = campaign.states[2]
+    campaign.states[2] = reward.model_copy(
+        update={
+            "state": reward.state.model_copy(
+                update={"progress": reward.state.progress.model_copy(update={"act": None})}
+            )
+        }
+    )
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="unknown-act",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="Initial strategy.",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
+            combat_factory=lambda execution, recovery, observation, notes: CodeCombat(),
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+        archive = Journal.open(tmp_path / "archive.sqlite")
+        requests = archive.requests()
+        assert [request.stream for request in requests] == ["run:1", "run:1", "run:1", "run:2"]
+        archive.close()
+
+    asyncio.run(scenario())

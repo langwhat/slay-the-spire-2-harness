@@ -79,7 +79,24 @@ class RunSession:
             recovery=self.recovery,
             diagnostics=self._diagnostics,
         )
-        run = (
+        run = self._new_run()
+        self._flow = (
+            self._flow_factory(self.execution, self.recovery, self.notes, run, self._combat)
+            if self._flow_factory is not None
+            else DefaultFlow(
+                self.execution,
+                self.recovery,
+                self.notes,
+                run,
+                self._combat,
+                new_run=self._new_run,
+                diagnostics=self._diagnostics,
+            )
+        )
+        return self
+
+    def _new_run(self) -> RunRole:
+        return (
             self._run_factory(self.execution, self.notes, self.recovery)
             if self._run_factory is not None
             else RunAgent(
@@ -91,19 +108,6 @@ class RunSession:
                 diagnostics=self._diagnostics,
             )
         )
-        self._flow = (
-            self._flow_factory(self.execution, self.recovery, self.notes, run, self._combat)
-            if self._flow_factory is not None
-            else DefaultFlow(
-                self.execution,
-                self.recovery,
-                self.notes,
-                run,
-                self._combat,
-                diagnostics=self._diagnostics,
-            )
-        )
-        return self
 
     async def __aexit__(
         self,
