@@ -324,7 +324,7 @@ class Decision(SemanticValue):
     phase: native.Phase
     screen: native.RunScreen | native.CombatScreen | native.TerminalScreen
     control: native.StateControl
-    actions: tuple[Action, ...]
+    actions: tuple[Action, ...] | MISSING = MISSING
     selection: Selection | None
     offers: tuple[Offer, ...] | MISSING = MISSING
     event: native.EventState | None | MISSING = MISSING

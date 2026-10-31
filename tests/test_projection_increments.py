@@ -42,6 +42,104 @@ def test_one_card_cost_change_does_not_repeat_unchanged_cards() -> None:
     assert '"c2"' not in cards, "A cost change must not resend an unchanged card."
 
 
+def test_run_group_resource_change_keeps_unchanged_entries_incremental() -> None:
+    raw = json.loads(RUN)
+    cards = json.loads(COMBAT)
+    for key in (
+        "objects",
+        "descriptions",
+        "modifier_descriptions",
+        "generated",
+        "mechanisms",
+        "map",
+    ):
+        raw[key] = cards[key]
+    raw["state"]["deck"] = ["c1", "c2"]
+    opening = Observation.model_validate_json(json.dumps(raw))
+    raw["state"]["player"]["gold"] = 1
+    changed = Observation.model_validate_json(json.dumps(raw))
+    context = Context(DecisionOwner.RUN)
+    context.begin_group(opening, "")
+    context.append_task(RunActInput(), opening)
+    context.finish_group()
+    context.begin_group(changed, "")
+    context.append_task(RunActInput(), changed)
+    frame = json.loads(context.model_input()[-1].text)["observation"]
+    assert "scene" not in frame
+    assert set(frame["current"]) == {"player"}
+    assert frame["current"]["player"]["gold"] == 1
+    context.finish_group()
+    baseline = json.loads(context.compaction_candidate()[0].text)["context_baseline"]
+    assert baseline["observation"]["current"]["player"]["gold"] == 1
+    assert len(baseline["observation"]["current"]["cards"]) == 2
+    context.install_compaction(context.compaction_candidate())
+    context.append_task(RunActInput(strategy_notes="Keep current strategy."), changed)
+    assert "current" not in json.loads(context.model_input()[-1].text)["observation"]
+
+
+def test_run_action_menu_is_retained_until_changed_and_rebuilt_in_baselines() -> None:
+    opening = Observation.model_validate_json(RUN)
+    raw = json.loads(RUN)
+    raw["state"]["actions"] = []
+    cleared = Observation.model_validate_json(json.dumps(raw))
+    context = Context(DecisionOwner.RUN)
+    context.begin_group(opening, "")
+    context.append_task(RunActInput(), opening)
+    menu = json.loads(context.model_input()[-1].text)["observation"]["decision"]["actions"]
+    context.finish_group()
+    context.begin_group(opening, "")
+    context.append_task(RunActInput(strategy_notes="Keep current strategy."), opening)
+    assert "actions" not in json.loads(context.model_input()[-1].text)["observation"]["decision"]
+    context.finish_group()
+    candidate = context.compaction_candidate()
+    baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
+    assert baseline["decision"]["actions"] == menu
+    context.install_compaction(candidate)
+    context.append_task(RunActInput(), cleared)
+    assert json.loads(context.model_input()[-1].text)["observation"]["decision"]["actions"] == []
+    context.append_task(RunActInput(), opening)
+    assert json.loads(context.model_input()[-1].text)["observation"]["decision"]["actions"] == menu
+    next_node = opening.model_copy(
+        update={"location": opening.location.model_copy(update={"node_id": "next-node"})}
+    )
+    context.append_task(RunActInput(), next_node)
+    assert json.loads(context.model_input()[-1].text)["observation"]["decision"]["actions"] == menu
+
+
+def test_run_group_card_updates_preserve_profile_closure_and_reset_on_removal() -> None:
+    raw = json.loads(RUN)
+    raw["objects"] = json.loads(COMBAT)["objects"]
+    raw["state"]["deck"] = ["c1", "c2"]
+    context = Context(DecisionOwner.RUN)
+    opening = Observation.model_validate_json(json.dumps(raw))
+    context.begin_group(opening, "")
+    context.append_task(RunActInput(), opening)
+    context.finish_group()
+    raw["objects"]["c1"]["cost"] = {"energy": 0}
+    for ref in ("c1", "c3"):
+        if ref == "c3":
+            raw["objects"][ref] = {**raw["objects"]["c1"], "definition_id": "CARD.NEW"}
+            raw["state"]["deck"].append(ref)
+        observation = Observation.model_validate_json(json.dumps(raw))
+        context.begin_group(observation, "")
+        context.append_task(RunActInput(), observation)
+        wire = json.loads(context.model_input()[-1].text)["observation"]
+        assert "reset" not in wire.get("scene", {})
+        assert [card["ref"] for card in wire["current"]["cards"]] == [ref]
+        context.finish_group()
+        context.install_compaction(context.compaction_candidate())
+    del raw["objects"]["c3"]
+    raw["state"]["deck"].remove("c3")
+    observation = Observation.model_validate_json(json.dumps(raw))
+    context.begin_group(observation, "")
+    context.append_task(RunActInput(), observation)
+    wire = json.loads(context.model_input()[-1].text)["observation"]
+    assert wire["scene"]["reset"] is True
+    assert [card["ref"] for card in wire["current"]["cards"]] == ["c1", "c2"]
+    context.finish_group()
+    context.install_compaction(context.compaction_candidate())
+
+
 def test_new_card_relations_are_incremental_and_removal_is_explicit() -> None:
     opening = Observation.model_validate_json(COMBAT)
     changed = opening.model_copy(

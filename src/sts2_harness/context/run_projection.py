@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from hashlib import sha256
 
 from pydantic import MISSING, JsonValue, TypeAdapter
 
@@ -90,6 +91,8 @@ class RunDelivery:
     role: native.DecisionOwner = native.DecisionOwner.RUN
     route_plan: RoutePlan | None = None
     reset_pending: bool = False
+    incremental_entry: bytes | None = None
+    actions: list[JsonValue] | None = None
 
     def project(
         self, observation: VisibleObservation, source: native.Observation
@@ -169,7 +172,11 @@ class RunDelivery:
         node_changed = self.scene is None or any(
             scene[k] != self.scene[k] for k in ("game_instance_id", "run_id", "node_id")
         )
-        reset = node_changed or self.reset_pending
+        matches_entry = (
+            self.incremental_entry is not None
+            and self.incremental_entry == sha256(source.to_json().encode()).digest()
+        )
+        reset = node_changed or (self.reset_pending and not matches_entry)
         mechanisms: list[JsonValue] = []
         for mechanism in observation.mechanisms:
             body = _json(mechanism)
@@ -299,15 +306,15 @@ class RunDelivery:
                     removals[collection] = removed
             if removals:
                 changed["removed"] = removals
+        actions: list[JsonValue] = []
         decision: dict[str, JsonValue] = {
             "phase": state.phase,
             "screen": state.screen,
             "control": state.control,
-            "actions": [],
+            "actions": actions,
             "selection": None,
         }
         if location.owner is self.role and isinstance(state, (native.RunState, native.CombatState)):
-            actions: list[JsonValue] = []
             for action in state.actions:
                 value = _json(action)
                 if action.subject is not MISSING:
@@ -317,7 +324,6 @@ class RunDelivery:
                 if action.targets is not MISSING:
                     value["targets"] = _refs(observation, action.targets)
                 actions.append(value)
-            decision["actions"] = actions
             if state.selection is not None:
                 selection = _json(state.selection)
                 selection["candidates"] = _refs(observation, state.selection.candidates)
@@ -345,6 +351,8 @@ class RunDelivery:
                     offers.append(value)
                 decision["offers"] = offers
                 decision["event"] = _json(state.event) if state.event is not None else None
+        if self.role is native.DecisionOwner.RUN and not reset and actions == self.actions:
+            decision.pop("actions")
         wire: dict[str, JsonValue] = {"decision": decision}
         if additions:
             wire["catalog_additions"] = additions
@@ -367,5 +375,7 @@ class RunDelivery:
         self.scene = scene
         self.current = current
         self.phase = state.phase
+        self.actions = actions
         self.reset_pending = False
+        self.incremental_entry = None
         return result

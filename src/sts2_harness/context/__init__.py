@@ -3,6 +3,7 @@
 import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from typing import overload
 
 from pydantic import MISSING, JsonValue, TypeAdapter
@@ -218,9 +219,21 @@ class Context:
         delivery = deepcopy(self._delivery)
         known = set(delivery.catalog.values())
         projected = delivery.project(visible_observation(observation, self._role), observation)
-        if delivery.scene != self._delivery.scene or delivery.current != self._delivery.current:
-            # The next retained frame must not apply an older delta over this fresh baseline.
+        changed = (
+            delivery.scene != self._delivery.scene or delivery.current != self._delivery.current
+        )
+        non_idempotent = (
+            projected.current is not MISSING
+            and (
+                projected.current.mechanisms is not MISSING
+                or projected.current.removed is not MISSING
+            )
+        ) or (projected.scene is not MISSING and projected.scene.removed is not MISSING)
+        if changed:
+            # Results may differ from this unseen baseline, even if they match the old ledger.
             self._delivery.reset_pending = True
+            if self._role is native.DecisionOwner.RUN and not non_idempotent:
+                self._delivery.incremental_entry = sha256(observation.to_json().encode()).digest()
         names = {
             ident: f"baseline{self._group_number}.{ident}"
             for ident in delivery.catalog.values()
@@ -228,6 +241,9 @@ class Context:
         }
         wire = _JSON_OBJECT.validate_json(projected.to_json())
         wire.pop("catalog_additions", None)
+        decision = wire["decision"]
+        assert isinstance(decision, dict)
+        decision["actions"] = delivery.actions
         if delivery.scene is not None:
             wire["scene"] = {**delivery.scene, "reset": True}
         if delivery.current:
@@ -356,10 +372,16 @@ class Context:
 
         reconstructed_scene: dict[str, JsonValue] | None = None
         reconstructed_current: dict[str, JsonValue] = {}
+        reconstructed_actions: list[JsonValue] | None = None
 
         def apply(observation: dict[str, JsonValue]) -> None:
-            nonlocal reconstructed_scene, reconstructed_current
+            nonlocal reconstructed_scene, reconstructed_current, reconstructed_actions
             receive(observation)
+            decision = observation.get("decision")
+            assert isinstance(decision, dict)
+            actions = decision.get("actions")
+            if isinstance(actions, list):
+                reconstructed_actions = actions
             new_scene = observation.get("scene")
             if isinstance(new_scene, dict):
                 reset = (
@@ -371,6 +393,8 @@ class Context:
                     )
                 )
                 if reset:
+                    if not isinstance(actions, list):
+                        raise ValueError("A complete observation requires its action menu.")
                     updates = observation.get("current")
                     old_progress = reconstructed_current.get("progress")
                     new_progress = updates.get("progress") if isinstance(updates, dict) else None
@@ -408,8 +432,7 @@ class Context:
             updates = observation.get("current")
             if not isinstance(updates, dict):
                 return
-            decision = observation.get("decision")
-            combat = isinstance(decision, dict) and decision.get("phase") == native.Phase.COMBAT
+            combat = decision.get("phase") == native.Phase.COMBAT
             for key, value in updates.items():
                 if key == "removed" or key in Collection:
                     continue
@@ -463,7 +486,9 @@ class Context:
         ):
             raise ValueError("The current state has an undelivered profile.")
         if has_retained_observation and (
-            reconstructed_scene != scene or reconstructed_current != current
+            reconstructed_scene != scene
+            or reconstructed_current != current
+            or reconstructed_actions != self._delivery.actions
         ):
             raise ValueError("The retained observations do not reproduce the current state.")
         if not install:
@@ -471,8 +496,10 @@ class Context:
         self._delivery.catalog = catalog
         self._delivery.scene = reconstructed_scene
         self._delivery.current = reconstructed_current
+        self._delivery.actions = reconstructed_actions
         if self._active_group is None or self._active_group is group:
             self._delivery.reset_pending = False
+            self._delivery.incremental_entry = None
         if not has_retained_observation:
             decision = initial.get("decision")
             if isinstance(decision, dict) and isinstance(decision.get("phase"), str):
