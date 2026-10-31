@@ -234,6 +234,8 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
             "run_knowledge",
             "run_skill",
             "run_notes",
+            "run_plan",
+            "run_next",
         }
         wire = http.inputs[-1]["input"]
         assert isinstance(wire, list)

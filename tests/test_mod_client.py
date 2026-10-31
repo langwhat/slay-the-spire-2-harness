@@ -104,7 +104,8 @@ COMBAT = """{
     "owner":"player","text":"甲"},{"kind":"power","definition_id":"POWER.STRENGTH",
     "name":"力量","owner":"e1","text":"乙"}],
   "map":{"bosses":[{"name":"首领","definition_id":"ENCOUNTER.BOSS"}],
-    "nodes":[{"position":"0:0","room_type":"monster","children":[],"odds":{"monster":1}}]}
+    "nodes":[{"position":"0:0","room_type":"monster","children":[],"odds":{"monster":1}}],
+    "legal_destinations":null}
 }""".replace("CARD_VALUE", CARD).replace("PREVIEW_VALUE", PREVIEW)
 
 

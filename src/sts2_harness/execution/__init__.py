@@ -242,6 +242,42 @@ class Execution:
             outcome: ActionOutcome = ActionCompleted(completed_steps=len(steps))
             for index, step in enumerate(steps):
                 uncertain_step = index + 1
+                if not proposal.allow_map_travel and isinstance(step, native.Interact):
+                    try:
+                        before_step = await self.observe()
+                    except (ClientUnavailable, GameReadError):
+                        before_step = None
+                    state = before_step.state if before_step is not None else None
+                    action = (
+                        next((item for item in state.actions if item.ref == step.action), None)
+                        if isinstance(state, native.RunState)
+                        else None
+                    )
+                    if (
+                        not isinstance(state, native.RunState)
+                        or (state.screen is native.RunScreen.MAP and action is None)
+                        or (action is not None and action.destination is not MISSING)
+                    ):
+                        outcome = ActionStopped(
+                            completed_steps=index,
+                            next_step=index + 1,
+                            reason=Reason(
+                                code=ReasonCode.ILLEGAL_ACTION,
+                                message=(
+                                    "This interaction could not be verified as a non-map action; "
+                                    "use run_next for map travel."
+                                ),
+                            ),
+                            suggested_actions=(
+                                Suggestion(
+                                    message="Inspect the current state and use run_next for travel."
+                                ),
+                            ),
+                        )
+                        reason = outcome.reason.code
+                        status = BatchStatus.STOPPED
+                        uncertain_step = None
+                        break
                 settled = unwrap(await self._game.settle(route, step))
                 receipt = settled.receipt
                 if isinstance(receipt, native.ReceiptCompleted):

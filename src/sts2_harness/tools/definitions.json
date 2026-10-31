@@ -705,7 +705,7 @@
   },
   {
     "name": "run_act",
-    "description": "Submit ordered steps for non-combat decisions: interact with a listed map, reward, shop, event, rest-site, or special-interface operation; select with refs; or use_potion and discard_potion. Potion actions are not duplicated as interact choices. The tool executes these operations; it does not delegate the run. Prefer combining planned actions, anticipated selections, and follow-ups when public information supports them. Use the current operation and object references, not positions or invented IDs. Earlier steps can change resources, eligibility, options, prices, and effects.\n\nEach step is checked against the native state when reached, so an earlier step can make a later one legal. Submit through a reveal and decide again if its unknown result would change your choice; do not queue an operation whose required reference is not yet known. Event or reward screens can close automatically after the last reward, so do not queue a skip or close unless the screen will remain open. A selection submits the complete final set of distinct candidates; follow the displayed min and max. A card ref can be reused by a later action only if that actual card is still present and legal. For targeted actions, omit target only if the action requires a target and exactly one legal target exists at execution; an explicit invalid target is not redirected. Omit it when the action does not use one.\n\nThe result reports outcome and the current role observation when trustworthy. If execution is unknown, submit no game actions until a fresh state reports control=ready; read-only queries remain available. Plan from that fresh state without replaying an uncertain submission. A role transition can stop the unexecuted tail. An optional reason briefly explains the batch using names rather than temporary references; do not provide a step-by-step reasoning transcript. This tool does not echo the reason.",
+    "description": "Submit ordered steps for non-combat decisions: interact with a listed reward, shop, event, rest-site, or special-interface operation; select with refs; or use_potion and discard_potion. Potion actions are not duplicated as interact choices. The tool executes these operations; it does not delegate the run. Prefer combining planned actions, anticipated selections, and follow-ups when public information supports them. Use the current operation and object references, not positions or invented IDs. Earlier steps can change resources, eligibility, options, prices, and effects.\n\nEach step is checked against the native state when reached, so an earlier step can make a later one legal. Submit through a reveal and decide again if its unknown result would change your choice; do not queue an operation whose required reference is not yet known. Event or reward screens can close automatically after the last reward, so do not queue a skip or close unless the screen will remain open. A selection submits the complete final set of distinct candidates; follow the displayed min and max. A card ref can be reused by a later action only if that actual card is still present and legal. For targeted actions, omit target only if the action requires a target and exactly one legal target exists at execution; an explicit invalid target is not redirected. Omit it when the action does not use one.\n\nThe result reports outcome and the current role observation when trustworthy. If execution is unknown, submit no game actions until a fresh state reports control=ready; read-only queries remain available. Plan from that fresh state without replaying an uncertain submission. A role transition can stop the unexecuted tail. An optional reason briefly explains the batch using names rather than temporary references; do not provide a step-by-step reasoning transcript. This tool does not echo the reason.\n\nMap destination interactions are not accepted here. Use run_plan and run_next for model-directed travel.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -721,7 +721,7 @@
                   },
                   "action": {
                     "type": "string",
-                    "description": "Reference of a Mod-provided operation, including map, reward, shop, event, or special-interface operations. It is bound to its semantic operation, not a changing menu position.",
+                    "description": "Reference of a Mod-provided operation, including reward, shop, event, or special-interface operations. It is bound to its semantic operation, not a changing menu position.",
                     "minLength": 1
                   }
                 },
@@ -867,6 +867,64 @@
           "additionalProperties": false
         }
       ]
+    }
+  },
+  {
+    "name": "run_plan",
+    "description": "Replace the remaining route plan with a partial directed graph rooted at the current map node. Supply edges and a short reason. The graph may branch later but must have exactly one immediate next destination. This stage records the plan without displaying it. It does not move or resolve a pending choice. Previous ink may remain; only the latest accepted plan controls model-directed movement. Use current native reachability for special movement rather than ordinary map connections alone. Use only current-act node IDs. Every submitted edge must be reachable from the current node; self-loops and cycles are rejected. Later edges may include possible special moves even when they are not ordinary connections; their future legality is not guaranteed.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "edges": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": "string",
+                "minLength": 1
+              },
+              "to": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "from",
+              "to"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "reason",
+        "edges"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "run_next",
+    "description": "Enter the unique next destination in the active plan. Supply a short reason for continuing with that plan. The tool checks current native travel legality and does not resolve pending rewards or choices for you. If travel cannot proceed, use the returned reason and current state to decide whether to resolve the pending choice or replace the plan. Automatic progression is independent of the plan; read the actual position and remaining plan after movement. If map restoration is unconfirmed, wait for the program to confirm restoration before submitting game actions; a fresh ready observation alone does not clear that condition.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "additionalProperties": false
     }
   }
 ]

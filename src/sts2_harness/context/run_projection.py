@@ -8,12 +8,14 @@ from dataclasses import dataclass, field
 from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
+from sts2_harness.context.map_projection import project_map
 from sts2_harness.context.models import (
     FinishedState,
     RunFinishedState,
     VisibleObservation,
 )
 from sts2_harness.context.run_models import RunObservation
+from sts2_harness.route_plan import RoutePlan
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -86,9 +88,9 @@ class RunDelivery:
         default_factory=lambda: dict[str, dict[str, JsonValue]]()
     )
     phase: native.Phase | None = None
-    map_delivered: bool = False
     next_profile: int = 1
     role: native.DecisionOwner = native.DecisionOwner.RUN
+    route_plan: RoutePlan | None = None
 
     def project(
         self, observation: VisibleObservation, source: native.Observation
@@ -232,6 +234,10 @@ class RunDelivery:
                 for ref, values in sorted(observation.generated.items())
             ],
         }
+        if self.role is native.DecisionOwner.RUN and source.map is not MISSING:
+            topology, dynamic = project_map(source.map, state.progress, self.route_plan)
+            current["map_topology"] = _json(topology)
+            current["dynamic_map"] = _json(dynamic)
         if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState):
             current["turn"] = state.turn
             current["piles"] = {
@@ -324,12 +330,9 @@ class RunDelivery:
             wire["scene"] = scene
         if changed:
             wire["current"] = changed
-        if not self.map_delivered and observation.map is not MISSING:
-            wire["updates"] = {"map": _json(observation.map)}
         result = RunObservation.model_validate_json(json.dumps(wire, ensure_ascii=False))
         self.scene = scene
         self.current = current
         self.descriptions = descriptions
         self.phase = state.phase
-        self.map_delivered = self.map_delivered or observation.map is not MISSING
         return result

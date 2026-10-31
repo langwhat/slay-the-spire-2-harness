@@ -524,7 +524,7 @@ def test_review_appends_its_actual_report_without_unrelated_live_state() -> None
     assert '"battle_report"' in review.text
 
 
-def test_partial_and_failed_reads_preserve_delivery_and_run_map_lasts_for_context() -> None:
+def test_partial_and_failed_reads_preserve_delivery_and_run_map_sections() -> None:
 
     observation = Observation.model_validate_json(COMBAT)
     shared = MechanismView(
@@ -577,9 +577,14 @@ def test_partial_and_failed_reads_preserve_delivery_and_run_map_lasts_for_contex
     first = run_context.model_input()[-1]
     assert isinstance(first, RunResultMessage)
     assert first.content.observation is not None
-    assert first.content.observation.updates is not MISSING
-    assert first.content.observation.updates.map == observation.map
+    assert first.content.observation.current is not MISSING
     assert observation.map is not MISSING
+    topology = first.content.observation.current.map_topology
+    dynamic = first.content.observation.current.dynamic_map
+    assert topology is not MISSING and topology is not None
+    assert dynamic is not MISSING and dynamic is not None
+    assert topology.bosses == observation.map.bosses
+    assert dynamic.legal_destinations == observation.map.legal_destinations
     next_run_node = run.model_copy(
         update={"location": run.location.model_copy(update={"node_id": "next"})}
     )
@@ -589,16 +594,27 @@ def test_partial_and_failed_reads_preserve_delivery_and_run_map_lasts_for_contex
     explicit = run_context.model_input()[-1]
     assert isinstance(explicit, RunResultMessage)
     assert explicit.content.observation is not None
-    assert explicit.content.observation.updates is MISSING
+    assert explicit.content.observation.current is not MISSING
+    assert explicit.content.observation.current.map_topology == topology
+    assert explicit.content.observation.current.dynamic_map == dynamic
     assert isinstance(explicit.content.data, MapData)
     assert explicit.content.data.map is observation.map
+    missing_map = next_run_node.model_copy(update={"map": MISSING})
+    run_context.append_tool_result(call, QueryToolResult(ReadCompleted(), missing_map))
+    cleared = run_context.model_input()[-1]
+    assert isinstance(cleared, RunResultMessage)
+    assert cleared.content.observation is not None
+    assert cleared.content.observation.current is not MISSING
+    assert cleared.content.observation.current.map_topology is None
+    assert cleared.content.observation.current.dynamic_map is None
     fresh = Context(DecisionOwner.RUN)
     fresh.append_tool_result(call, QueryToolResult(ReadCompleted(), run))
     fresh_message = fresh.model_input()[-1]
     assert isinstance(fresh_message, RunResultMessage)
     assert fresh_message.content.observation is not None
-    assert fresh_message.content.observation.updates is not MISSING
-    assert fresh_message.content.observation.updates.map == observation.map
+    assert fresh_message.content.observation.current is not MISSING
+    assert fresh_message.content.observation.current.map_topology == topology
+    assert fresh_message.content.observation.current.dynamic_map == dynamic
 
 
 def test_run_combat_result_keeps_permanent_facts_without_combat_internals() -> None:

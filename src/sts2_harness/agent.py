@@ -125,11 +125,7 @@ class Agent(ABC):
                 self._reject_multiple_calls(context, calls, observation)
             else:
                 call = calls[0]
-                result = (
-                    self._tools.dispatch_action(call, task)
-                    if call.name == self._tools.action_name
-                    else await self._tools.dispatch(call)
-                )
+                result = await self._dispatch(call, task, observation)
                 if isinstance(result, ActionProposal):
                     self._pending_call = call
                     return ActionDecision(
@@ -139,6 +135,13 @@ class Agent(ABC):
                 if latest is not None:
                     observation = latest
             context = await self._prepare(observation)
+
+    async def _dispatch(
+        self, call: ToolCall, task: DecisionTask, observation: native.Observation
+    ) -> ActionProposal | QueryToolResult:
+        if call.name == self._tools.action_name:
+            return self._tools.dispatch_action(call, task)
+        return await self._tools.dispatch(call)
 
     def _reject_multiple_calls(
         self, context: Context, calls: tuple[ToolCall, ...], observation: native.Observation

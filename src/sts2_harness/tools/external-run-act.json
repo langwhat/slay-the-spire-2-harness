@@ -1,0 +1,108 @@
+{
+  "name": "run_act",
+  "description": "Submit ordered steps for non-combat decisions: interact with a listed map, reward, shop, event, rest-site, or special-interface operation; select with refs; or use_potion and discard_potion. Potion actions are not duplicated as interact choices. The tool executes these operations; it does not delegate the run. Prefer combining planned actions, anticipated selections, and follow-ups when public information supports them. Use the current operation and object references, not positions or invented IDs. Earlier steps can change resources, eligibility, options, prices, and effects.\n\nEach step is checked against the native state when reached, so an earlier step can make a later one legal. Submit through a reveal and decide again if its unknown result would change your choice; do not queue an operation whose required reference is not yet known. Event or reward screens can close automatically after the last reward, so do not queue a skip or close unless the screen will remain open. A selection submits the complete final set of distinct candidates; follow the displayed min and max. A card ref can be reused by a later action only if that actual card is still present and legal. For targeted actions, omit target only if the action requires a target and exactly one legal target exists at execution; an explicit invalid target is not redirected. Omit it when the action does not use one.\n\nThe result reports outcome and the current role observation when trustworthy. If execution is unknown, submit no game actions until a fresh state reports control=ready; read-only queries remain available. Plan from that fresh state without replaying an uncertain submission. A role transition can stop the unexecuted tail. An optional reason briefly explains the batch using names rather than temporary references; do not provide a step-by-step reasoning transcript. This tool does not echo the reason.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "steps": {
+        "type": "array",
+        "items": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "interact"
+                },
+                "action": {
+                  "type": "string",
+                  "description": "Reference of a Mod-provided operation, including map, reward, shop, event, or special-interface operations. It is bound to its semantic operation, not a changing menu position.",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "action"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "use_potion"
+                },
+                "potion": {
+                  "type": "string",
+                  "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
+                  "minLength": 1
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "potion"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "discard_potion"
+                },
+                "potion": {
+                  "type": "string",
+                  "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "kind",
+                "potion"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "select"
+                },
+                "refs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "description": "Use an exact supplied public reference, never a list index or an invented identifier.",
+                    "minLength": 1
+                  },
+                  "minItems": 0,
+                  "uniqueItems": true,
+                  "description": "The complete final selection, not additions to the existing selection. Card, option, target, and bundle references are allowed when actual candidates allow them. Empty only when minimum is zero. A bundle reference selects that bundle as one option."
+                }
+              },
+              "required": [
+                "kind",
+                "refs"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "minItems": 1,
+        "description": "Steps execute in array order. Structural validation occurs before any step; state-dependent legality is checked only when each step is reached."
+      },
+      "reason": {
+        "type": "string",
+        "description": "Optional short explanation of the game choice for this batch. Use object names, not temporary references; no step-by-step reasoning is needed."
+      }
+    },
+    "required": [
+      "steps"
+    ],
+    "additionalProperties": false
+  }
+}

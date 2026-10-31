@@ -105,6 +105,32 @@ class RunActInput(RootModel[RunAct]):
         return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_act"))
 
 
+class RouteEdge(native.WireModel):
+    source: native.Nonempty = Field(alias="from")
+    destination: native.Nonempty = Field(alias="to")
+
+
+class RunPlan(native.WireModel):
+    reason: native.Nonempty
+    edges: Annotated[tuple[RouteEdge, ...], Field(min_length=1)]
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_plan"))
+
+
+class RunNext(native.WireModel):
+    reason: native.Nonempty
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_next"))
+
+
 class NotesMode(StrEnum):
     READ = "read"
     REPLACE = "replace"

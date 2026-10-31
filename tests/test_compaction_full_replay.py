@@ -16,6 +16,7 @@ from test_replay import record_campaign
 from test_responses import configuration
 
 from sts2_harness.capacity import CapacityPolicy, CompactionDecision, measure
+from sts2_harness.client import models as native
 from sts2_harness.client.models import DecisionOwner
 from sts2_harness.config import Protocol
 from sts2_harness.journal import Journal, Manifest
@@ -73,6 +74,25 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
     # Keep all three Run decisions in the same act so the oldest group can be discarded.
     campaign.states[3] = run_state(1, "next-room")
     campaign.states[4] = battle_state(1, "battle2")
+    for index in (0, 3):
+        state = json.loads(campaign.states[index].to_json())
+        state["state"]["progress"]["position"] = "0:0"
+        state["state"]["actions"][0].update(enabled=True, destination="1:0")
+        state["state"]["actions"][0].pop("reason", None)
+        state["map"] = {
+            "bosses": [],
+            "nodes": [
+                {"position": "0:0", "room_type": "event", "children": ["1:0", "1:1"]},
+                {"position": "1:0", "room_type": "monster", "children": []},
+                {"position": "1:1", "room_type": "monster", "children": []},
+            ],
+            "legal_destinations": ["1:0", "1:1"],
+        }
+        campaign.states[index] = native.Observation.model_validate_json(json.dumps(state))
+    reward = json.loads(campaign.states[2].to_json())
+    reward["state"]["screen"] = "event"
+    reward["state"]["actions"][0]["ref"] = "advance"
+    campaign.states[2] = native.Observation.model_validate_json(json.dumps(reward))
     random_text = "".join(random.Random(2026).choices(string.ascii_letters, k=6000))
     campaign.responses = iter(
         [
@@ -84,8 +104,14 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
                 protocol, ("restore-note", "run_notes", '{"mode":"replace","text":"Opening plan."}')
             ),
             response(
-                protocol, ("travel", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')
+                protocol,
+                (
+                    "plan",
+                    "run_plan",
+                    '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                ),
             ),
+            response(protocol, ("travel", "run_next", '{"reason":"Enter combat."}')),
             response(protocol, ("battle1", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
             response(protocol, text="A useful battle review."),
             response(
@@ -108,8 +134,13 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
             ),
             response(
                 protocol,
-                ("travel2", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}'),
+                (
+                    "plan2",
+                    "run_plan",
+                    '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                ),
             ),
+            response(protocol, ("travel2", "run_next", '{"reason":"Enter combat."}')),
             response(protocol, ("battle2", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
         ]
     )

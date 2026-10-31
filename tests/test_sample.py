@@ -109,6 +109,23 @@ async def sample(
         journal.close()
 
 
+def event_state(node: str) -> native.Observation:
+    observation = run_state(1, node)
+    return observation.model_copy(
+        update={
+            "state": observation.state.model_copy(
+                update={
+                    "screen": native.RunScreen.EVENT,
+                    "actions": (
+                        native.Action(ref="choose", label="Choose", enabled=True),
+                        native.Action(ref="advance", label="Continue", enabled=True),
+                    ),
+                }
+            )
+        }
+    )
+
+
 def test_one_decision_keeps_settlement_and_feedback_before_stopping(tmp_path: Path) -> None:
     async def scenario() -> None:
         campaign = Campaign()
@@ -116,8 +133,8 @@ def test_one_decision_keeps_settlement_and_feedback_before_stopping(tmp_path: Pa
             tmp_path / "sample.sqlite", campaign, SampleBudget(10, 10), AfterDecisions(1)
         ) as (host, journal, session):
             host.arm()
-            assert await host.run(session) == Completed(AfterDecisions(1), 1, 1)
-            assert len(campaign.actions) == len(campaign.inputs) == 1
+            assert await host.run(session) == Completed(AfterDecisions(1), 1, 2)
+            assert len(campaign.actions) == 1 and len(campaign.inputs) == 2
             assert len(journal.operations(kind=OperationKind.SETTLE)) == 1
             assert journal.operations()[-1].request.kind is OperationKind.OBSERVE
             assert journal.requests()[0].delivered
@@ -290,7 +307,7 @@ def test_recording_failure_prevents_completion_even_after_storage_recovers(
                 try:
                     host.arm()
                     assert await host.run(session) == Incomplete(
-                        StopCause.RECORDING_UNAVAILABLE, 1, 1
+                        StopCause.RECORDING_UNAVAILABLE, 1, 2
                     )
                     assert journal.gaps
                     assert (journal.availability.error is None) is recover
@@ -306,14 +323,15 @@ def test_recording_failure_prevents_completion_even_after_storage_recovers(
 def test_request_limit_does_not_split_a_two_step_model_batch(tmp_path: Path) -> None:
     async def scenario() -> None:
         campaign = Campaign()
-        campaign.states.insert(1, campaign.states[0])
+        campaign.states[0] = event_state("first")
+        campaign.states.insert(1, event_state("second"))
         campaign.responses = iter(
             [
                 reply(
                     (
                         "batch",
                         "run_act",
-                        '{"steps":[{"kind":"interact","action":"travel"},'
+                        '{"steps":[{"kind":"interact","action":"choose"},'
                         '{"kind":"interact","action":"advance"}]}',
                     )
                 )
@@ -354,11 +372,11 @@ def automatic(node: str) -> native.Observation:
 def test_automatic_units_do_not_consume_the_decision_count(tmp_path: Path) -> None:
     async def scenario() -> None:
         campaign = Campaign()
-        campaign.states = [run_state(1, "first"), automatic("auto"), run_state(1, "last")]
+        campaign.states = [event_state("first"), automatic("auto"), event_state("last")]
         campaign.states.append(terminal(campaign.states[-1]))
         campaign.responses = iter(
             [
-                reply(("first", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
+                reply(("first", "run_act", '{"steps":[{"kind":"interact","action":"choose"}]}')),
                 reply(("last", "run_act", '{"steps":[{"kind":"interact","action":"advance"}]}')),
             ]
         )
@@ -524,6 +542,7 @@ def test_run_change_does_not_complete_a_battle_endpoint(tmp_path: Path) -> None:
 class FailedActions(Campaign):
     def __init__(self, *, fail_control: bool) -> None:
         super().__init__()
+        self.states[0] = event_state("start")
         self.fail_control = fail_control
         self.paused = False
         self.controls = 0
@@ -570,7 +589,9 @@ class FailedActions(Campaign):
         self.inputs.append({})
         return httpx.Response(
             200,
-            content=reply(("move", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
+            content=reply(
+                ("choose", "run_act", '{"steps":[{"kind":"interact","action":"choose"}]}')
+            ),
             headers={"Content-Type": "text/event-stream"},
         )
 
@@ -617,12 +638,13 @@ def test_request_budget_counts_logical_requests_and_closes_the_last_unit(
         ) as (host, journal, session):
             host.arm()
             expected = (
-                Incomplete(StopCause.REQUEST_BUDGET, 1, 1)
+                Incomplete(StopCause.REQUEST_BUDGET, 0, 1)
                 if requests == 1
-                else Completed(AfterDecisions(2), 2, 2)
+                else Completed(AfterDecisions(2), 2, 3)
             )
             assert await host.run(session) == expected
-            assert len(campaign.actions) == len(campaign.inputs) == expected.decisions
+            assert len(campaign.actions) == expected.decisions
+            assert len(campaign.inputs) == expected.requests
             assert len(journal.requests()) == expected.requests
 
     asyncio.run(scenario())
@@ -726,13 +748,14 @@ class PendingCampaign(Campaign):
 def test_pending_confirmation_expires_without_resubmit_or_batch_tail(tmp_path: Path) -> None:
     async def scenario() -> None:
         campaign = PendingCampaign()
+        campaign.states[0] = event_state("first")
         campaign.responses = iter(
             [
                 reply(
                     (
                         "batch",
                         "run_act",
-                        '{"steps":[{"kind":"interact","action":"travel"},'
+                        '{"steps":[{"kind":"interact","action":"choose"},'
                         '{"kind":"interact","action":"advance"}]}',
                     )
                 ),

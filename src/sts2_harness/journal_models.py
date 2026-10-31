@@ -57,7 +57,7 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.llm.messages_native import MessagesReply
 from sts2_harness.material_text import MaterialParts, MaterialText
-from sts2_harness.results import NotesText, NotesUpdated, Outcome
+from sts2_harness.results import NotesText, NotesUpdated, Outcome, PlanData
 
 
 class BlobKind(StrEnum):
@@ -245,6 +245,7 @@ class DataKind(StrEnum):
     SKILLS = "skills"
     NATIVE = "native"
     NOTES = "notes"
+    PLAN = "plan"
 
 
 class KnowledgeData(native.WireModel):
@@ -273,7 +274,14 @@ class NotesData(native.WireModel):
     value: NotesText | NotesUpdated
 
 
-type ArchivedData = KnowledgeData | DocumentData | SkillsData | NativeData | NotesData
+class PlanArchiveData(native.WireModel):
+    kind: Literal[DataKind.PLAN] = DataKind.PLAN
+    value: PlanData
+
+
+type ArchivedData = (
+    KnowledgeData | DocumentData | SkillsData | NativeData | NotesData | PlanArchiveData
+)
 
 
 def archive_data(data: RunProjectedResult) -> ArchivedData | MISSING:
@@ -299,6 +307,8 @@ def archive_data(data: RunProjectedResult) -> ArchivedData | MISSING:
         return SkillsData(skills=tuple(SkillSnapshot.of(skill) for skill in value.skills))
     if isinstance(value, (NotesText, NotesUpdated)):
         return NotesData(value=value)
+    if isinstance(value, PlanData):
+        return PlanArchiveData(value=value)
     return NativeData(value=value)
 
 

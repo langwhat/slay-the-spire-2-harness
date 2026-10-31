@@ -168,7 +168,13 @@ def _candidate(
         return ActionStep(ActionKind.INTERACT, opening.ref), opening.label, _Reason.SHOP
     if state.screen is native.RunScreen.MAP:
         destinations = tuple(action for action in enabled if action.destination is not MISSING)
-        if len(destinations) == 1:
+        if (
+            observation.map is not MISSING
+            and observation.map.legal_destinations is not None
+            and len(observation.map.legal_destinations) == 1
+            and len(destinations) == 1
+            and destinations[0].destination == observation.map.legal_destinations[0]
+        ):
             action = destinations[0]
             return ActionStep(ActionKind.INTERACT, action.ref), action.label, _Reason.MAP
     if state.screen is native.RunScreen.TREASURE:

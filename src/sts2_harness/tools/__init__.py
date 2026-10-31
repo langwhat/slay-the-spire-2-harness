@@ -52,6 +52,8 @@ from sts2_harness.tools.inputs import (
     NotesReadInput,
     NotesReplaceInput,
     RunActInput,
+    RunNext,
+    RunPlan,
     SkillInput,
     SkillListInput,
     StateQuery,
@@ -66,6 +68,8 @@ class QueryView(StrEnum):
 class ToolName(StrEnum):
     COMBAT_ACT = "combat_act"
     RUN_ACT = "run_act"
+    RUN_PLAN = "run_plan"
+    RUN_NEXT = "run_next"
     RUN_NOTES = "run_notes"
     RUN_SKILL = "run_skill"
     COMBAT_SKILL = "combat_skill"
@@ -75,7 +79,7 @@ class ToolName(StrEnum):
     COMBAT_KNOWLEDGE = "combat_knowledge"
 
 
-def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+def unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
         if key in result:
@@ -135,6 +139,8 @@ class ToolCatalog:
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
             ToolName.RUN_ACT: RunActInput,
+            ToolName.RUN_PLAN: RunPlan,
+            ToolName.RUN_NEXT: RunNext,
             ToolName.COMBAT_ACT: CombatActInput,
             ToolName.RUN_NOTES: NotesInput,
             ToolName.RUN_INSPECT: InspectInput,
@@ -185,7 +191,7 @@ class ToolCatalog:
                 None,
             )
         try:
-            json.loads(call.arguments, object_pairs_hook=_unique_fields)
+            json.loads(call.arguments, object_pairs_hook=unique_fields)
             query = (
                 CombatActInput.model_validate_json(call.arguments, strict=True).root
                 if self._role is native.DecisionOwner.COMBAT
@@ -229,7 +235,7 @@ class ToolCatalog:
     async def _notes(self, call: ToolCall) -> QueryToolResult:
         observation = await self._current()
         try:
-            json.loads(call.arguments, object_pairs_hook=_unique_fields)
+            json.loads(call.arguments, object_pairs_hook=unique_fields)
             query = NotesInput.model_validate_json(call.arguments, strict=True).root
         except (ValueError, ValidationError):
             return QueryToolResult(
@@ -255,7 +261,7 @@ class ToolCatalog:
     async def _read_skill(self, call: ToolCall) -> QueryToolResult:
         observation = await self._current()
         try:
-            json.loads(call.arguments, object_pairs_hook=_unique_fields)
+            json.loads(call.arguments, object_pairs_hook=unique_fields)
             query = SkillInput.model_validate_json(call.arguments, strict=True).root
         except (ValueError, ValidationError):
             return QueryToolResult(
@@ -291,6 +297,9 @@ class ToolCatalog:
         except (ClientUnavailable, GameReadError):
             return None
 
+    async def current(self) -> native.Observation | None:
+        return await self._current()
+
     async def dispatch(self, call: ToolCall) -> QueryToolResult:
         if call.name not in self._names or call.name == self.action_name:
             return QueryToolResult(
@@ -302,7 +311,7 @@ class ToolCatalog:
         if ToolName(call.name) in (ToolName.RUN_SKILL, ToolName.COMBAT_SKILL):
             return await self._read_skill(call)
         try:
-            json.loads(call.arguments, object_pairs_hook=_unique_fields)
+            json.loads(call.arguments, object_pairs_hook=unique_fields)
             query = (
                 InspectInput.model_validate_json(call.arguments, strict=True).root
                 if ToolName(call.name) in (ToolName.RUN_INSPECT, ToolName.COMBAT_INSPECT)

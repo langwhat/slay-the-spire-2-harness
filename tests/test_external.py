@@ -163,11 +163,44 @@ def test_discovery_exposes_only_grouped_self_contained_tool_definitions() -> Non
                     assert set(item) == {"name", "description", "input_schema"}
                     variants = item["input_schema"].get("oneOf", [item["input_schema"]])
                     assert all(part["type"] == "object" for part in variants)
+                run_action = next(item for item in definitions if item["name"] == "run_act")
+                assert "map" in run_action["description"]
+                assert "run_next" not in run_action["description"]
+                for name in ("run_plan", "run_next"):
+                    assert (await caller.post("/tools/" + name, json={})).status_code == 404
                 missing = await caller.post("/tools/missing", json={})
                 assert missing.status_code == 404
                 bad_utf = await caller.post("/tools/run_inspect", content=b"\xff")
                 assert bad_utf.status_code == 400
         assert mod.control is native.ControlIntent.RUNNING
+
+    asyncio.run(run())
+
+
+def test_external_run_act_retains_native_map_travel() -> None:
+    async def run() -> None:
+        mod = FakeMod()
+        state = mod.observation.state
+        assert isinstance(state, native.RunState)
+        action = native.Action(ref="travel", label="Travel", enabled=True, destination="map:1:0")
+        mod.observation = mod.observation.model_copy(
+            update={
+                "state": state.model_copy(
+                    update={"screen": native.RunScreen.MAP, "actions": (action,)}
+                )
+            }
+        )
+        async with ExternalBackend(mod.client()) as backend:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app(backend)), base_url="http://tools"
+            ) as caller:
+                await caller.post("/tools/run_inspect", json={"area": "state"})
+                mod.control = native.ControlIntent.RUNNING
+                response = await caller.post(
+                    "/tools/run_act", json={"steps": [{"kind": "interact", "action": "travel"}]}
+                )
+                assert json.loads(response.content)["outcome"]["status"] == "completed"
+        assert len(mod.actions) == 1
 
     asyncio.run(run())
 

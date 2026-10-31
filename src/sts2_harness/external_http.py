@@ -4,6 +4,7 @@ import asyncio
 import socket
 from collections.abc import Generator
 from contextlib import contextmanager
+from importlib.resources import files
 
 import uvicorn
 from starlette.applications import Starlette
@@ -55,9 +56,17 @@ class _ReplyResponse(Response):
 
 
 def create_app(backend: ExternalBackend) -> Starlette:
+    external_run_act = Definition.model_validate_json(
+        files("sts2_harness.tools").joinpath("external-run-act.json").read_text(), strict=True
+    )
+    model_only_tools = frozenset({ToolName.RUN_PLAN, ToolName.RUN_NEXT})
     discovery = Discovery(
         roles=RoleDefinitions(
-            run=tuple(item for item in DEFINITIONS if item.name.startswith("run_")),
+            run=tuple(
+                external_run_act if item.name == ToolName.RUN_ACT else item
+                for item in DEFINITIONS
+                if item.name.startswith("run_") and item.name not in model_only_tools
+            ),
             combat=tuple(item for item in DEFINITIONS if item.name.startswith("combat_")),
         )
     ).to_json()
@@ -68,6 +77,8 @@ def create_app(backend: ExternalBackend) -> Starlette:
     async def call(request: Request) -> Response:
         try:
             name = ToolName(request.path_params["name"])
+            if name in model_only_tools:
+                raise ValueError("The tool is not exposed externally.")
         except ValueError:
             return Response(
                 reject(ReasonCode.INVALID_ARGUMENTS, "Unknown tool name.").result.to_json(),

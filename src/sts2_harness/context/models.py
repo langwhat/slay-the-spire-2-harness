@@ -124,7 +124,9 @@ class RunHandoffInput:
 
 class RunActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
-    instruction: str = "Make the next run decision using run_act."
+    instruction: str = (
+        "Make the next run decision using run_plan, run_next, or run_act as appropriate."
+    )
     observation: RunObservation
     strategy_notes: str | MISSING = MISSING
 
@@ -178,6 +180,7 @@ class AutomaticProgress(SemanticValue):
 
 class RunAutomaticContent(SemanticValue):
     automatic_progress: AutomaticProgress
+    route_plan_status: Literal["invalidated"] | MISSING = MISSING
     outcome: ActionOutcome
     observation: RunObservation | None
 

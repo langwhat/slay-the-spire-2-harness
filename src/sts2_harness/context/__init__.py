@@ -45,6 +45,7 @@ from sts2_harness.results import (
     ReadCompleted,
     ToolResult,
 )
+from sts2_harness.route_plan import RoutePlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +155,6 @@ class Context:
         self._last_group: _RunGroup | None = None
         self._active_group: _RunGroup | None = None
         self._group_number = 0
-        self._run_map: native.PublicMap | None = None
         for message in system:
             if isinstance(message.value, GuidanceContent):
                 self._record_documents(message.value.guidance)
@@ -192,6 +192,9 @@ class Context:
     def has_active_group(self) -> bool:
         return self._active_group is not None
 
+    def set_route_plan(self, plan: RoutePlan | None) -> None:
+        self._run_delivery.route_plan = plan
+
     @property
     def group_ids(self) -> tuple[int | None, int | None]:
         return (
@@ -224,9 +227,6 @@ class Context:
             if delivery.descriptions:
                 current["card_descriptions"] = list(delivery.descriptions.values())
             wire["current"] = current
-        old_map = observation.map if observation.map is not MISSING else self._run_map
-        if old_map is not None:
-            wire["updates"] = {"map": _JSON_OBJECT.validate_json(old_map.to_json())}
         renamed = _rename_profiles(wire, names)
         assert isinstance(renamed, dict)
         baseline_references = _profile_references(renamed)
@@ -511,8 +511,6 @@ class Context:
             run_projected = self._run_delivery.project(
                 visible_observation(observation, self._role), observation
             )
-            if observation.map is not MISSING:
-                self._run_map = observation.map
             if task.handoff is not None:
                 content = RunActHandoffContent(
                     observation=run_projected,
@@ -533,7 +531,9 @@ class Context:
     def append_reply(self, reply: AssistantMessage) -> None:
         self._history.append(reply)
 
-    def append_automatic(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+    def append_automatic(
+        self, progress: AutomaticProgress, result: ActionToolResult, *, invalidated: bool = False
+    ) -> None:
         delivery = (
             self._run_delivery if self._role is native.DecisionOwner.RUN else self._combat_delivery
         )
@@ -544,10 +544,11 @@ class Context:
             if result.observation is not None
             else None
         )
-        if result.observation is not None and result.observation.map is not MISSING:
-            self._run_map = result.observation.map
         content = RunAutomaticContent(
-            automatic_progress=progress, outcome=result.outcome, observation=observation
+            automatic_progress=progress,
+            route_plan_status="invalidated" if invalidated else MISSING,
+            outcome=result.outcome,
+            observation=observation,
         )
         self._history.append(RunAutomaticMessage(TextRole.USER, content.to_json(), content, result))
 
@@ -562,8 +563,6 @@ class Context:
             if result.observation is not None
             else None
         )
-        if result.observation is not None and result.observation.map is not MISSING:
-            self._run_map = result.observation.map
         content = RunProjectedResult(
             outcome=result.outcome,
             observation=observation,

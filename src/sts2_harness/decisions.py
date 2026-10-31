@@ -37,6 +37,7 @@ type Step = ActionStep | SelectStep
 class ActionProposal:
     steps: tuple[Step, ...]
     reason: str | None = None
+    allow_map_travel: bool = True
 
 
 @dataclass(frozen=True, slots=True)

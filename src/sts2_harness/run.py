@@ -1,19 +1,24 @@
 """One act's model role uses notes retained by the run session."""
 
+import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
-from pydantic import MISSING
+from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.agent import Agent, MaterialReader
 from sts2_harness.auto import choose_auto, shop_controls
 from sts2_harness.capacity import CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
+from sts2_harness.context.map_projection import Plan, PlanEdge
 from sts2_harness.context.models import AutomaticProgress, RunActInput, RunHandoffInput
 from sts2_harness.decisions import (
     ActionDecision,
+    ActionKind,
+    ActionProposal,
+    ActionStep,
     ActTask,
     Decision,
     DecisionSource,
@@ -33,11 +38,29 @@ from sts2_harness.llm.messages import (
     RequestPreparation,
     TextMessage,
     TextRole,
+    ToolCall,
 )
 from sts2_harness.material_text import MaterialParts, MaterialUnavailable
 from sts2_harness.prompts import PackagedPrompts, PromptReader
-from sts2_harness.results import ActionCompleted, ActionToolResult, Reason, ReasonCode
-from sts2_harness.tools import ToolCatalog
+from sts2_harness.results import (
+    ActionCompleted,
+    ActionToolResult,
+    PlanAccepted,
+    PlanData,
+    PlanRejected,
+    PresentationUnavailable,
+    QueryToolResult,
+    ReadCompleted,
+    Reason,
+    ReasonCode,
+    Rejected,
+    Suggestion,
+)
+from sts2_harness.route_plan import Edge, MovementStatus, RoutePlan, reconcile_plan, replace_plan
+from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
+from sts2_harness.tools.inputs import RunNext, RunPlan
+
+_JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +93,214 @@ class RunAgent(Agent):
         self._pending_auto: tuple[AutomaticProgress, native.Observation] | None = None
         self._force_strategy = False
         self._shop_strategy_node: native.Location | None = None
+        self._plan: RoutePlan | None = None
+        self._plan_identity: tuple[str, str | None, int | None] | None = None
+
+    def _sync_plan(self, observation: native.Observation) -> MovementStatus:
+        identity = (
+            observation.location.game_instance_id,
+            observation.location.run_id,
+            observation.state.progress.act,
+        )
+        if self._plan_identity is not None:
+            previous_game, previous_run, previous_act = self._plan_identity
+            game, run, act = identity
+            if (game, run) != (previous_game, previous_run) or (
+                act is not None and previous_act is not None and act != previous_act
+            ):
+                self._plan = None
+            if act is None and (game, run) == (previous_game, previous_run):
+                identity = (game, run, previous_act)
+        self._plan_identity = identity
+        movement = reconcile_plan(self._plan, observation.state.progress.position)
+        self._plan = movement.plan
+        if self._context is not None:
+            self._context.set_route_plan(self._plan)
+        return movement.status
+
+    def _plan_value(self) -> JsonValue:
+        if self._plan is None:
+            return None
+        plan = Plan(
+            reason=self._plan.reason,
+            edges=tuple(
+                PlanEdge(source=edge.source, destination=edge.destination)
+                for edge in self._plan.edges
+            ),
+        )
+        return _JSON_OBJECT.validate_json(plan.to_json())
+
+    def _route_rejected(
+        self,
+        code: ReasonCode,
+        message: str,
+        observation: native.Observation | None,
+        *,
+        plan: bool = False,
+    ) -> QueryToolResult:
+        outcome = Rejected(
+            reason=Reason(code=code, message=message),
+            suggested_actions=(
+                Suggestion(
+                    message="Inspect the current map and decision, then choose a valid next step."
+                ),
+            ),
+        )
+        if plan:
+            return QueryToolResult(
+                outcome,
+                observation,
+                PlanData(
+                    plan=PlanRejected(),
+                    presentation=PresentationUnavailable(status="not_attempted"),
+                ),
+            )
+        return QueryToolResult(outcome, observation)
+
+    async def _dispatch(
+        self, call: ToolCall, task: DecisionTask, observation: native.Observation
+    ) -> ActionProposal | QueryToolResult:
+        if call.name == ToolName.RUN_ACT:
+            result = self._tools.dispatch_action(call, task)
+            return (
+                replace(result, allow_map_travel=False)
+                if isinstance(result, ActionProposal)
+                else result
+            )
+        if call.name not in (ToolName.RUN_PLAN, ToolName.RUN_NEXT):
+            return await super()._dispatch(call, task, observation)
+        current = await self._tools.current()
+        if current is None:
+            return self._route_rejected(
+                ReasonCode.QUERY_FAILED,
+                "Current map observation is unavailable.",
+                None,
+                plan=call.name == ToolName.RUN_PLAN,
+            )
+        self._sync_plan(current)
+        if isinstance(task, ActTask) and current.location != native.Location.model_validate(
+            task.expected_route.model_dump()
+        ):
+            return self._route_rejected(
+                ReasonCode.ROLE_CHANGED,
+                "The action route changed.",
+                current,
+                plan=call.name == ToolName.RUN_PLAN,
+            )
+        try:
+            json.loads(call.arguments, object_pairs_hook=unique_fields)
+            if call.name == ToolName.RUN_PLAN:
+                proposed = RunPlan.model_validate_json(call.arguments, strict=True)
+                next_call = None
+            else:
+                next_call = RunNext.model_validate_json(call.arguments, strict=True)
+                proposed = None
+        except (ValueError, ValidationError):
+            return self._route_rejected(
+                ReasonCode.INVALID_ARGUMENTS,
+                "The route tool input does not match its schema.",
+                current,
+                plan=call.name == ToolName.RUN_PLAN,
+            )
+        if call.name == ToolName.RUN_PLAN:
+            assert proposed is not None
+            if current.location.owner is not native.DecisionOwner.RUN or current.map is MISSING:
+                return self._route_rejected(
+                    ReasonCode.QUERY_FAILED,
+                    "Current map facts are unavailable.",
+                    current,
+                    plan=True,
+                )
+            update = replace_plan(
+                self._plan,
+                current.state.progress.position,
+                frozenset(node.position for node in current.map.nodes),
+                proposed.reason,
+                tuple(Edge(edge.source, edge.destination) for edge in proposed.edges),
+            )
+            if update.rejection is not None:
+                return self._route_rejected(
+                    ReasonCode(update.rejection.value),
+                    f"The route plan was rejected: {update.rejection.value}.",
+                    current,
+                    plan=True,
+                )
+            self._plan = update.plan
+            assert self._plan is not None and self._plan.next_destination is not None
+            assert self._context is not None
+            self._context.set_route_plan(self._plan)
+            return QueryToolResult(
+                ReadCompleted(),
+                current,
+                PlanData(
+                    plan=PlanAccepted(next=self._plan.next_destination),
+                    presentation=PresentationUnavailable(status="not_available"),
+                ),
+            )
+        if not isinstance(task, ActTask):
+            return self._route_rejected(ReasonCode.WRONG_ROLE, "This task cannot travel.", current)
+        if self._plan is None:
+            return self._route_rejected(ReasonCode.NO_PLAN, "No route plan is active.", current)
+        if current.state.progress.position is None:
+            return self._route_rejected(
+                ReasonCode.UNKNOWN_POSITION, "The current map position is unknown.", current
+            )
+        destination = self._plan.next_destination
+        if destination is None:
+            return self._route_rejected(
+                ReasonCode.AMBIGUOUS_NEXT,
+                "The route does not select one next destination.",
+                current,
+            )
+        state = current.state
+        if (
+            not isinstance(state, native.RunState)
+            or state.screen is not native.RunScreen.MAP
+            or state.selection is not None
+            or state.offers
+        ):
+            return self._route_rejected(
+                ReasonCode.PENDING_CHOICE, "The current screen or choice blocks travel.", current
+            )
+        if (
+            current.input_readiness is not native.InputReadiness.READY
+            or current.map is MISSING
+            or current.map.legal_destinations is None
+            or destination not in current.map.legal_destinations
+        ):
+            return self._route_rejected(
+                ReasonCode.TRAVEL_NOT_AVAILABLE,
+                "The planned destination is not currently reachable.",
+                current,
+            )
+        action = next(
+            (
+                action
+                for action in state.actions
+                if action.enabled and action.destination == destination
+            ),
+            None,
+        )
+        if action is None:
+            return self._route_rejected(
+                ReasonCode.TRAVEL_NOT_AVAILABLE,
+                "Native travel is not currently available.",
+                current,
+            )
+        assert next_call is not None
+        return ActionProposal((ActionStep(ActionKind.INTERACT, action.ref),), next_call.reason)
+
+    def _close_query(
+        self,
+        context: Context,
+        task: DecisionTask,
+        bound: native.Location,
+        call: ToolCall,
+        result: QueryToolResult,
+    ) -> native.Observation | None:
+        if result.observation is not None:
+            self._sync_plan(result.observation)
+        return super()._close_query(context, task, bound, call, result)
 
     async def _request(self, context: Context) -> ModelReply:
         assert self._llm is not None
@@ -163,6 +394,7 @@ class RunAgent(Agent):
         if self._context is None:
             await self.enter_act(ActStart(observation))
         assert self._context is not None
+        self._sync_plan(observation)
         if (
             isinstance(task, ActTask)
             and not self._force_strategy
@@ -172,13 +404,13 @@ class RunAgent(Agent):
                 observation, shop_strategy=self._shop_strategy_node == observation.location
             )
             if automatic is not None:
-                self._context.begin_group(observation, self._notes.read())
+                self._context.begin_group(observation, self._notes.read(), self._plan_value())
                 proposal, progress = automatic
                 self._pending_auto = progress, observation
                 return ActionDecision(proposal)
         if isinstance(observation.state, native.RunState) and shop_controls(observation.state):
             self._shop_strategy_node = observation.location
-        self._context.begin_group(observation, self._notes.read())
+        self._context.begin_group(observation, self._notes.read(), self._plan_value())
         decision = await super().decide(task, observation)
         if isinstance(decision, TaskComplete):
             self._context.finish_group()
@@ -186,6 +418,11 @@ class RunAgent(Agent):
         return decision
 
     async def accept(self, outcome: ActionToolResult) -> None:
+        movement = (
+            self._sync_plan(outcome.observation)
+            if outcome.observation is not None
+            else MovementStatus.UNOBSERVED
+        )
         if self._pending_auto is None:
             await super().accept(outcome)
             assert self._context is not None
@@ -205,7 +442,9 @@ class RunAgent(Agent):
                 )
             )
         assert self._context is not None
-        self._context.append_automatic(progress, outcome)
+        self._context.append_automatic(
+            progress, outcome, invalidated=movement is MovementStatus.INVALIDATED
+        )
         self._context.finish_group()
         after = outcome.observation
         # Localized text changes alone cannot establish gameplay progress.

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
-from pydantic import JsonValue
+from pydantic import MISSING, JsonValue
 from test_combat import reply
 from test_mod_client import COMBAT, RUN
 from test_responses import configuration
@@ -40,7 +40,7 @@ def run_state(act: int, node: str) -> native.Observation:
                     )
                 }
             ),
-            "map": native.PublicMap(bosses=(), nodes=()),
+            "map": native.PublicMap(bosses=(), nodes=(), legal_destinations=None),
         }
     )
 
@@ -57,7 +57,7 @@ def battle_state(act: int, node: str) -> native.Observation:
                     )
                 }
             ),
-            "map": native.PublicMap(bosses=(), nodes=()),
+            "map": native.PublicMap(bosses=(), nodes=(), legal_destinations=None),
         }
     )
 
@@ -92,9 +92,28 @@ class Campaign:
             battle_state(2, "battle2"),
         ]
         self.states.append(terminal(self.states[-1]))
+        for index in (0, 3):
+            state = json.loads(self.states[index].to_json())
+            state["state"]["progress"]["position"] = "0:0"
+            state["state"]["actions"][0].update(enabled=True, destination="1:0")
+            state["state"]["actions"][0].pop("reason", None)
+            state["map"] = {
+                "bosses": [],
+                "nodes": [
+                    {"position": "0:0", "room_type": "event", "children": ["1:0", "1:1"]},
+                    {"position": "1:0", "room_type": "monster", "children": []},
+                    {"position": "1:1", "room_type": "monster", "children": []},
+                ],
+                "legal_destinations": ["1:0", "1:1"],
+            }
+            self.states[index] = native.Observation.model_validate_json(json.dumps(state))
+        reward = json.loads(self.states[2].to_json())
+        reward["state"]["screen"] = "event"
+        reward["state"]["actions"][0]["ref"] = "advance"
+        self.states[2] = native.Observation.model_validate_json(json.dumps(reward))
         self.index = 0
         self.actions: list[native.StepRequest] = []
-        self.map = native.PublicMap(bosses=(), nodes=())
+        self.map = native.PublicMap(bosses=(), nodes=(), legal_destinations=None)
         self.inputs: list[dict[str, JsonValue]] = []
         first = [
             reply(("battle1", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
@@ -103,11 +122,25 @@ class Campaign:
         second = [reply(("battle2", "combat_act", '{"steps":[{"kind":"end_turn"}]}'))]
         self.responses = iter(
             [
-                reply(("travel", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
+                reply(
+                    (
+                        "plan",
+                        "run_plan",
+                        '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                    )
+                ),
+                reply(("travel", "run_next", '{"reason":"Enter combat."}')),
                 *([] if code_combat else first),
                 reply(("notes", "run_notes", '{"mode":"replace","text":"Reserve for act two."}')),
                 reply(("advance", "run_act", '{"steps":[{"kind":"interact","action":"advance"}]}')),
-                reply(("travel2", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
+                reply(
+                    (
+                        "plan2",
+                        "run_plan",
+                        '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                    )
+                ),
+                reply(("travel2", "run_next", '{"reason":"Enter combat."}')),
                 *([] if code_combat else second),
             ]
         )
@@ -137,6 +170,8 @@ class Campaign:
         if request.url.path == "/inspect":
             query = native.InspectRequest.model_validate_json(request.content)
             assert query.query.area is native.InspectArea.MAP
+            if self.current.map is MISSING:
+                self.states[self.index] = self.current.model_copy(update={"map": self.map})
             return httpx.Response(
                 200,
                 content=native.InspectCompleted(
@@ -202,12 +237,15 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         )
     from pydantic import MISSING
 
+    initial_map = campaign.states[0].map
+    assert initial_map is not MISSING
     campaign.map = native.PublicMap(
         bosses=(
             native.NamedDefinition(name="Boss", definition_id="ENCOUNTER.BOSS"),
             native.NamedDefinition(name="Other Boss", definition_id="ENCOUNTER.OTHER"),
         ),
-        nodes=(),
+        nodes=initial_map.nodes,
+        legal_destinations=initial_map.legal_destinations,
     )
     campaign.states[0] = campaign.states[0].model_copy(update={"map": MISSING})
     battle = json.loads(campaign.states[1].to_json())
@@ -267,14 +305,14 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         assert {request.stream for request in requests} == (
             {"run:1", "run:2"} if code_combat else {"run:1", "run:2", "combat:1", "combat:2"}
         )
-        last_run = next(request for request in reversed(requests) if request.stream == "run:2")
+        first_run = next(request for request in requests if request.stream == "run:2")
         from sts2_harness.journal_models import GuidanceText, RunTaskSnapshot, TextSnapshot
 
-        assert len(last_run.input) == 3
-        task = last_run.input[-1]
+        assert len(first_run.input) == 3
+        task = first_run.input[-1]
         assert isinstance(task, RunTaskSnapshot)
         assert task.content.strategy_notes == "Reserve for act two."
-        system_guidance = last_run.input[1]
+        system_guidance = first_run.input[1]
         assert isinstance(system_guidance, TextSnapshot)
         assert isinstance(system_guidance.value, GuidanceText)
         assert [doc.id for doc in system_guidance.value.documents] == ["act-two"]
@@ -396,7 +434,7 @@ def test_act_initialization_waits_for_start_and_rechecks_lifetime_without_replay
             running = asyncio.create_task(session.run())
             await asyncio.wait_for(paused.wait(), 3)
             await asyncio.wait_for(waiting.wait(), 3)
-            assert len(campaign.actions) == 3 and len(campaign.inputs) == 3
+            assert len(campaign.actions) == 3 and len(campaign.inputs) == 4
             assert session.notes.read() == "Reserve for act two."
             assert not running.done()
             guide.write_text("Synthetic act two planning.", encoding="utf-8")
@@ -426,7 +464,7 @@ def test_act_initialization_waits_for_start_and_rechecks_lifetime_without_replay
                 else RunEndReason.TERMINAL
             )
         assert len(campaign.actions) == (5 if resume == "same_run" else 3)
-        assert len(campaign.inputs) == (4 if resume == "same_run" else 3)
+        assert len(campaign.inputs) == (6 if resume == "same_run" else 4)
         archive = Journal.open(tmp_path / "archive.sqlite")
         assert {request.stream for request in archive.requests()} == (
             {"run:1", "run:2"} if resume == "same_run" else {"run:1"}
@@ -595,12 +633,25 @@ def test_transition_pause_admits_latest_state_before_loading_new_act(
         ) as session:
             running = asyncio.create_task(session.run())
             await asyncio.wait_for(waiting.wait(), 3)
-            assert len(campaign.actions) == 3 and len(campaign.inputs) == 3
+            assert len(campaign.actions) == 3 and len(campaign.inputs) == 4
             archive = Journal.open(tmp_path / "archive.sqlite")
             assert not any(isinstance(item.request, DocumentRead) for item in archive.materials())
             archive.close()
             if resume == "changed_act":
-                campaign.states[3] = run_state(3, "latest-act")
+                campaign.states[3] = campaign.states[3].model_copy(
+                    update={
+                        "location": campaign.states[3].location.model_copy(
+                            update={"node_id": "latest-act"}
+                        ),
+                        "state": campaign.states[3].state.model_copy(
+                            update={
+                                "progress": campaign.states[3].state.progress.model_copy(
+                                    update={"act": 3, "definition_id": "ACT.3"}
+                                )
+                            }
+                        ),
+                    }
+                )
                 campaign.states[4] = battle_state(3, "battle2")
             elif resume == "terminal":
                 campaign.states[3] = terminal(campaign.current)
@@ -746,7 +797,7 @@ def test_unknown_act_does_not_start_a_new_run_context(tmp_path: Path) -> None:
             assert (await session.run()).reason is RunEndReason.TERMINAL
         archive = Journal.open(tmp_path / "archive.sqlite")
         requests = archive.requests()
-        assert [request.stream for request in requests] == ["run:1", "run:1", "run:1", "run:2"]
+        assert [request.stream for request in requests] == ["run:1"] * 4 + ["run:2"] * 2
         archive.close()
 
     asyncio.run(scenario())

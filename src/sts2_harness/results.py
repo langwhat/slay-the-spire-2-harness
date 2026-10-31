@@ -37,6 +37,17 @@ class ReasonCode(StrEnum):
     NOTES_CONFLICT = "notes_conflict"
     EXECUTION_UNCONFIRMED = "execution_unconfirmed"
     CONTENT_UNAVAILABLE = "content_unavailable"
+    UNKNOWN_POSITION = "unknown_position"
+    EMPTY = "empty"
+    UNKNOWN_NODE = "unknown_node"
+    DUPLICATE_EDGE = "duplicate_edge"
+    SELF_LOOP = "self_loop"
+    AMBIGUOUS_NEXT = "ambiguous_next"
+    DISCONNECTED = "disconnected"
+    CYCLE = "cycle"
+    NO_PLAN = "no_plan"
+    PENDING_CHOICE = "pending_choice"
+    TRAVEL_NOT_AVAILABLE = "travel_not_available"
 
 
 class Reason(SemanticValue):
@@ -109,6 +120,29 @@ class NotesUpdated(SemanticValue):
     updated: Literal[True] = True
 
 
+class PlanAccepted(SemanticValue):
+    status: Literal["accepted"] = "accepted"
+    next: str
+
+
+class PlanRejected(SemanticValue):
+    status: Literal["rejected"] = "rejected"
+
+
+class PresentationUnavailable(SemanticValue):
+    status: Literal["not_available", "not_attempted"]
+
+
+class RestorationNotNeeded(SemanticValue):
+    status: Literal["not_needed"] = "not_needed"
+
+
+class PlanData(SemanticValue):
+    plan: PlanAccepted | PlanRejected
+    presentation: PresentationUnavailable
+    restoration: RestorationNotNeeded = RestorationNotNeeded()
+
+
 type QueryData = (
     native.InspectData
     | native.CatalogData
@@ -119,6 +153,7 @@ type QueryData = (
     | SkillList
     | NotesText
     | NotesUpdated
+    | PlanData
 )
 
 

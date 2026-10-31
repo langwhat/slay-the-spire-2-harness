@@ -200,7 +200,7 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
         assert isinstance(task, RunTaskSnapshot)
         assert isinstance(task.content, RunActContent)
         assert task.content.strategy_notes == "Current plan."
-        assert task.content.observation.updates is MISSING
+        assert "updates" not in task.content.observation.model_dump(mode="json")
         assert all(
             isinstance(message.content, RunAutomaticContent)
             and message.content.observation is not None
@@ -259,6 +259,9 @@ def test_mechanical_rules_use_verified_languages_and_keep_event_choices_for_stra
             native.Action(ref="travel", label="Travel label", enabled=True, destination="map:1:0"),
             native.Action(ref="blocked", label="Blocked", enabled=False, destination="map:1:1"),
         ),
+    )
+    travel = travel.model_copy(
+        update={"map": native.PublicMap(bosses=(), nodes=(), legal_destinations=("map:1:0",))}
     )
     chest = scene(
         native.RunScreen.TREASURE,

@@ -6,6 +6,7 @@ from typing import Annotated, Literal, Self
 from pydantic import MISSING, ConfigDict, Field, model_validator
 
 from sts2_harness.client import models as native
+from sts2_harness.context.map_projection import DynamicMap, MapTopology
 from sts2_harness.results import SemanticValue
 
 
@@ -246,6 +247,8 @@ class Actors(SemanticValue):
 
 
 class Current(SemanticValue):
+    map_topology: MapTopology | None | MISSING = MISSING
+    dynamic_map: DynamicMap | None | MISSING = MISSING
     progress: native.Progress | MISSING = MISSING
     player: native.CombatPlayer | native.Player | native.RunPlayer | MISSING = MISSING
     turn: int | None | MISSING = MISSING
@@ -314,13 +317,8 @@ class Decision(SemanticValue):
     hand_previews: tuple[HandPreview, ...] | MISSING = MISSING
 
 
-class MapUpdate(SemanticValue):
-    map: native.PublicMap
-
-
 class RunObservation(SemanticValue):
     catalog_additions: dict[str, Profile] | MISSING = MISSING
     scene: Scene | MISSING = MISSING
     current: Current | MISSING = MISSING
     decision: Decision
-    updates: MapUpdate | MISSING = MISSING

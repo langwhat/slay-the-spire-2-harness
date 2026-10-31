@@ -329,10 +329,12 @@ def test_reach_runs_start_combat_handoff_and_act_rebuild(tmp_path: Path) -> None
         archive.close()
         assert [(record.role, record.stream) for record in records] == [
             (native.DecisionOwner.RUN, "run:1"),
+            (native.DecisionOwner.RUN, "run:1"),
             (native.DecisionOwner.COMBAT, "combat:1"),
             (native.DecisionOwner.COMBAT, "combat:1"),
             (native.DecisionOwner.RUN, "run:1"),
             (native.DecisionOwner.RUN, "run:1"),
+            (native.DecisionOwner.RUN, "run:2"),
             (native.DecisionOwner.RUN, "run:2"),
             (native.DecisionOwner.COMBAT, "combat:2"),
         ]
@@ -354,7 +356,7 @@ def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Pa
         source_path = tmp_path / "parent.sqlite"
         anchors = await record_campaign(source_path, StartedCampaign(), start=True)
         with closing(Journal.open(source_path)) as source:
-            cutoff = anchors[1].model_sequence
+            cutoff = anchors[2].model_sequence
             target = source.request(anchors[-1].model_sequence)
             branch = Journal.create(
                 tmp_path / "branch.sqlite",
@@ -418,8 +420,8 @@ def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Pa
             )
             assert reader.timeline()[-1].sequence == target.sequence
             assert reader.request(target.sequence).semantic_digest == target.semantic_digest
-            assert reader.requests()[1].base_sequence is None
-            assert reader.request(anchors[3].model_sequence).position == 2
+            assert reader.requests()[2].base_sequence is None
+            assert reader.request(anchors[4].model_sequence).position == 3
         anchor = ModelAnchor("branch", target.sequence)
         async with reach(branch.path, anchor) as result:
             assert result == Reached(
@@ -471,7 +473,7 @@ def test_reach_compares_typed_input_without_mapping_key_order(
         anchors = await record_campaign(source_path, Campaign())
         original = source_path.read_bytes()
         with closing(Journal.open(source_path)) as source:
-            target = source.request(anchors[1].model_sequence)
+            target = source.request(anchors[2].model_sequence)
             position, snapshot = next(
                 (index, message)
                 for index, message in enumerate(target.input)
@@ -557,7 +559,7 @@ def test_reach_accepts_generated_directories_across_process_hash_seeds(tmp_path:
     )
     anchors = asyncio.run(record_campaign(path, campaign))
     with closing(Journal.open(path)) as journal:
-        target = journal.request(anchors[1].model_sequence)
+        target = journal.request(anchors[2].model_sequence)
         task = next(message for message in target.input if isinstance(message, TaskSnapshot))
         assert isinstance(task.content, ActContent)
         current = task.content.observation.current
@@ -674,7 +676,8 @@ def test_reach_replays_failed_auto_model_failure_and_settle_ordinals(
         archive.close()
         assert records[0].failure is not None and not records[0].delivered
         assert records[1].confirmed_operation_cursor == 0
-        assert records[2].confirmed_operation_cursor == 1
+        assert records[2].confirmed_operation_cursor == 0
+        assert records[3].confirmed_operation_cursor == 1
         assert campaign.actions[1].operation_id == "recording:2"
 
         def forbidden(*args: object, **kwargs: object) -> Never:
@@ -685,8 +688,8 @@ def test_reach_replays_failed_auto_model_failure_and_settle_ordinals(
         monkeypatch.setattr(Llm, "__aenter__", forbidden)
         monkeypatch.setattr(PackagedPrompts, "read", forbidden)
         monkeypatch.setattr(MaterialText, "read", forbidden)
-        async with reach(path, anchors[2]) as result:
-            assert result == Reached(anchors[2], 1, records[2].semantic_digest)
+        async with reach(path, anchors[3]) as result:
+            assert result == Reached(anchors[3], 1, records[3].semantic_digest)
 
     asyncio.run(scenario())
 
@@ -789,7 +792,7 @@ def test_pending_target_and_unconsumed_suffix_remain_reachable(tmp_path: Path) -
         async with reach(path, anchors[0]) as result:
             assert result == Reached(anchors[0], 0, first.semantic_digest)
         assert path.read_bytes() == source
-        async with reach(path, anchors[1]) as result:
+        async with reach(path, anchors[2]) as result:
             assert isinstance(result, Rejected)
             assert result.reason is RejectReason.UNSUPPORTED_HISTORY
 
@@ -879,7 +882,7 @@ def test_reach_rejects_missing_prefix_and_unknown_writes(tmp_path: Path) -> None
         )
         journal.close()
         make_unknown(original, first_settle)
-        async with reach(original, anchors[1]) as result:
+        async with reach(original, anchors[2]) as result:
             assert result == Rejected(
                 RejectReason.UNSUPPORTED_HISTORY,
                 first_settle.sequence,

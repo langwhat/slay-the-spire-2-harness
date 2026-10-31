@@ -72,6 +72,17 @@ def admission_game(
         another["ref"] = "interaction:9:2"
         event["state"]["actions"].append(another)
     intermediate_event = json.loads(json.dumps(event))
+    opening["state"]["progress"]["position"] = "0:0"
+    opening["state"]["actions"][0]["destination"] = "1:0"
+    opening["map"] = {
+        "bosses": [],
+        "nodes": [
+            {"position": "0:0", "room_type": "event", "children": ["1:0", "1:1"]},
+            {"position": "1:0", "room_type": "monster", "children": []},
+            {"position": "1:1", "room_type": "monster", "children": []},
+        ],
+        "legal_destinations": ["1:0", "1:1"],
+    }
     battle = json.loads(battle_state(1, "node-11").to_json())
     battle["state"]["player"]["definition_id"] = "CHARACTER.IRONCLAD"
     battle["input_readiness"] = "ready"
@@ -397,11 +408,12 @@ def test_admission_replays_source_then_independently_loads_and_publishes_after_c
                 ),
                 reply(
                     (
-                        "travel",
-                        "run_act",
-                        '{"steps":[{"kind":"interact","action":"interaction:10:1"}]}',
+                        "plan",
+                        "run_plan",
+                        '{"reason":"Enter the battle.","edges":[{"from":"0:0","to":"1:0"}]}',
                     )
                 ),
+                reply(("travel", "run_next", '{"reason":"Enter the battle."}')),
                 reply(("turn", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
                 reply(("finish", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
             ]
@@ -580,11 +592,12 @@ def test_admission_restores_completed_combat_batch_with_one_publication(
                 ),
                 reply(
                     (
-                        "travel",
-                        "run_act",
-                        '{"steps":[{"kind":"interact","action":"interaction:10:1"}]}',
+                        "plan",
+                        "run_plan",
+                        '{"reason":"Enter the battle.","edges":[{"from":"0:0","to":"1:0"}]}',
                     )
                 ),
+                reply(("travel", "run_next", '{"reason":"Enter the battle."}')),
                 reply(
                     (
                         "turn",
