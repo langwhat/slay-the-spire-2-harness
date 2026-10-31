@@ -45,6 +45,7 @@ from sts2_harness.journal import (
     DependencyKind,
     HistoricalVariant,
     Journal,
+    ParentPrefix,
     Record,
     SceneVariant,
 )
@@ -64,6 +65,7 @@ from sts2_harness.journal_models import (
     MaterialRequest,
     MaterialSnapshot,
     ModelRecord,
+    PreparationBaseline,
     PreparationEvidence,
     PreparationInput,
     PromptRead,
@@ -76,6 +78,7 @@ from sts2_harness.journal_models import (
     TaskSnapshot,
     ToolSet,
     ToolSnapshot,
+    VariantPrefixOutcome,
     archive_input,
 )
 from sts2_harness.knowledge import (
@@ -156,12 +159,112 @@ class Timeline:
         records: tuple[Dependency, ...],
         materials: Materials | None = None,
         original_before: int | None = None,
+        variant_journal: Journal | None = None,
+        record_variant: bool = False,
     ) -> None:
         self.records = records
         self.index = 0
         self.cursor = 0
         self.materials = materials
         self.original_before = original_before
+        self.variant_journal = variant_journal
+        self.record_variant = record_variant
+        self.variant_preparations = (
+            variant_journal.variant_preparations() if variant_journal is not None else ()
+        )
+
+    def needs_variant_preparation(self, sequence: int) -> bool:
+        journal = self.variant_journal
+        if self.materials is None or journal is None:
+            return False
+        parent = journal.manifest.parent
+        return parent is not None and sequence <= parent.before_sequence
+
+    def preparation(
+        self,
+        source: ModelRecord,
+        preparation: RequestPreparation | None,
+        prepared: PreparedRequest | None,
+        tools: tuple[ToolDefinition, ...],
+        outcome: VariantPrefixOutcome,
+        reply_sequence: int | None,
+    ) -> None:
+        journal = self.variant_journal
+        if journal is None or preparation is None:
+            unsupported(source.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+        baseline = archive_input((preparation.baseline,))[0] if preparation.baseline else None
+        evidence = PreparationEvidence(
+            group_id=preparation.group_id,
+            baseline=baseline,
+            input_before=archive_input(preparation.input_before),
+            estimate_before=preparation.estimate_before,
+            decision=preparation.decision,
+            input_after=(
+                archive_input(preparation.input_after)
+                if preparation.input_after is not None
+                else None
+            ),
+            estimate_after=preparation.estimate_after,
+            retained_complete_group_id=preparation.retained_complete_group_id,
+            active_group_id=preparation.active_group_id,
+            validation=preparation.validation,
+        )
+        tool_set = ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in tools))
+        digest = prepared.measurement.digest if prepared is not None else None
+        if self.record_variant:
+            journal.record_variant_preparation(
+                source,
+                evidence,
+                tool_set,
+                protocol_encoding_digest=digest,
+                outcome=outcome,
+                source_reply_sequence=reply_sequence,
+            )
+            return
+        expected = next(
+            (
+                item
+                for item in self.variant_preparations
+                if item.source_model_sequence == source.sequence
+            ),
+            None,
+        )
+        if expected is None:
+            unsupported(source.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+        if (
+            expected.configuration != source.configuration
+            or (
+                expected.role,
+                expected.stream,
+                expected.position,
+                expected.confirmed_operation_cursor,
+            )
+            != (source.role, source.stream, source.position, source.confirmed_operation_cursor)
+            or expected.before != PreparationInput(messages=evidence.input_before, tools=tool_set)
+            or expected.after
+            != (
+                PreparationInput(messages=evidence.input_after, tools=tool_set)
+                if evidence.input_after is not None
+                else None
+            )
+            or expected.baseline != (PreparationBaseline(message=baseline) if baseline else None)
+            or expected.protocol_encoding_digest != digest
+            or expected.outcome is not outcome
+            or expected.source_reply_sequence != reply_sequence
+            or any(
+                getattr(expected, key) != getattr(evidence, key)
+                for key in (
+                    "group_id",
+                    "estimate_before",
+                    "decision",
+                    "estimate_after",
+                    "retained_complete_group_id",
+                    "active_group_id",
+                    "validation",
+                )
+            )
+        ):
+            _different(source.sequence, InputComponent.MODEL_INPUT)
 
     def original(self, sequence: int) -> bool:
         return self.original_before is None or sequence < self.original_before
@@ -488,7 +591,14 @@ class ReplayModel:
         return self._next_configuration().capacity_policy
 
     def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
-        configuration = self._next_configuration()
+        return self._encode(input, tools, self._next_configuration())
+
+    def _encode(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        configuration: ConfigurationSnapshot,
+    ) -> PreparedRequest:
         # Snapshots are mutable Pydantic values, so identify preparers by their serialized value.
         key = configuration.model_dump_json()
         preparer = self._preparers.get(key)
@@ -592,6 +702,16 @@ class ReplayModel:
         self._position += 1
         if record.position != self._position:
             _different(record.sequence, InputComponent.POSITION)
+        if self._timeline.materials is not None and self._timeline.original(record.sequence):
+            candidate = (
+                self._encode(preparation.input_after, tools, record.configuration)
+                if preparation.input_after is not None
+                else None
+            )
+            self._timeline.preparation(
+                record, preparation, candidate, tools, VariantPrefixOutcome.INTERRUPTED, None
+            )
+            unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
         self._check_preparation(record, preparation)
         if tuple(ToolSnapshot.of(tool) for tool in tools) != record.tools:
             _different(record.sequence, InputComponent.TOOLS)
@@ -632,10 +752,65 @@ class ReplayModel:
             if treated and materials is not None
             else record.tools
         )
-        if messages != expected_input:
+        if not treated and messages != expected_input:
             _different(record.sequence, InputComponent.MODEL_INPUT)
         if tuple(ToolSnapshot.of(tool) for tool in tools) != expected_tools:
             _different(record.sequence, InputComponent.TOOLS)
+        if not treated and record.attempts:
+            measurement = self._encode(input, tools, record.configuration).measurement
+            if any(
+                attempt.protocol_encoding_digest is not None
+                and attempt.protocol_encoding_digest != measurement.digest
+                or attempt.estimated_input_tokens is not None
+                and attempt.estimated_input_tokens != measurement.estimated_input_tokens
+                for attempt in record.attempts
+            ):
+                _different(record.sequence, InputComponent.MODEL_INPUT)
+        source_record = record
+        if treated and record.capacity_recovery is not None:
+            if record.sequence == self._target.model_sequence:
+                unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+            recovery = record.capacity_recovery
+            retry = self._timeline.take(DependencyKind.MODEL)
+            if not isinstance(retry, ModelRecord) or (
+                recovery.decision is not RecoveryDecision.RETRY
+                or recovery.retry_sequence != retry.sequence
+                or retry.sequence >= self._target.model_sequence
+                or (retry.role, retry.stream, retry.position, retry.confirmed_operation_cursor)
+                != (
+                    record.role,
+                    record.stream,
+                    record.position + 1,
+                    record.confirmed_operation_cursor,
+                )
+                or retry.configuration != record.configuration
+                or not retry.attempts
+                or retry.attempts[0].cause is not AttemptCause.CAPACITY_RETRY
+                or retry.attempts[0].recovery_of != recovery.rejected
+                or not retry.delivered
+                or retry.failure is not None
+            ):
+                unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+            self._position += 1
+            record = retry
+        if treated and record.failure is not None:
+            unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+        if self._timeline.needs_variant_preparation(source_record.sequence):
+            journal = self._timeline.variant_journal
+            assert journal is not None and journal.manifest.parent is not None
+            prefix_anchor = journal.manifest.parent.before_sequence
+            self._timeline.preparation(
+                source_record,
+                preparation,
+                self._encode(input, tools, source_record.configuration),
+                tools,
+                (
+                    VariantPrefixOutcome.ANCHOR_READY
+                    if source_record.sequence == prefix_anchor
+                    else VariantPrefixOutcome.SOURCE_REPLY
+                ),
+                None if source_record.sequence == prefix_anchor else record.sequence,
+            )
         if record.sequence == self._target.model_sequence:
             # Native admission stays bound to the source request digest.
             self._reached.set_result(
@@ -665,7 +840,9 @@ class ReplayModel:
         reply = attempt.reply
         return ModelReply(
             AssistantMessage(reply.native_reply),
-            Usage(
+            Usage()
+            if treated
+            else Usage(
                 reply.input_tokens,
                 reply.output_tokens,
                 reply.cache_read_tokens,
@@ -818,10 +995,17 @@ async def reach(archive: Path, target: ModelAnchor) -> AsyncGenerator[ReplayResu
             records = prefix(journal, target)
             reached = asyncio.get_running_loop().create_future()
             declaration = journal.manifest.variant
+            if isinstance(declaration, HistoricalVariant):
+                await verify_source(declaration.source)
             materials = Materials(declaration.replacements) if declaration is not None else None
             original_before = material_boundary(journal)
             task = asyncio.create_task(
-                _run(journal, Timeline(records, materials, original_before), target, reached)
+                _run(
+                    journal,
+                    Timeline(records, materials, original_before, variant_journal=journal),
+                    target,
+                    reached,
+                )
             )
             await asyncio.wait((task, reached), return_when=asyncio.FIRST_COMPLETED)
             if task.done():
@@ -843,3 +1027,18 @@ async def reach(archive: Path, target: ModelAnchor) -> AsyncGenerator[ReplayResu
         finally:
             if journal is not None:
                 journal.close()
+
+
+async def verify_source(source: ParentPrefix) -> None:
+    with closing(Journal.open(source.archive)) as journal:
+        for record in prefix(journal, ModelAnchor(source.recording_id, source.before_sequence)):
+            if isinstance(record, ModelRecord) and any(
+                attempt.protocol_encoding_digest is None or attempt.estimated_input_tokens is None
+                for attempt in record.attempts
+            ):
+                unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+    async with reach(
+        source.archive, ModelAnchor(source.recording_id, source.before_sequence)
+    ) as result:
+        if isinstance(result, Rejected):
+            raise ReplayRejected(result)

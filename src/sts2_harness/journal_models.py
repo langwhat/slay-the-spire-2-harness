@@ -9,6 +9,7 @@ from typing import Annotated, Literal, Self
 from pydantic import (
     MISSING,
     BeforeValidator,
+    Field,
     JsonValue,
     PlainSerializer,
     SerializationInfo,
@@ -638,6 +639,91 @@ class RecordedPreparation(PreparationEvidence):
     input_after_ref: str | None
     input_after_digest: str | None
     tools: tuple[ToolSnapshot, ...]
+
+
+class VariantPrefixOutcome(StrEnum):
+    SOURCE_REPLY = "source_reply"
+    ANCHOR_READY = "anchor_ready"
+    INTERRUPTED = "interrupted"
+
+
+type _ContentDigest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class VariantPrefixPreparation(PreparationReferences):
+    kind: Literal["variant_prefix_preparation"] = "variant_prefix_preparation"
+    group_id: Annotated[int, Field(gt=0)]
+    estimate_before: Annotated[int, Field(ge=0)]
+    estimate_after: Annotated[int, Field(ge=0)] | None
+    retained_complete_group_id: Annotated[int, Field(gt=0)] | None
+    active_group_id: Annotated[int, Field(gt=0)] | None
+    timeline_index: Annotated[int, Field(gt=0)]
+    source_model_sequence: Annotated[int, Field(gt=0)]
+    role: native.DecisionOwner
+    stream: native.Nonempty
+    position: Annotated[int, Field(gt=0)]
+    confirmed_operation_cursor: Annotated[int, Field(ge=0)]
+    configuration_ref: _ContentDigest
+    input_before_ref: _ContentDigest
+    input_after_ref: _ContentDigest | None
+    baseline_ref: _ContentDigest | None
+    semantic_digest: _ContentDigest | None
+    protocol_encoding_digest: _ContentDigest | None
+    outcome: VariantPrefixOutcome
+    source_reply_sequence: Annotated[int, Field(gt=0)] | None
+
+    @model_validator(mode="after")
+    def complete_evidence(self) -> Self:
+        if self.group_id != (self.active_group_id or self.retained_complete_group_id):
+            raise ValueError("The preparation group is inconsistent.")
+        if (
+            self.active_group_id is not None
+            and self.retained_complete_group_id is not None
+            and self.retained_complete_group_id >= self.active_group_id
+        ):
+            raise ValueError("The retained group must precede the active group.")
+        invalid = self.decision is CompactionDecision.INVALID_CANDIDATE
+        if any(
+            (value is None) != invalid
+            for value in (
+                self.input_after_ref,
+                self.estimate_after,
+                self.semantic_digest,
+                self.protocol_encoding_digest,
+            )
+        ):
+            raise ValueError("The preparation after evidence is inconsistent.")
+        expected_validation = {
+            CompactionDecision.UNCHANGED: CompactionValidation.NOT_NEEDED,
+            CompactionDecision.COMPACTED: CompactionValidation.PASSED,
+            CompactionDecision.MINIMUM_EXCEEDS_WINDOW: CompactionValidation.PASSED,
+            CompactionDecision.INVALID_CANDIDATE: CompactionValidation.FAILED,
+        }[self.decision]
+        interrupted = self.decision in (
+            CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
+            CompactionDecision.INVALID_CANDIDATE,
+        )
+        if self.validation is not expected_validation or interrupted != (
+            self.outcome is VariantPrefixOutcome.INTERRUPTED
+        ):
+            raise ValueError("The preparation outcome is inconsistent.")
+        if (self.source_reply_sequence is not None) != (
+            self.outcome is VariantPrefixOutcome.SOURCE_REPLY
+        ):
+            raise ValueError("The preparation source reply is inconsistent.")
+        if self.decision is CompactionDecision.UNCHANGED and (
+            self.input_before_ref != self.input_after_ref
+            or self.estimate_before != self.estimate_after
+        ):
+            raise ValueError("An unchanged preparation must retain its complete input.")
+        return self
+
+
+class RecordedVariantPrefixPreparation(VariantPrefixPreparation):
+    configuration: ConfigurationSnapshot
+    before: PreparationInput
+    after: PreparationInput | None
+    baseline: PreparationBaseline | None
 
 
 class InputDelta(native.WireModel):

@@ -12,8 +12,10 @@ from test_combat import reply
 from test_lifecycle import Campaign, battle_state, run_state, terminal
 from test_responses import configuration
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
+from sts2_harness.config import ModelConfiguration
 from sts2_harness.game import LiveGame, Settlement
 from sts2_harness.journal import (
     HeadlessInitialConditions,
@@ -31,7 +33,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
-from sts2_harness.prompts import PackagedPrompts
+from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval import ModelAnchor, Reached, reach, take_over
 from sts2_harness_eval.annotations import AnnotationStore
@@ -138,11 +140,17 @@ async def source_case(
     source: Source | None = None,
     documents: Documents | None = None,
     target_position: int = 2,
+    target_stream: str | None = None,
     materials: SessionMaterials | None = None,
     template: str = "test",
+    model_configuration: ModelConfiguration | None = None,
+    prompts: PromptReader | None = None,
 ) -> Case:
     source = source or Source()
     manifest = Manifest(
+        capacity_policy=CapacityPolicy.for_configuration(
+            model_configuration or configuration(path.parent)
+        ),
         materials=materials
         if materials is not None
         else SessionMaterials(entry_documents_enabled=False, act_guidance={}, battle_guidance=()),
@@ -170,7 +178,10 @@ async def source_case(
     with closing(Journal.create(path, manifest)) as journal:
         async with (
             ModClient("http://source", transport=httpx.MockTransport(source.mod)) as client,
-            Llm(configuration(path.parent), transport=httpx.MockTransport(source.model)) as model,
+            Llm(
+                model_configuration or configuration(path.parent),
+                transport=httpx.MockTransport(source.model),
+            ) as model,
         ):
 
             def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
@@ -189,7 +200,7 @@ async def source_case(
                         ),
                         journal,
                     ),
-                    RecordedPrompts(PackagedPrompts(), journal),
+                    RecordedPrompts(prompts or PackagedPrompts(), journal),
                     RecordedDocuments(documents or FileDocuments(), journal),
                     factory,
                 ),
@@ -201,7 +212,9 @@ async def source_case(
         target = next(
             item
             for item in requests
-            if item.role is native.DecisionOwner.COMBAT and item.position == target_position
+            if item.role is native.DecisionOwner.COMBAT
+            and item.position == target_position
+            and (target_stream is None or item.stream == target_stream)
         )
         anchor = ModelAnchor("source", target.sequence)
     plan = plan_admission(

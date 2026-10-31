@@ -84,9 +84,12 @@ from sts2_harness.journal_models import (
     PreparationReferences,
     RecordedPreparation,
     RecordedRecovery,
+    RecordedVariantPrefixPreparation,
     RecoveryRecord,
     SkillListing,
     ToolSet,
+    VariantPrefixOutcome,
+    VariantPrefixPreparation,
 )
 from sts2_harness.llm.messages import FailureKind
 from sts2_harness.results import Reason
@@ -305,6 +308,8 @@ CREATE TABLE IF NOT EXISTS model_requests (sequence INTEGER PRIMARY KEY, cursor 
 CREATE TABLE IF NOT EXISTS model_attempts (sequence INTEGER NOT NULL, attempt INTEGER NOT NULL,
     value TEXT NOT NULL, PRIMARY KEY(sequence,attempt));
 CREATE TABLE IF NOT EXISTS model_recoveries (sequence INTEGER PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS variant_preparations (timeline_index INTEGER PRIMARY KEY,
+    source_model_sequence INTEGER UNIQUE NOT NULL, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS materials (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
     request TEXT NOT NULL, reply TEXT);
 CREATE TABLE IF NOT EXISTS summaries (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
@@ -610,6 +615,164 @@ class Journal:
         self._sequence += 1
         self._active_sequence = self._sequence
         return self._sequence
+
+    def record_variant_preparation(
+        self,
+        source: ModelRecord,
+        preparation: PreparationEvidence,
+        tools: ToolSet,
+        *,
+        protocol_encoding_digest: str | None,
+        outcome: VariantPrefixOutcome,
+        source_reply_sequence: int | None,
+    ) -> None:
+        if self._read_only or not isinstance(self.manifest.variant, HistoricalVariant):
+            raise ArchiveError("Only a writable historical variant records prefix preparation.")
+        previous = self.variant_preparations()
+        if previous and (
+            source.sequence <= previous[-1].source_model_sequence
+            or previous[-1].outcome is not VariantPrefixOutcome.SOURCE_REPLY
+        ):
+            raise ArchiveError("Variant preparation order is inconsistent.")
+        with self._storage() as connection:
+            if connection is None:
+                raise ArchiveError("Cannot persist variant preparation.")
+            before_ref = self._blob(
+                connection, PreparationInput(messages=preparation.input_before, tools=tools)
+            )
+            after_ref = (
+                self._blob(
+                    connection, PreparationInput(messages=preparation.input_after, tools=tools)
+                )
+                if preparation.input_after is not None
+                else None
+            )
+            baseline_ref = (
+                self._blob(connection, PreparationBaseline(message=preparation.baseline))
+                if preparation.baseline is not None
+                else None
+            )
+            collector = BlobCollector()
+            encoding = BlobEncoding(collector.collect)
+            encoded = (
+                tuple(
+                    message.model_dump_json(context=encoding).encode()
+                    for message in preparation.input_after
+                )
+                if preparation.input_after is not None
+                else None
+            )
+            value = VariantPrefixPreparation(
+                **preparation.model_dump(exclude={"baseline", "input_before", "input_after"}),
+                baseline_ref=baseline_ref,
+                input_before_ref=before_ref,
+                input_after_ref=after_ref,
+                timeline_index=len(previous) + 1,
+                source_model_sequence=source.sequence,
+                role=source.role,
+                stream=source.stream,
+                position=source.position,
+                confirmed_operation_cursor=source.confirmed_operation_cursor,
+                configuration_ref=self._blob(connection, source.configuration),
+                semantic_digest=(
+                    hashlib.sha256(b"[" + b",".join(encoded) + b"]").hexdigest()
+                    if encoded is not None
+                    else None
+                ),
+                protocol_encoding_digest=protocol_encoding_digest,
+                outcome=outcome,
+                source_reply_sequence=source_reply_sequence,
+            )
+            connection.execute(
+                "INSERT INTO variant_preparations VALUES (?,?,?)",
+                (value.timeline_index, source.sequence, value.model_dump_json()),
+            )
+
+    def variant_preparations(self) -> tuple[RecordedVariantPrefixPreparation, ...]:
+        if not self.path.exists():
+            return ()
+        try:
+            with closing(self._read_connection(self.path)) as connection:
+                rows = connection.execute(
+                    "SELECT timeline_index,source_model_sequence,value FROM variant_preparations "
+                    "ORDER BY timeline_index"
+                ).fetchall()
+                decoding = BlobDecoding(lambda item: self._read_blob(connection, item))
+                result: list[RecordedVariantPrefixPreparation] = []
+                for index, (timeline_index, sequence, raw) in enumerate(rows, 1):
+                    value = VariantPrefixPreparation.model_validate_json(raw)
+                    parent = self.manifest.parent
+                    if (
+                        not isinstance(self.manifest.variant, HistoricalVariant)
+                        or parent is None
+                        or sequence > parent.before_sequence
+                        or value.outcome is VariantPrefixOutcome.ANCHOR_READY
+                        and sequence != parent.before_sequence
+                        or value.outcome is VariantPrefixOutcome.SOURCE_REPLY
+                        and (
+                            sequence == parent.before_sequence
+                            or value.source_reply_sequence is None
+                            or value.source_reply_sequence < sequence
+                            or value.source_reply_sequence >= parent.before_sequence
+                        )
+                    ):
+                        raise ArchiveError("Variant preparation source boundary is inconsistent.")
+                    if (timeline_index, sequence) != (index, value.source_model_sequence) or (
+                        value.timeline_index != index
+                        or result
+                        and (
+                            sequence <= result[-1].source_model_sequence
+                            or result[-1].outcome is not VariantPrefixOutcome.SOURCE_REPLY
+                        )
+                    ):
+                        raise ArchiveError("Variant preparation order is inconsistent.")
+                    configuration = ConfigurationSnapshot.model_validate_json(
+                        self._read_blob(connection, value.configuration_ref)
+                    )
+                    before = PreparationInput.model_validate_json(
+                        self._read_blob(connection, value.input_before_ref), context=decoding
+                    )
+                    after = (
+                        PreparationInput.model_validate_json(
+                            self._read_blob(connection, value.input_after_ref), context=decoding
+                        )
+                        if value.input_after_ref is not None
+                        else None
+                    )
+                    baseline = (
+                        PreparationBaseline.model_validate_json(
+                            self._read_blob(connection, value.baseline_ref), context=decoding
+                        )
+                        if value.baseline_ref is not None
+                        else None
+                    )
+                    if after is not None:
+                        collector = BlobCollector()
+                        encoding = BlobEncoding(collector.collect)
+                        encoded = tuple(
+                            message.model_dump_json(context=encoding).encode()
+                            for message in after.messages
+                        )
+                        digest = hashlib.sha256(b"[" + b",".join(encoded) + b"]").hexdigest()
+                        if digest != value.semantic_digest:
+                            raise ArchiveError("Variant semantic evidence is inconsistent.")
+                    if value.estimate_after is not None and (
+                        (value.estimate_after >= configuration.capacity_policy.context_window)
+                        != (value.decision is CompactionDecision.MINIMUM_EXCEEDS_WINDOW)
+                    ):
+                        raise ArchiveError("Variant capacity evidence is inconsistent.")
+                    result.append(
+                        RecordedVariantPrefixPreparation(
+                            **value.model_dump(),
+                            configuration=configuration,
+                            before=before,
+                            after=after,
+                            baseline=baseline,
+                        )
+                    )
+                return tuple(result)
+        except (OSError, sqlite3.Error, ValidationError, ValueError):
+            raise ArchiveError("Cannot decode variant preparation evidence.") from None
 
     def begin_model(
         self,

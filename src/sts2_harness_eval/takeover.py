@@ -74,6 +74,7 @@ from sts2_harness_eval._replay import (
     material_boundary,
     prefix,
     unsupported,
+    verify_source,
 )
 from sts2_harness_eval._scene import SceneSession
 from sts2_harness_eval.cases import (
@@ -420,9 +421,7 @@ class _Takeover:
                 initial=initial,
             )
             manifest = Manifest(
-                capacity_policy=CapacityPolicy(
-                    context_window=self.model.configuration.context_window
-                ),
+                capacity_policy=self.model.capacity_policy,
                 recording_id=uuid4().hex,
                 core_version="0.1.0",
                 game_instance_id=location.game_instance_id,
@@ -519,6 +518,7 @@ class _Takeover:
         materials = Materials(declaration.replacements) if declaration is not None else None
         original_before = declaration.source.before_sequence if declaration is not None else None
         if materials is not None:
+            await verify_source(parent)
             original_records = records
             if source.manifest.variant is not None:
                 assert declaration is not None
@@ -553,7 +553,13 @@ class _Takeover:
         release = asyncio.Event()
         # Only the original source target still needs material mapping.
         mapping_before = material_boundary(source)
-        timeline = Timeline(records, materials, mapping_before)
+        timeline = Timeline(
+            records,
+            materials,
+            mapping_before,
+            variant_journal=journal,
+            record_variant=True,
+        )
         historical_models: list[ReplayModel] = []
 
         def factory(role: native.DecisionOwner, stream: str) -> ModelClient:

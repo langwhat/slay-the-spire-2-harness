@@ -94,6 +94,11 @@ def test_historical_variant_retains_native_history_and_reopens(tmp_path: Path) -
             assert journal.manifest.variant is not None
             saved = journal.manifest.variant.replacements[0].replacement
             assert (saved.id, saved.body) == (prompt.id, "Act carefully.")
+            preparations = journal.variant_preparations()
+            assert preparations[-1].outcome.value == "anchor_ready"
+            assert preparations[-1].source_model_sequence == case.source.anchor.model_sequence
+            assert all(item.source_reply_sequence is not None for item in preparations[:-1])
+            assert all(item.configuration is not None for item in preparations)
             target = journal.requests()[-1]
             anchor = ModelAnchor(journal.manifest.recording_id, target.sequence)
         async with reach(branch, anchor) as reached:
@@ -266,7 +271,7 @@ def test_document_versions_keep_explicit_result_links_and_reject_unknown_sources
             journal.end_model()
         async with reach(broken, ModelAnchor("broken-link", sequence)) as reached:
             assert isinstance(reached, Rejected)
-            assert reached.detail == InputDifference(InputComponent.MODEL_INPUT)
+            assert reached.reason.value == "unsupported_history"
 
         assert manifest.parent is not None
         candidate_plan = plan_admission(
