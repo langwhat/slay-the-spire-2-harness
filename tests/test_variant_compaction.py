@@ -17,6 +17,7 @@ from sts2_harness.capacity import CompactionDecision
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
 from sts2_harness.journal import Journal
+from sts2_harness.journal_models import VariantPrefixOutcome
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialText
 from sts2_harness.materials import FileDocuments
@@ -289,7 +290,7 @@ def test_variant_owns_compaction_timing_and_reopens(
             assert actual.after is not None
             assert actual.confirmed_operation_cursor == case.source.target_cursor
             assert actual.configuration.capacity_policy.context_window == config.context_window
-            assert actual.outcome.value == "anchor_ready"
+            assert actual.outcome is VariantPrefixOutcome.ANCHOR_READY
             latest = saved.requests()[-1]
             anchor = ModelAnchor(saved.manifest.recording_id, latest.sequence)
         async with reach(branch, anchor) as result:
@@ -331,7 +332,7 @@ def test_oversized_variant_records_interruption_without_dispatch(tmp_path: Path)
         assert restorer.launches == 0 and not restorer.actions
         with closing(Journal.open(branch)) as saved:
             preparations = saved.variant_preparations()
-            assert preparations[-1].outcome.value == "interrupted"
+            assert preparations[-1].outcome is VariantPrefixOutcome.INTERRUPTED
             assert preparations[-1].decision is CompactionDecision.MINIMUM_EXCEEDS_WINDOW
             assert preparations[-1].retained_complete_group_id is None
             assert preparations[-1].active_group_id == 1
@@ -421,7 +422,7 @@ def test_variant_folds_verified_source_recovery_without_replaying_rejection(tmp_
                 if item.source_model_sequence == rejected.sequence
             )
             assert evidence.source_reply_sequence == recovery.retry_sequence
-            assert evidence.outcome.value == "source_reply"
+            assert evidence.outcome is VariantPrefixOutcome.SOURCE_REPLY
             latest = archive.requests()[-1]
             anchor = ModelAnchor(archive.manifest.recording_id, latest.sequence)
         async with reach(branch, anchor) as reopened:

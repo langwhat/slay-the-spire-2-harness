@@ -153,6 +153,23 @@ def _kind(record: Dependency) -> DependencyKind | OperationKind:
     return record.request.kind
 
 
+def _preparation_evidence(preparation: RequestPreparation) -> PreparationEvidence:
+    return PreparationEvidence(
+        group_id=preparation.group_id,
+        baseline=archive_input((preparation.baseline,))[0] if preparation.baseline else None,
+        input_before=archive_input(preparation.input_before),
+        estimate_before=preparation.estimate_before,
+        decision=preparation.decision,
+        input_after=(
+            archive_input(preparation.input_after) if preparation.input_after is not None else None
+        ),
+        estimate_after=preparation.estimate_after,
+        retained_complete_group_id=preparation.retained_complete_group_id,
+        active_group_id=preparation.active_group_id,
+        validation=preparation.validation,
+    )
+
+
 class Timeline:
     def __init__(
         self,
@@ -192,23 +209,7 @@ class Timeline:
         journal = self.variant_journal
         if journal is None or preparation is None:
             unsupported(source.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
-        baseline = archive_input((preparation.baseline,))[0] if preparation.baseline else None
-        evidence = PreparationEvidence(
-            group_id=preparation.group_id,
-            baseline=baseline,
-            input_before=archive_input(preparation.input_before),
-            estimate_before=preparation.estimate_before,
-            decision=preparation.decision,
-            input_after=(
-                archive_input(preparation.input_after)
-                if preparation.input_after is not None
-                else None
-            ),
-            estimate_after=preparation.estimate_after,
-            retained_complete_group_id=preparation.retained_complete_group_id,
-            active_group_id=preparation.active_group_id,
-            validation=preparation.validation,
-        )
+        evidence = _preparation_evidence(preparation)
         tool_set = ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in tools))
         digest = prepared.measurement.digest if prepared is not None else None
         if self.record_variant:
@@ -247,7 +248,8 @@ class Timeline:
                 if evidence.input_after is not None
                 else None
             )
-            or expected.baseline != (PreparationBaseline(message=baseline) if baseline else None)
+            or expected.baseline
+            != (PreparationBaseline(message=evidence.baseline) if evidence.baseline else None)
             or expected.protocol_encoding_digest != digest
             or expected.outcome is not outcome
             or expected.source_reply_sequence != reply_sequence
@@ -660,23 +662,7 @@ class ReplayModel:
             return
         if expected is None:
             _different(record.sequence, InputComponent.MODEL_INPUT)
-        baseline = archive_input((preparation.baseline,))[0] if preparation.baseline else None
-        actual = PreparationEvidence(
-            group_id=preparation.group_id,
-            baseline=baseline,
-            input_before=archive_input(preparation.input_before),
-            estimate_before=preparation.estimate_before,
-            decision=preparation.decision,
-            input_after=(
-                archive_input(preparation.input_after)
-                if preparation.input_after is not None
-                else None
-            ),
-            estimate_after=preparation.estimate_after,
-            retained_complete_group_id=preparation.retained_complete_group_id,
-            active_group_id=preparation.active_group_id,
-            validation=preparation.validation,
-        )
+        actual = _preparation_evidence(preparation)
         if actual != PreparationEvidence.model_validate(
             expected.model_dump(include=set(PreparationEvidence.model_fields))
         ):

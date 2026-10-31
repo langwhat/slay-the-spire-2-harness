@@ -25,6 +25,7 @@ from sts2_harness.journal_models import (
     TaskSnapshot,
     TextSnapshot,
     ToolSet,
+    VariantPrefixOutcome,
 )
 from sts2_harness.knowledge import Document, DocumentView, SkillRead, SkillSummary, SubjectId
 from sts2_harness.llm.client import Llm
@@ -95,7 +96,7 @@ def test_historical_variant_retains_native_history_and_reopens(tmp_path: Path) -
             saved = journal.manifest.variant.replacements[0].replacement
             assert (saved.id, saved.body) == (prompt.id, "Act carefully.")
             preparations = journal.variant_preparations()
-            assert preparations[-1].outcome.value == "anchor_ready"
+            assert preparations[-1].outcome is VariantPrefixOutcome.ANCHOR_READY
             assert preparations[-1].source_model_sequence == case.source.anchor.model_sequence
             assert all(item.source_reply_sequence is not None for item in preparations[:-1])
             assert all(item.configuration is not None for item in preparations)
