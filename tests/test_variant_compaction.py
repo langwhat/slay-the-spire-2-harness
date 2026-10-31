@@ -338,7 +338,13 @@ def test_oversized_variant_records_interruption_without_dispatch(tmp_path: Path)
             assert preparations[-1].active_group_id == 1
             assert preparations[-1].source_reply_sequence is None
             assert preparations[-1].after is not None
-            assert all(record.role is native.DecisionOwner.RUN for record in saved.requests())
+            with closing(Journal.open(case.source.archive)) as source:
+                assert saved.requests() == source.requests(
+                    stop=case.source.anchor.model_sequence - 1
+                )
+            with closing(sqlite3.connect(f"file:{branch}?mode=ro", uri=True)) as connection:
+                assert connection.execute("SELECT count(*) FROM model_requests").fetchone() == (0,)
+                assert connection.execute("SELECT count(*) FROM model_attempts").fetchone() == (0,)
 
     asyncio.run(scenario())
 

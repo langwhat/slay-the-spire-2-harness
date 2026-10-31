@@ -12,7 +12,6 @@ from test_takeover import FakeRestorer, Source, source_case
 
 from sts2_harness.client import models as native
 from sts2_harness.context.models import ActContent, RunObservation
-from sts2_harness.context.run_models import Current, RemovedEntries
 from sts2_harness.game import GameReply, GameSuccess
 from sts2_harness.journal import Journal, ParentPrefix, SceneVariant, SessionMaterials
 from sts2_harness.journal_models import (
@@ -477,7 +476,7 @@ class ActionBoundarySource(Source):
         if request.url.path == "/state" and self.index == 2:
             self._boundary_reads += 1
             if self._observation_changed and self._boundary_reads == 2:
-                # A missing description requires an explicit entry removal.
+                # The incoming group snapshot must omit this retired description.
                 self.states[2] = self.current.model_copy(
                     update={
                         "descriptions": {
@@ -523,14 +522,29 @@ def test_action_boundary_task_omission_requires_complete_recorded_evidence(
         assert isinstance(tasks[-1].content, ActContent)
         action_result = next(item for item in original.input if isinstance(item, ResultSnapshot))
         assert action_result.observation is not None
-        assert tasks[-1].content.observation == RunObservation(
-            decision=action_result.observation.decision,
-            current=(
-                Current(removed=RemovedEntries(card_descriptions=("card:1:2",)))
-                if difference == "observation"
-                else MISSING
-            ),
-        )
+        if difference == "observation":
+            assert isinstance(tasks[0].content, ActContent)
+            initial = tasks[0].content.observation
+            incoming = tasks[-1].content.observation
+            assert initial is not None and incoming is not None
+            assert initial.scene is not MISSING and initial.current is not MISSING
+            assert incoming.scene is not MISSING
+            assert incoming.scene == initial.scene and incoming.scene.reset is True
+            assert incoming.decision == action_result.observation.decision
+            assert initial.current.card_descriptions is not MISSING
+            assert incoming.current == initial.current.model_copy(
+                update={
+                    "card_descriptions": tuple(
+                        entry
+                        for entry in initial.current.card_descriptions
+                        if entry.ref != "card:1:2"
+                    )
+                }
+            )
+        else:
+            assert tasks[-1].content.observation == RunObservation(
+                decision=action_result.observation.decision,
+            )
         if difference == "notes":
             invalid = tmp_path / "extra-notes.sqlite"
             extra_notes = tasks[-1].model_copy(
