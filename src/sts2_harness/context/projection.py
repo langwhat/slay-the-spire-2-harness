@@ -70,7 +70,7 @@ def _source_refs(observation: VisibleObservation) -> set[str]:
     refs = set(observation.objects)
     refs.add("player")
     state = observation.state
-    if isinstance(state, (native.CombatState, ForeignCombatState)):
+    if isinstance(state, native.CombatState):
         refs.update(actor.ref for actor in (*state.enemies, *state.inactive_enemies))
         if state.allies is not MISSING:
             refs.update(ally.ref for ally in state.allies)
@@ -88,6 +88,7 @@ class Delivery:
     owner_mechanisms: Mapping[str, tuple[native.MechanismView, ...]]
     node: tuple[str, str | None, str | None] | None = None
     map_delivered: bool = False
+    encounter: native.NamedDefinition | MISSING = MISSING
 
     @classmethod
     def empty(cls) -> Delivery:
@@ -134,6 +135,11 @@ class Delivery:
         mechanisms, shared, owners = _mechanisms(
             observation.mechanisms, previous.shared_mechanisms, previous.owner_mechanisms
         )
+        state = observation.state
+        encounter: native.NamedDefinition | MISSING = MISSING
+        if isinstance(state, ForeignCombatState):
+            encounter = state.encounter if state.encounter is not MISSING else previous.encounter
+            state = state.model_copy(update={"encounter": encounter})
         updates = Updates(
             objects=_changed(observation.objects, previous.objects) or MISSING,
             descriptions=_changed(observation.descriptions, previous.descriptions) or MISSING,
@@ -154,5 +160,6 @@ class Delivery:
             owners,
             node,
             previous.map_delivered or observation.map is not MISSING,
+            encounter,
         )
-        return ActObservation(state=observation.state, updates=updates), delivered
+        return ActObservation(state=state, updates=updates), delivered

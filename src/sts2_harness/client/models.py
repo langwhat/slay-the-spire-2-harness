@@ -450,6 +450,7 @@ class CombatState(WireModel):
     selection: Selection | None
     phase: Literal[Phase.COMBAT]
     screen: CombatScreen
+    deck: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)]
     turn: Annotated[int, Field(ge=0)] | None
     piles: Piles
     enemies: tuple[Enemy, ...]

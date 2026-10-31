@@ -4,3 +4,4 @@ Automatic-progress reports describe operations already attempted by the program.
 
 # Reading observations
 
+During battle, Run sees persistent run facts, public encounter identity and outcomes, not Combat piles, live actors, targets or Combat menus.

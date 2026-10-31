@@ -86,7 +86,7 @@ COMBAT = """{
     "relics":[],"potions":[],"actions":[],
     "selection":{"prompt":"选择","source":null,"min":0,"max":1,
       "candidates":["c2","c1"],"selected":[]},
-    "turn":null,"piles":{"hand":["c2","c1"],"draw":[],"discard":[],"exhaust":[],"other":[]},
+    "deck":["c1"],"turn":null,"piles":{"hand":["c2","c1"],"draw":[],"discard":[],"exhaust":[],"other":[]},
     "enemies":[{"ref":"e1","name":"敌人","definition_id":"ENEMY.ONE","hp":null,
       "max_hp":null,"block":0,"powers":[],"hp_display":"infinite",
       "intents":[{"type":"unknown"},{"type":"attack","damage_per_hit":null,"hits":2}]}],

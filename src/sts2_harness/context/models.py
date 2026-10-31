@@ -58,13 +58,9 @@ class ForeignRunState(ForeignState):
 class ForeignCombatState(ForeignState):
     phase: Literal[native.Phase.COMBAT]
     screen: native.CombatScreen
-    player: native.CombatPlayer
-    turn: int | None
-    piles: native.Piles
-    enemies: tuple[native.Enemy, ...]
-    inactive_enemies: tuple[native.Enemy, ...]
-    orbs: native.Orbs | MISSING = MISSING
-    allies: tuple[native.Ally, ...] | MISSING = MISSING
+    player: native.RunPlayer
+    deck: tuple[str, ...]
+    encounter: native.NamedDefinition | MISSING = MISSING
 
 
 class FinishedState(ForeignState):
@@ -77,7 +73,18 @@ class FinishedState(ForeignState):
     enemies: tuple[native.Enemy, ...] | MISSING = MISSING
 
 
-type ShortState = native.State | ForeignRunState | ForeignCombatState | FinishedState
+class RunFinishedState(ForeignState):
+    phase: Literal[native.Phase.TERMINAL]
+    screen: native.TerminalScreen
+    player: native.RunPlayer
+    result: native.TerminalResult
+    deck: tuple[str, ...]
+    last_observed_turn: int | None | MISSING = MISSING
+
+
+type ShortState = (
+    native.State | ForeignRunState | ForeignCombatState | FinishedState | RunFinishedState
+)
 
 
 class VisibleObservation(SemanticValue):

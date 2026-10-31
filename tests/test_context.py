@@ -1,8 +1,11 @@
+import asyncio
 from types import MappingProxyType
 
+import httpx2 as httpx
 from pydantic import MISSING
 from test_mod_client import COMBAT, RUN
 
+from sts2_harness.client import ModClient
 from sts2_harness.client.models import (
     CardEntry,
     CombatState,
@@ -16,6 +19,7 @@ from sts2_harness.client.models import (
     Power,
     ResourceCosts,
     RunState,
+    StateCompleted,
     TerminalResult,
     TerminalState,
 )
@@ -32,9 +36,11 @@ from sts2_harness.context.models import (
     ProjectedResult,
     ResultMessage,
     ReviewContent,
+    RunActInput,
+    RunHandoffInput,
     TaskMessage,
 )
-from sts2_harness.decisions import BattleLocation, BattleReport, BoundaryValues
+from sts2_harness.decisions import BattleLocation, BattleReport, BoundaryValues, CombatHandoff
 from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall
 from sts2_harness.results import ActionCompleted, Failed, Reason, ReasonCode, Suggestion
 
@@ -306,6 +312,7 @@ def test_foreign_role_menus_and_their_details_do_not_leak_or_change_raw_observat
     assert final.content.updates.mechanisms == (local_keyword,)
     assert "保留卡牌机制" in final.text
     assert "奖励专属机制" not in final.text
+
     assert reward.to_json() == raw
 
     terminal = Observation.model_validate_json(
@@ -353,6 +360,18 @@ def test_foreign_role_menus_and_their_details_do_not_leak_or_change_raw_observat
     assert "玩家状态机制" in final.text
     assert "敌人状态机制" in final.text
     assert "奖励专属机制" not in final.text
+
+    run_context = Context(DecisionOwner.RUN)
+    run_context.append_tool_result(
+        ToolCall("terminal", "run_act", "{}"),
+        ActionToolResult(ActionCompleted(completed_steps=1), terminal),
+    )
+    run_final = run_context.model_input()[-1]
+    assert isinstance(run_final, ResultMessage)
+    assert run_final.content.state is not None
+    assert "enemies" not in run_final.content.state.model_dump()
+    assert "powers" not in run_final.content.state.model_dump()["player"]
+    assert run_final.content.updates.mechanisms is MISSING
 
 
 def test_task_omission_uses_only_the_actual_tail_and_preserves_native_assistant() -> None:
@@ -478,3 +497,117 @@ def test_partial_and_failed_reads_preserve_delivery_and_run_map_lasts_for_contex
     fresh_message = fresh.model_input()[-1]
     assert isinstance(fresh_message, ResultMessage)
     assert fresh_message.content.updates.map is observation.map
+
+
+def test_run_combat_result_keeps_permanent_facts_without_combat_internals() -> None:
+    raw = COMBAT.replace(
+        '"game_language":"zhs",',
+        '"game_language":"zhs","encounter":{"name":"遭遇","definition_id":"ENCOUNTER.ONE"},',
+    )
+    observation = Observation.model_validate_json(raw)
+    original = observation.to_json()
+    context = Context(DecisionOwner.RUN)
+    context.append_tool_result(
+        ToolCall("start", "run_act", "{}"),
+        ActionToolResult(ActionCompleted(completed_steps=1), observation),
+    )
+    result = context.model_input()[-1]
+    assert isinstance(result, ResultMessage)
+    assert result.content.state is not None
+    state = result.content.state.model_dump(mode="json", exclude_unset=True)
+    assert state["deck"] == ["c1"]
+    assert state["encounter"] == {"name": "遭遇", "definition_id": "ENCOUNTER.ONE"}
+    assert state["player"]["hp"] == 10
+    assert not {"turn", "piles", "enemies", "inactive_enemies", "allies", "orbs"} & state.keys()
+    assert not {"block", "powers", "resources"} & state["player"].keys()
+    assert result.content.updates.objects is not MISSING
+    assert set(result.content.updates.objects) == {"c1"}
+    assert "previews" not in result.content.updates.objects["c1"].model_dump(exclude_unset=True)
+    assert result.content.updates.mechanisms is MISSING
+    assert observation.to_json() == original
+
+    combat = Context(DecisionOwner.COMBAT)
+    combat.append_task(CombatActInput(), observation)
+    combat_message = combat.model_input()[-1]
+    assert isinstance(combat_message, TaskMessage)
+    assert isinstance(combat_message.content, ActContent)
+    assert combat_message.content.observation.state == observation.state
+    assert combat_message.content.observation.updates.objects == observation.objects
+
+
+def test_run_retains_encounter_only_within_the_same_battle() -> None:
+    raw = COMBAT.replace(
+        '"game_language":"zhs",',
+        '"game_language":"zhs","encounter":{"name":"遭遇","definition_id":"ENCOUNTER.ONE"},',
+    )
+    observation = Observation.model_validate_json(raw)
+    missing = observation.model_copy(update={"encounter": MISSING})
+    next_node = missing.model_copy(
+        update={"location": missing.location.model_copy(update={"node_id": "next"})}
+    )
+    context = Context(DecisionOwner.RUN)
+    call = ToolCall("start", "run_act", "{}")
+    for current in (observation, missing, next_node):
+        context.append_tool_result(
+            call, ActionToolResult(ActionCompleted(completed_steps=1), current)
+        )
+    first, second, third = context.model_input()
+    assert isinstance(first, ResultMessage)
+    assert isinstance(second, ResultMessage)
+    assert isinstance(third, ResultMessage)
+    assert first.content.state is not None
+    assert second.content.state is not None
+    assert third.content.state is not None
+    assert first.content.state.model_dump().get("encounter") == {
+        "name": "遭遇",
+        "definition_id": "ENCOUNTER.ONE",
+    }
+    assert second.content.state.model_dump().get("encounter") == {
+        "name": "遭遇",
+        "definition_id": "ENCOUNTER.ONE",
+    }
+    assert "encounter" not in third.content.state.model_dump()
+
+
+def test_fake_http_battle_transition_preserves_run_handoff_and_notes() -> None:
+    async def scenario() -> None:
+        responses = iter((RUN, COMBAT, RUN.replace('"hp":10', '"hp":8')))
+        async with ModClient(
+            "http://mod.test",
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200, content='{"status":"completed","observation":' + next(responses) + "}"
+                )
+            ),
+        ) as client:
+            observed = [await client.state() for _ in range(3)]
+        assert all(isinstance(item, StateCompleted) for item in observed)
+        before, during, after = (
+            item.observation for item in observed if isinstance(item, StateCompleted)
+        )
+        context = Context(DecisionOwner.RUN)
+        context.append_task(RunActInput(strategy_notes="Save potion."), before)
+        context.append_tool_result(
+            ToolCall("start", "run_act", "{}"),
+            ActionToolResult(ActionCompleted(completed_steps=1), during),
+        )
+        report = BattleReport(
+            location=BattleLocation(act=1, floor=1, room_type="monster"),
+            result=TerminalResult.UNKNOWN,
+            last_observed_turn=2,
+            before=BoundaryValues(hp=10, max_hp=10, gold=0),
+            after=BoundaryValues(hp=8, max_hp=10, gold=0),
+        )
+        context.append_task(RunHandoffInput(CombatHandoff(report, "Need faster damage.")))
+        context.append_task(RunActInput(strategy_notes="Save potion."), after)
+        messages = context.model_input()
+        assert "Save potion." in messages[0].text
+        assert '"deck":["c1"]' in messages[1].text
+        assert '"piles"' not in messages[1].text
+        assert '"enemies"' not in messages[1].text
+        assert "Need faster damage." in messages[2].text
+        assert '"hp":8' in messages[2].text
+        assert '"hp":8' in messages[3].text
+        assert "Save potion." in messages[3].text
+
+    asyncio.run(scenario())

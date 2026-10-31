@@ -7,12 +7,28 @@ from sts2_harness.context.models import (
     FinishedState,
     ForeignCombatState,
     ForeignRunState,
+    RunFinishedState,
     ShortState,
     VisibleObservation,
 )
 
 
-def _short_state(state: native.State, own_menu: bool) -> ShortState:
+def _run_player(player: native.CombatPlayer | native.Player) -> native.RunPlayer:
+    return native.RunPlayer(
+        name=player.name,
+        definition_id=player.definition_id,
+        hp=player.hp,
+        max_hp=player.max_hp,
+        gold=player.gold,
+        potion_slot_count=player.potion_slot_count,
+        empty_potion_slot_count=player.empty_potion_slot_count,
+    )
+
+
+def _short_state(
+    observation: native.Observation, own_menu: bool, role: native.DecisionOwner
+) -> ShortState:
+    state = observation.state
     if own_menu:
         return state
     if isinstance(state, native.RunState):
@@ -33,15 +49,24 @@ def _short_state(state: native.State, own_menu: bool) -> ShortState:
             screen=state.screen,
             control=state.control,
             progress=state.progress,
-            player=state.player,
+            player=_run_player(state.player),
             relics=state.relics,
             potions=state.potions,
-            turn=state.turn,
-            piles=state.piles,
-            enemies=state.enemies,
-            inactive_enemies=state.inactive_enemies,
-            orbs=state.orbs,
-            allies=state.allies,
+            deck=state.deck,
+            encounter=observation.encounter,
+        )
+    if role is native.DecisionOwner.RUN:
+        return RunFinishedState(
+            phase=state.phase,
+            screen=state.screen,
+            control=state.control,
+            progress=state.progress,
+            player=_run_player(state.player),
+            relics=state.relics,
+            potions=state.potions,
+            result=state.result,
+            deck=state.deck,
+            last_observed_turn=state.last_observed_turn,
         )
     return FinishedState(
         phase=state.phase,
@@ -84,7 +109,9 @@ def _menu_refs(observation: native.Observation) -> set[str]:
     return excluded - retained
 
 
-def _native_ids(objects: native.Directory[native.ObjectEntry], state: native.State) -> set[str]:
+def _native_ids(
+    objects: native.Directory[native.ObjectEntry], state: native.State, *, actors: bool = True
+) -> set[str]:
     identities: set[str] = set()
     for entry in objects.values():
         if entry.definition_id is not MISSING:
@@ -96,6 +123,8 @@ def _native_ids(objects: native.Directory[native.ObjectEntry], state: native.Sta
             for modifier in (entry.enchantment, entry.affliction):
                 if modifier is not None:
                     identities.add(modifier.definition_id)
+    if not actors:
+        return identities
     if isinstance(state, native.TerminalState):
         if state.player.powers is not MISSING:
             identities.update(power.definition_id for power in state.player.powers)
@@ -121,6 +150,48 @@ def visible_observation(
     observation: native.Observation, role: native.DecisionOwner
 ) -> VisibleObservation:
     own_menu = observation.location.owner is role
+    state = observation.state
+    if role is native.DecisionOwner.RUN and isinstance(
+        state, (native.CombatState, native.TerminalState)
+    ):
+        retained = set((*state.deck, *state.relics, *state.potions))
+        objects = {
+            ref: entry.model_copy(update={"previews": MISSING})
+            if isinstance(entry, native.CardEntry)
+            else entry
+            for ref, entry in observation.objects.items()
+            if ref in retained
+        }
+        identities = _native_ids(objects, state, actors=False)
+        mechanisms = tuple(
+            entry
+            for entry in observation.mechanisms
+            if (
+                entry.owner in retained
+                if entry.owner is not MISSING
+                else entry.definition_id in identities
+            )
+        )
+        return VisibleObservation(
+            state=_short_state(observation, False, role),
+            objects=objects,
+            descriptions={
+                ref: text for ref, text in observation.descriptions.items() if ref in retained
+            },
+            modifier_descriptions={
+                ref: text
+                for ref, text in observation.modifier_descriptions.items()
+                if ref in retained
+            },
+            upgrades={
+                ref: preview for ref, preview in observation.upgrades.items() if ref in retained
+            },
+            generated={
+                ref: cards for ref, cards in observation.generated.items() if ref in retained
+            },
+            mechanisms=mechanisms,
+            map=observation.map,
+        )
     excluded = set[str]() if own_menu else _menu_refs(observation)
     objects = {ref: entry for ref, entry in observation.objects.items() if ref not in excluded}
     identities = _native_ids(objects, observation.state)
@@ -135,7 +206,7 @@ def visible_observation(
         )
     )
     return VisibleObservation(
-        state=_short_state(observation.state, own_menu),
+        state=_short_state(observation, own_menu, role),
         objects=objects,
         descriptions={
             ref: text for ref, text in observation.descriptions.items() if ref not in excluded
