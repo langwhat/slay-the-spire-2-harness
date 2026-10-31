@@ -156,7 +156,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with (start.parent / "control.jsonl").open("a") as control_log:
                 control_log.write(json.dumps(value) + "\\n")
             result = {"mode": mode}
+        elif self.path in ("/map/present", "/map/restore/verify"):
+            result = {"operation_id": value["operation_id"], "status": "rejected",
+                      "error": {"code": "action_unavailable",
+                                "message": "Presentation is unavailable."}}
         else:
+            assert self.path == "/action"
             state = ended
             result = {"operation_id": value["operation_id"],
                       "status": "completed", "boundary": "ready"}

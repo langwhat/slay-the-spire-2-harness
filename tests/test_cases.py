@@ -303,7 +303,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "proof": proof(kind, path),
                 }
             )
-        assert mode == "running"
+        if self.path in ("/map/present", "/map/restore/verify"):
+            event("presentation" if self.path == "/map/present" else "verify")
+            return self.send({
+                "operation_id": value["operation_id"],
+                "status": "rejected",
+                "error": {"code": "action_unavailable", "message": "Presentation is unavailable."},
+            })
+        assert self.path == "/action" and mode == "running"
         event("action")
         if COMBAT_BATCH and index == BATTLE_INDEX:
             observation = current()
@@ -538,6 +545,7 @@ def test_admission_replays_source_then_independently_loads_and_publishes_after_c
         assert not list(store.directory.rglob("*.sqlite"))
         assert not list(store.directory.glob(".admission-*"))
         ledger = (tmp_path / "ledger").read_text().splitlines()
+        assert any(line.startswith("presentation:") for line in ledger)
         owners = [line for line in ledger if line.startswith(("recipe:", "menu:"))]
         for previous, following in zip(owners, owners[1:], strict=False):
             assert ledger.index("closed:" + previous.split(":")[1]) < ledger.index(following)
