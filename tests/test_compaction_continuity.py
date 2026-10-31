@@ -213,3 +213,16 @@ def test_removed_query_material_can_be_delivered_as_guidance_again() -> None:
     assert isinstance(message, TextMessage)
     assert isinstance(message.value, GuidanceContent)
     assert message.value.guidance == (document,)
+
+
+def test_context_returns_baseline_as_part_of_the_candidate() -> None:
+    from sts2_harness.llm.messages import TextMessage
+
+    obs = native.Observation.model_validate_json(RUN)
+    context = Context(native.DecisionOwner.RUN)
+    context.begin_group(obs, "notes")
+    context.append_task(RunActInput(), obs)
+    candidate, baseline = context.compaction_input()
+    assert isinstance(baseline, TextMessage)
+    assert baseline in candidate
+    assert json.loads(baseline.text)["context_baseline"]["strategy_notes"] == "notes"

@@ -252,6 +252,9 @@ class Context:
         self._active_group = None
 
     def compaction_candidate(self) -> ModelInput:
+        return self.compaction_input()[0]
+
+    def compaction_input(self) -> tuple[ModelInput, TextMessage]:
         group = self._last_group or self._active_group
         if group is None:
             raise RuntimeError("No Run interaction group exists.")
@@ -304,14 +307,11 @@ class Context:
         prefix = (
             (TextMessage(TextRole.USER, GuidanceContent(guidance=guidance)),) if guidance else ()
         )
-        return (
-            *self._system,
-            *prefix,
-            TextMessage(
-                TextRole.USER, json.dumps(baseline, ensure_ascii=False, separators=(",", ":"))
-            ),
-            *retained,
+        baseline_message = TextMessage(
+            TextRole.USER, json.dumps(baseline, ensure_ascii=False, separators=(",", ":"))
         )
+        candidate: ModelInput = (*self._system, *prefix, baseline_message, *retained)
+        return candidate, baseline_message
 
     def validate_compaction(self, candidate: ModelInput) -> None:
         self._check_compaction(candidate, install=False)

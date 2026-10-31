@@ -29,6 +29,7 @@ from sts2_harness.llm.messages import (
     ModelClient,
     ModelReply,
     ModelUnavailable,
+    PreparedRequest,
     RequestPreparation,
     TextMessage,
     TextRole,
@@ -72,6 +73,11 @@ class RunAgent(Agent):
 
     async def _request(self, context: Context) -> ModelReply:
         assert self._llm is not None
+        prepared, evidence = await self.compact(context)
+        return await self._llm.complete_prepared(prepared, preparation=evidence)
+
+    async def compact(self, context: Context) -> tuple[PreparedRequest, RequestPreparation]:
+        assert self._llm is not None
         client = self._llm
         tools = self._tools.definitions
         before = context.model_input()
@@ -80,12 +86,7 @@ class RunAgent(Agent):
         complete_id, active_id = context.group_ids
         group_id = active_id or complete_id
         assert group_id is not None
-        candidate = context.compaction_candidate()
-        baseline = next(
-            message
-            for message in candidate
-            if isinstance(message, TextMessage) and message.text.startswith('{"context_baseline":')
-        )
+        candidate, baseline = context.compaction_input()
         policy = client.capacity_policy
         below_trigger = (
             estimate * policy.trigger_denominator < policy.context_window * policy.trigger_numerator
@@ -104,7 +105,7 @@ class RunAgent(Agent):
                 active_id,
                 CompactionValidation.NOT_NEEDED,
             )
-            return await client.complete_prepared(prepared, preparation=evidence)
+            return prepared, evidence
         try:
             context.validate_compaction(candidate)
         except ValueError:
@@ -154,7 +155,7 @@ class RunAgent(Agent):
             active_id,
             CompactionValidation.PASSED,
         )
-        return await client.complete_prepared(compacted, preparation=evidence)
+        return compacted, evidence
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         if self._pending_auto is not None or self._pending_call is not None:
