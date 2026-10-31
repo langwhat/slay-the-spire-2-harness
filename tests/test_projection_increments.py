@@ -264,6 +264,26 @@ def test_automatic_group_preserves_fresh_pre_action_snapshot() -> None:
     context.install_compaction(candidate)
 
 
+def test_automatic_group_restores_menu_after_unseen_empty_menu_baseline() -> None:
+    opening = Observation.model_validate_json(RUN)
+    before = opening.model_copy(
+        update={"state": opening.state.model_copy(update={"actions": ()})}
+    )
+    context = Context(DecisionOwner.RUN)
+    context.append_task(RunActInput(), opening)
+    context.begin_group(before, "")
+    context.append_automatic(
+        AutomaticProgress(label="Continue", reason="Only one destination."),
+        ActionToolResult(ActionCompleted(completed_steps=1), opening),
+    )
+    candidate = context.compaction_candidate()
+    baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
+    assert baseline["decision"]["actions"] == []
+    context.install_compaction(candidate)
+    result = json.loads(context.model_input()[-1].text)["observation"]
+    assert result["decision"]["actions"]
+
+
 def test_compaction_preserves_entry_removals_defaults_and_mechanism_multiplicity() -> None:
     original = Observation.model_validate_json(COMBAT)
     card = original.objects["c1"]

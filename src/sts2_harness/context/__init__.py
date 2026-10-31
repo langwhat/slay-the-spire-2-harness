@@ -220,7 +220,9 @@ class Context:
         known = set(delivery.catalog.values())
         projected = delivery.project(visible_observation(observation, self._role), observation)
         changed = (
-            delivery.scene != self._delivery.scene or delivery.current != self._delivery.current
+            delivery.scene != self._delivery.scene
+            or delivery.current != self._delivery.current
+            or delivery.actions != self._delivery.actions
         )
         non_idempotent = (
             projected.current is not MISSING
