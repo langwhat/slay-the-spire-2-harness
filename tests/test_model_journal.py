@@ -67,10 +67,35 @@ def reference_encodings(
 
 
 def reference_estimate(
-    body: dict[str, JsonValue], count: int, encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
+    body: dict[str, JsonValue],
+    keys: tuple[str, ...],
+    encodings: tuple[tiktoken.Encoding, tiktoken.Encoding],
 ) -> int:
-    text = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return max(len(encoding.encode_ordinary(text)) for encoding in encodings) + 1024 + 64 * count
+    strings: list[str] = []
+
+    def structure(value: JsonValue) -> JsonValue:
+        if isinstance(value, str):
+            strings.append(value)
+            return ""
+        if isinstance(value, list):
+            return [structure(item) for item in value]
+        if isinstance(value, dict):
+            return {key: structure(item) for key, item in value.items()}
+        return value
+
+    text = json.dumps(
+        structure({key: body[key] for key in keys}),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        max(
+            sum(len(encoding.encode_ordinary(value)) for value in (text, *strings))
+            for encoding in encodings
+        )
+        + 1024
+    )
 
 
 @pytest.mark.parametrize(
@@ -823,10 +848,8 @@ def test_recorded_request_accounts_for_each_attempt_and_wire_input(
         assert len(record.attempts) == 2
         body = bodies[0]
         assert isinstance(body["input"], list) and isinstance(body["tools"], list)
-        expected = reference_estimate(
-            body, len(body["input"]) + len(body["tools"]), reference_encodings
-        )
-        assert archive.manifest.capacity_policy.estimator_id == "wire_tiktoken_max_v1"
+        expected = reference_estimate(body, ("input", "tools"), reference_encodings)
+        assert archive.manifest.capacity_policy.estimator_id == "input_tiktoken_max_v2"
         assert archive.manifest.capacity_policy.tokenizer_dependency == "tiktoken==0.12.0"
         assert archive.manifest.capacity_policy.cl100k_base_sha256 == (
             "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
@@ -919,10 +942,9 @@ def test_retry_records_the_measurement_of_each_submitted_body(
             )
             arrays = [body[key] for key in keys]
             assert all(isinstance(value, list) for value in arrays)
-            count = sum(len(value) for value in arrays if isinstance(value, list))
             assert attempt.protocol_encoding_digest == hashlib.sha256(encoded).hexdigest()
             assert attempt.estimated_input_tokens == reference_estimate(
-                body, count, reference_encodings
+                body, keys, reference_encodings
             )
         assert attempts[0].reply is None
         assert attempts[1].reply is not None
@@ -1020,10 +1042,9 @@ def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
             )
             arrays = [body[key] for key in keys]
             assert all(isinstance(value, list) for value in arrays)
-            count = sum(len(value) for value in arrays if isinstance(value, list))
             attempt = record.attempts[0]
             assert attempt.estimated_input_tokens == reference_estimate(
-                body, count, reference_encodings
+                body, keys, reference_encodings
             )
             assert (
                 attempt.protocol_encoding_digest

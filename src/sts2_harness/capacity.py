@@ -87,7 +87,7 @@ class CapacityPolicy(native.WireModel):
     context_window: Annotated[int, Field(gt=0, strict=True)] = 300_000
     trigger_numerator: Literal[9] = 9
     trigger_denominator: Literal[10] = 10
-    estimator_id: Literal["wire_tiktoken_max_v1"] = "wire_tiktoken_max_v1"
+    estimator_id: Literal["input_tiktoken_max_v2"] = "input_tiktoken_max_v2"
     tokenizer_dependency: Literal["tiktoken==0.12.0"] = "tiktoken==0.12.0"
     cl100k_base_sha256: Literal[
         "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
@@ -138,6 +138,17 @@ class Measurement:
     encoded_bytes: int
 
 
+def _input_structure(value: JsonValue, strings: list[str]) -> JsonValue:
+    if isinstance(value, str):
+        strings.append(value)
+        return ""
+    if isinstance(value, list):
+        return [_input_structure(item, strings) for item in value]
+    if isinstance(value, dict):
+        return {key: _input_structure(item, strings) for key, item in value.items()}
+    return value
+
+
 def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
     names = (
         ("messages", "tools")
@@ -148,13 +159,25 @@ def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
             else ("system", "messages", "tools")
         )
     )
-    count = 0
+    input_fields: dict[str, JsonValue] = {}
     for name in names:
         value = body.get(name)
         if not isinstance(value, list):
             raise ValueError("Expected an array in the encoded model request.")
-        count += len(value)
+        input_fields[name] = value
+    strings: list[str] = []
+    structure = json.dumps(
+        _input_structure(input_fields, strings),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    # Count decoded strings once, including opaque continuation, without HTTP escaping.
+    tokens = max(
+        len(encoding.encode_ordinary(structure))
+        + sum(len(encoding.encode_ordinary(value)) for value in strings)
+        for encoding in encodings()
+    )
     text = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    tokens = max(len(encoding.encode_ordinary(text)) for encoding in encodings())
     encoded = text.encode()
-    return Measurement(sha256(encoded).hexdigest(), tokens + 1024 + 64 * count, len(encoded))
+    return Measurement(sha256(encoded).hexdigest(), tokens + 1024, len(encoded))

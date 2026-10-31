@@ -28,6 +28,13 @@ licensed; this command obtains the tables directly from OpenAI, and their separa
 has not been established here. Use `uv run --offline` when uv itself must not access the
 network. Estimates are approximate, not provider token counts.
 
+The `input_tiktoken_max_v2` estimator counts decoded string values and their JSON structure
+in model-input arrays and tool schemas, taking the larger pinned-tokenizer total plus a
+fixed 1,024-token allowance. HTTP escaping and transport-only settings do not inflate this
+estimate; opaque continuation values still count. Full canonical request digests and byte
+counts cover the unchanged transport body. Estimation uses no provider counting call or
+historical-usage calibration.
+
 Configuration is read once into an immutable snapshot shared by Run and Combat. Precedence
 is `--set NAME=VALUE`, process environment, local `.env`, then code defaults.
 `--env-file PATH` selects another defaults file; a missing file means no local defaults.

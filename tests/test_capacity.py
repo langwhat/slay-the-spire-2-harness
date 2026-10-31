@@ -13,14 +13,33 @@ from sts2_harness.cli import main
 from sts2_harness.config import ConfigurationError, Protocol
 
 
+@pytest.mark.parametrize("protocol", list(Protocol))
+def test_input_estimate_ignores_transport_settings_but_digest_preserves_them(
+    protocol: Protocol,
+) -> None:
+    field = "input" if protocol is Protocol.RESPONSES else "messages"
+    body: dict[str, JsonValue] = {
+        field: [{"role": "user", "content": 'Choose "A".\nThen continue.'}],
+        "tools": [],
+    }
+    if protocol is Protocol.MESSAGES:
+        body["system"] = [{"type": "text", "text": "Follow the game rules."}]
+    original = measure(body, protocol)
+    configured = measure({**body, "metadata": {"label": "transport-only " * 100}}, protocol)
+    assert configured.estimated_input_tokens == original.estimated_input_tokens
+    assert configured.digest != original.digest
+    assert configured.encoded_bytes > original.encoded_bytes
+
+
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
-        ("中文 <|endoftext|> hello", 1112),
-        ("玩家查看三条路线，比较它们的代价，然后选择预期收益最高的路线。", 1136),
+        ("中文 <|endoftext|> hello", 1048),
+        ("玩家查看三条路线，比较它们的代价，然后选择预期收益最高的路线。", 1071),
+        ('Line one: "quoted".\nLine two: "quoted".\n' * 100, 2239),
     ],
 )
-def test_measure_counts_canonical_multilingual_text_and_literal_special_tokens(
+def test_measure_counts_decoded_multilingual_text_and_literal_special_tokens(
     content: str, expected: int
 ) -> None:
     body: dict[str, JsonValue] = {
@@ -28,6 +47,16 @@ def test_measure_counts_canonical_multilingual_text_and_literal_special_tokens(
         "tools": [],
     }
     assert measure(body, Protocol.CHAT_COMPLETIONS).estimated_input_tokens == expected
+
+
+def test_input_estimate_includes_opaque_native_continuation() -> None:
+    body: dict[str, JsonValue] = {"input": [], "tools": []}
+    empty = measure(body, Protocol.RESPONSES)
+    body["input"] = [
+        {"type": "reasoning", "encrypted_content": "synthetic opaque continuation " * 100}
+    ]
+    continued = measure(body, Protocol.RESPONSES)
+    assert continued.estimated_input_tokens > empty.estimated_input_tokens + 300
 
 
 @pytest.mark.parametrize("name", ["cl100k_base", "o200k_base"])
