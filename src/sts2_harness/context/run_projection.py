@@ -281,15 +281,19 @@ class RunDelivery:
                 current[collection] = ordered(collection, current[collection])
         changed = {k: v for k, v in current.items() if reset or self.current.get(k, MISSING) != v}
         previous_progress = self.current.get("progress")
-        if (
+        same_act = (
             self.scene is not None
             and all(scene[k] == self.scene[k] for k in ("game_instance_id", "run_id"))
             and isinstance(previous_progress, dict)
             and previous_progress.get("act") == state.progress.act
-            and "map_topology" in current
-            and current["map_topology"] == self.current.get("map_topology")
-        ):
-            changed.pop("map_topology", None)
+        )
+        for section in ("map_topology", "dynamic_map"):
+            if section not in current:
+                continue
+            if same_act and current[section] == self.current.get(section):
+                changed.pop(section, None)
+            else:
+                changed[section] = current[section]
         changed.update({k: None for k in self.current if k not in current})
         if not reset:
             removals: dict[str, JsonValue] = {}

@@ -199,9 +199,37 @@ def test_node_change_keeps_unchanged_act_map_through_compaction() -> None:
     context.append_task(RunActInput(), next_node)
     changed = json.loads(context.model_input()[-1].text)["observation"]
     assert "map_topology" not in changed.get("current", {})
+    assert "dynamic_map" not in changed.get("current", {})
     context.finish_group()
     context.begin_group(next_node, "")
     context.install_compaction(context.compaction_candidate())
+
+
+def test_run_reset_retains_only_unchanged_same_act_map() -> None:
+    raw = json.loads(RUN)
+    raw["map"] = {"bosses": [], "nodes": [], "legal_destinations": []}
+    context = Context(DecisionOwner.RUN)
+    opening = Observation.model_validate_json(json.dumps(raw))
+    context.append_task(RunActInput(), opening)
+    raw["mechanisms"] = json.loads(COMBAT)["mechanisms"]
+    changed = Observation.model_validate_json(json.dumps(raw))
+    context.begin_group(changed, "")
+    context.append_task(RunActInput(), changed)
+    frame = json.loads(context.model_input()[-1].text)["observation"]
+    assert frame["scene"]["reset"] is True
+    assert "dynamic_map" not in frame["current"]
+    candidate = context.compaction_candidate()
+    baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
+    assert baseline["current"]["dynamic_map"]["legal_destinations"] == []
+    context.install_compaction(candidate)
+    raw["map"]["legal_destinations"] = None
+    context.append_task(RunActInput(), Observation.model_validate_json(json.dumps(raw)))
+    frame = json.loads(context.model_input()[-1].text)["observation"]
+    assert frame["current"]["dynamic_map"]["legal_destinations"] is None
+    raw["state"]["progress"]["act"] = 2
+    context.append_task(RunActInput(), Observation.model_validate_json(json.dumps(raw)))
+    frame = json.loads(context.model_input()[-1].text)["observation"]
+    assert "dynamic_map" in frame["current"]
 
 
 def test_first_group_compaction_preserves_mechanism_multiplicity() -> None:
@@ -266,9 +294,7 @@ def test_automatic_group_preserves_fresh_pre_action_snapshot() -> None:
 
 def test_automatic_group_restores_menu_after_unseen_empty_menu_baseline() -> None:
     opening = Observation.model_validate_json(RUN)
-    before = opening.model_copy(
-        update={"state": opening.state.model_copy(update={"actions": ()})}
-    )
+    before = opening.model_copy(update={"state": opening.state.model_copy(update={"actions": ()})})
     context = Context(DecisionOwner.RUN)
     context.append_task(RunActInput(), opening)
     context.begin_group(before, "")
