@@ -129,12 +129,27 @@ class PlanRejected(SemanticValue):
     status: Literal["rejected"] = "rejected"
 
 
+class PlanPresentationStatus(StrEnum):
+    NOT_AVAILABLE = "not_available"
+    NOT_ATTEMPTED = "not_attempted"
+    SHOWN = "shown"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+class PlanRestorationStatus(StrEnum):
+    NOT_NEEDED = "not_needed"
+    RESTORED = "restored"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
 class PlanPresentation(SemanticValue):
-    status: Literal["not_available", "not_attempted", "shown", "failed", "unknown"]
+    status: PlanPresentationStatus
 
 
 class PlanRestoration(SemanticValue):
-    status: Literal["not_needed", "restored", "failed", "unknown"] = "not_needed"
+    status: PlanRestorationStatus = PlanRestorationStatus.NOT_NEEDED
 
 
 class PlanData(SemanticValue):

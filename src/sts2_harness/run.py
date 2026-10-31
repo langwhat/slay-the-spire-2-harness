@@ -44,8 +44,10 @@ from sts2_harness.results import (
     PlanAccepted,
     PlanData,
     PlanPresentation,
+    PlanPresentationStatus,
     PlanRejected,
     PlanRestoration,
+    PlanRestorationStatus,
     QueryToolResult,
     ReadCompleted,
     Reason,
@@ -149,7 +151,7 @@ class RunAgent(Agent):
                 observation,
                 PlanData(
                     plan=PlanRejected(),
-                    presentation=PlanPresentation(status="not_attempted"),
+                    presentation=PlanPresentation(status=PlanPresentationStatus.NOT_ATTEMPTED),
                 ),
             )
         return QueryToolResult(outcome, observation)
@@ -244,22 +246,22 @@ class RunAgent(Agent):
                 presented = await self._tools.present(route, edges)
             except (ClientUnavailable, GameReadError):
                 presented = None
-                display = PlanPresentation(status="unknown")
-                restoration = PlanRestoration(status="unknown")
+                display = PlanPresentation(status=PlanPresentationStatus.UNKNOWN)
+                restoration = PlanRestoration(status=PlanRestorationStatus.UNKNOWN)
                 current = None
             else:
                 receipt = presented.receipt if presented is not None else None
                 if presented is None:
-                    display = PlanPresentation(status="not_available")
+                    display = PlanPresentation(status=PlanPresentationStatus.NOT_AVAILABLE)
                     restoration = PlanRestoration()
                 elif isinstance(receipt, (native.PresentationRejected, native.InvalidRequestReply)):
-                    display = PlanPresentation(status="not_attempted")
+                    display = PlanPresentation(status=PlanPresentationStatus.NOT_ATTEMPTED)
                     restoration = PlanRestoration()
                     current = await self._tools.current()
                 elif isinstance(receipt, native.PresentationCompleted):
-                    display = PlanPresentation.model_validate({"status": receipt.drawing.value})
-                    restoration = PlanRestoration.model_validate(
-                        {"status": receipt.restoration.value}
+                    display = PlanPresentation(status=PlanPresentationStatus(receipt.drawing.value))
+                    restoration = PlanRestoration(
+                        status=PlanRestorationStatus(receipt.restoration.value)
                     )
                     current = (
                         await self._tools.current()
@@ -267,8 +269,8 @@ class RunAgent(Agent):
                         else None
                     )
                 else:
-                    display = PlanPresentation(status="unknown")
-                    restoration = PlanRestoration(status="unknown")
+                    display = PlanPresentation(status=PlanPresentationStatus.UNKNOWN)
+                    restoration = PlanRestoration(status=PlanRestorationStatus.UNKNOWN)
                     current = None
             return QueryToolResult(
                 ReadCompleted(),

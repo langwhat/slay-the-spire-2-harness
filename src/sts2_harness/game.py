@@ -325,6 +325,8 @@ class LiveGame:
     async def _settlement_result(
         self, route: native.RouteKey, step: native.NativeStep
     ) -> Settlement:
+        if self._unresolved_presentation is not None:
+            await self._ensure_presentation(await self._status())
         self._step_number += 1
         submission = native.StepRequest(
             operation_id=f"{self._namespace}:{self._step_number}", expected_route=route, step=step
