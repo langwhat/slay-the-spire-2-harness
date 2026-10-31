@@ -83,6 +83,53 @@ def test_combat_baseline_precedes_latest_group_and_retains_opening_advice() -> N
     assert context.model_input() == candidate
 
 
+def reasoning_query(protocol: Protocol, ident: str) -> bytes:
+    from test_compaction_full_replay import response
+    from test_messages import events, sse
+
+    if protocol is Protocol.MESSAGES:
+        stream = events()[:7]
+        stream.extend(
+            [
+                {
+                    "type": "content_block_start",
+                    "index": 2,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": ident,
+                        "name": "combat_inspect",
+                        "input": {"area": "state"},
+                    },
+                },
+                {"type": "content_block_stop", "index": 2},
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use"},
+                    "usage": {"output_tokens": 5},
+                },
+                {"type": "message_stop"},
+            ]
+        )
+        return sse(stream)
+    payload = response(protocol, (ident, "combat_inspect", '{"area":"state"}'))
+    chunks = payload.decode().split("\n\n")
+    chunk = json.loads(chunks[0][len("data: ") :])
+    if protocol is Protocol.RESPONSES:
+        chunk["response"]["output"].insert(
+            0,
+            {
+                "type": "reasoning",
+                "id": f"reasoning-{ident}",
+                "summary": [],
+                "encrypted_content": "synthetic-continuation",
+            },
+        )
+    else:
+        chunk["choices"][0]["delta"]["reasoning_content"] = "synthetic-continuation"
+    chunks[0] = "data: " + json.dumps(chunk)
+    return "\n\n".join(chunks).encode()
+
+
 def combat_campaign(protocol: Protocol) -> Campaign:
     import random
     import string
@@ -126,9 +173,9 @@ def combat_campaign(protocol: Protocol) -> Campaign:
             response(protocol, ("travel", "run_next", '{"reason":"Battle."}')),
             response(protocol, text=old_text),
             response(protocol, ("a0", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-            response(protocol, ("q1", "combat_inspect", '{"area":"state"}')),
+            reasoning_query(protocol, "q1"),
             response(protocol, ("a1", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-            response(protocol, ("q2", "combat_inspect", '{"area":"state"}')),
+            reasoning_query(protocol, "q2"),
             response(protocol, ("a2", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
             response(protocol, text="Observed damage; later timing is unknown."),
             response(
@@ -150,8 +197,9 @@ def combat_campaign(protocol: Protocol) -> Campaign:
 
 
 @pytest.mark.parametrize("protocol", list(Protocol))
+@pytest.mark.parametrize("stage", ["before_action", "after_query", "review"])
 def test_combat_compaction_recording_replays_without_repeating_actions(
-    tmp_path: Path, protocol: Protocol
+    tmp_path: Path, protocol: Protocol, stage: str
 ) -> None:
     async def scenario() -> None:
         calibration = combat_campaign(protocol)
@@ -162,11 +210,13 @@ def test_combat_compaction_recording_replays_without_repeating_actions(
             await record_campaign(tmp_path / "calibration.sqlite", calibration)
         with closing(Journal.open(tmp_path / "calibration.sqlite")) as journal:
             calibration_records = journal.requests()
-        target = next(
+        combat_candidates = [
             index
             for index, record in enumerate(calibration_records)
-            if record.role is native.DecisionOwner.COMBAT and record.confirmed_operation_cursor == 3
-        )
+            if record.role is native.DecisionOwner.COMBAT
+            and record.confirmed_operation_cursor == (4 if stage == "review" else 3)
+        ]
+        target = combat_candidates[1 if stage == "after_query" else 0]
         estimate = measure(calibration.inputs[target], protocol).estimated_input_tokens
         previous = max(
             measure(calibration.inputs[index], protocol).estimated_input_tokens
@@ -208,11 +258,22 @@ def test_combat_compaction_recording_replays_without_repeating_actions(
         assert isinstance(preparation.baseline.value, LiteralText)
         baseline = json.loads(preparation.baseline.value.body)["context_baseline"]
         assert baseline["opening_notes"] == "Opening plan."
-        assert baseline["observation"]["current"]["player"]["hp"] == 7
+        assert baseline["observation"]["current"]["player"]["hp"] == (5 if stage == "review" else 7)
         call_ids = [
             item.call_id for item in preparation.input_after if isinstance(item, ResultSnapshot)
         ]
-        assert call_ids == ["q1", "a1"]
+        expected = {
+            "before_action": ["q1", "a1"],
+            "after_query": ["q1", "a1", "q2"],
+            "review": ["q2", "a2"],
+        }
+        assert call_ids == expected[stage]
+        wire = json.dumps(campaign.inputs[records.index(compressed)], ensure_ascii=False)
+        if protocol is Protocol.MESSAGES:
+            assert "Synthetic thought." in wire and "synthetic-signature" in wire
+            assert "synthetic-redacted" in wire
+        else:
+            assert "synthetic-continuation" in wire
         review = next(
             record
             for record in records
@@ -222,12 +283,10 @@ def test_combat_compaction_recording_replays_without_repeating_actions(
                 for item in record.input
             )
         )
-        assert [item.call_id for item in review.input if isinstance(item, ResultSnapshot)] == [
-            "q1",
-            "a1",
-            "q2",
-            "a2",
-        ]
+        expected_review = ["q2", "a2"] if stage == "review" else ["q1", "a1", "q2", "a2"]
+        assert [
+            item.call_id for item in review.input if isinstance(item, ResultSnapshot)
+        ] == expected_review
         actions_before = tuple(campaign.actions)
         inputs_before = tuple(campaign.inputs)
         for anchor in anchors:
@@ -306,5 +365,53 @@ def test_repeated_combat_compaction_keeps_unknown_result_and_later_facts() -> No
         for item in baseline["observation"]["current"]["card_descriptions"]
     )
     assert [item.call_id for item in second if isinstance(item, ToolResultMessage)] == ["confirmed"]
+    context.validate_compaction(second)
+    context.install_compaction(second)
+
+
+def test_combat_compaction_preserves_guidance_changes_in_order() -> None:
+    from sts2_harness.knowledge import DocumentView, GuidanceContent
+    from sts2_harness.llm.messages import TextMessage, TextRole
+    from sts2_harness.material_text import MaterialText
+
+    observation = native.Observation.model_validate_json(COMBAT)
+    original = DocumentView(
+        id="battle",
+        name=MaterialText.create("name", "Battle"),
+        text=MaterialText.create("text", "Initial guidance."),
+        resources=(),
+    )
+    updated = original.model_copy(update={"text": MaterialText.create("text", "Updated guidance.")})
+    context = Context(
+        native.DecisionOwner.COMBAT,
+        system=(TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=(original,))),),
+    )
+    context.begin_group(observation, "Opening")
+    context.append_task(CombatActInput("Opening"), observation)
+    action(context, "first", observation)
+    context.finish_group()
+    context.begin_group(observation, "Opening")
+    context.append_materials((updated,))
+    context.append_task(CombatActInput(), observation)
+    action(context, "second", observation)
+    context.finish_group()
+    context.begin_group(observation, "Opening")
+    context.append_task(CombatActInput(), observation)
+    first = context.compaction_candidate()
+    contents = [message.text for message in first]
+    assert next(i for i, text in enumerate(contents) if "Initial guidance." in text) < next(
+        i for i, text in enumerate(contents) if "Updated guidance." in text
+    )
+    context.install_compaction(first)
+    action(context, "third", observation)
+    context.finish_group()
+    context.begin_group(observation, "Opening")
+    context.append_task(CombatActInput(), observation)
+    second = context.compaction_candidate()
+    contents = [message.text for message in second]
+    assert sum("Updated guidance." in text for text in contents) == 1
+    assert next(i for i, text in enumerate(contents) if "Updated guidance." in text) < next(
+        i for i, text in enumerate(contents) if "context_baseline" in text
+    )
     context.validate_compaction(second)
     context.install_compaction(second)

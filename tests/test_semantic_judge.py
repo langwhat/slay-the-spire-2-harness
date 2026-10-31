@@ -13,7 +13,14 @@ from sts2_harness.client import models as native
 from sts2_harness.game import GameReply, Observe, Settle, Settlement
 from sts2_harness.journal import Journal
 from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import ModelAttemptSink, ModelInput, ModelReply, ToolDefinition
+from sts2_harness.llm.messages import (
+    ModelAttemptSink,
+    ModelInput,
+    ModelReply,
+    PreparedRequest,
+    RequestPreparation,
+    ToolDefinition,
+)
 from sts2_harness.materials import FileDocuments
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness_eval import take_over
@@ -60,15 +67,15 @@ class Actor(Llm):
         super().__init__(configuration(directory), transport=httpx.MockTransport(respond))
         self.inputs: list[tuple[ModelInput, tuple[ToolDefinition, ...]]] = []
 
-    async def complete(
+    async def complete_prepared(
         self,
-        input: ModelInput,
-        tools: tuple[ToolDefinition, ...],
+        prepared: PreparedRequest,
         *,
         evidence: ModelAttemptSink | None = None,
+        preparation: RequestPreparation | None = None,
     ) -> ModelReply:
-        self.inputs.append((input, tools))
-        return await super().complete(input, tools, evidence=evidence)
+        self.inputs.append((prepared.input, prepared.tools))
+        return await super().complete_prepared(prepared, evidence=evidence, preparation=preparation)
 
 
 class AcceptableJudge:

@@ -466,7 +466,7 @@ def test_reach_compares_typed_input_without_mapping_key_order(
 
     from sts2_harness.context.models import ActContent
     from sts2_harness.journal import ParentPrefix
-    from sts2_harness.journal_models import TaskSnapshot, ToolSet
+    from sts2_harness.journal_models import PreparationEvidence, TaskSnapshot, ToolSet
 
     async def scenario() -> None:
         source_path = tmp_path / "source.sqlite"
@@ -511,12 +511,17 @@ def test_reach_compares_typed_input_without_mapping_key_order(
                     ),
                 )
             ) as branch:
+                assert target.preparation is not None
+                preparation = PreparationEvidence.model_validate(
+                    target.preparation.model_dump(include=set(PreparationEvidence.model_fields))
+                ).model_copy(update={"input_after": tuple(messages)})
                 sequence = branch.begin_model(
                     target.role,
                     target.stream,
                     tuple(messages),
                     ToolSet(tools=target.tools),
                     target.configuration,
+                    preparation=preparation,
                 )
                 branch.finish_model(sequence)
                 branch.end_model()
