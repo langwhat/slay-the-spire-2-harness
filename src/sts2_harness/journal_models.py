@@ -18,7 +18,7 @@ from pydantic import (
     model_validator,
 )
 
-from sts2_harness.capacity import CapacityPolicy
+from sts2_harness.capacity import CapacityPolicy, CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.config import Authentication, AuthKind, ModelConfiguration, Protocol
 from sts2_harness.context.models import (
@@ -563,12 +563,12 @@ class PreparationEvidence(native.WireModel):
     baseline: MessageSnapshot | None
     input_before: tuple[MessageSnapshot, ...]
     estimate_before: int
-    decision: Literal["unchanged", "compacted", "minimum_exceeds_window", "invalid_candidate"]
+    decision: CompactionDecision
     input_after: tuple[MessageSnapshot, ...] | None
     estimate_after: int | None
     retained_complete_group_id: int | None
     active_group_id: int | None
-    validation: Literal["not_needed", "passed", "failed"]
+    validation: CompactionValidation
 
 
 class PreparationInput(native.WireModel):
@@ -585,12 +585,12 @@ class PreparationReferences(native.WireModel):
     baseline_ref: str | None
     input_before_ref: str
     estimate_before: int
-    decision: Literal["unchanged", "compacted", "minimum_exceeds_window", "invalid_candidate"]
+    decision: CompactionDecision
     input_after_ref: str | None
     estimate_after: int | None
     retained_complete_group_id: int | None
     active_group_id: int | None
-    validation: Literal["not_needed", "passed", "failed"]
+    validation: CompactionValidation
 
 
 class RecordedPreparation(PreparationEvidence):

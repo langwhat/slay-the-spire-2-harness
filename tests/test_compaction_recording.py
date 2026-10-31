@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from test_responses import configuration
 
-from sts2_harness.capacity import CapacityPolicy
+from sts2_harness.capacity import CapacityPolicy, CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
 from sts2_harness.journal import ArchiveError, Journal, Manifest, SessionMaterials
@@ -51,12 +51,12 @@ def test_preparation_persists_full_before_after_and_rejects_missing_content(tmp_
         baseline=baseline,
         input_before=before,
         estimate_before=290_000,
-        decision="compacted",
+        decision=CompactionDecision.COMPACTED,
         input_after=after,
         estimate_after=15_000,
         retained_complete_group_id=1,
         active_group_id=2,
-        validation="passed",
+        validation=CompactionValidation.PASSED,
     )
     sequence = journal.begin_model(
         native.DecisionOwner.RUN,
@@ -70,6 +70,8 @@ def test_preparation_persists_full_before_after_and_rejects_missing_content(tmp_
     journal.end_model()
     recorded = journal.request(sequence).preparation
     assert recorded is not None
+    assert recorded.decision is CompactionDecision.COMPACTED
+    assert recorded.validation is CompactionValidation.PASSED
     assert (recorded.input_before, recorded.input_after, recorded.baseline) == (
         before,
         after,
@@ -120,12 +122,12 @@ def test_failed_preparation_records_candidate_but_no_attempt(tmp_path: Path) -> 
         baseline=None,
         input_before=before,
         estimate_before=400_000,
-        decision="minimum_exceeds_window",
+        decision=CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
         input_after=candidate,
         estimate_after=320_000,
         retained_complete_group_id=None,
         active_group_id=1,
-        validation="failed",
+        validation=CompactionValidation.FAILED,
     )
     sequence = journal.begin_model(
         native.DecisionOwner.RUN,
@@ -171,12 +173,12 @@ def test_replay_uses_recorded_window_and_checks_unsent_preparation(
             baseline=None,
             input_before=archive_input(input),
             estimate_before=6_000,
-            decision="minimum_exceeds_window",
+            decision=CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
             input_after=None,
             estimate_after=None,
             retained_complete_group_id=3,
             active_group_id=4,
-            validation="failed",
+            validation=CompactionValidation.FAILED,
         )
         sequence = journal.begin_model(
             native.DecisionOwner.RUN,
@@ -205,12 +207,12 @@ def test_replay_uses_recorded_window_and_checks_unsent_preparation(
             baseline=None,
             input_before=input,
             estimate_before=6_000,
-            decision="minimum_exceeds_window",
+            decision=CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
             input_after=None,
             estimate_after=None,
             retained_complete_group_id=3,
             active_group_id=4,
-            validation="failed",
+            validation=CompactionValidation.FAILED,
         )
         try:
             assert replay.capacity_policy.context_window == 5_000

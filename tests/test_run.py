@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import httpx2 as httpx
+import pytest
 from pydantic import JsonValue
 from test_combat import reply
 from test_mod_client import RUN
@@ -555,8 +556,10 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("protocol", ("responses", "chat-completions", "messages"))
 def test_run_compaction_sends_retained_group_and_records_zero_attempt_when_too_large(
     tmp_path: Path,
+    protocol: str,
 ) -> None:
     from dataclasses import replace
 
@@ -570,8 +573,18 @@ def test_run_compaction_sends_retained_group_and_records_zero_attempt_when_too_l
     from sts2_harness.model_journal import RecordedLlm
 
     async def scenario(window: int) -> None:
-        http = RunHTTP([reply(text="Considered.")])
-        config = replace(configuration(tmp_path), context_window=window)
+        from test_chat_completions import chat_reply
+        from test_messages import events, sse
+
+        response = (
+            reply(text="Considered.")
+            if protocol == "responses"
+            else chat_reply(text="Considered.")
+            if protocol == "chat-completions"
+            else sse(events())
+        )
+        http = RunHTTP([response])
+        config = replace(configuration(tmp_path, LLM_PROTOCOL=protocol), context_window=window)
         journal = Journal.create(
             tmp_path / f"compaction-{window}.sqlite",
             Manifest(
@@ -609,21 +622,27 @@ def test_run_compaction_sends_retained_group_and_records_zero_attempt_when_too_l
                 from sts2_harness.run import ActStart
 
                 await agent.enter_act(ActStart(http.observation))
-                context = Context(
-                    native.DecisionOwner.RUN,
-                    system=(TextMessage(TextRole.SYSTEM, "Make a decision."),),
-                )
-                obs = http.observation
-                context.begin_group(obs, "old notes")
-                context.append_task(RunActInput(strategy_notes="old notes"), obs)
-                context.append_correction(" ".join(f"obsolete{i}" for i in range(10000)))
-                context.finish_group()
-                context.begin_group(obs, "new notes", {"reason": "shop", "edges": []})
-                context.append_task(RunActInput(strategy_notes="new notes"), obs)
-                context.finish_group()
-                context.begin_group(obs, "later notes")
-                context.append_task(RunActInput(strategy_notes="later notes"), obs)
+
+                def make_context() -> Context:
+                    context = Context(
+                        native.DecisionOwner.RUN,
+                        system=(TextMessage(TextRole.SYSTEM, "Make a decision."),),
+                    )
+                    obs = http.observation
+                    context.begin_group(obs, "old notes")
+                    context.append_task(RunActInput(strategy_notes="old notes"), obs)
+                    context.append_correction(" ".join(f"obsolete{i}" for i in range(10000)))
+                    context.finish_group()
+                    context.begin_group(obs, "new notes", {"reason": "shop", "edges": []})
+                    context.append_task(RunActInput(strategy_notes="new notes"), obs)
+                    context.finish_group()
+                    context.begin_group(obs, "later notes")
+                    context.append_task(RunActInput(strategy_notes="later notes"), obs)
+                    return context
+
+                context = make_context()
                 before = context.model_input()
+                replay_context = make_context()
                 if window == 2000:
                     with pytest.raises(ModelUnavailable) as error:
                         await agent.request(context)
@@ -648,6 +667,24 @@ def test_run_compaction_sends_retained_group_and_records_zero_attempt_when_too_l
         else:
             assert len(record.attempts) == 1
             assert record.preparation.decision == "compacted"
+            from sts2_harness_eval._replay import ReplayModel, Timeline
+            from sts2_harness_eval.results import ModelAnchor, Reached
+
+            reached: asyncio.Future[Reached] = asyncio.get_running_loop().create_future()
+            replay = ReplayModel(
+                Timeline((record,)),
+                native.DecisionOwner.RUN,
+                "run:1",
+                ModelAnchor("compaction", 999),
+                reached,
+            )
+            try:
+                replay_agent = TestRunAgent(lambda: replay, tools, ToolRecoveryBudget())
+                await replay_agent.enter_act(ActStart(http.observation))
+                await replay_agent.request(replay_context)
+                assert replay_context.model_input() == context.model_input()
+            finally:
+                await replay.close()
         archive.close()
 
     asyncio.run(scenario(10000))

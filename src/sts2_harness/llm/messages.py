@@ -5,12 +5,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal, Protocol, Self
+from typing import Protocol, Self
 
 from openai.types.responses import ResponseOutputItem
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
-from sts2_harness.capacity import CapacityPolicy, Measurement
+from sts2_harness.capacity import (
+    CapacityPolicy,
+    CompactionDecision,
+    CompactionValidation,
+    Measurement,
+)
 from sts2_harness.config import Protocol as ModelProtocol
 from sts2_harness.knowledge import GuidanceContent
 from sts2_harness.llm.chat_native import ChatCompletionsReply
@@ -160,12 +165,12 @@ class RequestPreparation:
     baseline: TextMessage | None
     input_before: ModelInput
     estimate_before: int
-    decision: Literal["unchanged", "compacted", "minimum_exceeds_window", "invalid_candidate"]
+    decision: CompactionDecision
     input_after: ModelInput | None
     estimate_after: int | None
     retained_complete_group_id: int | None
     active_group_id: int | None
-    validation: Literal["not_needed", "passed", "failed"]
+    validation: CompactionValidation
 
 
 @dataclass(frozen=True, slots=True)

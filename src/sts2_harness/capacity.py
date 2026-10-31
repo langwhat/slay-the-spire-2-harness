@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import dataclass
+from enum import StrEnum
 from hashlib import sha256
 from typing import Annotated, Literal
 
@@ -10,6 +11,19 @@ from pydantic import Field, JsonValue
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
 from sts2_harness.tokenizer import encodings
+
+
+class CompactionDecision(StrEnum):
+    UNCHANGED = "unchanged"
+    COMPACTED = "compacted"
+    MINIMUM_EXCEEDS_WINDOW = "minimum_exceeds_window"
+    INVALID_CANDIDATE = "invalid_candidate"
+
+
+class CompactionValidation(StrEnum):
+    NOT_NEEDED = "not_needed"
+    PASSED = "passed"
+    FAILED = "failed"
 
 
 class CapacityClassifierConfig(native.WireModel):

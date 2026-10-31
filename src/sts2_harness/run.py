@@ -8,6 +8,7 @@ from pydantic import MISSING
 
 from sts2_harness.agent import Agent, MaterialReader
 from sts2_harness.auto import choose_auto, shop_controls
+from sts2_harness.capacity import CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.models import AutomaticProgress, RunActInput, RunHandoffInput
@@ -86,18 +87,22 @@ class RunAgent(Agent):
             if isinstance(message, TextMessage) and message.text.startswith('{"context_baseline":')
         )
         policy = client.capacity_policy
-        if estimate * policy.trigger_denominator < policy.context_window * policy.trigger_numerator:
+        below_trigger = (
+            estimate * policy.trigger_denominator < policy.context_window * policy.trigger_numerator
+        )
+        already_minimal = candidate == before and estimate < policy.context_window
+        if below_trigger or already_minimal:
             evidence = RequestPreparation(
                 group_id,
                 baseline,
                 before,
                 estimate,
-                "unchanged",
+                CompactionDecision.UNCHANGED,
                 before,
                 estimate,
                 complete_id,
                 active_id,
-                "not_needed",
+                CompactionValidation.NOT_NEEDED,
             )
             return await client.complete_prepared(prepared, preparation=evidence)
         try:
@@ -108,12 +113,12 @@ class RunAgent(Agent):
                 baseline,
                 before,
                 estimate,
-                "invalid_candidate",
+                CompactionDecision.INVALID_CANDIDATE,
                 None,
                 None,
                 complete_id,
                 active_id,
-                "failed",
+                CompactionValidation.FAILED,
             )
             failure = ModelUnavailable(FailureKind.CAPACITY)
             await client.interrupt_preparation(evidence, tools, failure)
@@ -126,12 +131,12 @@ class RunAgent(Agent):
                 baseline,
                 before,
                 estimate,
-                "minimum_exceeds_window",
+                CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
                 candidate,
                 after,
                 complete_id,
                 active_id,
-                "passed",
+                CompactionValidation.PASSED,
             )
             failure = ModelUnavailable(FailureKind.CAPACITY)
             await client.interrupt_preparation(evidence, tools, failure)
@@ -142,12 +147,12 @@ class RunAgent(Agent):
             baseline,
             before,
             estimate,
-            "compacted",
+            CompactionDecision.COMPACTED,
             candidate,
             after,
             complete_id,
             active_id,
-            "passed",
+            CompactionValidation.PASSED,
         )
         return await client.complete_prepared(compacted, preparation=evidence)
 

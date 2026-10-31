@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
 
-from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy
+from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy, CompactionDecision
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import (
@@ -613,7 +613,7 @@ class Journal:
             raise ArchiveError("Model capacity policy does not match the recording manifest.")
         if (
             preparation is not None
-            and preparation.decision in ("unchanged", "compacted")
+            and preparation.decision in (CompactionDecision.UNCHANGED, CompactionDecision.COMPACTED)
             and preparation.input_after is not None
         ):
             if preparation.input_after != messages:
@@ -888,7 +888,8 @@ class Journal:
                     )
                     if (
                         preparation is not None
-                        and preparation.decision in ("unchanged", "compacted")
+                        and preparation.decision
+                        in (CompactionDecision.UNCHANGED, CompactionDecision.COMPACTED)
                         and preparation.input_after is not None
                         and preparation.input_after != decoded_input
                     ):
