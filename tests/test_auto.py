@@ -12,6 +12,7 @@ from test_responses import configuration
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
+from sts2_harness.context.models import RunAutomaticContent
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
@@ -199,8 +200,12 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
         assert isinstance(task, RunTaskSnapshot)
         assert isinstance(task.content, RunActContent)
         assert task.content.strategy_notes == "Current plan."
-        assert task.content.observation.updates.model_dump(exclude_unset=True) == {}
-        assert all(message.content.state is not None for message in automatic)
+        assert task.content.observation.updates is MISSING
+        assert all(
+            isinstance(message.content, RunAutomaticContent)
+            and message.content.observation is not None
+            for message in automatic
+        )
         assert len(http.inputs) == (1 if batch else 2)
         assert [
             step.step.action for step in http.actions if isinstance(step.step, native.Interact)
@@ -640,8 +645,9 @@ def test_auto_preserves_handoff_before_next_combat_and_act_rebuild(
         ]
         assert len(automatic) == (0 if cross_act else 1)
         if automatic:
-            assert automatic[0].content.state is not None
-            assert not isinstance(automatic[0].content.state, native.RunState)
+            assert isinstance(automatic[0].content, RunAutomaticContent)
+            assert automatic[0].content.observation is not None
+            assert automatic[0].content.observation.decision.phase == "combat"
         assert requests[0].stream == ("run:2" if cross_act else "run:1")
         last_task = requests[-1].input[-1]
         assert isinstance(last_task, RunTaskSnapshot) and isinstance(
@@ -758,8 +764,13 @@ def test_rewards_stay_with_strategy_and_pure_dialogue_advances_from_changed_nati
             if isinstance(message, AutomaticSnapshot)
         ]
         assert len(automatic) == 3
-        assert automatic[0].content.updates.descriptions == {"event": "First line."}
-        assert automatic[1].content.updates.descriptions == {"event": "Second line."}
+        for message, text in zip(automatic, ("First line.", "Second line."), strict=False):
+            assert isinstance(message.content, RunAutomaticContent)
+            observation = message.content.observation
+            assert observation is not None and observation.current is not MISSING
+            assert observation.current.model_dump(mode="json")["object_descriptions"] == [
+                {"ref": "event", "name": "Event", "definition_id": "EVENT.TEST", "text": text}
+            ]
         assert [
             step.step.action for step in http.actions if isinstance(step.step, native.Interact)
         ] == ["claim", "skip", "dialogue", "dialogue", "choose"]

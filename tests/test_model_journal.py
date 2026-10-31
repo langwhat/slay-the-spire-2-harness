@@ -1060,3 +1060,154 @@ def test_recording_cannot_restore_a_missing_capacity_policy(tmp_path: Path) -> N
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     with pytest.raises(ArchiveError, match="capacity policy is incomplete"):
         Journal.open(path)
+
+
+def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> None:
+    from pydantic import MISSING
+
+    from sts2_harness.context.models import (
+        AutomaticContent,
+        AutomaticMessage,
+        AutomaticProgress,
+        ProjectedResult,
+        ResultMessage,
+        RunAutomaticContent,
+        RunAutomaticMessage,
+        RunProjectedResult,
+        RunResultMessage,
+        Updates,
+    )
+    from sts2_harness.journal_models import (
+        AutomaticSnapshot,
+        ConfigurationSnapshot,
+        NotesData,
+        ToolSet,
+        archive_input,
+    )
+    from sts2_harness.results import ActionCompleted, ActionToolResult, NotesText
+
+    outcome = ActionCompleted(completed_steps=1)
+    source = ActionToolResult(outcome=outcome, observation=None)
+    from test_mod_client import COMBAT, RUN
+
+    from sts2_harness.context import Context, RunActInput
+    from sts2_harness.context.models import RunActContent, TaskMessage
+
+    context = Context(native.DecisionOwner.RUN)
+    run = native.Observation.model_validate_json(RUN)
+    card = native.Observation.model_validate_json(COMBAT).objects["c1"]
+    context.append_task(RunActInput(), run.model_copy(update={"objects": {"c1": card}}))
+    task = context.model_input()[-1]
+    assert isinstance(task, TaskMessage) and isinstance(task.content, RunActContent)
+    observation = task.content.observation
+    assert observation.catalog_additions is not MISSING
+    progress = AutomaticProgress(label="Continue", reason="Continue the run.")
+    results = (
+        RunProjectedResult(outcome=outcome, observation=observation, data=NotesText(text="note")),
+        RunProjectedResult(outcome=outcome, observation=None),
+        ProjectedResult(outcome=outcome, state=None, updates=Updates()),
+    )
+    messages = archive_input(
+        tuple(
+            RunResultMessage(call_id=str(index), content=result, source=source)
+            if isinstance(result, RunProjectedResult)
+            else ResultMessage(call_id=str(index), content=result, source=source)
+            for index, result in enumerate(results)
+        )
+        + (
+            RunAutomaticMessage(
+                role=TextRole.USER,
+                value="automatic",
+                content=RunAutomaticContent(
+                    automatic_progress=progress, outcome=outcome, observation=observation
+                ),
+                source=source,
+            ),
+            AutomaticMessage(
+                role=TextRole.USER,
+                value="automatic",
+                content=AutomaticContent(
+                    automatic_progress=progress, outcome=outcome, state=None, updates=Updates()
+                ),
+                source=source,
+            ),
+        )
+    )
+    journal = Journal.create(
+        tmp_path / "projection.sqlite",
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="projection",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
+    )
+    sequence = journal.begin_model(
+        native.DecisionOwner.RUN,
+        "run:1",
+        messages,
+        ToolSet(tools=()),
+        ConfigurationSnapshot.of(configuration(tmp_path)),
+    )
+    journal.finish_model(sequence)
+    journal.end_model()
+    journal.close()
+    with closing(Journal.open(journal.path)) as reopened:
+        record = reopened.requests()[0]
+        assert record.input == messages
+        first, unavailable, combat, automatic_run, automatic_combat = record.input
+        assert isinstance(first, ResultSnapshot)
+        assert first.observation == observation
+        assert isinstance(first.data, NotesData) and first.data.value == NotesText(text="note")
+        assert first.state is MISSING and first.updates is MISSING
+        assert isinstance(unavailable, ResultSnapshot) and unavailable.observation is None
+        assert isinstance(combat, ResultSnapshot)
+        assert combat.observation is MISSING and combat.state is None
+        assert isinstance(automatic_run, AutomaticSnapshot)
+        assert isinstance(automatic_run.content, RunAutomaticContent)
+        assert isinstance(automatic_combat, AutomaticSnapshot)
+        assert isinstance(automatic_combat.content, AutomaticContent)
+        assert "state" not in first.model_dump()
+        assert "observation" not in combat.model_dump()
+
+
+def test_journal_result_requires_one_projection_shape() -> None:
+    from pydantic import ValidationError
+
+    from sts2_harness.context.models import Updates
+    from sts2_harness.results import ReadCompleted
+
+    with pytest.raises(ValidationError, match="require state and updates"):
+        ResultSnapshot(call_id="missing", outcome=ReadCompleted())
+    with pytest.raises(ValidationError, match="cannot contain Combat"):
+        ResultSnapshot(
+            call_id="mixed",
+            outcome=ReadCompleted(),
+            observation=None,
+            state=None,
+            updates=Updates(),
+        )
+
+
+@pytest.mark.parametrize(
+    "observation",
+    (
+        '{"decision":{"phase":17,"screen":"map","control":"ready","actions":[],"selection":null}}',
+        '{"decision":{"phase":"run","screen":"map","control":"ready","actions":false,"selection":null}}',
+        '{"decision":{"phase":"run","screen":"map","control":"ready","actions":[],"selection":"bogus"}}',
+        '{"decision":{"phase":"run","screen":"map","control":"ready","actions":[],"selection":null},'
+        '"scene":{"game_instance_id":"game","run_id":"run","node_id":"node","bindings":false}}',
+        '{"decision":{"phase":"run","screen":"map","control":"ready","actions":[],"selection":null},'
+        '"catalog_additions":{"p1":{"kind":"card","language":"eng","schema":"card/1","content":false}}}',
+    ),
+)
+def test_run_result_record_rejects_malformed_observation(observation: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ResultSnapshot.model_validate_json(
+            '{"call_id":"q","outcome":{"status":"completed"},"observation":' + observation + "}"
+        )

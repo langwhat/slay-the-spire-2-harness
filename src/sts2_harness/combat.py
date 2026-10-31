@@ -43,6 +43,8 @@ def _system(prompts: PromptReader) -> MaterialParts:
         "combat-observations",
     ):
         blocks.append(prompts.read(name))
+        if name == "combat-tasks":
+            blocks.append("\n")
     return MaterialParts(tuple(blocks))
 
 

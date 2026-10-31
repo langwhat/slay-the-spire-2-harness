@@ -1,0 +1,248 @@
+"""Run's context-local catalog and current non-map observation."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+
+from pydantic import MISSING, JsonValue, TypeAdapter
+
+from sts2_harness.client import models as native
+from sts2_harness.context.models import (
+    RunFinishedState,
+    VisibleObservation,
+)
+from sts2_harness.context.run_models import RunObservation
+
+_JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+def _json(value: native.WireModel) -> dict[str, JsonValue]:
+    return _JSON_OBJECT.validate_json(value.to_json())
+
+
+def _identity(observation: VisibleObservation, ref: str) -> dict[str, JsonValue]:
+    result: dict[str, JsonValue] = {"ref": ref}
+    obj = observation.objects.get(ref)
+    if obj is not None:
+        result["name"] = obj.name
+        if obj.definition_id is not MISSING:
+            result["definition_id"] = obj.definition_id
+    elif ref == "player":
+        result["name"] = observation.state.player.name
+        result["definition_id"] = observation.state.player.definition_id
+    return result
+
+
+def _refs(observation: VisibleObservation, refs: tuple[str, ...]) -> list[JsonValue]:
+    return [_identity(observation, ref) for ref in refs]
+
+
+@dataclass
+class RunDelivery:
+    catalog: dict[str, str] = field(default_factory=lambda: dict[str, str]())
+    scene: dict[str, JsonValue] | None = None
+    current: dict[str, JsonValue] = field(default_factory=lambda: dict[str, JsonValue]())
+    descriptions: dict[str, dict[str, JsonValue]] = field(
+        default_factory=lambda: dict[str, dict[str, JsonValue]]()
+    )
+    phase: native.Phase | None = None
+    map_delivered: bool = False
+
+    def project(
+        self, observation: VisibleObservation, source: native.Observation
+    ) -> RunObservation:
+        state = observation.state
+        location = source.location
+        additions: dict[str, JsonValue] = {}
+
+        def intern(kind: str, content: dict[str, JsonValue]) -> str:
+            profile: dict[str, JsonValue] = {
+                "kind": kind,
+                "language": source.game_language,
+                "schema": f"{kind}/1",
+                "content": content,
+            }
+            key = json.dumps(profile, sort_keys=True, ensure_ascii=False)
+            if key not in self.catalog:
+                ident = f"p{len(self.catalog) + 1}"
+                self.catalog[key] = ident
+                additions[ident] = profile
+            return self.catalog[key]
+
+        bindings: list[JsonValue] = []
+        cards: list[JsonValue] = []
+        noncards: list[JsonValue] = []
+        descriptions: dict[str, dict[str, JsonValue]] = {}
+        object_descriptions: list[JsonValue] = []
+        for ref, obj in observation.objects.items():
+            raw = _json(obj)
+            identity = _identity(observation, ref)
+            content = {
+                k: raw[k]
+                for k in ("name", "definition_id", "upgrades", "card_type", "card_pool", "rarity")
+                if k in raw
+            }
+            for key in ("enchantment", "affliction"):
+                modifier = raw.get(key)
+                if isinstance(modifier, dict):
+                    content[key] = {k: modifier[k] for k in ("definition_id", "name")}
+            profile = intern(obj.kind, content)
+            bindings.append({**identity, "kind": obj.kind, "profile": profile})
+            if isinstance(obj, native.CardEntry):
+                keys = (
+                    "keywords",
+                    "local_keywords",
+                    "is_upgradable",
+                    "is_removable",
+                    "cost",
+                    "cost_without_global_effects",
+                    "playable",
+                    "should_retain_this_turn",
+                    "exhaust_on_next_play",
+                    "has_turn_end_in_hand_effect",
+                    "enchantment",
+                    "affliction",
+                )
+                live = {k: raw[k] for k in keys if k in raw}
+                if live.get("local_keywords") == live["keywords"]:
+                    live.pop("local_keywords", None)
+                for key in (
+                    "should_retain_this_turn",
+                    "exhaust_on_next_play",
+                    "has_turn_end_in_hand_effect",
+                ):
+                    if live.get(key) is False:
+                        live.pop(key)
+                for key in ("enchantment", "affliction"):
+                    if live.get(key) is None:
+                        live.pop(key, None)
+                cards.append({**identity, **live})
+                if ref in observation.descriptions:
+                    descriptions[ref] = {**identity, "text": observation.descriptions[ref]}
+            elif not isinstance(obj, (native.EnemyEntry, native.AllyEntry)):
+                if isinstance(obj, native.BundleEntry):
+                    raw["members"] = _refs(observation, obj.members)
+                noncards.append({"ref": ref, **raw})
+                if ref in observation.descriptions:
+                    object_descriptions.append({**identity, "text": observation.descriptions[ref]})
+        scene: dict[str, JsonValue] = {
+            "game_instance_id": location.game_instance_id,
+            "run_id": location.run_id,
+            "node_id": location.node_id,
+            "bindings": bindings,
+        }
+        node_changed = self.scene is None or any(
+            scene[k] != self.scene[k] for k in ("game_instance_id", "run_id", "node_id")
+        )
+        mechanisms: list[JsonValue] = []
+        for mechanism in observation.mechanisms:
+            body = _json(mechanism)
+            body.pop("owner", None)
+            profile = intern("mechanism", body)
+            mechanisms.append(
+                {
+                    "owner": _identity(observation, mechanism.owner)
+                    if mechanism.owner is not MISSING
+                    else None,
+                    "profile": profile,
+                    "definition_id": mechanism.definition_id,
+                    "name": mechanism.name,
+                }
+            )
+        current: dict[str, JsonValue] = {
+            "progress": _json(state.progress),
+            "player": _json(state.player),
+            "inventory": {
+                "relics": _refs(observation, state.relics),
+                "potions": _refs(observation, state.potions),
+            },
+            "deck": _refs(observation, state.deck),
+            "cards": cards,
+            "noncard_objects": noncards,
+            "object_descriptions": object_descriptions,
+            "modifier_descriptions": [
+                {**_identity(observation, ref), **_json(value)}
+                for ref, value in observation.modifier_descriptions.items()
+            ],
+            "mechanisms": mechanisms,
+            "upgrades": [
+                {"source": _identity(observation, ref), **_json(value)}
+                for ref, value in observation.upgrades.items()
+            ],
+            "generated": [
+                {
+                    "source": _identity(observation, ref),
+                    "previews": [_json(value) for value in values],
+                }
+                for ref, values in observation.generated.items()
+            ],
+        }
+        if isinstance(state, (native.TerminalState, RunFinishedState)):
+            current["result"] = state.result
+            if state.last_observed_turn is not MISSING:
+                current["last_observed_turn"] = state.last_observed_turn
+        if source.encounter is not MISSING and state.phase is native.Phase.COMBAT:
+            current["encounter"] = _json(source.encounter)
+        elif (
+            not node_changed
+            and self.phase is native.Phase.COMBAT
+            and state.phase is native.Phase.COMBAT
+            and "encounter" in self.current
+        ):
+            current["encounter"] = self.current["encounter"]
+        changed = {
+            k: v for k, v in current.items() if node_changed or self.current.get(k, MISSING) != v
+        }
+        changed.update({k: None for k in self.current if k not in current})
+        entries: list[JsonValue] = [
+            v for ref, v in descriptions.items() if node_changed or self.descriptions.get(ref) != v
+        ]
+        if entries:
+            changed["card_descriptions"] = entries
+        decision: dict[str, JsonValue] = {
+            "phase": state.phase,
+            "screen": state.screen,
+            "control": state.control,
+            "actions": [],
+            "selection": None,
+        }
+        if location.owner is native.DecisionOwner.RUN and isinstance(state, native.RunState):
+            actions: list[JsonValue] = []
+            for action in state.actions:
+                value = _json(action)
+                if action.subject is not MISSING and action.subject in observation.objects:
+                    value["subject"] = _identity(observation, action.subject)
+                if action.targets is not MISSING:
+                    value["targets"] = _refs(observation, action.targets)
+                actions.append(value)
+            decision["actions"] = actions
+            if state.selection is not None:
+                selection = _json(state.selection)
+                selection["candidates"] = _refs(observation, state.selection.candidates)
+                selection["selected"] = _refs(observation, state.selection.selected)
+                decision["selection"] = selection
+            offers: list[JsonValue] = []
+            for offer in state.offers:
+                value = _json(offer)
+                value["ref"] = _identity(observation, offer.ref)
+                value["contents"] = _refs(observation, offer.contents)
+                offers.append(value)
+            decision["offers"] = offers
+            decision["event"] = _json(state.event) if state.event is not None else None
+        wire: dict[str, JsonValue] = {"decision": decision}
+        if additions:
+            wire["catalog_additions"] = additions
+        if node_changed or scene != self.scene:
+            wire["scene"] = scene
+        if changed:
+            wire["current"] = changed
+        if not self.map_delivered and observation.map is not MISSING:
+            wire["updates"] = {"map": _json(observation.map)}
+        result = RunObservation.model_validate_json(json.dumps(wire, ensure_ascii=False))
+        self.scene = scene
+        self.current = current
+        self.descriptions = descriptions
+        self.phase = state.phase
+        self.map_delivered = self.map_delivered or observation.map is not MISSING
+        return result

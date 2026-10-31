@@ -19,7 +19,11 @@ from sts2_harness.context.models import (
     RunActContent,
     RunActHandoffContent,
     RunActInput,
+    RunAutomaticContent,
+    RunAutomaticMessage,
     RunHandoffInput,
+    RunProjectedResult,
+    RunResultMessage,
     ShortState,
     TaskContent,
     TaskInput,
@@ -27,6 +31,7 @@ from sts2_harness.context.models import (
     Updates,
 )
 from sts2_harness.context.projection import Delivery
+from sts2_harness.context.run_projection import RunDelivery
 from sts2_harness.context.view import visible_observation
 from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
 from sts2_harness.llm.messages import (
@@ -57,14 +62,16 @@ __all__ = [
 def same_observation(
     role: native.DecisionOwner, left: native.Observation, right: native.Observation
 ) -> bool:
-    return left.location == right.location and visible_observation(
-        left, role
-    ) == visible_observation(right, role)
+    return (
+        left.game_language == right.game_language
+        and left.location == right.location
+        and visible_observation(left, role) == visible_observation(right, role)
+    )
 
 
 def repeats_action_result(
     role: native.DecisionOwner,
-    last: ResultMessage,
+    last: ResultMessage | RunResultMessage,
     task: TaskInput,
     observation: native.Observation,
 ) -> bool:
@@ -87,6 +94,7 @@ class Context:
         self._role = role
         self._history: list[TextMessage | AssistantMessage | ToolResultMessage] = list(system)
         self._delivery = Delivery.empty()
+        self._run_delivery = RunDelivery()
         self._documents: dict[tuple[str, str | None], DocumentView] = {}
         for message in system:
             if isinstance(message.value, GuidanceContent):
@@ -152,27 +160,33 @@ class Context:
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
                 if same_observation(self._role, last.observation, observation):
                     return
-            if isinstance(last, ResultMessage) and repeats_action_result(
+            if isinstance(last, (ResultMessage, RunResultMessage)) and repeats_action_result(
                 self._role, last, task, observation
             ):
                 return
-        projected, delivered = self._delivery.project(
-            visible_observation(observation, self._role), observation.location
-        )
         if isinstance(task, CombatActInput):
-            content = ActContent(observation=projected, opening_notes=task.opening_notes)
-        elif task.handoff is not None:
-            content = RunActHandoffContent(
-                observation=projected,
-                strategy_notes=task.strategy_notes,
-                battle_report=task.handoff.report,
-                combat_review=task.handoff.review,
+            projected, delivered = self._delivery.project(
+                visible_observation(observation, self._role), observation.location
             )
+            self._delivery = delivered
+            content = ActContent(observation=projected, opening_notes=task.opening_notes)
         else:
-            content = RunActContent(observation=projected, strategy_notes=task.strategy_notes)
+            run_projected = self._run_delivery.project(
+                visible_observation(observation, self._role), observation
+            )
+            if task.handoff is not None:
+                content = RunActHandoffContent(
+                    observation=run_projected,
+                    strategy_notes=task.strategy_notes,
+                    battle_report=task.handoff.report,
+                    combat_review=task.handoff.review,
+                )
+            else:
+                content = RunActContent(
+                    observation=run_projected, strategy_notes=task.strategy_notes
+                )
         message = TaskMessage(TextRole.USER, content.to_json(), content, task, observation)
         self._history.append(message)
-        self._delivery = delivered
 
     def append_correction(self, message: str) -> None:
         self._history.append(TextMessage(TextRole.USER, message))
@@ -181,6 +195,21 @@ class Context:
         self._history.append(reply)
 
     def append_automatic(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+        if self._role is native.DecisionOwner.RUN:
+            observation = (
+                self._run_delivery.project(
+                    visible_observation(result.observation, self._role), result.observation
+                )
+                if result.observation is not None
+                else None
+            )
+            run_content = RunAutomaticContent(
+                automatic_progress=progress, outcome=result.outcome, observation=observation
+            )
+            self._history.append(
+                RunAutomaticMessage(TextRole.USER, run_content.to_json(), run_content, result)
+            )
+            return
         state: ShortState | None = None
         updates = Updates()
         if result.observation is not None:
@@ -195,6 +224,23 @@ class Context:
         self._history.append(AutomaticMessage(TextRole.USER, content.to_json(), content, result))
 
     def append_tool_result(self, call: ToolCall, result: ToolResult) -> None:
+        if self._role is native.DecisionOwner.RUN:
+            observation = (
+                self._run_delivery.project(
+                    visible_observation(result.observation, self._role), result.observation
+                )
+                if result.observation is not None
+                else None
+            )
+            run_content = RunProjectedResult(
+                outcome=result.outcome,
+                observation=observation,
+                data=result.data if isinstance(result, QueryToolResult) else MISSING,
+            )
+            self._history.append(RunResultMessage(call.id, run_content, result))
+            if isinstance(result, QueryToolResult):
+                self._record_query_documents(result)
+            return
         delivered = self._delivery
         state: ShortState | None = None
         updates = Updates()
@@ -216,6 +262,9 @@ class Context:
 
         if not isinstance(result, QueryToolResult):
             return
+        self._record_query_documents(result)
+
+    def _record_query_documents(self, result: QueryToolResult) -> None:
         data = result.data
         if isinstance(data, DocumentView):
             self._record_documents((data,))
