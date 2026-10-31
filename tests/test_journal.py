@@ -14,6 +14,7 @@ import pytest
 from test_execution import Source
 from test_mod_client import COMBAT, RUN
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.decisions import ActionDecision, ActionKind, ActionProposal, ActionStep, ActTask
@@ -144,7 +145,7 @@ def test_branch_readers_join_the_parent_prefix_with_local_evidence(tmp_path: Pat
     observation = native.Observation.model_validate_json(RUN)
     route = native.RouteKey.model_validate(observation.location.model_dump())
     step = native.Interact(kind=native.StepKind.INTERACT, action="travel")
-    config = ConfigurationSnapshot.of(configuration(tmp_path))
+    config = ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy())
     messages = archive_input((TextMessage(TextRole.USER, "Synthetic current task."),))
 
     def model(journal: Journal, stream: str) -> int:

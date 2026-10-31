@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from test_lifecycle import battle_state
 from test_responses import configuration
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import models as native
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import ConfigurationSnapshot, ToolSet
@@ -60,7 +61,7 @@ def cases_fixture(directory: Path) -> CaseStore:
             "combat",
             (),
             ToolSet(tools=()),
-            ConfigurationSnapshot.of(configuration(directory)),
+            ConfigurationSnapshot.of(configuration(directory), CapacityPolicy()),
         )
         journal.finish_model(sequence)
         journal.end_model()

@@ -11,6 +11,7 @@ from test_annotations import cases_fixture
 from test_lifecycle import battle_state, run_state
 from test_responses import configuration
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
 from sts2_harness.game import GameReply, Observe, Observed, Settle, Settlement
@@ -676,7 +677,7 @@ def test_inherited_variant_uses_current_direct_parent_interval(tmp_path: Path) -
             "child",
             (),
             ToolSet(tools=()),
-            ConfigurationSnapshot.of(configuration(tmp_path)),
+            ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
         )
         journal.finish_model(sequence)
         journal.end_model()

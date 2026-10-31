@@ -8,7 +8,7 @@ import pytest
 from pydantic import JsonValue
 
 from sts2_harness import tokenizer
-from sts2_harness.capacity import measure
+from sts2_harness.capacity import CapacityPolicy, measure
 from sts2_harness.cli import main
 from sts2_harness.config import ConfigurationError, Protocol
 
@@ -179,7 +179,7 @@ def test_recorded_configuration_reconstructs_identical_request_without_local_def
         original = replace(
             configuration(tmp_path, LLM_PROTOCOL=protocol.value), context_window=42_000
         )
-        recorded = ConfigurationSnapshot.of(original)
+        recorded = ConfigurationSnapshot.of(original, CapacityPolicy(context_window=42_000))
         reconstructed = recorded.for_offline_preparation()
         assert reconstructed.context_window == 42_000
         assert reconstructed.protocol == protocol

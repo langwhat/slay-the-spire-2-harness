@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness_eval.prune import ArchivePruner, PrunePlan, PruneRequest, PruneScope, RunRef
 
@@ -150,7 +151,7 @@ def test_cases_protect_branches_and_whole_transitive_parents(tmp_path: Path) -> 
         "combat",
         (),
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
     )
     journal.finish_model(sequence)
     journal.end_model()
@@ -253,7 +254,7 @@ def test_unreferenced_children_precede_selected_parents(
         "run",
         (),
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
     )
     journal.finish_model(sequence)
     journal.end_model()
@@ -278,7 +279,7 @@ def test_unreferenced_children_precede_selected_parents(
         "run",
         (),
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
     )
     journal.finish_model(child_sequence)
     journal.end_model()

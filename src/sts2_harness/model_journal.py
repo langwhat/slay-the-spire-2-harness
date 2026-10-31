@@ -208,7 +208,7 @@ class RecordedLlm:
             self._stream,
             archive_input(preparation.input_before),
             ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in tools)),
-            ConfigurationSnapshot.of(self._live.configuration),
+            ConfigurationSnapshot.of(self._live.configuration, self._live.capacity_policy),
             preparation=self._preparation(preparation),
         )
         try:
@@ -264,7 +264,7 @@ class RecordedLlm:
             self._stream,
             messages,
             tool_set,
-            ConfigurationSnapshot.of(self._live.configuration),
+            ConfigurationSnapshot.of(self._live.configuration, self._live.capacity_policy),
             preparation=self._preparation(preparation) if preparation is not None else None,
         )
         recovery_of = preparation.recovery_of if preparation is not None else None

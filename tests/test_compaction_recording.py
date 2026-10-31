@@ -63,7 +63,7 @@ def test_preparation_persists_full_before_after_and_rejects_missing_content(tmp_
         "run:1",
         after,
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
         preparation=evidence,
     )
     journal.finish_model(sequence, failure=FailureKind.PROVIDER)
@@ -134,7 +134,7 @@ def test_failed_preparation_records_candidate_but_no_attempt(tmp_path: Path) -> 
         "run:1",
         before,
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
         preparation=evidence,
     )
     journal.finish_model(sequence, failure=FailureKind.PROVIDER)
@@ -186,7 +186,8 @@ def test_replay_uses_recorded_window_and_checks_unsent_preparation(
             archive_input(input),
             ToolSet(tools=()),
             ConfigurationSnapshot.of(
-                replace(configuration(tmp_path), protocol=protocol, context_window=5_000)
+                replace(configuration(tmp_path), protocol=protocol, context_window=5_000),
+                CapacityPolicy(context_window=5_000),
             ),
             preparation=evidence,
         )

@@ -520,7 +520,9 @@ class ConfigurationSnapshot(native.WireModel):
         )
 
     @classmethod
-    def of(cls, config: ModelConfiguration) -> "ConfigurationSnapshot":
+    def of(
+        cls, config: ModelConfiguration, capacity_policy: CapacityPolicy
+    ) -> "ConfigurationSnapshot":
         return cls(
             protocol=config.protocol,
             model=config.model,
@@ -528,7 +530,7 @@ class ConfigurationSnapshot(native.WireModel):
             service_tier=config.service_tier,
             timeout_seconds=config.timeout_seconds,
             extra_retries=config.extra_retries,
-            capacity_policy=CapacityPolicy(context_window=config.context_window),
+            capacity_policy=capacity_policy,
         )
 
 

@@ -132,8 +132,12 @@ async def run_suite(
     plan = SuitePlan(
         spec=spec,
         cases=tuple(cases.load(item.case_id) for item in spec.cases),
-        baseline=ConfigurationSnapshot.of(baseline.model.configuration),
-        candidate=ConfigurationSnapshot.of(candidate.model.configuration),
+        baseline=ConfigurationSnapshot.of(
+            baseline.model.configuration, baseline.model.capacity_policy
+        ),
+        candidate=ConfigurationSnapshot.of(
+            candidate.model.configuration, candidate.model.capacity_policy
+        ),
     )
     for item, case in zip(spec.cases, plan.cases, strict=True):
         if annotations.cases.load(case.id) != case:

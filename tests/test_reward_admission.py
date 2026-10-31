@@ -14,6 +14,7 @@ from test_combat import reply
 from test_lifecycle import battle_state, run_state, terminal
 from test_responses import configuration
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.config import Configuration, Driver
@@ -247,7 +248,7 @@ def reward_source(
             "run",
             (),
             ToolSet(tools=()),
-            ConfigurationSnapshot.of(configuration(directory)),
+            ConfigurationSnapshot.of(configuration(directory), CapacityPolicy()),
         )
         journal.finish_model(sequence)
         journal.end_model()

@@ -16,7 +16,7 @@ from pydantic import JsonValue, TypeAdapter
 from test_combat import BattleHTTP, reply
 from test_responses import OUTPUT, completed, configuration
 
-from sts2_harness.capacity import measure
+from sts2_harness.capacity import CapacityPolicy, measure
 from sts2_harness.cli import main
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
@@ -576,7 +576,7 @@ def test_indexed_model_and_material_summaries_keep_historical_input_and_incomple
         "run:1",
         messages,
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
     )
     journal.model_attempt(first, ModelAttempt(index=1, failure=FailureKind.CONNECTION))
     journal.finish_model(first)
@@ -592,7 +592,7 @@ def test_indexed_model_and_material_summaries_keep_historical_input_and_incomple
         "combat:1",
         messages,
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
     )
     from sts2_harness.config import Protocol
     from sts2_harness.journal_models import ReplySnapshot
@@ -670,7 +670,7 @@ def test_summary_storage_failure_preserves_gap_and_allows_later_model_recording(
         ),
     )
     messages = archive_input((TextMessage(TextRole.USER, "Keep playing after archive failure."),))
-    snapshot = ConfigurationSnapshot.of(configuration(tmp_path))
+    snapshot = ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy())
     # A missing index destination simulates a failed SQLite write, not a model failure.
     with closing(sqlite3.connect(journal.path)) as connection, connection:
         connection.execute("ALTER TABLE summaries RENAME TO unavailable_summaries")
@@ -1072,6 +1072,47 @@ def test_recording_rejects_a_different_effective_capacity_policy(tmp_path: Path)
     journal.close()
 
 
+def test_recording_preserves_the_live_classifier_policy(tmp_path: Path) -> None:
+    from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy
+
+    policy = CapacityPolicy(capacity_classifier_config=CapacityClassifierConfig(protocols=()))
+
+    class RestrictedLlm(Llm):
+        @property
+        def capacity_policy(self) -> CapacityPolicy:
+            return policy
+
+    async def scenario() -> None:
+        journal = Journal.create(
+            tmp_path / "effective-policy.sqlite",
+            Manifest(
+                recording_id="effective-policy",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                capacity_policy=policy,
+            ),
+        )
+        transport = httpx.MockTransport(
+            lambda _: httpx.Response(
+                200, content=completed(), headers={"Content-Type": "text/event-stream"}
+            )
+        )
+        async with RestrictedLlm(configuration(tmp_path), transport=transport) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.RUN, stream="run:1")
+            await model.complete((TextMessage(TextRole.USER, "Synthetic input"),), ())
+        journal.close()
+        reopened = Journal.open(journal.path)
+        assert reopened.request(1).configuration.capacity_policy == policy
+        assert reopened.manifest.capacity_policy == policy
+        reopened.close()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -1188,7 +1229,7 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
         "run:1",
         messages,
         ToolSet(tools=()),
-        ConfigurationSnapshot.of(configuration(tmp_path)),
+        ConfigurationSnapshot.of(configuration(tmp_path), CapacityPolicy()),
     )
     journal.finish_model(sequence)
     journal.end_model()
