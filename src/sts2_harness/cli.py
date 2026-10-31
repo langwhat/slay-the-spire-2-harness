@@ -22,6 +22,7 @@ from sts2_harness.interactive import InteractiveOptions, run_interactive
 from sts2_harness.journal import ArchiveError, DependencyKind, Journal, StandardCharacter, evidence
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
+from sts2_harness.tokenizer import prepare as prepare_tokenizers
 
 
 class _Parser(argparse.ArgumentParser):
@@ -68,7 +69,9 @@ def _build_parser() -> _Parser:
     parser = _Parser(
         description="Attach a resident backend or inspect configuration and evidence safely."
     )
-    parser.add_argument("command", choices=["start", "headless", "check-config", "journal"])
+    parser.add_argument(
+        "command", choices=["start", "headless", "check-config", "journal", "prepare-tokenizers"]
+    )
     parser.add_argument("--env-file", default=".env", metavar="PATH")
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--mod-url", default="http://127.0.0.1:17877", metavar="URL")
@@ -206,6 +209,9 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
     try:
         arguments = parser.parse_args(argv)
         command: str = arguments.command
+        if command == "prepare-tokenizers":
+            prepare_tokenizers()
+            return 0
         if command == "journal":
             return _inspect_evidence(arguments)
         # argparse is confined to this input boundary; extract concrete values immediately.

@@ -32,6 +32,7 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.llm.openai_boundary import classify_error
 from sts2_harness.llm.responses import ResponsesAdapter
+from sts2_harness.tokenizer import encodings
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +63,7 @@ class Llm:
 
     @staticmethod
     def validate_configuration(configuration: ModelConfiguration) -> None:
+        encodings()
         if configuration.protocol not in {
             Protocol.RESPONSES,
             Protocol.CHAT_COMPLETIONS,

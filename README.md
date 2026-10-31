@@ -11,12 +11,22 @@ Install Python 3.12+ and [uv](https://docs.astral.sh/uv/), then run:
 
 ```sh
 uv sync
+uv run sts2 prepare-tokenizers
 cp .env.example .env
 # Edit .env once with your model and credentials.
 uv run sts2 check-config
 uv run sts2 check-config --set STS2_DRIVER=external
 ./scripts/check
 ```
+
+`prepare-tokenizers` explicitly downloads and SHA-256 verifies the two tiktoken encoding
+tables into `~/.cache/sts2-harness/tokenizers`. Run it once before using the built-in model
+client, or again to repair missing or damaged tables. Once prepared, the model client reads
+them locally and never downloads them implicitly. The Python dependencies and tables must
+already be cached or provisioned for an offline installation. The tiktoken software is MIT
+licensed; this command obtains the tables directly from OpenAI, and their separate licensing
+has not been established here. Use `uv run --offline` when uv itself must not access the
+network. Estimates are approximate, not provider token counts.
 
 Configuration is read once into an immutable snapshot shared by Run and Combat. Precedence
 is `--set NAME=VALUE`, process environment, local `.env`, then code defaults.

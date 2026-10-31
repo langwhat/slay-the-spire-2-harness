@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import shutil
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import closing
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
+import tiktoken
 from pydantic import JsonValue, TypeAdapter
 from test_combat import BattleHTTP, reply
 from test_responses import OUTPUT, completed, configuration
@@ -45,7 +47,28 @@ from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.results import ActionUnknown
+from sts2_harness.tokenizer import TABLE_DIRECTORY
 from sts2_harness.tools import ToolCatalog
+
+
+@pytest.fixture
+def reference_encodings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[tiktoken.Encoding, tiktoken.Encoding]:
+    for name, cache_key in (
+        ("cl100k_base", "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"),
+        ("o200k_base", "fb374d419588a4632f3f557e76b4b70aebbca790"),
+    ):
+        shutil.copyfile(TABLE_DIRECTORY / f"{name}.tiktoken", tmp_path / cache_key)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+    return tiktoken.get_encoding("cl100k_base"), tiktoken.get_encoding("o200k_base")
+
+
+def reference_estimate(
+    body: dict[str, JsonValue], count: int, encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
+) -> int:
+    text = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return max(len(encoding.encode_ordinary(text)) for encoding in encodings) + 1024 + 64 * count
 
 
 @pytest.mark.parametrize(
@@ -750,7 +773,9 @@ def test_summary_rejects_disagreement_with_authoritative_metadata(
     reader.close()
 
 
-def test_recorded_request_accounts_for_each_attempt_and_wire_input(tmp_path: Path) -> None:
+def test_recorded_request_accounts_for_each_attempt_and_wire_input(
+    tmp_path: Path, reference_encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
+) -> None:
     bodies: list[dict[str, JsonValue]] = []
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -795,11 +820,18 @@ def test_recorded_request_accounts_for_each_attempt_and_wire_input(tmp_path: Pat
         assert record.configuration.capacity_policy == archive.manifest.capacity_policy
         assert len(record.attempts) == 2
         body = bodies[0]
-        expected_bytes = len(
-            json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        )
         assert isinstance(body["input"], list) and isinstance(body["tools"], list)
-        expected = expected_bytes + 1024 + 64 * (len(body["input"]) + len(body["tools"]))
+        expected = reference_estimate(
+            body, len(body["input"]) + len(body["tools"]), reference_encodings
+        )
+        assert archive.manifest.capacity_policy.estimator_id == "wire_tiktoken_max_v1"
+        assert archive.manifest.capacity_policy.tokenizer_dependency == "tiktoken==0.12.0"
+        assert archive.manifest.capacity_policy.cl100k_base_sha256 == (
+            "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
+        )
+        assert archive.manifest.capacity_policy.o200k_base_sha256 == (
+            "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
+        )
         assert bodies[0] == bodies[1]
         assert record.attempts[0].input_digest == record.attempts[1].input_digest
         assert record.attempts[0].input_digest is not None
@@ -817,7 +849,7 @@ def test_recorded_request_accounts_for_each_attempt_and_wire_input(tmp_path: Pat
 
 @pytest.mark.parametrize("protocol", ["responses", "chat-completions", "messages"])
 def test_retry_records_the_measurement_of_each_submitted_body(
-    tmp_path: Path, protocol: str
+    tmp_path: Path, protocol: str, reference_encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
 ) -> None:
     from pydantic import BaseModel, ConfigDict
     from test_chat_completions import chat_stream
@@ -887,7 +919,9 @@ def test_retry_records_the_measurement_of_each_submitted_body(
             assert all(isinstance(value, list) for value in arrays)
             count = sum(len(value) for value in arrays if isinstance(value, list))
             assert attempt.protocol_encoding_digest == hashlib.sha256(encoded).hexdigest()
-            assert attempt.estimated_input_tokens == len(encoded) + 1024 + 64 * count
+            assert attempt.estimated_input_tokens == reference_estimate(
+                body, count, reference_encodings
+            )
         assert attempts[0].reply is None
         assert attempts[1].reply is not None
 
@@ -896,7 +930,7 @@ def test_retry_records_the_measurement_of_each_submitted_body(
 
 @pytest.mark.parametrize("protocol", ["responses", "chat-completions", "messages"])
 def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
-    tmp_path: Path, protocol: str
+    tmp_path: Path, protocol: str, reference_encodings: tuple[tiktoken.Encoding, tiktoken.Encoding]
 ) -> None:
     from test_chat_completions import chat_stream
     from test_messages import events, sse
@@ -982,14 +1016,13 @@ def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
                     else ("system", "messages", "tools")
                 )
             )
-            size = len(
-                json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
-            )
             arrays = [body[key] for key in keys]
             assert all(isinstance(value, list) for value in arrays)
             count = sum(len(value) for value in arrays if isinstance(value, list))
             attempt = record.attempts[0]
-            assert attempt.estimated_input_tokens == size + 1024 + 64 * count
+            assert attempt.estimated_input_tokens == reference_estimate(
+                body, count, reference_encodings
+            )
             assert (
                 attempt.protocol_encoding_digest
                 == hashlib.sha256(
@@ -1037,7 +1070,17 @@ def test_recording_rejects_a_different_effective_capacity_policy(tmp_path: Path)
     journal.close()
 
 
-def test_recording_cannot_restore_a_missing_capacity_policy(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "field",
+    [
+        "context_window",
+        "estimator_id",
+        "tokenizer_dependency",
+        "cl100k_base_sha256",
+        "o200k_base_sha256",
+    ],
+)
+def test_recording_cannot_restore_a_missing_capacity_policy(tmp_path: Path, field: str) -> None:
     from sts2_harness.journal import ArchiveError
 
     path = tmp_path / "missing-policy.sqlite"
@@ -1056,7 +1099,7 @@ def test_recording_cannot_restore_a_missing_capacity_policy(tmp_path: Path) -> N
     journal.close()
     with sqlite3.connect(path) as connection:
         manifest = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
-        del manifest["capacity_policy"]["context_window"]
+        del manifest["capacity_policy"][field]
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     with pytest.raises(ArchiveError, match="capacity policy is incomplete"):
         Journal.open(path)
@@ -1211,3 +1254,28 @@ def test_run_result_record_rejects_malformed_observation(observation: str) -> No
         ResultSnapshot.model_validate_json(
             '{"call_id":"q","outcome":{"status":"completed"},"observation":' + observation + "}"
         )
+
+
+def test_recording_rejects_unknown_estimator_identity(tmp_path: Path) -> None:
+    from sts2_harness.journal import ArchiveError
+
+    path = tmp_path / "unknown-estimator.sqlite"
+    journal = Journal.create(
+        path,
+        Manifest(
+            recording_id="unknown-estimator",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+        ),
+    )
+    journal.close()
+    with sqlite3.connect(path) as connection:
+        manifest = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
+        manifest["capacity_policy"]["estimator_id"] = "unknown"
+        connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
+    with pytest.raises(ArchiveError, match="unsupported"):
+        Journal.open(path)
