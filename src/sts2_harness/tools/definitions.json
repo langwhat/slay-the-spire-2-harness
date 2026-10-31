@@ -413,8 +413,7 @@
                   "uniqueItems": true
                 }
               },
-              "additionalProperties": false,
-              "description": "Card filters use pools, types, rarities, and energy_costs. Pool, type, and rarity values come from catalog; they are not assumed to be native definition IDs. Catalog identifies each character's own card pool; this does not mean every card that character could obtain. energy_costs matches unupgraded base energy costs, using non-negative integers or \"X\", never current combat costs. Different dimensions combine with AND; alternatives within a dimension combine with OR. Omit a dimension to leave it unconstrained. Empty lists, duplicates, and unknown filter values are input errors, not empty matches."
+              "additionalProperties": false
             },
             "offset": {
               "type": "integer",
@@ -585,7 +584,6 @@
                   },
                   "target": {
                     "type": "string",
-                    "description": "For an action that needs a target, target may be omitted only when exactly one legal target exists when that step executes; the Mod binds it then. Multiple legal targets require an explicit reference. An explicitly supplied invalid target is never redirected. Omit target for actions that do not use one.",
                     "minLength": 1
                   }
                 },
@@ -608,7 +606,6 @@
                   },
                   "target": {
                     "type": "string",
-                    "description": "For an action that needs a target, target may be omitted only when exactly one legal target exists when that step executes; the Mod binds it then. Multiple legal targets require an explicit reference. An explicitly supplied invalid target is never redirected. Omit target for actions that do not use one.",
                     "minLength": 1
                   }
                 },
