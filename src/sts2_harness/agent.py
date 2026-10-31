@@ -115,6 +115,7 @@ class Agent(ABC):
             candidate, baseline = context.compaction_input()
             try:
                 context.validate_compaction(candidate)
+                compacted = self._llm.prepare(candidate, self._tools.definitions)
             except ValueError:
                 await self._llm.record_recovery(
                     CapacityRecovery(
@@ -122,7 +123,6 @@ class Agent(ABC):
                     )
                 )
                 raise ModelUnavailable(FailureKind.CAPACITY) from None
-            compacted = self._llm.prepare(candidate, self._tools.definitions)
             if (
                 compacted.measurement.estimated_input_tokens
                 >= self._llm.capacity_policy.context_window

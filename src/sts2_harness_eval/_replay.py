@@ -504,6 +504,9 @@ class ReplayModel:
                 next_record.sequence != expected.retry_sequence
                 or next_record.confirmed_operation_cursor != record.confirmed_operation_cursor
                 or not next_record.attempts
+                or any(
+                    attempt.index != index for index, attempt in enumerate(next_record.attempts, 1)
+                )
                 or next_record.attempts[0].cause is not AttemptCause.CAPACITY_RETRY
                 or next_record.attempts[0].recovery_of != expected.rejected
             ):
@@ -582,6 +585,8 @@ class ReplayModel:
     ) -> ModelReply:
         record = self._timeline.take(DependencyKind.MODEL)
         assert isinstance(record, ModelRecord)
+        if any(attempt.index != index for index, attempt in enumerate(record.attempts, 1)):
+            unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
         self._timeline.check_cursor(record)
         if (self._role, self._stream) != (record.role, record.stream):
             _different(record.sequence, InputComponent.ROLE_STREAM)

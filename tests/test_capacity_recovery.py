@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
@@ -24,7 +25,7 @@ from sts2_harness.config import Protocol
 from sts2_harness.context import Context
 from sts2_harness.context.models import CombatActInput, RunActInput
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.journal import Journal, Manifest, SessionMaterials
+from sts2_harness.journal import ArchiveError, Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import AttemptCause
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
@@ -33,9 +34,12 @@ from sts2_harness.llm.messages import (
     FailureKind,
     ModelAttemptSink,
     ModelClient,
+    ModelInput,
     ModelReply,
     ModelUnavailable,
+    PreparedRequest,
     ResponsesReply,
+    ToolDefinition,
 )
 from sts2_harness.model_journal import RecordedLlm
 from sts2_harness.notes import Notes
@@ -63,7 +67,8 @@ class FakeClassifierLlm(Llm):
 @pytest.mark.parametrize("protocol", tuple(Protocol))
 @pytest.mark.parametrize("role", (native.DecisionOwner.RUN, native.DecisionOwner.COMBAT))
 @pytest.mark.parametrize(
-    "mode", ("recover", "minimal", "invalid", "twice", "transport", "unverified", "unrelated")
+    "mode",
+    ("recover", "minimal", "invalid", "encoding", "twice", "transport", "unverified", "unrelated"),
 )
 def test_confirmed_rejection_retries_once_with_smaller_request(
     tmp_path: Path, protocol: Protocol, role: native.DecisionOwner, mode: str
@@ -71,7 +76,10 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
     if mode == "invalid" and protocol is not Protocol.RESPONSES:
         pytest.skip("The incomplete tool-call fixture uses Responses native output.")
 
+    verify_untrusted: Callable[[], Awaitable[None]] | None = None
+
     async def scenario() -> None:
+        nonlocal verify_untrusted
         obs = native.Observation.model_validate_json(
             RUN if role is native.DecisionOwner.RUN else COMBAT
         )
@@ -193,17 +201,33 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
                 llm.install_fake_classifier()
             model = RecordedLlm(llm, journal, role=role, stream="role:1")
             agent = await make_agent(model)
-            if mode in {"recover", "transport"}:
-                await agent.request(context)
-            else:
-                with pytest.raises(ModelUnavailable) as failure:
+            original_prepare = llm.prepare
+            prepare_calls = 0
+
+            def prepare(input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
+                nonlocal prepare_calls
+                prepare_calls += 1
+                if prepare_calls == 2:
+                    raise ValueError("synthetic invalid candidate")
+                return original_prepare(input, tools)
+
+            fault = (
+                patch.object(llm, "prepare", side_effect=prepare)
+                if mode == "encoding"
+                else nullcontext()
+            )
+            with fault:
+                if mode in {"recover", "transport"}:
                     await agent.request(context)
-                expected = (
-                    FailureKind.CAPACITY
-                    if mode in {"minimal", "invalid", "twice"}
-                    else FailureKind.CONFIGURATION
-                )
-                assert failure.value.reason is expected
+                else:
+                    with pytest.raises(ModelUnavailable) as failure:
+                        await agent.request(context)
+                    expected = (
+                        FailureKind.CAPACITY
+                        if mode in {"minimal", "invalid", "encoding", "twice"}
+                        else FailureKind.CONFIGURATION
+                    )
+                    assert failure.value.reason is expected
             expected_requests = (
                 3 if mode == "transport" else 2 if mode in {"recover", "twice"} else 1
             )
@@ -224,10 +248,10 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
             if mode == "transport":
                 assert len(rejected.attempts) == 2
                 assert rejected.capacity_recovery.rejected.attempt == 2
-        elif mode in {"minimal", "invalid"}:
+        elif mode in {"minimal", "invalid", "encoding"}:
             assert rejected.capacity_recovery is not None
             assert rejected.capacity_recovery.retry_sequence is None
-            if mode == "invalid":
+            if mode in {"invalid", "encoding"}:
                 assert rejected.capacity_recovery.comparison is RecoveryComparison.INVALID
                 assert rejected.capacity_recovery.candidate_input is None
         else:
@@ -238,6 +262,9 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
         replay_agent = await make_agent(replay)
         if mode in {"recover", "transport"}:
             await replay_agent.request(replay_context)
+        elif mode == "encoding":
+            with pytest.raises(ReplayRejected):
+                await replay_agent.request(replay_context)
         else:
             with pytest.raises(ModelUnavailable):
                 await replay_agent.request(replay_context)
@@ -290,6 +317,14 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
                         }
                     ),
                 ),
+                (
+                    rejected,
+                    records[1].model_copy(
+                        update={
+                            "attempts": (records[1].attempts[0].model_copy(update={"index": 7}),)
+                        }
+                    ),
+                ),
             )
             for broken in broken_records:
                 broken_replay = ReplayModel(
@@ -299,14 +334,23 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
                 with pytest.raises(ReplayRejected):
                     await broken_agent.request(make_context())
                 await broken_replay.close()
-            with patch.object(CapacityClassifierConfig, "supports", return_value=False):
+
+            async def reject_unverified_record() -> None:
+                replay_reached: asyncio.Future[Reached] = asyncio.get_running_loop().create_future()
                 unsupported = ReplayModel(
-                    Timeline(records), role, "role:1", ModelAnchor("capacity", 999), reached
+                    Timeline(records), role, "role:1", ModelAnchor("capacity", 999), replay_reached
                 )
                 unsupported_agent = await make_agent(unsupported)
                 with pytest.raises(ReplayRejected):
                     await unsupported_agent.request(make_context())
                 await unsupported.close()
+
+            verify_untrusted = reject_unverified_record
+            journal.model_attempt(
+                records[1].sequence, records[1].attempts[0].model_copy(update={"index": 7})
+            )
+            with pytest.raises(ArchiveError):
+                journal.requests()
         journal.close()
 
     # Only the test boundary claims its synthetic signal is verified.
@@ -317,6 +361,8 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
     )
     with classifier:
         asyncio.run(scenario())
+    if verify_untrusted is not None:
+        asyncio.run(verify_untrusted())
 
 
 @pytest.mark.parametrize("protocol", tuple(Protocol))

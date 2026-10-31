@@ -909,18 +909,27 @@ class Journal:
                         raise ArchiveError(
                             "Model capacity policy does not match the recording manifest."
                         )
+                    attempt_rows = connection.execute(
+                        "SELECT attempt,value FROM model_attempts "
+                        "WHERE sequence=? ORDER BY attempt",
+                        (sequence,),
+                    ).fetchall()
                     attempts = tuple(
                         ModelAttempt.model_validate_json(
-                            self._read_blob(connection, row[0]),
+                            self._read_blob(connection, row[1]),
                             context=BlobDecoding(
                                 lambda digest: self._read_blob(connection, digest)
                             ),
                         )
-                        for row in connection.execute(
-                            "SELECT value FROM model_attempts WHERE sequence=? ORDER BY attempt",
-                            (sequence,),
-                        ).fetchall()
+                        for row in attempt_rows
                     )
+                    if any(
+                        row[0] != index or attempt.index != index
+                        for index, (row, attempt) in enumerate(
+                            zip(attempt_rows, attempts, strict=True), 1
+                        )
+                    ):
+                        raise ArchiveError("Model attempt indices are not contiguous.")
                     input_digest = hashlib.sha256(
                         b"[" + b",".join(content) + b"]" + self._read_blob(connection, delta.tools)
                     ).hexdigest()
