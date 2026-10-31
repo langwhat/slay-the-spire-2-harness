@@ -12,6 +12,7 @@ from test_takeover import FakeRestorer, Source, source_case
 
 from sts2_harness.client import models as native
 from sts2_harness.context.models import ActContent, RunObservation
+from sts2_harness.context.run_models import Current, RemovedEntries
 from sts2_harness.game import GameReply, GameSuccess
 from sts2_harness.journal import Journal, ParentPrefix, SceneVariant, SessionMaterials
 from sts2_harness.journal_models import (
@@ -470,7 +471,7 @@ class ActionBoundarySource(Source):
         if request.url.path == "/state" and self.index == 2:
             self._boundary_reads += 1
             if self._observation_changed and self._boundary_reads == 2:
-                # Removing a previously delivered entry leaves projected updates empty.
+                # A missing description requires an explicit entry removal.
                 self.states[2] = self.current.model_copy(
                     update={
                         "descriptions": {
@@ -517,7 +518,12 @@ def test_action_boundary_task_omission_requires_complete_recorded_evidence(
         action_result = next(item for item in original.input if isinstance(item, ResultSnapshot))
         assert action_result.observation is not None
         assert tasks[-1].content.observation == RunObservation(
-            decision=action_result.observation.decision
+            decision=action_result.observation.decision,
+            current=(
+                Current(removed=RemovedEntries(card_descriptions=("card:1:2",)))
+                if difference == "observation"
+                else MISSING
+            ),
         )
         if difference == "notes":
             invalid = tmp_path / "extra-notes.sqlite"
