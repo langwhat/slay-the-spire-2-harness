@@ -605,7 +605,7 @@ def test_partial_and_failed_reads_preserve_delivery_and_run_map_sections() -> No
     assert explicit.content.observation is not None
     assert explicit.content.observation.current is not MISSING
     assert explicit.content.observation.current.map_topology is MISSING
-    assert explicit.content.observation.current.dynamic_map == dynamic
+    assert explicit.content.observation.current.dynamic_map is MISSING
     assert isinstance(explicit.content.data, MapData)
     assert explicit.content.data.map is observation.map
     missing_map = next_run_node.model_copy(update={"map": MISSING})
