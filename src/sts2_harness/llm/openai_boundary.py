@@ -7,6 +7,7 @@ from typing import assert_never
 import httpx2 as httpx
 from openai import AsyncOpenAI, Omit, omit
 
+from sts2_harness.capacity import CapacitySignal
 from sts2_harness.config import AuthKind, ModelConfiguration
 from sts2_harness.llm.messages import FailureKind
 
@@ -52,6 +53,12 @@ def openai_client(
         http_client=httpx.AsyncClient(transport=transport, timeout=None),
     )
     return sdk, headers
+
+
+def capacity_signal(code: str | None, status: int) -> CapacitySignal | None:
+    if status == 400 and code == CapacitySignal.CONTEXT_TOO_LARGE:
+        return CapacitySignal.CONTEXT_TOO_LARGE
+    return None
 
 
 def classify_error(code: str | None, status: int | None = None) -> FailureKind:

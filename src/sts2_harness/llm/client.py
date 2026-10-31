@@ -33,7 +33,7 @@ from sts2_harness.llm.messages import (
     RequestPreparation,
     ToolDefinition,
 )
-from sts2_harness.llm.openai_boundary import classify_error
+from sts2_harness.llm.openai_boundary import capacity_signal, classify_error
 from sts2_harness.llm.responses import ResponsesAdapter
 from sts2_harness.tokenizer import encodings
 
@@ -76,7 +76,7 @@ class Llm:
 
     @property
     def capacity_policy(self) -> CapacityPolicy:
-        return CapacityPolicy(context_window=self._configuration.context_window)
+        return CapacityPolicy.for_configuration(self._configuration)
 
     async def __aenter__(self) -> Self:
         return self
@@ -145,6 +145,13 @@ class Llm:
             except (APIConnectionError, anthropic.APIConnectionError, httpx.TransportError):
                 reason = FailureKind.CONNECTION
             except APIStatusError as error:
+                signal = capacity_signal(error.code, error.status_code)
+                if signal is not None and self.capacity_policy.capacity_classifier_config.supports(
+                    self._configuration.protocol, signal
+                ):
+                    if evidence is not None and started:
+                        evidence.failed(FailureKind.CAPACITY, capacity_signal=signal)
+                    raise CapacityRejected(signal, attempt=attempt + 1) from None
                 reason = classify_error(error.code, error.status_code)
             except anthropic.APIStatusError as error:
                 reason = classify_anthropic_error(error.body, error.status_code)

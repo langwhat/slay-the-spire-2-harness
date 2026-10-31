@@ -4,12 +4,12 @@ import json
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from sts2_harness.client import models as native
-from sts2_harness.config import Protocol
+from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.tokenizer import encodings
 
 
@@ -43,14 +43,41 @@ class ModelAttemptReference(native.WireModel):
     attempt: Annotated[int, Field(gt=0)]
 
 
+class CapacitySignal(StrEnum):
+    CONTEXT_TOO_LARGE = "context_too_large"
+
+
+class CapacityEndpointCategory(StrEnum):
+    UNVERIFIED = "unverified"
+    VERIFIED_RESPONSES = "verified_responses"
+
+
+class CapacityClassifierId(StrEnum):
+    UNVERIFIED = "no_verified_signals_v1"
+    VERIFIED_RESPONSES = "responses_context_too_large_v1"
+
+
 class CapacityClassifierConfig(native.WireModel):
     protocols: tuple[Protocol, ...] = (
         Protocol.RESPONSES,
         Protocol.CHAT_COMPLETIONS,
         Protocol.MESSAGES,
     )
-    endpoint_category: Literal["unverified"] = "unverified"
-    enabled_signals: tuple[str, ...] = Field(default=(), max_length=0)
+    endpoint_category: CapacityEndpointCategory = CapacityEndpointCategory.UNVERIFIED
+    enabled_signals: tuple[CapacitySignal, ...] = ()
+
+    @model_validator(mode="after")
+    def verified_shape(self) -> Self:
+        if self.endpoint_category is CapacityEndpointCategory.UNVERIFIED:
+            if self.enabled_signals:
+                raise ValueError("Unverified endpoints cannot enable capacity signals.")
+        elif self.protocols != (Protocol.RESPONSES,) or self.enabled_signals != (
+            CapacitySignal.CONTEXT_TOO_LARGE,
+        ):
+            raise ValueError(
+                "Verified Responses capacity classification requires its observed signal."
+            )
+        return self
 
     def supports(self, protocol: Protocol, signal: str) -> bool:
         return protocol in self.protocols and signal in self.enabled_signals
@@ -69,8 +96,39 @@ class CapacityPolicy(native.WireModel):
         "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     ] = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
     compaction_policy_id: Literal["latest_complete_group_v1"] = "latest_complete_group_v1"
-    capacity_classifier_id: Literal["no_verified_signals_v1"] = "no_verified_signals_v1"
+    capacity_classifier_id: CapacityClassifierId = CapacityClassifierId.UNVERIFIED
     capacity_classifier_config: CapacityClassifierConfig = CapacityClassifierConfig()
+
+    @model_validator(mode="after")
+    def classifier_identity(self) -> Self:
+        verified = (
+            self.capacity_classifier_config.endpoint_category
+            is CapacityEndpointCategory.VERIFIED_RESPONSES
+        )
+        expected = (
+            CapacityClassifierId.VERIFIED_RESPONSES if verified else CapacityClassifierId.UNVERIFIED
+        )
+        if self.capacity_classifier_id is not expected:
+            raise ValueError("Capacity classifier identity does not match its configuration.")
+        return self
+
+    @classmethod
+    def for_configuration(cls, config: ModelConfiguration) -> Self:
+        if (
+            config.protocol is not Protocol.RESPONSES
+            or not config.capacity_verified_endpoint
+            or config.capacity_verified_endpoint != config.endpoint
+        ):
+            return cls(context_window=config.context_window)
+        return cls(
+            context_window=config.context_window,
+            capacity_classifier_id=CapacityClassifierId.VERIFIED_RESPONSES,
+            capacity_classifier_config=CapacityClassifierConfig(
+                protocols=(Protocol.RESPONSES,),
+                endpoint_category=CapacityEndpointCategory.VERIFIED_RESPONSES,
+                enabled_signals=(CapacitySignal.CONTEXT_TOO_LARGE,),
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)

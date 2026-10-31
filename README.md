@@ -50,6 +50,12 @@ names in the local file fail validation; unrelated process environment keys are 
 | `LLM_REQUEST_TIMEOUT_S` | `3600`, positive finite per-attempt timeout |
 | `LLM_EXTRA_RETRIES` | `25`, nonnegative additional attempts |
 | `LLM_CONTEXT_WINDOW` | `300000`, positive input accounting window |
+| `LLM_CAPACITY_VERIFIED_ENDPOINT` | Empty by default; an exact match with `LLM_BASE_URL` enables the verified Responses HTTP 400 `context_too_large` rejection signal |
+
+Set `LLM_CAPACITY_VERIFIED_ENDPOINT` only after verifying that exact endpoint's structured
+Responses rejection. Changing `LLM_BASE_URL` disables the signal until the selector matches
+again. Other protocols, HTTP statuses, and streamed failures do not establish this rejection.
+Recordings retain the verified category, protocol, and signal; they do not store the endpoint URL.
 
 Base URLs must omit userinfo, query strings, and fragments. Endpoint path prefixes are
 retained when the selected client appends `/responses` or `/chat/completions`.

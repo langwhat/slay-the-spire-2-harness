@@ -55,6 +55,7 @@ class ModelConfiguration:
     timeout_seconds: float
     extra_retries: int
     context_window: int = 300_000
+    capacity_verified_endpoint: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ _KEYS = frozenset(
         "REQUEST_TIMEOUT_S",
         "EXTRA_RETRIES",
         "CONTEXT_WINDOW",
+        "CAPACITY_VERIFIED_ENDPOINT",
     }
 )
 _HEADER_VALUE = re.compile(r"[\t\x20-\x7e]*\Z")
@@ -206,6 +208,7 @@ def load_configuration(
             timeout,
             retries,
             context_window,
+            get("CAPACITY_VERIFIED_ENDPOINT"),
         ),
     )
 
