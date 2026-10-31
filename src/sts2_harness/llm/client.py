@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
 
@@ -15,9 +14,9 @@ from openai import (
     APIStatusError,
     APITimeoutError,
 )
-from pydantic import JsonValue, ValidationError
+from pydantic import ValidationError
 
-from sts2_harness.capacity import Measurement, measure
+from sts2_harness.capacity import CapacityPolicy, measure
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.llm.anthropic_boundary import classify_error as classify_anthropic_error
 from sts2_harness.llm.anthropic_messages import MessagesAdapter
@@ -28,17 +27,13 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    PreparedRequest,
+    RequestPreparation,
     ToolDefinition,
 )
 from sts2_harness.llm.openai_boundary import classify_error
 from sts2_harness.llm.responses import ResponsesAdapter
 from sts2_harness.tokenizer import encodings
-
-
-@dataclass(frozen=True, slots=True)
-class PreparedRequest:
-    body: dict[str, JsonValue]
-    measurement: Measurement
 
 
 class Llm:
@@ -77,6 +72,10 @@ class Llm:
     def configuration(self) -> ModelConfiguration:
         return self._configuration
 
+    @property
+    def capacity_policy(self) -> CapacityPolicy:
+        return CapacityPolicy(context_window=self._configuration.context_window)
+
     async def __aenter__(self) -> Self:
         return self
 
@@ -90,7 +89,7 @@ class Llm:
 
     def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
         body = self._adapter.prepare(input, tools)
-        return PreparedRequest(body, measure(body, self._configuration.protocol))
+        return PreparedRequest(input, tools, measure(body, self._configuration.protocol), body)
 
     async def complete(
         self,
@@ -99,10 +98,32 @@ class Llm:
         *,
         evidence: ModelAttemptSink | None = None,
     ) -> ModelReply:
+        return await self._complete(lambda: self.prepare(input, tools), evidence=evidence)
+
+    async def complete_prepared(
+        self,
+        prepared: PreparedRequest,
+        *,
+        evidence: ModelAttemptSink | None = None,
+        preparation: RequestPreparation | None = None,
+    ) -> ModelReply:
+        return await self._complete(lambda: prepared, evidence=evidence)
+
+    async def interrupt_preparation(
+        self,
+        preparation: RequestPreparation,
+        tools: tuple[ToolDefinition, ...],
+        failure: ModelUnavailable,
+    ) -> None:
+        return None
+
+    async def _complete(
+        self, prepare: Callable[[], PreparedRequest], *, evidence: ModelAttemptSink | None
+    ) -> ModelReply:
         for attempt in range(self._configuration.extra_retries + 1):
             started = False
             try:
-                prepared = self.prepare(input, tools)
+                prepared = prepare()
                 if evidence is not None:
                     evidence.started(attempt + 1)
                     started = True

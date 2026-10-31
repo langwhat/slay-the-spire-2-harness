@@ -19,7 +19,15 @@ from sts2_harness.game import GameReadError, LiveGame, SessionStopped
 from sts2_harness.journal import ArchiveError, Journal, Manifest, RecordedGame, SessionMaterials
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import ModelClient, ModelInput, ModelReply, ToolDefinition
+from sts2_harness.llm.messages import (
+    ModelClient,
+    ModelInput,
+    ModelReply,
+    ModelUnavailable,
+    PreparedRequest,
+    RequestPreparation,
+    ToolDefinition,
+)
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.prompts import PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
@@ -121,13 +129,43 @@ class _Sample:
             recorded = RecordedLlm(model, journal, role=role, stream=stream)
 
             class Model:
-                async def complete(
+                @property
+                def capacity_policy(self) -> CapacityPolicy:
+                    return recorded.capacity_policy
+
+                def prepare(
                     self, input: ModelInput, tools: tuple[ToolDefinition, ...]
-                ) -> ModelReply:
+                ) -> PreparedRequest:
+                    return recorded.prepare(input, tools)
+
+                def _check_first(self) -> None:
                     if sample._first_request:
                         if role is not native.DecisionOwner.COMBAT:
                             raise ArchiveError("A laboratory sample must begin with Combat.")
                         sample._first_request = False
+
+                async def complete_prepared(
+                    self,
+                    prepared: PreparedRequest,
+                    *,
+                    preparation: RequestPreparation | None = None,
+                ) -> ModelReply:
+                    self._check_first()
+                    return await recorded.complete_prepared(prepared, preparation=preparation)
+
+                async def interrupt_preparation(
+                    self,
+                    preparation: RequestPreparation,
+                    tools: tuple[ToolDefinition, ...],
+                    failure: ModelUnavailable,
+                ) -> None:
+                    self._check_first()
+                    await recorded.interrupt_preparation(preparation, tools, failure)
+
+                async def complete(
+                    self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+                ) -> ModelReply:
+                    self._check_first()
                     return await recorded.complete(input, tools)
 
             return Model()

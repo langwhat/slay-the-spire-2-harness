@@ -137,8 +137,9 @@ class RunActHandoffContent(RunActContent):
 class HandoffContent(SemanticValue):
     task: Literal[TaskKind.HANDOFF] = TaskKind.HANDOFF
     instruction: str = (
-        "Assess the battle report and any Combat review. Update strategy notes if useful, "
-        "then finish with a concise response. Do not perform game actions."
+        "Assess the battle report and any Combat review using available evidence. "
+        "Update strategy notes if useful, then finish with a concise response. "
+        "Do not perform game actions."
     )
     battle_report: BattleReport
     combat_review: str | None

@@ -8,9 +8,14 @@ from enum import StrEnum
 from typing import Protocol, Self
 
 from openai.types.responses import ResponseOutputItem
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
-from sts2_harness.capacity import Measurement
+from sts2_harness.capacity import (
+    CapacityPolicy,
+    CompactionDecision,
+    CompactionValidation,
+    Measurement,
+)
 from sts2_harness.config import Protocol as ModelProtocol
 from sts2_harness.knowledge import GuidanceContent
 from sts2_harness.llm.chat_native import ChatCompletionsReply
@@ -147,6 +152,28 @@ type ModelInput = tuple[TextMessage | AssistantMessage | ToolResultMessage, ...]
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedRequest:
+    input: ModelInput
+    tools: tuple[ToolDefinition, ...]
+    measurement: Measurement
+    body: dict[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class RequestPreparation:
+    group_id: int
+    baseline: TextMessage | None
+    input_before: ModelInput
+    estimate_before: int
+    decision: CompactionDecision
+    input_after: ModelInput | None
+    estimate_after: int | None
+    retained_complete_group_id: int | None
+    active_group_id: int | None
+    validation: CompactionValidation
+
+
+@dataclass(frozen=True, slots=True)
 class Usage:
     input_tokens: int | None = None
     output_tokens: int | None = None
@@ -225,6 +252,7 @@ class FailureKind(StrEnum):
     CONFIGURATION = "configuration"
     PROTOCOL = "protocol"
     PROVIDER = "provider"
+    CAPACITY = "capacity"
 
 
 class ModelUnavailable(Exception):
@@ -236,6 +264,22 @@ class ModelUnavailable(Exception):
 
 
 class ModelClient(Protocol):
+    @property
+    def capacity_policy(self) -> CapacityPolicy: ...
+
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest: ...
+
+    async def complete_prepared(
+        self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
+    ) -> ModelReply: ...
+
+    async def interrupt_preparation(
+        self,
+        preparation: RequestPreparation,
+        tools: tuple[ToolDefinition, ...],
+        failure: ModelUnavailable,
+    ) -> None: ...
+
     async def complete(
         self, input: ModelInput, tools: tuple[ToolDefinition, ...]
     ) -> ModelReply: ...

@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
 
-from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy
+from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy, CompactionDecision
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import (
@@ -69,6 +69,11 @@ from sts2_harness.journal_models import (
     MessageSnapshot,
     ModelAttempt,
     ModelRecord,
+    PreparationBaseline,
+    PreparationEvidence,
+    PreparationInput,
+    PreparationReferences,
+    RecordedPreparation,
     SkillListing,
     ToolSet,
 )
@@ -601,9 +606,18 @@ class Journal:
         messages: tuple[MessageSnapshot, ...],
         tools: ToolSet,
         configuration: ConfigurationSnapshot,
+        *,
+        preparation: PreparationEvidence | None = None,
     ) -> int:
         if configuration.capacity_policy != self.manifest.capacity_policy:
             raise ArchiveError("Model capacity policy does not match the recording manifest.")
+        if (
+            preparation is not None
+            and preparation.decision in (CompactionDecision.UNCHANGED, CompactionDecision.COMPACTED)
+            and preparation.input_after is not None
+        ):
+            if preparation.input_after != messages:
+                raise ArchiveError("Prepared model input does not match the recorded request.")
         sequence = self._allocate()
         position = self._stream_positions.get(stream, 0) + 1
         self._stream_positions[stream] = position
@@ -625,6 +639,39 @@ class Journal:
                 suffix = tuple(
                     self._content_blob(connection, content) for content in encoded[prefix:]
                 )
+                preparation_ref = None
+                if preparation is not None:
+                    before_ref = self._blob(
+                        connection, PreparationInput(messages=preparation.input_before, tools=tools)
+                    )
+                    after_ref = (
+                        self._blob(
+                            connection,
+                            PreparationInput(messages=preparation.input_after, tools=tools),
+                        )
+                        if preparation.input_after is not None
+                        else None
+                    )
+                    baseline_ref = (
+                        self._blob(connection, PreparationBaseline(message=preparation.baseline))
+                        if preparation.baseline is not None
+                        else None
+                    )
+                    preparation_ref = self._blob(
+                        connection,
+                        PreparationReferences(
+                            group_id=preparation.group_id,
+                            baseline_ref=baseline_ref,
+                            input_before_ref=before_ref,
+                            estimate_before=preparation.estimate_before,
+                            decision=preparation.decision,
+                            input_after_ref=after_ref,
+                            estimate_after=preparation.estimate_after,
+                            retained_complete_group_id=preparation.retained_complete_group_id,
+                            active_group_id=preparation.active_group_id,
+                            validation=preparation.validation,
+                        ),
+                    )
                 delta = InputDelta(
                     base_sequence=previous[0] if previous else None,
                     prefix_length=prefix,
@@ -632,6 +679,7 @@ class Journal:
                     semantic_digest=hashlib.sha256(b"[" + b",".join(encoded) + b"]").hexdigest(),
                     tools=self._blob(connection, tools),
                     configuration=self._blob(connection, configuration),
+                    preparation=preparation_ref,
                 )
                 connection.execute(
                     "INSERT INTO model_requests VALUES (?,?,?,?,?,?,0,NULL)",
@@ -824,6 +872,28 @@ class Journal:
                         for attempt in attempts
                     ):
                         raise ArchiveError("A model attempt input failed its integrity check.")
+                    tools = ToolSet.model_validate_json(
+                        self._read_blob(connection, delta.tools),
+                        context=BlobDecoding(lambda digest: self._read_blob(connection, digest)),
+                    )
+                    preparation = self._read_preparation(connection, delta.preparation, tools)
+                    decoded_input = tuple(
+                        MESSAGE.validate_json(
+                            item,
+                            context=BlobDecoding(
+                                lambda digest: self._read_blob(connection, digest)
+                            ),
+                        )
+                        for item in content
+                    )
+                    if (
+                        preparation is not None
+                        and preparation.decision
+                        in (CompactionDecision.UNCHANGED, CompactionDecision.COMPACTED)
+                        and preparation.input_after is not None
+                        and preparation.input_after != decoded_input
+                    ):
+                        raise ArchiveError("A prepared input differs from its model request.")
                     result.append(
                         ModelRecord(
                             sequence=sequence,
@@ -835,22 +905,10 @@ class Journal:
                             prefix_length=delta.prefix_length,
                             suffix_length=len(delta.suffix),
                             semantic_digest=delta.semantic_digest,
-                            input=tuple(
-                                MESSAGE.validate_json(
-                                    item,
-                                    context=BlobDecoding(
-                                        lambda digest: self._read_blob(connection, digest)
-                                    ),
-                                )
-                                for item in content
-                            ),
-                            tools=ToolSet.model_validate_json(
-                                self._read_blob(connection, delta.tools),
-                                context=BlobDecoding(
-                                    lambda digest: self._read_blob(connection, digest)
-                                ),
-                            ).tools,
+                            input=decoded_input,
+                            tools=tools.tools,
                             configuration=configuration,
+                            preparation=preparation,
                             attempts=attempts,
                             delivered=bool(delivered),
                             failure=FailureKind(failure) if failure else None,
@@ -859,6 +917,52 @@ class Journal:
                 return inherited + tuple(result)
         except (OSError, sqlite3.Error, ValidationError, ValueError):
             raise ArchiveError("Cannot decode the requested model evidence.") from None
+
+    def _read_preparation(
+        self, connection: sqlite3.Connection, digest: str | None, tools: ToolSet
+    ) -> RecordedPreparation | None:
+        if digest is None:
+            return None
+        refs = PreparationReferences.model_validate_json(self._read_blob(connection, digest))
+        decoding = BlobDecoding(lambda item: self._read_blob(connection, item))
+        before = PreparationInput.model_validate_json(
+            self._read_blob(connection, refs.input_before_ref), context=decoding
+        )
+        after = (
+            PreparationInput.model_validate_json(
+                self._read_blob(connection, refs.input_after_ref), context=decoding
+            )
+            if refs.input_after_ref is not None
+            else None
+        )
+        if before.tools != tools or (after is not None and after.tools != tools):
+            raise ArchiveError("A preparation tool set differs from its model request.")
+        baseline = (
+            PreparationBaseline.model_validate_json(
+                self._read_blob(connection, refs.baseline_ref), context=decoding
+            ).message
+            if refs.baseline_ref is not None
+            else None
+        )
+        return RecordedPreparation(
+            group_id=refs.group_id,
+            baseline=baseline,
+            input_before=before.messages,
+            estimate_before=refs.estimate_before,
+            decision=refs.decision,
+            input_after=after.messages if after is not None else None,
+            estimate_after=refs.estimate_after,
+            retained_complete_group_id=refs.retained_complete_group_id,
+            active_group_id=refs.active_group_id,
+            validation=refs.validation,
+            baseline_ref=refs.baseline_ref,
+            baseline_digest=refs.baseline_ref,
+            input_before_ref=refs.input_before_ref,
+            input_before_digest=refs.input_before_ref,
+            input_after_ref=refs.input_after_ref,
+            input_after_digest=refs.input_after_ref,
+            tools=tools.tools,
+        )
 
     def request(self, sequence: int) -> ModelRecord:
         records = self.requests(start=sequence, stop=sequence)

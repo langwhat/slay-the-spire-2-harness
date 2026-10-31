@@ -1,8 +1,11 @@
 """One synchronous owner of a role's conversation and delivered observations."""
 
+import json
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import overload
 
-from pydantic import MISSING
+from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
 from sts2_harness.context.models import (
@@ -24,6 +27,7 @@ from sts2_harness.context.models import (
     TaskInput,
     TaskMessage,
 )
+from sts2_harness.context.run_models import RunObservation
 from sts2_harness.context.run_projection import RunDelivery
 from sts2_harness.context.view import visible_observation
 from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
@@ -41,6 +45,62 @@ from sts2_harness.results import (
     ReadCompleted,
     ToolResult,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _RunGroup:
+    id: int
+    start: int
+    observation: dict[str, JsonValue]
+    catalog: dict[str, JsonValue]
+    notes: str
+    guidance: tuple[DocumentView, ...]
+    route_plan: JsonValue
+
+
+def _profile_references(value: JsonValue) -> set[str]:
+    references: set[str] = set()
+    if isinstance(value, list):
+        for item in value:
+            references.update(_profile_references(item))
+        return references
+    if not isinstance(value, dict):
+        return references
+    profile = value.get("profile")
+    if isinstance(profile, str):
+        references.add(profile)
+    for child in value.values():
+        references.update(_profile_references(child))
+    return references
+
+
+def _rename_profiles(value: JsonValue, names: dict[str, str]) -> JsonValue:
+    if isinstance(value, list):
+        return [_rename_profiles(item, names) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: names.get(child, child)
+        if key == "profile" and isinstance(child, str)
+        else _rename_profiles(child, names)
+        for key, child in value.items()
+    }
+
+
+_JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+def _message_observation(
+    message: TextMessage | AssistantMessage | ToolResultMessage,
+) -> RunObservation | None:
+    if isinstance(message, TaskMessage) and isinstance(
+        message.content, (RunActContent, ActContent)
+    ):
+        return message.content.observation
+    if isinstance(message, (RunResultMessage, RunAutomaticMessage)):
+        return message.content.observation
+    return None
+
 
 __all__ = [
     "CombatActInput",
@@ -86,12 +146,24 @@ class Context:
     def __init__(self, role: native.DecisionOwner, *, system: tuple[TextMessage, ...] = ()) -> None:
         self._role = role
         self._history: list[TextMessage | AssistantMessage | ToolResultMessage] = list(system)
+        self._system = system
         self._combat_delivery = RunDelivery(role=native.DecisionOwner.COMBAT)
         self._run_delivery = RunDelivery()
         self._documents: dict[tuple[str, str | None], DocumentView] = {}
+        self._guidance: dict[tuple[str, str | None], DocumentView] = {}
+        self._last_group: _RunGroup | None = None
+        self._active_group: _RunGroup | None = None
+        self._group_number = 0
+        self._run_map: native.PublicMap | None = None
         for message in system:
             if isinstance(message.value, GuidanceContent):
                 self._record_documents(message.value.guidance)
+                self._record_guidance(message.value.guidance)
+
+    def _record_guidance(self, documents: tuple[DocumentView, ...]) -> None:
+        for document in documents:
+            key = (document.id, None if document.resource is MISSING else document.resource)
+            self._guidance[key] = document
 
     def _record_documents(self, documents: tuple[DocumentView, ...]) -> None:
         for document in documents:
@@ -106,13 +178,286 @@ class Context:
         changed = tuple(
             document for key, document in candidates.items() if self._documents.get(key) != document
         )
+        self._record_guidance(documents)
         if not changed:
             return
         self._history.append(TextMessage(TextRole.USER, GuidanceContent(guidance=changed)))
         self._record_documents(changed)
+        self._record_guidance(changed)
 
     def model_input(self) -> ModelInput:
         return tuple(self._history)
+
+    @property
+    def has_active_group(self) -> bool:
+        return self._active_group is not None
+
+    @property
+    def group_ids(self) -> tuple[int | None, int | None]:
+        return (
+            self._last_group.id if self._last_group else None,
+            self._active_group.id if self._active_group else None,
+        )
+
+    def begin_group(
+        self, observation: native.Observation, notes: str, route_plan: JsonValue = None
+    ) -> None:
+        if self._role is not native.DecisionOwner.RUN:
+            raise ValueError("Only Run supports Run interaction groups.")
+        if self._active_group is not None:
+            return
+        self._group_number += 1
+        delivery = deepcopy(self._run_delivery)
+        known = set(delivery.catalog.values())
+        projected = delivery.project(visible_observation(observation, self._role), observation)
+        names = {
+            ident: f"baseline{self._group_number}.{ident}"
+            for ident in delivery.catalog.values()
+            if ident not in known
+        }
+        wire = _JSON_OBJECT.validate_json(projected.to_json())
+        wire.pop("catalog_additions", None)
+        if delivery.scene is not None:
+            wire["scene"] = delivery.scene
+        if delivery.current:
+            current = dict(delivery.current)
+            if delivery.descriptions:
+                current["card_descriptions"] = list(delivery.descriptions.values())
+            wire["current"] = current
+        old_map = observation.map if observation.map is not MISSING else self._run_map
+        if old_map is not None:
+            wire["updates"] = {"map": _JSON_OBJECT.validate_json(old_map.to_json())}
+        renamed = _rename_profiles(wire, names)
+        assert isinstance(renamed, dict)
+        baseline_references = _profile_references(renamed)
+        catalog: dict[str, JsonValue] = {
+            names.get(ident, ident): _JSON_OBJECT.validate_json(key)
+            for key, ident in delivery.catalog.items()
+            if names.get(ident, ident) in baseline_references
+        }
+        self._active_group = _RunGroup(
+            self._group_number,
+            len(self._history),
+            renamed,
+            catalog,
+            notes,
+            tuple(self._guidance.values()),
+            deepcopy(route_plan),
+        )
+
+    def finish_group(self) -> None:
+        if self._active_group is None:
+            raise RuntimeError("No Run interaction group is active.")
+        self._last_group = self._active_group
+        self._active_group = None
+
+    def compaction_candidate(self) -> ModelInput:
+        return self.compaction_input()[0]
+
+    def compaction_input(self) -> tuple[ModelInput, TextMessage]:
+        group = self._last_group or self._active_group
+        if group is None:
+            raise RuntimeError("No Run interaction group exists.")
+        retained = tuple(self._history[group.start :])
+        references = _profile_references(group.observation)
+        additions: set[str] = set()
+        for message in retained:
+            projected = _message_observation(message)
+            if projected is None:
+                continue
+            content = _JSON_OBJECT.validate_json(projected.to_json())
+            references.update(_profile_references(content))
+            entries = content.get("catalog_additions")
+            if isinstance(entries, dict):
+                additions.update(entries)
+        needed = _profile_references(group.observation) | (references - additions)
+        catalog: dict[str, JsonValue] = {
+            ident: _JSON_OBJECT.validate_json(key)
+            for key, ident in self._run_delivery.catalog.items()
+            if ident in needed
+        }
+        catalog.update(group.catalog)
+        profiles: dict[str, JsonValue] = {
+            key: value for key, value in catalog.items() if key in needed
+        }
+        observation = dict(group.observation)
+        if profiles:
+            observation["catalog_additions"] = profiles
+        baseline: dict[str, JsonValue] = {
+            "context_baseline": {
+                "observation": observation,
+                "strategy_notes": group.notes,
+                "route_plan": group.route_plan,
+            }
+        }
+        system_guidance = {
+            (document.id, None if document.resource is MISSING else document.resource): document
+            for message in self._system
+            if isinstance(message.value, GuidanceContent)
+            for document in message.value.guidance
+        }
+        guidance = tuple(
+            document
+            for document in group.guidance
+            if system_guidance.get(
+                (document.id, None if document.resource is MISSING else document.resource)
+            )
+            != document
+        )
+        prefix = (
+            (TextMessage(TextRole.USER, GuidanceContent(guidance=guidance)),) if guidance else ()
+        )
+        baseline_message = TextMessage(
+            TextRole.USER, json.dumps(baseline, ensure_ascii=False, separators=(",", ":"))
+        )
+        candidate: ModelInput = (*self._system, *prefix, baseline_message, *retained)
+        return candidate, baseline_message
+
+    def validate_compaction(self, candidate: ModelInput) -> None:
+        self._check_compaction(candidate, install=False)
+
+    def install_compaction(self, candidate: ModelInput) -> None:
+        self._check_compaction(candidate, install=True)
+
+    def _check_compaction(self, candidate: ModelInput, *, install: bool) -> None:
+        if candidate != self.compaction_candidate():
+            raise ValueError("The Run compaction candidate changed before installation.")
+        group = self._last_group or self._active_group
+        assert group is not None
+        retained = tuple(self._history[group.start :])
+        prefix_length = len(candidate) - len(retained)
+        baseline_message = candidate[prefix_length - 1]
+        if not isinstance(baseline_message, TextMessage):
+            raise ValueError("The Run compaction baseline is missing.")
+        envelope = _JSON_OBJECT.validate_json(baseline_message.text)
+        baseline = envelope.get("context_baseline")
+        if not isinstance(baseline, dict):
+            raise ValueError("The Run compaction baseline is invalid.")
+        initial = baseline.get("observation")
+        if not isinstance(initial, dict):
+            raise ValueError("The Run compaction observation is invalid.")
+        RunObservation.model_validate_json(json.dumps(initial, ensure_ascii=False))
+        catalog: dict[str, str] = {}
+        known: set[str] = set()
+
+        def receive(observation: dict[str, JsonValue]) -> None:
+            entries = observation.get("catalog_additions")
+            if isinstance(entries, dict):
+                for ident, profile in entries.items():
+                    key = json.dumps(profile, sort_keys=True, ensure_ascii=False)
+                    catalog[key] = ident
+                    known.add(ident)
+            if not _profile_references(observation) <= known:
+                raise ValueError("A retained profile reference has no definition.")
+
+        reconstructed_scene: dict[str, JsonValue] | None = None
+        reconstructed_current: dict[str, JsonValue] = {}
+        reconstructed_descriptions: dict[str, JsonValue] = {}
+
+        def apply(observation: dict[str, JsonValue]) -> None:
+            nonlocal reconstructed_scene, reconstructed_current, reconstructed_descriptions
+            receive(observation)
+            new_scene = observation.get("scene")
+            if isinstance(new_scene, dict):
+                if reconstructed_scene is None or any(
+                    new_scene.get(key) != reconstructed_scene.get(key)
+                    for key in ("game_instance_id", "run_id", "node_id")
+                ):
+                    reconstructed_current = {}
+                    reconstructed_descriptions = {}
+                reconstructed_scene = new_scene
+                bindings = new_scene.get("bindings")
+                if isinstance(bindings, list):
+                    refs = {
+                        ref
+                        for item in bindings
+                        if isinstance(item, dict) and isinstance((ref := item.get("ref")), str)
+                    }
+                    reconstructed_descriptions = {
+                        ref: item for ref, item in reconstructed_descriptions.items() if ref in refs
+                    }
+            updates = observation.get("current")
+            if not isinstance(updates, dict):
+                return
+            for key, value in updates.items():
+                if key == "card_descriptions":
+                    if isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, dict) and isinstance(ref := item.get("ref"), str):
+                                reconstructed_descriptions[ref] = item
+                elif value is None:
+                    reconstructed_current.pop(key, None)
+                else:
+                    reconstructed_current[key] = value
+
+        apply(initial)
+        pending: list[str] = []
+        has_retained_observation = False
+        for message in retained:
+            if isinstance(message, AssistantMessage):
+                if pending:
+                    raise ValueError("A retained tool call has no result.")
+                pending.extend(call.id for call in message.tool_calls)
+            elif isinstance(message, ToolResultMessage):
+                if not pending or pending.pop(0) != message.call_id:
+                    raise ValueError("A retained tool result has no matching call.")
+            observation = _message_observation(message)
+            if observation is not None:
+                has_retained_observation = True
+                apply(_JSON_OBJECT.validate_json(observation.to_json()))
+        if pending:
+            raise ValueError("A retained tool call has no result.")
+        renamed = {
+            old: catalog[key] for key, old in self._run_delivery.catalog.items() if key in catalog
+        }
+        scene = _rename_profiles(self._run_delivery.scene, renamed)
+        current = _rename_profiles(self._run_delivery.current, renamed)
+        if scene is not None and not isinstance(scene, dict):
+            raise ValueError("The current Run scene is invalid.")
+        if not isinstance(current, dict):
+            raise ValueError("The current Run state is invalid.")
+        if (
+            has_retained_observation
+            and not (_profile_references(scene) | _profile_references(current)) <= known
+        ):
+            raise ValueError("The current Run state has an undelivered profile.")
+        if has_retained_observation and (
+            reconstructed_scene != scene
+            or reconstructed_current != current
+            or reconstructed_descriptions != self._run_delivery.descriptions
+        ):
+            raise ValueError("The retained Run observations do not reproduce the current state.")
+        if not install:
+            return
+        self._run_delivery.catalog = catalog
+        self._run_delivery.scene = reconstructed_scene
+        self._run_delivery.current = reconstructed_current
+        self._run_delivery.descriptions = {
+            ref: value
+            for ref, value in reconstructed_descriptions.items()
+            if isinstance(value, dict)
+        }
+        if not has_retained_observation:
+            decision = initial.get("decision")
+            if isinstance(decision, dict) and isinstance(decision.get("phase"), str):
+                self._run_delivery.phase = native.Phase(decision["phase"])
+        self._history = list(candidate)
+        if self._last_group is not None:
+            self._last_group = replace(
+                self._last_group, start=prefix_length + self._last_group.start - group.start
+            )
+        if self._active_group is not None:
+            self._active_group = replace(
+                self._active_group, start=prefix_length + self._active_group.start - group.start
+            )
+        self._documents = {}
+        for message in candidate:
+            if isinstance(message, TextMessage) and isinstance(message.value, GuidanceContent):
+                self._record_documents(message.value.guidance)
+            elif isinstance(message, RunResultMessage) and isinstance(
+                message.source, QueryToolResult
+            ):
+                self._record_query_documents(message.source)
 
     @overload
     def append_task(self, task: CombatActInput, observation: native.Observation) -> None: ...
@@ -166,6 +511,8 @@ class Context:
             run_projected = self._run_delivery.project(
                 visible_observation(observation, self._role), observation
             )
+            if observation.map is not MISSING:
+                self._run_map = observation.map
             if task.handoff is not None:
                 content = RunActHandoffContent(
                     observation=run_projected,
@@ -197,6 +544,8 @@ class Context:
             if result.observation is not None
             else None
         )
+        if result.observation is not None and result.observation.map is not MISSING:
+            self._run_map = result.observation.map
         content = RunAutomaticContent(
             automatic_progress=progress, outcome=result.outcome, observation=observation
         )
@@ -213,6 +562,8 @@ class Context:
             if result.observation is not None
             else None
         )
+        if result.observation is not None and result.observation.map is not MISSING:
+            self._run_map = result.observation.map
         content = RunProjectedResult(
             outcome=result.outcome,
             observation=observation,

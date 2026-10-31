@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import httpx2 as httpx
+import pytest
 from pydantic import JsonValue
 from test_combat import reply
 from test_mod_client import RUN
@@ -422,8 +423,9 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
         assert task == {
             "task": "handoff",
             "instruction": (
-                "Assess the battle report and any Combat review. Update strategy notes if useful, "
-                "then finish with a concise response. Do not perform game actions."
+                "Assess the battle report and any Combat review using available evidence. "
+                "Update strategy notes if useful, then finish with a concise response. "
+                "Do not perform game actions."
             ),
             "battle_report": handoff().report.model_dump(mode="json"),
             "combat_review": None,
@@ -552,3 +554,138 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
         assert http.actions == []
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("protocol", ("responses", "chat-completions", "messages"))
+def test_run_compaction_sends_retained_group_and_records_zero_attempt_when_too_large(
+    tmp_path: Path,
+    protocol: str,
+) -> None:
+    from dataclasses import replace
+
+    import pytest
+
+    from sts2_harness.capacity import CapacityPolicy
+    from sts2_harness.context import Context
+    from sts2_harness.context.models import RunActInput
+    from sts2_harness.journal import Journal, Manifest
+    from sts2_harness.llm.messages import FailureKind, ModelUnavailable, TextMessage, TextRole
+    from sts2_harness.model_journal import RecordedLlm
+
+    async def scenario(window: int) -> None:
+        from test_chat_completions import chat_reply
+        from test_messages import events, sse
+
+        response = (
+            reply(text="Considered.")
+            if protocol == "responses"
+            else chat_reply(text="Considered.")
+            if protocol == "chat-completions"
+            else sse(events())
+        )
+        http = RunHTTP([response])
+        config = replace(configuration(tmp_path, LLM_PROTOCOL=protocol), context_window=window)
+        journal = Journal.create(
+            tmp_path / f"compaction-{window}.sqlite",
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="compaction",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="notes",
+                capacity_policy=CapacityPolicy(context_window=window),
+            ),
+        )
+        async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
+
+            async def observe() -> native.Observation:
+                return http.observation
+
+            tools = ToolCatalog(
+                native.DecisionOwner.RUN,
+                notes=Notes("notes"),
+                observe=observe,
+                inspect=client.inspect,
+                catalog=client.catalog,
+            )
+            async with Llm(config, transport=httpx.MockTransport(http.model)) as llm:
+                recorded = RecordedLlm(llm, journal, role=native.DecisionOwner.RUN, stream="run:1")
+
+                class TestRunAgent(RunAgent):
+                    async def request(self, context: Context) -> None:
+                        await self._request(context)
+
+                agent = TestRunAgent(lambda: recorded, tools, ToolRecoveryBudget())
+                from sts2_harness.run import ActStart
+
+                await agent.enter_act(ActStart(http.observation))
+
+                def make_context() -> Context:
+                    context = Context(
+                        native.DecisionOwner.RUN,
+                        system=(TextMessage(TextRole.SYSTEM, "Make a decision."),),
+                    )
+                    obs = http.observation
+                    context.begin_group(obs, "old notes")
+                    context.append_task(RunActInput(strategy_notes="old notes"), obs)
+                    context.append_correction(" ".join(f"obsolete{i}" for i in range(10000)))
+                    context.finish_group()
+                    context.begin_group(obs, "new notes", {"reason": "shop", "edges": []})
+                    context.append_task(RunActInput(strategy_notes="new notes"), obs)
+                    context.finish_group()
+                    context.begin_group(obs, "later notes")
+                    context.append_task(RunActInput(strategy_notes="later notes"), obs)
+                    return context
+
+                context = make_context()
+                before = context.model_input()
+                replay_context = make_context()
+                if window == 2000:
+                    with pytest.raises(ModelUnavailable) as error:
+                        await agent.request(context)
+                    assert error.value.reason is FailureKind.CAPACITY
+                    assert context.model_input() == before
+                    assert http.inputs == []
+                else:
+                    await agent.request(context)
+                    assert len(http.inputs) == 1
+                    payload = json.dumps(http.inputs[0], ensure_ascii=False)
+                    assert "obsolete9999" not in payload
+                    assert "shop" in payload and "new notes" in payload
+                    assert "later notes" in payload
+        journal.close()
+        archive = Journal.open(journal.path)
+        record = archive.requests()[0]
+        assert record.preparation is not None
+        if window == 2000:
+            assert not record.attempts
+            assert record.preparation.decision == "minimum_exceeds_window"
+            assert record.preparation.input_after is not None
+        else:
+            assert len(record.attempts) == 1
+            assert record.preparation.decision == "compacted"
+            from sts2_harness_eval._replay import ReplayModel, Timeline
+            from sts2_harness_eval.results import ModelAnchor, Reached
+
+            reached: asyncio.Future[Reached] = asyncio.get_running_loop().create_future()
+            replay = ReplayModel(
+                Timeline((record,)),
+                native.DecisionOwner.RUN,
+                "run:1",
+                ModelAnchor("compaction", 999),
+                reached,
+            )
+            try:
+                replay_agent = TestRunAgent(lambda: replay, tools, ToolRecoveryBudget())
+                await replay_agent.enter_act(ActStart(http.observation))
+                await replay_agent.request(replay_context)
+                assert replay_context.model_input() == context.model_input()
+            finally:
+                await replay.close()
+        archive.close()
+
+    asyncio.run(scenario(10000))
+    asyncio.run(scenario(2000))

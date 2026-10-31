@@ -16,6 +16,7 @@ from pydantic import JsonValue, TypeAdapter
 from test_combat import BattleHTTP, reply
 from test_responses import OUTPUT, completed, configuration
 
+from sts2_harness.capacity import measure
 from sts2_harness.cli import main
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
@@ -31,6 +32,7 @@ from sts2_harness.journal_models import (
     DocumentLookupResult,
     DocumentReadResult,
     GuidanceText,
+    LiteralText,
     MaterialFailed,
     MaterialFailure,
     MaterialKind,
@@ -1265,3 +1267,100 @@ def test_recording_rejects_unknown_estimator_identity(tmp_path: Path) -> None:
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     with pytest.raises(ArchiveError, match="unsupported"):
         Journal.open(path)
+
+
+def test_recorded_prepared_request_archives_exact_input_and_physical_attempt(
+    tmp_path: Path,
+) -> None:
+    requests: list[dict[str, JsonValue]] = []
+    journal = Journal.create(
+        tmp_path / "prepared.sqlite",
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="prepared",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
+    )
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200, content=completed(), headers={"Content-Type": "text/event-stream"}
+        )
+
+    async def scenario() -> None:
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(provider)) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.RUN, stream="run:1")
+            prepared = model.prepare((TextMessage(TextRole.USER, "Prepared 中文"),), ())
+            await model.complete_prepared(prepared)
+            assert len(requests) == 1
+            assert prepared.measurement == measure(requests[0], live.configuration.protocol)
+            record = journal.request(1)
+            assert len(record.input) == 1
+            assert isinstance(record.input[0], TextSnapshot)
+            assert record.input[0].value == LiteralText(body="Prepared 中文")
+            assert (
+                record.attempts[0].estimated_input_tokens
+                == prepared.measurement.estimated_input_tokens
+            )
+            assert record.attempts[0].protocol_encoding_digest == prepared.measurement.digest
+        journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_invalid_request_preparation_records_failure_without_physical_attempt(
+    tmp_path: Path,
+) -> None:
+    from sts2_harness.llm.chat_native import ChatCompletionsReply
+    from sts2_harness.llm.messages import AssistantMessage
+
+    journal = Journal.create(
+        tmp_path / "prepare-failure.sqlite",
+        Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="prepare-failure",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+        ),
+    )
+    native_reply = ChatCompletionsReply.from_json(
+        json.dumps(
+            {
+                "id": "reply",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Done."},
+                    }
+                ],
+            }
+        )
+    )
+
+    def no_network(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("No physical request should be sent.")
+
+    async def scenario() -> None:
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(no_network)) as live:
+            model = RecordedLlm(live, journal, role=native.DecisionOwner.RUN, stream="run:1")
+            with pytest.raises(ModelUnavailable):
+                await model.complete((AssistantMessage(native_reply),), ())
+            record = journal.request(1)
+            assert not record.delivered
+            assert record.failure is FailureKind.CONFIGURATION
+            assert record.attempts == ()
+        journal.close()
+
+    asyncio.run(scenario())

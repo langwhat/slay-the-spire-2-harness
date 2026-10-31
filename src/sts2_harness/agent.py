@@ -17,7 +17,7 @@ from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ModelFailure, ToolRecoveryBudget
 from sts2_harness.game import GameLifetimeEnded
 from sts2_harness.knowledge import DocumentView
-from sts2_harness.llm.messages import ModelClient, ModelUnavailable, ToolCall
+from sts2_harness.llm.messages import ModelClient, ModelReply, ModelUnavailable, ToolCall
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import (
     ActionToolResult,
@@ -90,6 +90,10 @@ class Agent(ABC):
             observation,
         )
 
+    async def _request(self, context: Context) -> ModelReply:
+        assert self._llm is not None
+        return await self._llm.complete(context.model_input(), self._tools.definitions)
+
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         if self._pending_call is not None:
             raise RuntimeError(
@@ -100,8 +104,7 @@ class Agent(ABC):
         self._append_task(context, task, observation)
         while True:
             try:
-                assert self._llm is not None
-                reply = await self._llm.complete(context.model_input(), self._tools.definitions)
+                reply = await self._request(context)
             except ModelUnavailable as error:
                 raise DecisionInterrupted(ModelFailure(error.reason), True) from error
             context.append_reply(reply.assistant)

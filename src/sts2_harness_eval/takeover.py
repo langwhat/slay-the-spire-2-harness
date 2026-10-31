@@ -46,7 +46,15 @@ from sts2_harness.journal import (
 from sts2_harness.journal_models import AssistantSnapshot, MaterialRecord, ModelRecord
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import ModelClient, ModelInput, ModelReply, ToolDefinition
+from sts2_harness.llm.messages import (
+    ModelClient,
+    ModelInput,
+    ModelReply,
+    ModelUnavailable,
+    PreparedRequest,
+    RequestPreparation,
+    ToolDefinition,
+)
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.native_template import TemplateError
 from sts2_harness.prompts import PromptReader
@@ -539,20 +547,75 @@ class _Takeover:
         # Only the original source target still needs material mapping.
         mapping_before = material_boundary(source)
         timeline = Timeline(records, materials, mapping_before)
+        historical_models: list[ReplayModel] = []
 
         def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
             async def continue_live(
                 input: ModelInput,
                 tools: tuple[ToolDefinition, ...],
+                preparation: RequestPreparation | None,
             ) -> ModelReply:
                 await release.wait()
-                return await switch.current.model(role, stream).complete(input, tools)
+                client = switch.current.model(role, stream)
+                if preparation is None:
+                    return await client.complete(input, tools)
+                prepared = client.prepare(input, tools)
+                if prepared.measurement.estimated_input_tokens != preparation.estimate_after:
+                    raise ReplayRejected(
+                        Rejected(
+                            RejectReason.INPUT_MISMATCH,
+                            self.case.source.anchor.model_sequence,
+                            InputDifference(InputComponent.MODEL_INPUT),
+                        )
+                    )
+                return await client.complete_prepared(prepared, preparation=preparation)
 
             historical = ReplayModel(
                 timeline, role, stream, self.case.source.anchor, reached, continue_live
             )
+            historical_models.append(historical)
 
             class Model:
+                @property
+                def capacity_policy(self) -> CapacityPolicy:
+                    if switch.live:
+                        return switch.current.model(role, stream).capacity_policy
+                    return historical.capacity_policy
+
+                def prepare(
+                    self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+                ) -> PreparedRequest:
+                    treated_tools = materials.tools(tools) if materials is not None else tools
+                    if switch.live:
+                        return switch.current.model(role, stream).prepare(input, treated_tools)
+                    return historical.prepare(input, treated_tools)
+
+                async def complete_prepared(
+                    self,
+                    prepared: PreparedRequest,
+                    *,
+                    preparation: RequestPreparation | None = None,
+                ) -> ModelReply:
+                    if switch.live:
+                        return await switch.current.model(role, stream).complete_prepared(
+                            prepared, preparation=preparation
+                        )
+                    return await historical.complete_prepared(prepared, preparation=preparation)
+
+                async def interrupt_preparation(
+                    self,
+                    preparation: RequestPreparation,
+                    tools: tuple[ToolDefinition, ...],
+                    failure: ModelUnavailable,
+                ) -> None:
+                    treated_tools = materials.tools(tools) if materials is not None else tools
+                    if switch.live:
+                        await switch.current.model(role, stream).interrupt_preparation(
+                            preparation, treated_tools, failure
+                        )
+                    else:
+                        await historical.interrupt_preparation(preparation, treated_tools, failure)
+
                 async def complete(
                     self,
                     input: ModelInput,
@@ -686,3 +749,5 @@ class _Takeover:
                 task.cancel()
                 with suppress(asyncio.CancelledError, ReplayRejected):
                     await task
+            for historical in historical_models:
+                await historical.close()

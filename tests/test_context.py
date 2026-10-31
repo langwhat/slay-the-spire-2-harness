@@ -35,6 +35,7 @@ from sts2_harness.context import (
 from sts2_harness.context.models import (
     ActContent,
     ReviewContent,
+    RunActContent,
     RunActInput,
     RunHandoffInput,
     RunProjectedResult,
@@ -717,3 +718,151 @@ def test_fake_http_battle_transition_preserves_run_handoff_and_notes() -> None:
         assert "Save potion." in messages[3].text
 
     asyncio.run(scenario())
+
+
+def test_run_compaction_candidate_uses_prior_group_baseline_and_keeps_active_query() -> None:
+    import json
+
+    observation = Observation.model_validate_json(RUN)
+    assert isinstance(observation.state, RunState)
+    player = observation.state.player
+    before = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(
+                update={"player": player.model_copy(update={"gold": 100})}
+            )
+        }
+    )
+    after = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(
+                update={"player": player.model_copy(update={"gold": 90})}
+            )
+        }
+    )
+    context = Context(DecisionOwner.RUN)
+    context.begin_group(before, "old notes")
+    context.append_task(RunActInput(strategy_notes="old notes"), before)
+    context.append_correction("Older completed group")
+    context.finish_group()
+    context.begin_group(before, "current notes")
+    call = ToolCall("a1", "run_act", "{}")
+    assistant = AssistantMessage(
+        ResponsesReply.from_json(
+            json.dumps(
+                [{"type": "function_call", "call_id": "a1", "name": "run_act", "arguments": "{}"}]
+            )
+        )
+    )
+    context.append_reply(assistant)
+    context.append_tool_result(call, ActionToolResult(ActionCompleted(completed_steps=1), after))
+    context.finish_group()
+    context.begin_group(after, "current notes")
+    context.append_task(RunActInput(strategy_notes="current notes"), after)
+    query = AssistantMessage(
+        ResponsesReply.from_json(
+            json.dumps(
+                [{"type": "function_call", "call_id": "q1", "name": "run_notes", "arguments": "{}"}]
+            )
+        )
+    )
+    context.append_reply(query)
+    context.append_tool_result(
+        ToolCall("q1", "run_notes", "{}"), QueryToolResult(ReadCompleted(), after)
+    )
+    original = context.model_input()
+    candidate = context.compaction_candidate()
+    assert context.model_input() == original
+    baseline = json.loads(candidate[0].text)["context_baseline"]
+    assert baseline["observation"]["current"]["player"]["gold"] == 100
+    assert baseline["strategy_notes"] == "current notes"
+    assert baseline["route_plan"] is None
+    assert all("Older completed group" not in message.text for message in candidate)
+    assert [
+        message.tool_calls[0].id for message in candidate if isinstance(message, AssistantMessage)
+    ] == ["a1", "q1"]
+    assert [message.call_id for message in candidate if isinstance(message, RunResultMessage)] == [
+        "a1",
+        "q1",
+    ]
+
+
+def test_run_compaction_retains_historical_profile_and_later_upgrade() -> None:
+    import json
+
+    observation = Observation.model_validate_json(RUN)
+    combat = Observation.model_validate_json(COMBAT)
+    assert isinstance(observation.state, RunState)
+    card = combat.objects["c1"]
+    assert isinstance(card, CardEntry)
+    initial = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(update={"deck": ("c1",)}),
+            "objects": {"c1": card},
+            "descriptions": {"c1": "Before upgrade."},
+        }
+    )
+    upgraded = initial.model_copy(
+        update={
+            "objects": {"c1": card.model_copy(update={"upgrades": 1})},
+            "descriptions": {"c1": "After upgrade."},
+        }
+    )
+    context = Context(DecisionOwner.RUN)
+    context.begin_group(initial, "notes")
+    context.append_task(RunActInput(), initial)
+    context.finish_group()
+    context.begin_group(initial, "notes")
+    action = AssistantMessage(
+        ResponsesReply.from_json(
+            json.dumps(
+                [{"type": "function_call", "call_id": "a", "name": "run_act", "arguments": "{}"}]
+            )
+        )
+    )
+    context.append_reply(action)
+    context.append_tool_result(
+        ToolCall("a", "run_act", "{}"),
+        ActionToolResult(ActionCompleted(completed_steps=1), upgraded),
+    )
+    context.finish_group()
+    context.begin_group(upgraded, "notes")
+    context.append_task(RunActInput(strategy_notes="notes"), upgraded)
+    messages = context.compaction_candidate()
+    baseline = json.loads(messages[0].text)["context_baseline"]["observation"]
+    binding = baseline["scene"]["bindings"][0]
+    assert baseline["catalog_additions"][binding["profile"]]["content"]["upgrades"] == 0
+    assert baseline["current"]["card_descriptions"][0]["text"] == "Before upgrade."
+    result = next(message for message in messages if isinstance(message, RunResultMessage))
+    assert result.content.observation is not None
+    later = json.loads(result.text)["observation"]
+    new_binding = later["scene"]["bindings"][0]
+    assert later["catalog_additions"][new_binding["profile"]]["content"]["upgrades"] == 1
+    assert later["current"]["card_descriptions"][0]["text"] == "After upgrade."
+    context.install_compaction(messages)
+    assert context.model_input() == messages
+
+
+def test_run_compaction_of_handoff_before_first_observation_preserves_baseline_state() -> None:
+    observation = Observation.model_validate_json(RUN)
+    report = BattleReport(
+        location=BattleLocation(act=1, floor=1, room_type="monster"),
+        result=TerminalResult.UNKNOWN,
+        last_observed_turn=2,
+        before=BoundaryValues(hp=10, max_hp=10, gold=0),
+        after=BoundaryValues(hp=8, max_hp=10, gold=0),
+    )
+    context = Context(DecisionOwner.RUN)
+    context.begin_group(observation, "notes")
+    context.append_task(RunHandoffInput(CombatHandoff(report, None)))
+    candidate = context.compaction_candidate()
+    context.validate_compaction(candidate)
+    context.install_compaction(candidate)
+    context.finish_group()
+    context.begin_group(observation, "notes")
+    context.append_task(RunActInput(), observation)
+    task = context.model_input()[-1]
+    assert isinstance(task, TaskMessage)
+    assert isinstance(task.content, RunActContent)
+    assert task.content.observation.scene is MISSING
+    assert task.content.observation.current is MISSING

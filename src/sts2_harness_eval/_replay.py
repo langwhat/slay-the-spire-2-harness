@@ -8,6 +8,7 @@ from typing import Never
 
 from pydantic import MISSING
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import models as native
 from sts2_harness.context import repeats_action_result
 from sts2_harness.context.models import (
@@ -47,6 +48,7 @@ from sts2_harness.journal import (
 )
 from sts2_harness.journal_models import (
     AssistantSnapshot,
+    ConfigurationSnapshot,
     DocumentLookup,
     DocumentLookupResult,
     DocumentRead,
@@ -59,6 +61,7 @@ from sts2_harness.journal_models import (
     MaterialRequest,
     MaterialSnapshot,
     ModelRecord,
+    PreparationEvidence,
     PromptRead,
     PromptReadResult,
     ResultSnapshot,
@@ -78,6 +81,7 @@ from sts2_harness.knowledge import (
     SubjectId,
     UnknownDocument,
 )
+from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
     AssistantMessage,
     ModelClient,
@@ -85,6 +89,8 @@ from sts2_harness.llm.messages import (
     ModelMetadata,
     ModelReply,
     ModelUnavailable,
+    PreparedRequest,
+    RequestPreparation,
     TextRole,
     ToolDefinition,
     Usage,
@@ -415,7 +421,10 @@ class ReplayModel:
         stream: str,
         target: ModelAnchor,
         reached: asyncio.Future[Reached],
-        continuation: Callable[[ModelInput, tuple[ToolDefinition, ...]], Awaitable[ModelReply]]
+        continuation: Callable[
+            [ModelInput, tuple[ToolDefinition, ...], RequestPreparation | None],
+            Awaitable[ModelReply],
+        ]
         | None = None,
     ) -> None:
         self._timeline = timeline
@@ -425,8 +434,105 @@ class ReplayModel:
         self._target = target
         self._reached = reached
         self._continuation = continuation
+        self._preparers: dict[str, Llm] = {}
 
-    async def complete(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> ModelReply:
+    def _next_record(self) -> ModelRecord:
+        for record in self._timeline.records[self._timeline.index :]:
+            if isinstance(record, ModelRecord) and (record.role, record.stream) == (
+                self._role,
+                self._stream,
+            ):
+                return record
+        unsupported(None, UnsupportedCause.UNEXPECTED_END)
+
+    def _next_configuration(self) -> ConfigurationSnapshot:
+        return self._next_record().configuration
+
+    @property
+    def capacity_policy(self) -> CapacityPolicy:
+        return self._next_configuration().capacity_policy
+
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
+        configuration = self._next_configuration()
+        # Snapshots are mutable Pydantic values, so identify preparers by their serialized value.
+        key = configuration.model_dump_json()
+        preparer = self._preparers.get(key)
+        if preparer is None:
+            preparer = Llm(configuration.for_offline_preparation())
+            self._preparers[key] = preparer
+        return preparer.prepare(input, tools)
+
+    def _check_preparation(
+        self, record: ModelRecord, preparation: RequestPreparation | None
+    ) -> None:
+        if self._timeline.materials is not None and self._timeline.original(record.sequence):
+            return
+        expected = record.preparation
+        if preparation is None:
+            if expected is not None:
+                _different(record.sequence, InputComponent.MODEL_INPUT)
+            return
+        if expected is None:
+            _different(record.sequence, InputComponent.MODEL_INPUT)
+        baseline = archive_input((preparation.baseline,))[0] if preparation.baseline else None
+        actual = PreparationEvidence(
+            group_id=preparation.group_id,
+            baseline=baseline,
+            input_before=archive_input(preparation.input_before),
+            estimate_before=preparation.estimate_before,
+            decision=preparation.decision,
+            input_after=(
+                archive_input(preparation.input_after)
+                if preparation.input_after is not None
+                else None
+            ),
+            estimate_after=preparation.estimate_after,
+            retained_complete_group_id=preparation.retained_complete_group_id,
+            active_group_id=preparation.active_group_id,
+            validation=preparation.validation,
+        )
+        if actual != PreparationEvidence.model_validate(
+            expected.model_dump(include=set(PreparationEvidence.model_fields))
+        ):
+            _different(record.sequence, InputComponent.MODEL_INPUT)
+
+    async def complete_prepared(
+        self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
+    ) -> ModelReply:
+        self._check_preparation(self._next_record(), preparation)
+        return await self.complete(prepared.input, prepared.tools, preparation=preparation)
+
+    async def interrupt_preparation(
+        self,
+        preparation: RequestPreparation,
+        tools: tuple[ToolDefinition, ...],
+        failure: ModelUnavailable,
+    ) -> None:
+        record = self._timeline.take(DependencyKind.MODEL)
+        assert isinstance(record, ModelRecord)
+        self._timeline.check_cursor(record)
+        if (self._role, self._stream) != (record.role, record.stream):
+            _different(record.sequence, InputComponent.ROLE_STREAM)
+        self._position += 1
+        if record.position != self._position:
+            _different(record.sequence, InputComponent.POSITION)
+        self._check_preparation(record, preparation)
+        if tuple(ToolSnapshot.of(tool) for tool in tools) != record.tools:
+            _different(record.sequence, InputComponent.TOOLS)
+        if record.attempts or record.delivered or record.failure is not failure.reason:
+            unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+
+    async def close(self) -> None:
+        for preparer in self._preparers.values():
+            await preparer.__aexit__(None, None, None)
+
+    async def complete(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        preparation: RequestPreparation | None = None,
+    ) -> ModelReply:
         record = self._timeline.take(DependencyKind.MODEL)
         assert isinstance(record, ModelRecord)
         self._timeline.check_cursor(record)
@@ -458,7 +564,7 @@ class ReplayModel:
                 Reached(self._target, self._timeline.cursor, record.semantic_digest)
             )
             if self._continuation is not None:
-                return await self._continuation(input, tools)
+                return await self._continuation(input, tools, preparation)
             await asyncio.Future[None]()
         if record.failure is not None:
             raise ModelUnavailable(record.failure)
@@ -488,10 +594,41 @@ class ReplayModel:
 async def _run(
     journal: Journal, timeline: Timeline, target: ModelAnchor, reached: asyncio.Future[Reached]
 ) -> None:
+    models: list[ReplayModel] = []
+
     def model(role: native.DecisionOwner, stream: str) -> ModelClient:
         historical = ReplayModel(timeline, role, stream, target, reached)
+        models.append(historical)
 
         class Model:
+            @property
+            def capacity_policy(self) -> CapacityPolicy:
+                return historical.capacity_policy
+
+            def prepare(
+                self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+            ) -> PreparedRequest:
+                materials = timeline.materials
+                return historical.prepare(
+                    input, materials.tools(tools) if materials is not None else tools
+                )
+
+            async def complete_prepared(
+                self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
+            ) -> ModelReply:
+                return await historical.complete_prepared(prepared, preparation=preparation)
+
+            async def interrupt_preparation(
+                self,
+                preparation: RequestPreparation,
+                tools: tuple[ToolDefinition, ...],
+                failure: ModelUnavailable,
+            ) -> None:
+                materials = timeline.materials
+                await historical.interrupt_preparation(
+                    preparation, materials.tools(tools) if materials is not None else tools, failure
+                )
+
             async def complete(
                 self, input: ModelInput, tools: tuple[ToolDefinition, ...]
             ) -> ModelReply:
@@ -518,6 +655,9 @@ async def _run(
             await session.run()
     except SessionStopped:
         unsupported(None, UnsupportedCause.UNEXPECTED_END)
+    finally:
+        for historical in models:
+            await historical.close()
     unsupported(None, UnsupportedCause.UNEXPECTED_END)
 
 

@@ -3,7 +3,7 @@
 import hashlib
 import time
 
-from sts2_harness.capacity import Measurement
+from sts2_harness.capacity import CapacityPolicy, Measurement
 from sts2_harness.client import models as native
 from sts2_harness.diagnostics import EncodingMetadata, Event, EventKind
 from sts2_harness.journal import Journal
@@ -21,6 +21,7 @@ from sts2_harness.journal_models import (
     MaterialFailure,
     MaterialSnapshot,
     ModelAttempt,
+    PreparationEvidence,
     PromptRead,
     PromptReadResult,
     ReplySnapshot,
@@ -46,6 +47,8 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    PreparedRequest,
+    RequestPreparation,
     ToolDefinition,
 )
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
@@ -143,7 +146,70 @@ class RecordedLlm:
         self._role = role
         self._stream = stream
 
+    @property
+    def capacity_policy(self) -> CapacityPolicy:
+        return self._journal.manifest.capacity_policy
+
     async def complete(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> ModelReply:
+        return await self._complete(input, tools, None)
+
+    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
+        return self._live.prepare(input, tools)
+
+    async def complete_prepared(
+        self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
+    ) -> ModelReply:
+        return await self._complete(prepared.input, prepared.tools, prepared, preparation)
+
+    async def interrupt_preparation(
+        self,
+        preparation: RequestPreparation,
+        tools: tuple[ToolDefinition, ...],
+        failure: ModelUnavailable,
+    ) -> None:
+        sequence = self._journal.begin_model(
+            self._role,
+            self._stream,
+            archive_input(preparation.input_before),
+            ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in tools)),
+            ConfigurationSnapshot.of(self._live.configuration),
+            preparation=self._preparation(preparation),
+        )
+        try:
+            self._journal.finish_model(sequence, failure=failure.reason)
+        finally:
+            self._journal.end_model()
+
+    @staticmethod
+    def _preparation(preparation: RequestPreparation) -> PreparationEvidence:
+        return PreparationEvidence(
+            group_id=preparation.group_id,
+            baseline=(
+                archive_input((preparation.baseline,))[0]
+                if preparation.baseline is not None
+                else None
+            ),
+            input_before=archive_input(preparation.input_before),
+            estimate_before=preparation.estimate_before,
+            decision=preparation.decision,
+            input_after=(
+                archive_input(preparation.input_after)
+                if preparation.input_after is not None
+                else None
+            ),
+            estimate_after=preparation.estimate_after,
+            retained_complete_group_id=preparation.retained_complete_group_id,
+            active_group_id=preparation.active_group_id,
+            validation=preparation.validation,
+        )
+
+    async def _complete(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        prepared: PreparedRequest | None,
+        preparation: RequestPreparation | None = None,
+    ) -> ModelReply:
         messages = archive_input(input)
         tool_set = ToolSet(tools=tuple(ToolSnapshot.of(tool) for tool in tools))
         collector = BlobCollector()
@@ -163,11 +229,15 @@ class RecordedLlm:
             messages,
             tool_set,
             ConfigurationSnapshot.of(self._live.configuration),
+            preparation=self._preparation(preparation) if preparation is not None else None,
         )
         attempts = _Attempts(self._journal, sequence, self._role, input_digest)
         self._journal.diagnostics.started_model(self._role, sequence)
         try:
-            reply = await self._live.complete(input, tools, evidence=attempts)
+            if prepared is None:
+                reply = await self._live.complete(input, tools, evidence=attempts)
+            else:
+                reply = await self._live.complete_prepared(prepared, evidence=attempts)
         except ModelUnavailable as error:
             self._journal.finish_model(sequence, failure=error.reason)
             attempts.finished(error.reason)

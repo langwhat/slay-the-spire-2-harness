@@ -2,12 +2,21 @@
 
 from collections.abc import Callable
 
+from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import models as native
 from sts2_harness.game import LiveGame
 from sts2_harness.journal import ArchiveError, Journal, RecordedGame, SceneVariant
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import ModelClient, ModelInput, ModelReply, ToolDefinition
+from sts2_harness.llm.messages import (
+    ModelClient,
+    ModelInput,
+    ModelReply,
+    ModelUnavailable,
+    PreparedRequest,
+    RequestPreparation,
+    ToolDefinition,
+)
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.prompts import PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
@@ -61,6 +70,33 @@ class SceneSession:
             recorded = RecordedLlm(model, journal, role=role, stream=stream)
 
             class Model:
+                @property
+                def capacity_policy(self) -> CapacityPolicy:
+                    return recorded.capacity_policy
+
+                def prepare(
+                    self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+                ) -> PreparedRequest:
+                    return recorded.prepare(input, materials.tools(tools))
+
+                async def complete_prepared(
+                    self,
+                    prepared: PreparedRequest,
+                    *,
+                    preparation: RequestPreparation | None = None,
+                ) -> ModelReply:
+                    return await recorded.complete_prepared(prepared, preparation=preparation)
+
+                async def interrupt_preparation(
+                    self,
+                    preparation: RequestPreparation,
+                    tools: tuple[ToolDefinition, ...],
+                    failure: ModelUnavailable,
+                ) -> None:
+                    await recorded.interrupt_preparation(
+                        preparation, materials.tools(tools), failure
+                    )
+
                 async def complete(
                     self, input: ModelInput, tools: tuple[ToolDefinition, ...]
                 ) -> ModelReply:
