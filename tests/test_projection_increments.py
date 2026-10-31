@@ -70,11 +70,34 @@ def test_run_group_resource_change_keeps_unchanged_entries_incremental() -> None
     assert frame["current"]["player"]["gold"] == 1
     context.finish_group()
     baseline = json.loads(context.compaction_candidate()[0].text)["context_baseline"]
-    assert baseline["observation"]["current"]["player"]["gold"] == 1
+    assert baseline["observation"]["current"]["player"]["gold"] == opening.state.player.gold
     assert len(baseline["observation"]["current"]["cards"]) == 2
     context.install_compaction(context.compaction_candidate())
     context.append_task(RunActInput(strategy_notes="Keep current strategy."), changed)
     assert "current" not in json.loads(context.model_input()[-1].text)["observation"]
+
+
+def test_run_group_mechanism_change_does_not_resend_untouched_state() -> None:
+    raw = json.loads(RUN)
+    combat = json.loads(COMBAT)
+    for key in ("objects", "descriptions", "mechanisms"):
+        raw[key] = combat[key]
+    raw["state"]["deck"] = ["c1", "c2"]
+    opening = Observation.model_validate_json(json.dumps(raw))
+    raw["mechanisms"].append(raw["mechanisms"][0])
+    changed = Observation.model_validate_json(json.dumps(raw))
+    context = Context(DecisionOwner.RUN)
+    context.begin_group(opening, "")
+    context.append_task(RunActInput(), opening)
+    context.finish_group()
+    context.begin_group(changed, "")
+    context.append_task(RunActInput(), changed)
+    wire = json.loads(context.model_input()[-1].text)["observation"]
+    assert "scene" not in wire
+    assert set(wire["current"]) == {"mechanisms"}
+    assert len(wire["current"]["mechanisms"]) == 1
+    context.install_compaction(context.compaction_candidate())
+    context.install_compaction(context.compaction_candidate())
 
 
 def test_run_action_menu_is_retained_until_changed_and_rebuilt_in_baselines() -> None:
@@ -106,7 +129,7 @@ def test_run_action_menu_is_retained_until_changed_and_rebuilt_in_baselines() ->
     assert json.loads(context.model_input()[-1].text)["observation"]["decision"]["actions"] == menu
 
 
-def test_run_group_card_updates_preserve_profile_closure_and_reset_on_removal() -> None:
+def test_run_group_card_updates_and_removals_preserve_profile_closure() -> None:
     raw = json.loads(RUN)
     raw["objects"] = json.loads(COMBAT)["objects"]
     raw["state"]["deck"] = ["c1", "c2"]
@@ -134,8 +157,10 @@ def test_run_group_card_updates_preserve_profile_closure_and_reset_on_removal() 
     context.begin_group(observation, "")
     context.append_task(RunActInput(), observation)
     wire = json.loads(context.model_input()[-1].text)["observation"]
-    assert wire["scene"]["reset"] is True
-    assert [card["ref"] for card in wire["current"]["cards"]] == ["c1", "c2"]
+    assert "reset" not in wire["scene"]
+    assert wire["scene"]["removed"] == ["c3"]
+    assert "cards" not in wire["current"]
+    assert wire["current"]["removed"]["cards"] == ["c3"]
     context.finish_group()
     context.install_compaction(context.compaction_candidate())
 
@@ -205,7 +230,7 @@ def test_node_change_keeps_unchanged_act_map_through_compaction() -> None:
     context.install_compaction(context.compaction_candidate())
 
 
-def test_run_reset_retains_only_unchanged_same_act_map() -> None:
+def test_run_group_retains_only_unchanged_same_act_map() -> None:
     raw = json.loads(RUN)
     raw["map"] = {"bosses": [], "nodes": [], "legal_destinations": []}
     context = Context(DecisionOwner.RUN)
@@ -216,7 +241,7 @@ def test_run_reset_retains_only_unchanged_same_act_map() -> None:
     context.begin_group(changed, "")
     context.append_task(RunActInput(), changed)
     frame = json.loads(context.model_input()[-1].text)["observation"]
-    assert frame["scene"]["reset"] is True
+    assert "scene" not in frame
     assert "dynamic_map" not in frame["current"]
     candidate = context.compaction_candidate()
     baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
@@ -267,7 +292,7 @@ def test_changed_group_entry_rebuilds_mechanisms_before_compaction(count: int) -
     assert "current" not in json.loads(context.model_input()[-1].text)["observation"]
 
 
-def test_automatic_group_preserves_fresh_pre_action_snapshot() -> None:
+def test_automatic_group_keeps_delivered_snapshot_as_delta_origin() -> None:
     opening = Observation.model_validate_json(RUN)
     before = opening.model_copy(
         update={
@@ -286,13 +311,13 @@ def test_automatic_group_preserves_fresh_pre_action_snapshot() -> None:
     retained = context.model_input()[-1]
     candidate = context.compaction_candidate()
     baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
-    assert baseline["current"]["player"]["hp"] == 7
+    assert baseline["current"]["player"]["hp"] == 10
     assert candidate[-1] == retained
-    assert json.loads(retained.text)["observation"]["scene"]["reset"] is True
+    assert "scene" not in json.loads(retained.text)["observation"]
     context.install_compaction(candidate)
 
 
-def test_automatic_group_restores_menu_after_unseen_empty_menu_baseline() -> None:
+def test_automatic_group_keeps_delivered_menu_when_unseen_menu_changes() -> None:
     opening = Observation.model_validate_json(RUN)
     before = opening.model_copy(update={"state": opening.state.model_copy(update={"actions": ()})})
     context = Context(DecisionOwner.RUN)
@@ -304,10 +329,10 @@ def test_automatic_group_restores_menu_after_unseen_empty_menu_baseline() -> Non
     )
     candidate = context.compaction_candidate()
     baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
-    assert baseline["decision"]["actions"] == []
+    assert baseline["decision"]["actions"]
     context.install_compaction(candidate)
     result = json.loads(context.model_input()[-1].text)["observation"]
-    assert result["decision"]["actions"]
+    assert "actions" not in result["decision"]
 
 
 def test_compaction_preserves_entry_removals_defaults_and_mechanism_multiplicity() -> None:

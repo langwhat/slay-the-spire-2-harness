@@ -3,7 +3,6 @@
 import json
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from hashlib import sha256
 from typing import overload
 
 from pydantic import MISSING, JsonValue, TypeAdapter
@@ -218,30 +217,24 @@ class Context:
         self._group_number += 1
         delivery = deepcopy(self._delivery)
         known = set(delivery.catalog.values())
-        projected = delivery.project(visible_observation(observation, self._role), observation)
-        changed = (
-            delivery.scene != self._delivery.scene
-            or delivery.current != self._delivery.current
-            or delivery.actions != self._delivery.actions
-        )
-        non_idempotent = (
-            projected.current is not MISSING
-            and (
-                projected.current.mechanisms is not MISSING
-                or projected.current.removed is not MISSING
+        if self._role is native.DecisionOwner.RUN and delivery.scene is not None:
+            assert delivery.decision is not None
+            wire: dict[str, JsonValue] = {"decision": delivery.decision}
+        else:
+            projected = delivery.project(visible_observation(observation, self._role), observation)
+            changed = (
+                delivery.scene != self._delivery.scene
+                or delivery.current != self._delivery.current
+                or delivery.actions != self._delivery.actions
             )
-        ) or (projected.scene is not MISSING and projected.scene.removed is not MISSING)
-        if changed:
-            # Results may differ from this unseen baseline, even if they match the old ledger.
-            self._delivery.reset_pending = True
-            if self._role is native.DecisionOwner.RUN and not non_idempotent:
-                self._delivery.incremental_entry = sha256(observation.to_json().encode()).digest()
+            if changed and self._role is native.DecisionOwner.COMBAT:
+                self._delivery.reset_pending = True
+            wire = _JSON_OBJECT.validate_json(projected.to_json())
         names = {
             ident: f"baseline{self._group_number}.{ident}"
             for ident in delivery.catalog.values()
             if ident not in known
         }
-        wire = _JSON_OBJECT.validate_json(projected.to_json())
         wire.pop("catalog_additions", None)
         decision = wire["decision"]
         assert isinstance(decision, dict)
@@ -375,15 +368,18 @@ class Context:
         reconstructed_scene: dict[str, JsonValue] | None = None
         reconstructed_current: dict[str, JsonValue] = {}
         reconstructed_actions: list[JsonValue] | None = None
+        reconstructed_decision: dict[str, JsonValue] | None = None
 
         def apply(observation: dict[str, JsonValue]) -> None:
             nonlocal reconstructed_scene, reconstructed_current, reconstructed_actions
+            nonlocal reconstructed_decision
             receive(observation)
             decision = observation.get("decision")
             assert isinstance(decision, dict)
             actions = decision.get("actions")
             if isinstance(actions, list):
                 reconstructed_actions = actions
+            reconstructed_decision = {**decision, "actions": reconstructed_actions}
             new_scene = observation.get("scene")
             if isinstance(new_scene, dict):
                 reset = (
@@ -499,9 +495,9 @@ class Context:
         self._delivery.scene = reconstructed_scene
         self._delivery.current = reconstructed_current
         self._delivery.actions = reconstructed_actions
+        self._delivery.decision = reconstructed_decision
         if self._active_group is None or self._active_group is group:
             self._delivery.reset_pending = False
-            self._delivery.incremental_entry = None
         if not has_retained_observation:
             decision = initial.get("decision")
             if isinstance(decision, dict) and isinstance(decision.get("phase"), str):

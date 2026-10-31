@@ -1,6 +1,6 @@
 # Reading observations
 
-A context_baseline is a historical snapshot from before the following retained interaction, not a new task or an action result. Apply subsequent observations and note changes in order to determine current facts. Its route_plan is the plan at that earlier point; null means none. An observation of null means the baseline has no trustworthy observation.
+A context_baseline is a historical snapshot of the latest observation delivered before the following retained interaction, not a new task or an action result. For the first interaction it can contain the opening observation. Apply subsequent observations and note changes in order to determine current facts. Its route_plan is the plan at that earlier point; null means none. An observation of null means the baseline has no trustworthy observation.
 
 `catalog_additions` gives newly delivered exact content profiles. `scene.reset=true` marks a full node snapshot: clear previous node-scoped references and collections before applying its bindings and current facts, even when the node identity is unchanged. Initial observations, node changes and context_baseline observations carry this marker. A change in scene game, run, or node identity also invalidates previous node-scoped facts. Without reset, `scene.bindings` replaces only the listed complete bindings by `ref`; `scene.removed` retires the listed references. Apply removals before updates. Never add a full snapshot's mechanisms to those from an earlier snapshot.
 

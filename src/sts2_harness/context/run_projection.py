@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from hashlib import sha256
 
 from pydantic import MISSING, JsonValue, TypeAdapter
 
@@ -91,8 +90,8 @@ class RunDelivery:
     role: native.DecisionOwner = native.DecisionOwner.RUN
     route_plan: RoutePlan | None = None
     reset_pending: bool = False
-    incremental_entry: bytes | None = None
     actions: list[JsonValue] | None = None
+    decision: dict[str, JsonValue] | None = None
 
     def project(
         self, observation: VisibleObservation, source: native.Observation
@@ -172,11 +171,7 @@ class RunDelivery:
         node_changed = self.scene is None or any(
             scene[k] != self.scene[k] for k in ("game_instance_id", "run_id", "node_id")
         )
-        matches_entry = (
-            self.incremental_entry is not None
-            and self.incremental_entry == sha256(source.to_json().encode()).digest()
-        )
-        reset = node_changed or (self.reset_pending and not matches_entry)
+        reset = node_changed or self.reset_pending
         mechanisms: list[JsonValue] = []
         for mechanism in observation.mechanisms:
             body = _json(mechanism)
@@ -355,6 +350,7 @@ class RunDelivery:
                     offers.append(value)
                 decision["offers"] = offers
                 decision["event"] = _json(state.event) if state.event is not None else None
+        complete_decision = dict(decision)
         if self.role is native.DecisionOwner.RUN and not reset and actions == self.actions:
             decision.pop("actions")
         wire: dict[str, JsonValue] = {"decision": decision}
@@ -380,6 +376,6 @@ class RunDelivery:
         self.current = current
         self.phase = state.phase
         self.actions = actions
+        self.decision = complete_decision
         self.reset_pending = False
-        self.incremental_entry = None
         return result
