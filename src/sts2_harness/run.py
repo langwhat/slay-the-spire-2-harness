@@ -137,15 +137,14 @@ class RunAgent(Agent):
         return await super()._prepare(observation)
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
-        blocks = tuple(
-            self._prompts.read(name)
-            for name in (
-                "run-tasks",
-                "run-report-reader",
-                "run-task-rules",
-                "projected-reader",
-                "run-observations",
-            )
+        blocks = (
+            self._prompts.read("run-tasks"),
+            self._prompts.read("run-report-reader"),
+            self._prompts.read("run-task-rules"),
+            "\n",
+            self._prompts.read("run-projected-reader"),
+            "\n",
+            self._prompts.read("run-observations"),
         )
         system = (TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),)
         if documents:

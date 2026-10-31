@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import MISSING
 
 from sts2_harness.client import models as native
+from sts2_harness.context.run_models import RunObservation
 from sts2_harness.decisions import BattleReport, CombatHandoff
 from sts2_harness.llm.messages import TextMessage, ToolResultMessage
 from sts2_harness.results import (
@@ -139,7 +140,7 @@ class RunHandoffInput:
 class RunActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     instruction: str = "Make the next run decision using run_act."
-    observation: ActObservation
+    observation: RunObservation
     strategy_notes: str | MISSING = MISSING
 
 
@@ -179,9 +180,21 @@ class ProjectedResult(SemanticValue):
     data: QueryData | MISSING = MISSING
 
 
+class RunProjectedResult(SemanticValue):
+    outcome: Outcome
+    observation: RunObservation | None
+    data: QueryData | MISSING = MISSING
+
+
 @dataclass(frozen=True, slots=True)
 class ResultMessage(ToolResultMessage):
     content: ProjectedResult
+    source: ToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class RunResultMessage(ToolResultMessage):
+    content: RunProjectedResult
     source: ToolResult
 
 
@@ -197,7 +210,19 @@ class AutomaticContent(SemanticValue):
     updates: Updates
 
 
+class RunAutomaticContent(SemanticValue):
+    automatic_progress: AutomaticProgress
+    outcome: ActionOutcome
+    observation: RunObservation | None
+
+
 @dataclass(frozen=True, slots=True)
 class AutomaticMessage(TextMessage):
     content: AutomaticContent
+    source: ActionToolResult
+
+
+@dataclass(frozen=True, slots=True)
+class RunAutomaticMessage(TextMessage):
+    content: RunAutomaticContent
     source: ActionToolResult

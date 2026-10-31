@@ -457,7 +457,7 @@ def test_run_tasks_keep_new_handoffs_and_notes_without_consuming_observation_del
     context.append_task(RunActInput(), observation)
     task = context.model_input()[-1]
     assert isinstance(task, TaskMessage) and isinstance(task.content, RunActContent)
-    assert isinstance(task.content.observation.state, native.RunState)
+    assert task.content.observation.decision.phase == "run"
     context.append_tool_result(
         ToolCall("act", "run_act", "{}"),
         ActionToolResult(ActionCompleted(completed_steps=1), observation),

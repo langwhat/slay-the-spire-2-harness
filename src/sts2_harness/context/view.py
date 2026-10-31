@@ -193,7 +193,15 @@ def visible_observation(
             map=observation.map,
         )
     excluded = set[str]() if own_menu else _menu_refs(observation)
-    objects = {ref: entry for ref, entry in observation.objects.items() if ref not in excluded}
+    objects = {
+        ref: entry
+        for ref, entry in observation.objects.items()
+        if ref not in excluded
+        and not (
+            role is native.DecisionOwner.RUN
+            and isinstance(entry, (native.EnemyEntry, native.AllyEntry))
+        )
+    }
     identities = _native_ids(objects, observation.state)
     mechanisms = tuple(
         entry

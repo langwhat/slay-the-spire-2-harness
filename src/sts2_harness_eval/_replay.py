@@ -17,6 +17,8 @@ from sts2_harness.context.models import (
     ResultMessage,
     RunActContent,
     RunActInput,
+    RunObservation,
+    RunResultMessage,
     Updates,
 )
 from sts2_harness.game import (
@@ -214,24 +216,28 @@ class Timeline:
             results = tuple(
                 item
                 for item in input
-                if isinstance(item, ResultMessage) and item.call_id == previous.call_id
+                if isinstance(item, (ResultMessage, RunResultMessage))
+                and item.call_id == previous.call_id
             )
             if len(results) != 1 or archive_input(results) != (previous,):
                 continue
             result = results[0]
-            if result.content.state is None:
-                continue
-            projected = ActObservation(state=result.content.state, updates=Updates())
             task: CombatActInput | RunActInput
             if record.role is native.DecisionOwner.COMBAT:
+                if not isinstance(result, ResultMessage) or result.content.state is None:
+                    continue
+                projected = ActObservation(state=result.content.state, updates=Updates())
                 if message != TaskSnapshot(
                     role=TextRole.USER, content=ActContent(observation=projected)
                 ):
                     continue
                 task = CombatActInput()
             else:
+                if not isinstance(result, RunResultMessage) or result.content.observation is None:
+                    continue
+                run_projected = RunObservation(decision=result.content.observation.decision)
                 if message != RunTaskSnapshot(
-                    role=TextRole.USER, content=RunActContent(observation=projected)
+                    role=TextRole.USER, content=RunActContent(observation=run_projected)
                 ):
                     continue
                 task = RunActInput()

@@ -10,7 +10,7 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import ClientFailureKind, ClientUnavailable
 from sts2_harness.client.models import DecisionOwner
 from sts2_harness.context import Context
-from sts2_harness.context.models import ResultMessage
+from sts2_harness.context.models import ResultMessage, RunResultMessage
 from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import TextMessage, TextRole, ToolCall
@@ -212,7 +212,7 @@ def test_shared_file_supplements_and_resources_keep_complete_independent_identit
             context.append_materials((explicit,))
             assert len(context.model_input()) == 1
             message = context.model_input()[0]
-            assert isinstance(message, ResultMessage)
+            assert isinstance(message, RunResultMessage)
             assert message.content.data == result.data
             assert (
                 json.loads(message.text)["data"]["entries"][1]["supplements"][0]["text"]

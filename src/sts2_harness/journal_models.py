@@ -31,6 +31,11 @@ from sts2_harness.context.models import (
     ReviewContent,
     RunActContent,
     RunActHandoffContent,
+    RunAutomaticContent,
+    RunAutomaticMessage,
+    RunObservation,
+    RunProjectedResult,
+    RunResultMessage,
     ShortState,
     TaskMessage,
     Updates,
@@ -277,7 +282,7 @@ class NotesData(native.WireModel):
 type ArchivedData = KnowledgeData | DocumentData | SkillsData | NativeData | NotesData
 
 
-def archive_data(data: ProjectedResult) -> ArchivedData | MISSING:
+def archive_data(data: ProjectedResult | RunProjectedResult) -> ArchivedData | MISSING:
     value = data.data
     if value is MISSING:
         return MISSING
@@ -380,7 +385,7 @@ class RunTaskSnapshot(native.WireModel):
 class AutomaticSnapshot(native.WireModel):
     kind: Literal[MessageKind.AUTOMATIC] = MessageKind.AUTOMATIC
     role: TextRole
-    content: AutomaticContent
+    content: AutomaticContent | RunAutomaticContent
 
 
 class NativeSnapshot(native.WireModel):
@@ -411,9 +416,20 @@ class ResultSnapshot(native.WireModel):
     kind: Literal[MessageKind.RESULT] = MessageKind.RESULT
     call_id: str
     outcome: Outcome
-    state: ShortState | None
-    updates: Updates
+    state: ShortState | None | MISSING = MISSING
+    updates: Updates | MISSING = MISSING
+    observation: RunObservation | None | MISSING = MISSING
     data: ArchivedData | MISSING = MISSING
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> Self:
+        if self.observation is not MISSING:
+            if self.state is not MISSING or self.updates is not MISSING:
+                raise ValueError("Run results cannot contain Combat state or updates.")
+            return self
+        if self.state is MISSING or self.updates is MISSING:
+            raise ValueError("Combat results require state and updates.")
+        return self
 
 
 type MessageSnapshot = (
@@ -430,7 +446,7 @@ MESSAGE = TypeAdapter(MessageSnapshot)
 def archive_input(input: ModelInput) -> tuple[MessageSnapshot, ...]:
     messages: list[MessageSnapshot] = []
     for message in input:
-        if isinstance(message, AutomaticMessage):
+        if isinstance(message, (AutomaticMessage, RunAutomaticMessage)):
             messages.append(AutomaticSnapshot(role=message.role, content=message.content))
         elif isinstance(message, TaskMessage):
             content = message.content
@@ -438,17 +454,24 @@ def archive_input(input: ModelInput) -> tuple[MessageSnapshot, ...]:
                 messages.append(RunTaskSnapshot(role=message.role, content=content))
             else:
                 messages.append(TaskSnapshot(role=message.role, content=content))
-        elif isinstance(message, ResultMessage):
+        elif isinstance(message, (ResultMessage, RunResultMessage)):
             result = message.content
-            messages.append(
-                ResultSnapshot(
+            if isinstance(result, RunProjectedResult):
+                snapshot = ResultSnapshot(
+                    call_id=message.call_id,
+                    outcome=result.outcome,
+                    observation=result.observation,
+                    data=archive_data(result),
+                )
+            else:
+                snapshot = ResultSnapshot(
                     call_id=message.call_id,
                     outcome=result.outcome,
                     state=result.state,
                     updates=result.updates,
                     data=archive_data(result),
                 )
-            )
+            messages.append(snapshot)
         elif isinstance(message, TextMessage):
             messages.append(TextSnapshot(role=message.role, value=archive_text(message.value)))
         elif isinstance(message, AssistantMessage):
