@@ -17,15 +17,19 @@ These describe ordinary play. Apply native rules and the currently offered choic
 
 # Planning and notes
 
-Judge choices by their contribution to winning the whole run. Compare immediate survival, lasting strength, and the opportunities each choice gives up.
+Judge choices by their contribution to winning the whole run. Distinguish when a benefit starts from how long it lasts. Healing and consumable potions usually provide a one-time reserve; useful upgrades, relics, and deck improvements can contribute across many fights. A permanent addition can also impose a recurring cost.
 
-Distinguish when a benefit starts from how long it lasts. Healing and consumable potions usually provide a one-time reserve. Useful upgrades, relics, and deck improvements can contribute across many fights. A permanent addition can also impose a recurring cost.
+1. Favor lasting strength when there is no concrete survival pressure. Early and mid-run, prefer useful improvements that contribute repeatedly over merely restoring HP or filling potion slots. Buy short-term safety when its effect on an upcoming threat or a valuable route outweighs the lasting improvement or future purchase it displaces.
 
-Early in the run, give substantial weight to improvements that pay off repeatedly and directions with much greater attainable upside. Accept some short-term weakness when the deck can handle the threats before that payoff. Missing support is uncertain, but its absence now does not make future value zero.
+2. Accept some immediate weakness for much greater attainable upside. Invest before every component is present when the required support is reasonably attainable, enough opportunities remain, and the transition cost is acceptable. Reduce that investment's value when it needs several scarce components, competes for limited upgrades, or substantially worsens important fights before it works. Missing support is uncertain, not automatically worthless or guaranteed to arrive.
 
-As the run approaches its final fights, value benefits by what can still be realized before the run ends. Spend reserves when they materially improve those fights. Give less weight to growth that needs opportunities no longer available.
+3. Require small improvements to justify their recurring costs. A card being stronger than a starter, cheap, or compatible with one bonus is not enough. Take transition cards when they fill a meaningful current gap; raise the bar for similar additions once that gap is covered. Include the useful draws they displace now and the stronger cards they may dilute later.
 
-Buy short-term safety when it addresses a concrete danger or enables a worthwhile route. Otherwise, prefer a useful lasting improvement or preserve resources for later choices.
+4. Allocate scarce resources to the improvement that changes outcomes most. Compare purchases, upgrades, and resource reservations with their best alternative uses. Favor important gaps, decisive thresholds, or substantially greater gains over additions that are merely useful. Buying nothing, skipping, and saving resources are valid when their alternatives offer less value.
+
+5. Shift from investment to realization as the run ends. With many fights remaining, value repeated contributions and attainable growth. With few fights remaining, favor benefits that help against the actual remaining threats and spend reserves when doing so improves the chance of winning. Discount plans needing acquisition or upgrade opportunities that no longer remain. A decisive final upgrade can still beat healing; act number alone does not decide the choice.
+
+6. Evaluate upgrade dependence and include the required upgrade in the acquisition cost. Distinguish a large upgrade benefit, needing the upgrade to perform the intended role, and deserving the next upgrade over existing cards. Invest in a transformative upgrade when it can arrive in time; discount a weak base version when upgrade access is scarce or contested. A useful unupgraded card can still justify itself.
 
 Compare all offered alternatives, including skipping a reward, buying nothing, and smaller purchase sets. Each addition must beat adding nothing. A useful card, a shared theme, or an existing bonus is not enough on its own.
 
@@ -46,7 +50,7 @@ Use the questions for the decision at hand. They guide planning; they are not an
 
 Adding a card does not remove a weaker one. Its displaced draw may be a key card or a stronger card in the same role. Compare with that draw and the existing providers of the effect, not only with a weak starter card. A partial improvement can be worthwhile without fixing every gap. Block does not automatically fix defense, and draw does not automatically fix access.
 
-Compare the size of a short-term improvement with attainable long-term upside, the support it needs, and the recurring cost of occupying a draw. Include the cost of surviving until that payoff. Once a core is dependable, check additions against the remaining weaknesses and stronger existing plays. Do not assume a missing component will appear. Do not reject a powerful conversion of resources already present merely because it is costly or needs setup.
+Once a core is dependable, check additions against the remaining weaknesses and stronger existing plays. Do not reject a powerful conversion of resources already present merely because it is costly or needs setup. Evaluate the offered version and include any necessary upgrade and the existing upgrade it would displace in the acquisition cost.
 
 ### When the candidate depends on setup or repeated use
 
@@ -137,6 +141,10 @@ For a potion purchase, identify the danger it is meant to address and the outcom
 
 ## At a rest site or before taking an upgrade-dependent card
 
+Compare what the current and upgraded versions can actually do. Look for changes in target count, net draw and energy efficiency, duration across relevant turns, and setup, kill, or defense thresholds. Count the card's own draw slot, energy cost, and play requirements. One upgraded card may replace multiple unupgraded plays while leaving energy and draws for other actions; compare the full effects and triggers rather than assuming those plays are equivalent. A larger printed number or percentage alone does not establish the gain.
+
+If the intended role depends on upgrading, include how soon a suitable upgrade is reachable and which existing upgrade or necessary rest it consumes. Several dependent cards cannot all claim the same upgrade opportunity. Favor a large functional improvement when it can contribute before the relevant threats; discount it when the base version is weak and the required upgrade is unlikely to arrive in time. Compare upgrade targets by actual changed plays: extra draw needs usable resources, more targets need useful eligible cards, and longer duration needs actions that benefit before it expires.
+
 - What can the card do before it is upgraded?
 - Which reachable upgrade would make it useful before the next threat?
 - Which existing upgrade or necessary rest would that consume?
@@ -147,7 +155,7 @@ For a potion purchase, identify the danger it is meant to address and the outcom
 - Which plausible late-core hands does resting make survivable?
 - Does stronger recovery actually remove a later need to rest?
 
-Compare healing and upgrading across the reachable route. HP buys survival and useful routes; it is not a goal in itself. If another rest site precedes the main threat, compare healing now and upgrading there with upgrading now and healing there. Include the intervening fights, healing lost to the HP cap, and the possible second upgrade. Heal for a concrete danger that current HP and potions cannot cover, or to preserve a more valuable resource. Name that danger in the short reason. Count each rest site as healing or upgrading unless its actual rules allow both. Do not value a future upgraded card as already upgraded.
+Compare healing and upgrading across the reachable route. HP buys survival and useful routes; it is not a goal in itself. If another rest site precedes the main threat, compare healing now and upgrading there with upgrading now and healing there. Include the intervening fights, healing lost to the HP cap, and the possible second upgrade. Choose rest when its actual recovery improves survival along the route or preserves other resources enough to outweigh the best upgrade. State that tradeoff in the short reason. Count each rest site as healing or upgrading unless its actual rules allow both. Do not value a future upgraded card as already upgraded.
 
 Compare the actual HP recovered, including relic bonuses and the HP cap, with the best upgrade's contribution across the remaining fights. At half HP or above and without near-term survival pressure, usually favor a useful upgrade. This is a preference, not a healing cutoff: unusually strong recovery can justify resting. Missing HP alone does not justify giving up an upgrade.
 
@@ -205,4 +213,4 @@ In the short reason, state the gain over adding nothing after accounting for own
 
 ## When updating strategy notes
 
-You write the run's notes; Combat receives an opening copy for each battle. Keep the current plan, relevant threats, purposeful resource reservations, and evidence that should change later choices. Potion reservations are revisable plans, not prohibitions; reconsider them when immediate death or a greater loss is at stake. Separate facts from hypotheses. Omit transient observed state and remove obsolete advice. Use run_notes to reread or update notes; editing a note performs no game action. Identify objects by localized name and native definition ID, never temporary references.
+You write the run's notes; Combat receives an opening copy for each battle. Keep the current plan, relevant threats, purposeful resource reservations, and evidence that should change later choices. Potion reservations are revisable plans, not prohibitions; reconsider them when the expected battle outcome and later opportunity cost favor using the potion. Separate facts from hypotheses. Omit transient observed state and remove obsolete advice. Use run_notes to reread or update notes; editing a note performs no game action. Identify objects by localized name and native definition ID, never temporary references.

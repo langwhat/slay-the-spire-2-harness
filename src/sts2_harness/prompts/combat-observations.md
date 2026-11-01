@@ -14,7 +14,7 @@ These describe ordinary play. Apply the actual card, keyword, relic, power, and 
 
 # Planning a sequence
 
-Seek a credible win, then reduce total HP loss across the battle. Compare executable lines over the same relevant enemy actions. Defense that only postpones defeat is not safe. Faster damage is worth HP only when it removes a concrete threat or improves the continuation.
+Choose executable lines by their probability-weighted outcomes toward winning the run. Compare expected total HP loss and resource use through the same relevant enemy actions, extending the comparison when setup, growth, or later draws change the result. Accept damage now when the improved continuation outweighs it. Extra damage that does not improve the continuation does not justify avoidable HP loss. Defense that only postpones defeat is not a winning line.
 
 Use the questions for the decision at hand. They guide planning; they are not an answer checklist.
 
@@ -42,6 +42,8 @@ If neither line kills now, compare both through the same later enemy action that
 - Would delaying the transition leave the needed defense, debuff, or card access available?
 - With energy gains, debuffs, and extra damage applied in order, is lethal already available?
 
+Favor damage, control, or setup that crosses a threshold changing an enemy action or a later executable play. Choose targets by the pressure their removal prevents, not HP alone. Once a threshold is met, compare further investment with defense, another target, or preparation; include any actual benefit from excess damage or block. A phase transition can expose a new threat, so compare the resulting turns before triggering it.
+
 Use the supplied enemy rules for death and phase timing. Do not infer those rules from the desired sequence.
 
 ## Before drawing, retrieving, or generating cards
@@ -58,7 +60,7 @@ Use the supplied enemy rules for death and phase timing. Do not infer those rule
 - Where will overflow cards go?
 - Will a retrieval target be in an eligible pile when retrieval resolves?
 
-Compare the affordable result with the best line already in hand. Access can improve plays, resources, triggers, or later cycling; seeing more cards is not itself the payoff. Value a retrieved or top-decked card at its actual arrival, with the resources, status durations, and pile contents then available. Retrieval need not put a card in hand immediately or guarantee the next draw.
+Spend resources on access when its possible results improve the executable turn or continuation enough to beat the best line already in hand. Include the chance of finding the needed effect and the resources left to use it. If access spends the energy or components needed to play its result, prefer the existing line unless triggers or later cycling justify that cost. Access can improve plays, resources, triggers, or later cycling; seeing more cards is not itself the payoff. Value a retrieved or top-decked card at its actual arrival, with the resources, status durations, and pile contents then available. Retrieval need not put a card in hand immediately or guarantee the next draw.
 
 ## Before committing to the next hand or reshuffle
 
@@ -70,9 +72,11 @@ Compare the affordable result with the best line already in hand. Access can imp
 - Can that sequence survive the next meaningful attack?
 - Does drawing or shuffling now remove a later retrieval target?
 - When replacing the whole hand, which retained defenses or components are lost?
-- Is the unknown replacement hand more reliable than the protection already held?
+- How do the replacement hand's probability-weighted outcomes compare with keeping the current protection?
 
-Do not assume the best possible hand or require guaranteed next-turn lethal from every setup. When poor draws before the next one or two attacks could kill you, weigh that risk above a modest expected HP saving unless avoiding it gives up the credible win.
+Do not assume the best possible hand or require guaranteed next-turn lethal from every setup. Compare possible next hands using probabilities supported by known pile membership, draw counts, and shuffle timing. For each branch, include the feasible response after the result is revealed, including a change of target or potion use. Compare probability-weighted HP loss and remaining resources over the same horizon. Do not prefer a line merely because it is certain, or reject a better expected outcome merely because a worse draw is possible. Use estimates or ranges when exact probabilities are unavailable; do not invent precision.
+
+When death is a possible result, distinguish its probability and the loss of the continuation from ordinary HP loss; surviving branches alone do not describe the whole line. Do not let damage capped by remaining HP make death look cheaper, and do not invent a fixed death penalty or a blanket worst-case preference. If defensive lines only postpone defeat, compare the outcomes of the attacking or setup lines that can still win.
 
 ## Before clearing cards, setting up, or extending a loop
 
@@ -94,6 +98,12 @@ Do not assume the best possible hand or require guaranteed next-turn lethal from
 - If a risky play fails to find its strong random combination, how long can known retention, retrieval, and potions keep the line alive?
 - If ordinary defense only delays defeat, which line still has a credible win?
 
+Invest in setup, growth, or clearing when its later contribution outweighs the actions and HP spent before it pays off. Quiet or already defended turns often provide a cheaper window. Under pressure, compare the expected losses during setup with the later attacks or resource costs it avoids. Once output is sufficient to finish, further growth must improve the continuation enough to justify delaying the finish.
+
+Use each card's actual current version. For an in-battle upgrade, compare the actions enabled now and on later uses with the upgrade's energy and timing cost. Include the useful eligible cards it affects and what remains affordable afterward. Do not count the improved effects before the upgrade resolves, or count only isolated printed increases when upgrading several cards changes the whole turn.
+
+Before exhausting cards or extending a loop, account for the attacks, defenses, and connectors left through the end of the fight. Prefer a sustainable continuation over a local gain that removes its only necessary component. Spend that component when doing so finishes the fight or another available line can take over its role.
+
 ## Before spending persistent resources or limited triggers
 
 - What later damage or defense is lost by spending this persistent resource now?
@@ -105,7 +115,7 @@ Do not assume the best possible hand or require guaranteed next-turn lethal from
 - Which small hit or status damage could consume a one-use defense before the dangerous hit?
 - What must be blocked or cleared first to preserve that defense?
 
-Use the specific rules for resource retention, capacity, and release. Two cards displaying the same one-use bonus cannot both consume it.
+Preserve a limited resource for its actual later contribution, not merely because it is scarce. Spend it when the immediate result and remaining continuation outweigh that contribution. Use the specific rules for resource retention, capacity, and release. Two cards displaying the same one-use bonus cannot both consume it.
 
 ## Before using or reserving a potion
 
@@ -119,7 +129,7 @@ Use the specific rules for resource retention, capacity, and release. Two cards 
 - What specific later gap justifies keeping this potion?
 - What HP loss or slot pressure does keeping it impose now?
 
-Treat Run's potion reservations as revisable plans. Compare the current danger with the later need and the alternatives available in each fight.
+Use a potion at the window where its effect most improves the outcome relative to saving it. Earlier lethal, cheaper setup, expected HP saved, or reduced dependence on a particular draw can justify use before HP becomes critical. Preserve it when current plays handle the fight well and its later opportunity is more valuable. Treat Run's potion reservations as revisable plans. Compare the current benefit with the later need and the alternatives available in each fight.
 
 ## Before a random action or an optional extra turn
 
@@ -131,7 +141,11 @@ Treat Run's potion reservations as revisable plans. Compare the current danger w
 - Can the known solution be reused without exposing it to an immediate negative effect?
 - What does delaying the finish actually gain in recovery, potions, triggers, or stored resources?
 - What extra enemy actions and resource costs does that delay require?
-- Is the extra gain merely trading a known resource for an uncertain replacement?
+- What is the expected gain from the replacement after accounting for the known resource spent and possible outcomes?
+
+Resolve a useful information-producing action before committing dependent choices when the information can improve the decision and the required energy, components, and action window remain available. Include the resource cost and possible negative effects of obtaining that information. Reassess after the reveal.
+
+Once a satisfactory line is available, continue searching or taking extra actions only when their expected improvement outweighs their costs and possible disruption. A known line is an alternative to compare, not an automatic reason to stop. Spare energy or a playable card is not itself a benefit; delaying a finish needs an actual gain worth the extra enemy actions and resource costs.
 
 ## After a reveal or completed action
 
@@ -141,4 +155,4 @@ Treat Run's potion reservations as revisable plans. Compare the current danger w
 
 Earlier steps change later resources, costs, bonuses, targets, and piles. Combine actions, anticipated selections, and follow-up plays when public information supports them, following combat_act's execution and recovery rules.
 
-In combat_act.reason, when the batch is not lethal and lines differ materially, give in one or two short lines, for the chosen line and its main alternative, the expected total own HP loss from now through that same later enemy action, counting that action if it is not prevented, and the chance and HP cost of missing the kill before it. Use estimates or ranges where uncertain; do not invent exact values or narrate the full analysis.
+In combat_act.reason, when the batch is not lethal and lines differ materially, give in one or two short lines, for the chosen line and its main alternative, the expected total own HP loss from now through that same later enemy action, counting that action if it is not prevented, and the chance and HP cost of missing the kill before it. Mention a material difference in death risk or resource use separately rather than hiding it inside an HP average. Use estimates or ranges where uncertain; do not invent exact values or narrate the full analysis.
