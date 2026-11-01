@@ -72,6 +72,11 @@ async def entry_materials(
                 for boss in map_.bosses
                 if isinstance(boss.definition_id, str)
             )
+            subjects.extend(
+                SubjectId(category=native.NativeCategory.CARD, definition_id=entry.definition_id)
+                for entry in observation.objects.values()
+                if isinstance(entry, native.CardEntry)
+            )
         elif isinstance(observation.state, native.CombatState):
             subjects.extend(combat_subjects(observation, role))
         unique = {(subject.category, subject.definition_id): subject for subject in subjects}

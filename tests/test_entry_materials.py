@@ -7,6 +7,7 @@ import pytest
 from test_combat import reply
 from test_mod_client import CARD, COMBAT, RUN
 from test_responses import configuration
+from test_run import RunHTTP
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
@@ -20,6 +21,8 @@ from sts2_harness.knowledge import DocumentView, SkillSummary, SubjectId
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.materials import DocumentSource, FileDocuments
+from sts2_harness.notes import Notes
+from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog
 
 
@@ -144,6 +147,129 @@ def test_combat_guidance_uses_current_public_objects_without_skill_navigation(
                 )
 
     asyncio.run(scenario())
+
+
+def test_run_receives_full_visible_card_guidance_and_appends_only_changes(tmp_path: Path) -> None:
+    value = json.loads(RUN)
+    value["map"] = json.loads(COMBAT)["map"]
+    value["state"]["deck"] = ["owned", "duplicate"]
+    value["state"]["selection"] = {
+        "prompt": "Choose a card",
+        "source": None,
+        "min": 0,
+        "max": 1,
+        "candidates": ["candidate"],
+        "selected": [],
+    }
+    value["state"]["offers"] = [
+        {"ref": "offer", "kind": "card", "contents": ["shop"], "actions": []}
+    ]
+    value["objects"] = {
+        ref: dict(json.loads(CARD), definition_id=identity)
+        for ref, identity in (
+            ("owned", "CARD.OWNED"),
+            ("duplicate", "CARD.OWNED"),
+            ("candidate", "CARD.CANDIDATE"),
+            ("shop", "CARD.SHOP"),
+            ("visible", "CARD.VISIBLE"),
+        )
+    }
+    opening = native.Observation.model_validate_json(json.dumps(value))
+    value["objects"]["new"] = dict(json.loads(CARD), definition_id="CARD.NEW")
+    value["state"]["selection"]["candidates"].append("new")
+    later = native.Observation.model_validate_json(json.dumps(value))
+    sources: list[DocumentSource] = []
+    for identity in (
+        "CARD.OWNED",
+        "CARD.CANDIDATE",
+        "CARD.SHOP",
+        "CARD.VISIBLE",
+        "CARD.NEW",
+        "ENCOUNTER.BOSS",
+    ):
+        path = tmp_path / identity
+        path.write_text(f"Complete rules for {identity}.\nFurther details for {identity}.")
+        sources.append(
+            DocumentSource(
+                identity,
+                identity,
+                "Rules",
+                path,
+                subjects=(
+                    SubjectId(category=identity.split(".")[0].lower(), definition_id=identity),
+                ),
+            )
+        )
+    documents = ObjectDocuments(tuple(sources))
+    http = RunHTTP(
+        [
+            reply(("first", "run_inspect", '{"area":"state"}')),
+            reply(("second", "run_inspect", '{"area":"state"}')),
+            reply(("act", "run_act", '{"steps":[{"kind":"select","refs":[]}]}')),
+        ]
+    )
+    http.observation = later
+    inputs: list[bytes] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        inputs.append(request.content)
+        (tmp_path / "CARD.CANDIDATE").write_text("Revised complete rules for CARD.CANDIDATE.")
+        return http.model(request)
+
+    async def scenario() -> None:
+        async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
+            execution = Execution(
+                LiveGame(client, namespace="test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
+            tools = ToolCatalog(
+                native.DecisionOwner.RUN,
+                observe=execution.observe,
+                inspect=execution.inspect,
+                catalog=execution.catalog,
+                notes=Notes(""),
+                skills=documents,
+                supplements=documents,
+            )
+
+            async def materials(observation: native.Observation) -> tuple[DocumentView, ...]:
+                return await entry_materials(
+                    execution, documents, native.DecisionOwner.RUN, observation, ()
+                )
+
+            async with Llm(configuration(tmp_path), transport=httpx.MockTransport(model)) as llm:
+                agent = RunAgent(lambda: llm, tools, ToolRecoveryBudget(), materials=materials)
+                task = ActTask(native.RouteKey.model_validate(opening.location.model_dump()))
+                assert isinstance(await agent.decide(task, opening), ActionDecision)
+
+    asyncio.run(scenario())
+    wire = [json.loads(request)["input"] for request in inputs]
+    initial = json.loads(wire[0][1]["content"])["guidance"]
+    assert [document["id"] for document in initial] == [
+        "CARD.OWNED",
+        "CARD.CANDIDATE",
+        "CARD.SHOP",
+        "CARD.VISIBLE",
+        "ENCOUNTER.BOSS",
+    ]
+    assert initial[1]["text"] == (
+        "Complete rules for CARD.CANDIDATE.\nFurther details for CARD.CANDIDATE."
+    )
+    additions = [
+        json.loads(message["content"])["guidance"]
+        for message in wire[1]
+        if message.get("role") == "user" and "guidance" in json.loads(message["content"])
+    ]
+    assert [[document["id"] for document in group] for group in additions] == [
+        ["CARD.CANDIDATE", "CARD.NEW"]
+    ]
+    assert additions[0][0]["text"] == "Revised complete rules for CARD.CANDIDATE."
+    assert additions[0][1]["text"] == (
+        "Complete rules for CARD.NEW.\nFurther details for CARD.NEW."
+    )
+    assert wire[2][: len(wire[1])] == wire[1]
+    assert [message.get("role") for message in wire[2][len(wire[1]) :]] == [None, None]
 
 
 def test_combat_appends_new_or_changed_knowledge_before_the_next_request(tmp_path: Path) -> None:

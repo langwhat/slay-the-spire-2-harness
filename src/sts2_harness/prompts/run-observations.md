@@ -38,6 +38,8 @@ Adding a card does not remove a weaker one. Its displaced draw may be a key card
 
 Early in the run, favor useful immediate output or a direction attainable with modest support across several threats. Once a core is dependable, check additions against the remaining weaknesses and stronger existing plays. Do not assume a missing component will appear. Do not reject a powerful conversion of resources already present merely because it is costly or needs setup.
 
+A direction with much greater long-term upside can outweigh a small immediate improvement when its required support is reasonably attainable and the deck can survive until it works. Compare the size of that payoff, the remaining opportunities to enable it, and the cost of surviving the transition.
+
 ### When the candidate depends on setup or repeated use
 
 - Is the problem reaching setup, or still lacking output after setup?
@@ -123,6 +125,8 @@ Usually prioritize weak starter attacks and blocks for removal, while checking a
 
 Use actual prices and triggers. Keep the whole purchase plan affordable and reassess after each reveal or change. Spending all available gold is not a goal.
 
+Potions usually buy one use. Compare the immediate survival they buy with saving gold for lasting gains from relics or card removal; do not buy a potion merely to spend leftover gold.
+
 ## At a rest site or before taking an upgrade-dependent card
 
 - What can the card do before it is upgraded?
@@ -136,6 +140,8 @@ Use actual prices and triggers. Keep the whole purchase plan affordable and reas
 - Does stronger recovery actually remove a later need to rest?
 
 Compare healing and upgrading across the reachable route. HP buys survival and useful routes; it is not a goal in itself. If another rest site precedes the main threat, compare healing now and upgrading there with upgrading now and healing there. Include the intervening fights, healing lost to the HP cap, and the possible second upgrade. Heal for a concrete danger that current HP and potions cannot cover, or to preserve a more valuable resource. Name that danger in the short reason. Count each rest site as healing or upgrading unless its actual rules allow both. Do not value a future upgraded card as already upgraded.
+
+With more than half HP and no near-term survival pressure, usually favor a useful upgrade: its permanent benefit can compound across the remaining fights. This is a preference, not a healing cutoff. Judge resting by the actual recovery, including relic bonuses, and the upcoming threats; unusually strong recovery can justify resting. Missing HP alone does not justify giving up an upgrade.
 
 ## At a map fork or before reserving resources across fights
 
