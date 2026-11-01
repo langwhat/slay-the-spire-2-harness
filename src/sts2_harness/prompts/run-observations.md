@@ -17,7 +17,17 @@ These describe ordinary play. Apply native rules and the currently offered choic
 
 # Planning and notes
 
-Judge choices by how they change the run's ability to survive and win upcoming fights. Compare all offered alternatives, including skipping a reward, buying nothing, and smaller purchase sets. Each addition must beat adding nothing. A useful card, a shared theme, or an existing bonus is not enough on its own.
+Judge choices by their contribution to winning the whole run. Compare immediate survival, lasting strength, and the opportunities each choice gives up.
+
+Distinguish when a benefit starts from how long it lasts. Healing and consumable potions usually provide a one-time reserve. Useful upgrades, relics, and deck improvements can contribute across many fights. A permanent addition can also impose a recurring cost.
+
+Early in the run, give substantial weight to improvements that pay off repeatedly and directions with much greater attainable upside. Accept some short-term weakness when the deck can handle the threats before that payoff. Missing support is uncertain, but its absence now does not make future value zero.
+
+As the run approaches its final fights, value benefits by what can still be realized before the run ends. Spend reserves when they materially improve those fights. Give less weight to growth that needs opportunities no longer available.
+
+Buy short-term safety when it addresses a concrete danger or enables a worthwhile route. Otherwise, prefer a useful lasting improvement or preserve resources for later choices.
+
+Compare all offered alternatives, including skipping a reward, buying nothing, and smaller purchase sets. Each addition must beat adding nothing. A useful card, a shared theme, or an existing bonus is not enough on its own.
 
 Use the questions for the decision at hand. They guide planning; they are not an answer checklist. Compare a plausible turn or sequence with and without each serious candidate, over the same relevant threats.
 
@@ -36,9 +46,7 @@ Use the questions for the decision at hand. They guide planning; they are not an
 
 Adding a card does not remove a weaker one. Its displaced draw may be a key card or a stronger card in the same role. Compare with that draw and the existing providers of the effect, not only with a weak starter card. A partial improvement can be worthwhile without fixing every gap. Block does not automatically fix defense, and draw does not automatically fix access.
 
-Early in the run, favor useful immediate output or a direction attainable with modest support across several threats. Once a core is dependable, check additions against the remaining weaknesses and stronger existing plays. Do not assume a missing component will appear. Do not reject a powerful conversion of resources already present merely because it is costly or needs setup.
-
-A direction with much greater long-term upside can outweigh a small immediate improvement when its required support is reasonably attainable and the deck can survive until it works. Compare the size of that payoff, the remaining opportunities to enable it, and the cost of surviving the transition.
+Compare the size of a short-term improvement with attainable long-term upside, the support it needs, and the recurring cost of occupying a draw. Include the cost of surviving until that payoff. Once a core is dependable, check additions against the remaining weaknesses and stronger existing plays. Do not assume a missing component will appear. Do not reject a powerful conversion of resources already present merely because it is costly or needs setup.
 
 ### When the candidate depends on setup or repeated use
 
@@ -125,7 +133,7 @@ Usually prioritize weak starter attacks and blocks for removal, while checking a
 
 Use actual prices and triggers. Keep the whole purchase plan affordable and reassess after each reveal or change. Spending all available gold is not a goal.
 
-Potions usually buy one use. Compare the immediate survival they buy with saving gold for lasting gains from relics or card removal; do not buy a potion merely to spend leftover gold.
+For a potion purchase, identify the danger it is meant to address and the outcome it could change, including a later Boss fight. Compare that reserve with the opportunities saved gold could buy. An affordable price, an empty slot, or leftover gold is not sufficient reason to purchase. A potion that makes an otherwise unsafe valuable route viable can be worth more than saving.
 
 ## At a rest site or before taking an upgrade-dependent card
 
@@ -141,7 +149,7 @@ Potions usually buy one use. Compare the immediate survival they buy with saving
 
 Compare healing and upgrading across the reachable route. HP buys survival and useful routes; it is not a goal in itself. If another rest site precedes the main threat, compare healing now and upgrading there with upgrading now and healing there. Include the intervening fights, healing lost to the HP cap, and the possible second upgrade. Heal for a concrete danger that current HP and potions cannot cover, or to preserve a more valuable resource. Name that danger in the short reason. Count each rest site as healing or upgrading unless its actual rules allow both. Do not value a future upgraded card as already upgraded.
 
-With more than half HP and no near-term survival pressure, usually favor a useful upgrade: its permanent benefit can compound across the remaining fights. This is a preference, not a healing cutoff. Judge resting by the actual recovery, including relic bonuses, and the upcoming threats; unusually strong recovery can justify resting. Missing HP alone does not justify giving up an upgrade.
+Compare the actual HP recovered, including relic bonuses and the HP cap, with the best upgrade's contribution across the remaining fights. At half HP or above and without near-term survival pressure, usually favor a useful upgrade. This is a preference, not a healing cutoff: unusually strong recovery can justify resting. Missing HP alone does not justify giving up an upgrade.
 
 ## At a map fork or before reserving resources across fights
 
