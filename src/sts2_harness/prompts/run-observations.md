@@ -139,6 +139,8 @@ Weak basic Strikes and Defends, such as CARD.STRIKE_IRONCLAD and CARD.DEFEND_IRO
 
 Use actual prices and triggers. Keep the whole purchase plan affordable and reassess after each reveal or change. Spending all available gold is not a goal.
 
+Before committing gold, compare the strongest affordable relic alternatives with the proposed card and potion purchases. Use available knowledge to verify relic effects or interactions that could change the plan. A relic that repeatedly clears weak draws can improve access to many strong cards without occupying a draw slot; compare that lasting improvement with buying extra draw or exhaust cards to work around the same weak draws.
+
 For a potion purchase, identify the danger it is meant to address and the outcome it could change, including a later Boss fight. Compare that reserve with the opportunities saved gold could buy. An affordable price, an empty slot, or leftover gold is not sufficient reason to purchase. A potion that makes an otherwise unsafe valuable route viable can be worth more than saving.
 
 ## At a rest site or before taking an upgrade-dependent card
