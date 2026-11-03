@@ -121,6 +121,8 @@ An existing damage bonus does not justify every compatible attack. An existing d
 
 Usually prioritize weak starter attacks and blocks for removal, while checking actual eligibility, synergies, and opportunity costs. Compare draw quality rather than deck size alone. A larger deck can dilute weak cards or delay essential ones. Evaluate the offered version; rarity and upgrade status are not automatic rankings.
 
+Weak basic Strikes and Defends, such as CARD.STRIKE_IRONCLAD and CARD.DEFEND_IRONCLAD, can dilute stronger draws. Exhausting those cards during a battle is an important benefit: they stop entering later shuffles, so useful attacks, defenses, and engine cards cycle more often. Value that improvement across the remaining turns and fights when judging an exhaust effect or relic. Do not label losing a weak basic a cost merely because it leaves the battle piles. Count a loss only when its remaining output, defense, or specific synergy is still needed; exhaustion does not permanently remove it from the deck.
+
 ## At a shop
 
 - Does the card justify both its permanent deck slot and its gold cost?
