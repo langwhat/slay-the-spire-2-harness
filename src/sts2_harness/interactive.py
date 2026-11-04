@@ -27,6 +27,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
 from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.session import RunSession
+from sts2_harness.user_input_values import UserInputSource
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ async def run_interactive(
     session_factory: SessionFactory | None = None,
     materials: EntryMaterials | None = None,
     wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    user_input: UserInputSource | None = None,
 ) -> None:
     if configuration.driver is not Driver.BUILTIN:
         raise ConfigurationError("Resident external driving is not implemented.")
@@ -206,6 +208,7 @@ async def run_interactive(
                         diagnostics=diagnostics,
                         stop_requested=stop_requested.is_set,
                         wait=wait,
+                        user_input=user_input,
                     )
                 )
                 async with session_resource as session:

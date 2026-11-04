@@ -6,7 +6,8 @@ import json
 import os
 import signal
 import sys
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import NoReturn
 
@@ -22,6 +23,7 @@ from sts2_harness.interactive import InteractiveOptions, run_interactive
 from sts2_harness.journal import ArchiveError, DependencyKind, Journal, StandardCharacter, evidence
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
+from sts2_harness.user_input import UserInputQueue, serving_user_input
 
 
 class _Parser(argparse.ArgumentParser):
@@ -30,11 +32,21 @@ class _Parser(argparse.ArgumentParser):
         raise ConfigurationError("Invalid command line; use sts2 --help.")
 
 
+@asynccontextmanager
+async def _user_input(port: int | None) -> AsyncGenerator[UserInputQueue | None]:
+    if port is None:
+        yield None
+        return
+    async with serving_user_input(port) as queue:
+        yield queue
+
+
 async def _start(
     options: InteractiveOptions,
     configuration: Configuration,
     tool_port: int,
     materials: EntryMaterials | None,
+    input_port: int | None,
 ) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -44,21 +56,38 @@ async def _start(
         if configuration.driver is Driver.EXTERNAL:
             await run_external(options, configuration, tool_port=tool_port, stop_requested=stop)
         else:
-            await run_interactive(options, configuration, stop_requested=stop, materials=materials)
+            async with _user_input(input_port) as user_input:
+                await run_interactive(
+                    options,
+                    configuration,
+                    stop_requested=stop,
+                    materials=materials,
+                    user_input=user_input,
+                )
     finally:
         for name in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(name)
 
 
 async def _headless(
-    options: HeadlessOptions, configuration: Configuration, materials: EntryMaterials | None
+    options: HeadlessOptions,
+    configuration: Configuration,
+    materials: EntryMaterials | None,
+    input_port: int | None,
 ) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(name, stop.set)
     try:
-        await run_headless(options, configuration, stop_requested=stop, materials=materials)
+        async with _user_input(input_port) as user_input:
+            await run_headless(
+                options,
+                configuration,
+                stop_requested=stop,
+                materials=materials,
+                user_input=user_input,
+            )
     finally:
         for name in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(name)
@@ -73,6 +102,7 @@ def _build_parser() -> _Parser:
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--mod-url", default="http://127.0.0.1:17877", metavar="URL")
     parser.add_argument("--tool-port", type=int, default=17878, metavar="PORT")
+    parser.add_argument("--input-port", type=int, metavar="PORT")
     parser.add_argument("--output", type=Path, default=Path("runs"), metavar="DIRECTORY")
     parser.add_argument("--game", type=Path, metavar="EXECUTABLE")
     parser.add_argument("--template", type=Path, metavar="MANIFEST")
@@ -212,8 +242,11 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
         env_file: str = arguments.env_file
         settings: list[str] = arguments.set
         config = load_configuration(Path(env_file), os.environ, _overrides(settings))
+        input_port: int | None = arguments.input_port
+        if input_port is not None and config.driver is Driver.EXTERNAL:
+            raise ConfigurationError("User input requires builtin driving.")
         if command == "headless":
-            asyncio.run(_headless(_headless_options(arguments), config, materials))
+            asyncio.run(_headless(_headless_options(arguments), config, materials, input_port))
             return 0
         if command == "start":
             if materials is not None and config.driver is Driver.EXTERNAL:
@@ -222,7 +255,13 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
             output_directory: Path = arguments.output
             tool_port: int = arguments.tool_port
             asyncio.run(
-                _start(InteractiveOptions(mod_url, output_directory), config, tool_port, materials)
+                _start(
+                    InteractiveOptions(mod_url, output_directory),
+                    config,
+                    tool_port,
+                    materials,
+                    input_port,
+                )
             )
             return 0
         if command == "check-config":

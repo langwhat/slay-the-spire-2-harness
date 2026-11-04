@@ -47,6 +47,9 @@ from sts2_harness.results import (
     ToolResult,
 )
 from sts2_harness.route_plan import MovementStatus, RoutePlan
+from sts2_harness.user_input_values import UserInput
+
+_VIEWER_PREFIX = "[viewer] "
 
 
 @dataclass(frozen=True, slots=True)
@@ -538,9 +541,8 @@ class Context:
         if combat != (self._role is native.DecisionOwner.COMBAT):
             raise ValueError("The task requires its corresponding role context.")
         if isinstance(task, (CombatReviewInput, RunHandoffInput)):
-            if self._history and isinstance(last := self._history[-1], TaskMessage):
-                if last.task == task:
-                    return
+            if isinstance(last := self._last_entry(), TaskMessage) and last.task == task:
+                return
             content: TaskContent = (
                 ReviewContent(battle_report=task.battle_report)
                 if isinstance(task, CombatReviewInput)
@@ -554,8 +556,7 @@ class Context:
             return
         if observation is None:
             raise TypeError("An act task requires a current observation.")
-        if self._history:
-            last = self._history[-1]
+        if (last := self._last_entry()) is not None:
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
                 if same_observation(self._role, last.observation, observation):
                     return
@@ -585,6 +586,18 @@ class Context:
                 )
         message = TaskMessage(TextRole.USER, content.to_json(), content, task, observation)
         self._history.append(message)
+
+    def _last_entry(self) -> TextMessage | AssistantMessage | ToolResultMessage | None:
+        # Viewer input can sit between a task and its retry without changing what the task repeats.
+        for entry in reversed(self._history):
+            if not (isinstance(entry, TextMessage) and entry.text.startswith(_VIEWER_PREFIX)):
+                return entry
+        return None
+
+    def append_user_input(self, inputs: tuple[UserInput, ...]) -> None:
+        # One line per input, so a viewer's line break cannot pass for anything but their own words.
+        lines = (f"{_VIEWER_PREFIX}{' '.join(item.text.split())}" for item in inputs)
+        self._history.append(TextMessage(TextRole.USER, "\n".join(lines)))
 
     def append_correction(self, message: str) -> None:
         self._history.append(TextMessage(TextRole.USER, message))

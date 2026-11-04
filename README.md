@@ -302,6 +302,21 @@ settlement, and feedback finish. Waiting has no fixed deadline. The backend clos
 resources and never launches or terminates your game. Model protocols not yet implemented
 by the model adapter fail explicitly before connection.
 
+## Live user input
+
+`--input-port PORT` lets `start` and `headless` accept live viewer input on `127.0.0.1:PORT`. It
+requires builtin driving and is off by default.
+
+`POST /inputs` with `{ "inputs": [{ "id": "...", "text": "..." }] }` appends to a memory-only FIFO,
+ignoring ids it has already seen. Input enters the current role's Context as `[viewer] text` lines
+immediately before a new logical model request; HTTP retries reuse that frozen request, and a
+battle's closing review does not take input.
+
+`GET /inputs/deliveries?after=N` returns `{ "instance", "last", "deliveries": [{ "sequence", "id" }]
+}`. A delivery means the input entered a Context, not that a model request succeeded. `instance`
+changes when the backend restarts, so clients can resubmit undelivered input. Runs that received
+input cannot be replayed offline without it.
+
 ## External gameplay tools
 
 Start the local tool backend without model configuration:

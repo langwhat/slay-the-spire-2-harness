@@ -23,6 +23,7 @@ from sts2_harness.session import (
     RunSession,
     SessionDependencies,
 )
+from sts2_harness.user_input_values import UserInputSource
 
 
 @asynccontextmanager
@@ -39,6 +40,7 @@ async def live_session(
     wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
     diagnostics: Diagnostics | None = None,
     stop_requested: Callable[[], bool] | None = None,
+    user_input: UserInputSource | None = None,
 ) -> AsyncGenerator[RunSession]:
     if model is None and (run_factory is None or combat_factory is None):
         raise ValueError("Default model roles require a model resource.")
@@ -93,5 +95,6 @@ async def live_session(
             combat_factory=combat_factory,
             flow_factory=flow_factory,
             diagnostics=journal.diagnostics,
+            user_input=user_input,
         ) as session:
             yield session

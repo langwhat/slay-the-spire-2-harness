@@ -17,6 +17,7 @@ from sts2_harness.decisions import (
     ActTask,
     Decision,
     DecisionTask,
+    ReviewTask,
     TaskComplete,
 )
 from sts2_harness.diagnostics import Diagnostics
@@ -46,6 +47,7 @@ from sts2_harness.results import (
     WriteUnknown,
 )
 from sts2_harness.tools import ToolCatalog
+from sts2_harness.user_input_values import UserInputSource
 
 type MaterialReader = Callable[[native.Observation], Awaitable[tuple[DocumentView, ...]]]
 
@@ -59,8 +61,10 @@ class Agent(ABC):
         *,
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
+        user_input: UserInputSource | None = None,
     ) -> None:
         self._diagnostics = diagnostics
+        self._user_input = user_input
         self._llm = llm
         self._tools = tools
         self._recovery = recovery
@@ -255,6 +259,7 @@ class Agent(ABC):
         context = await self._prepare(observation)
         self._append_task(context, task, observation)
         while True:
+            self._deliver_user_input(context, task)
             try:
                 reply = await self._request(context)
             except ModelUnavailable as error:
@@ -287,6 +292,16 @@ class Agent(ABC):
                 if latest is not None:
                     observation = latest
             context = await self._prepare(observation)
+
+    def _deliver_user_input(self, context: Context, task: DecisionTask) -> None:
+        # Each logical request freezes its input here, so HTTP retries reuse the same content
+        # and later input waits for the next request. A battle's review is its Context's last
+        # request, so its input waits for a decision that can still act on it.
+        if self._user_input is None or isinstance(task, ReviewTask):
+            return
+        inputs = self._user_input.drain()
+        if inputs:
+            context.append_user_input(inputs)
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation

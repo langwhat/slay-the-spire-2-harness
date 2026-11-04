@@ -23,6 +23,7 @@ from sts2_harness.prompts import PromptReader
 from sts2_harness.results import QueryToolResult
 from sts2_harness.run import RunAgent, RunRole
 from sts2_harness.tools import ToolCatalog
+from sts2_harness.user_input_values import UserInputSource
 
 type RunFactory = Callable[[Execution, Notes, ToolRecoveryBudget], RunRole]
 type RoleFactory = Callable[
@@ -52,6 +53,7 @@ class RunSession:
         combat_factory: RoleFactory | None = None,
         flow_factory: FlowFactory | None = None,
         diagnostics: Diagnostics | None = None,
+        user_input: UserInputSource | None = None,
     ) -> None:
         if manifest.initial_notes is None:
             raise ValueError("A run session requires explicit initial notes in its manifest.")
@@ -63,6 +65,7 @@ class RunSession:
         self._combat_factory = combat_factory
         self._flow_factory = flow_factory
         self._diagnostics = diagnostics
+        self._user_input = user_input
         self._run_stream = 0
         self._combat_stream = 0
         self._flow: RunFlow | None = None
@@ -106,6 +109,7 @@ class RunSession:
                 prompts=self._dependencies.prompts,
                 materials=self._materials(native.DecisionOwner.RUN),
                 diagnostics=self._diagnostics,
+                user_input=self._user_input,
             )
         )
 
@@ -188,4 +192,5 @@ class RunSession:
             prompts=self._dependencies.prompts,
             materials=self._materials(native.DecisionOwner.COMBAT, opening),
             diagnostics=self._diagnostics,
+            user_input=self._user_input,
         )

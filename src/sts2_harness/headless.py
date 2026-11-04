@@ -41,6 +41,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
 from sts2_harness.native_template import NativeTemplate, TemplateError, digest
 from sts2_harness.session import RunSession
+from sts2_harness.user_input_values import UserInputSource
 
 
 class HeadlessError(Exception):
@@ -570,6 +571,7 @@ async def run_headless(
     stop_requested: asyncio.Event,
     session_factory: SessionFactory | None = None,
     materials: EntryMaterials | None = None,
+    user_input: UserInputSource | None = None,
 ) -> RunEnded | None:
     if configuration.driver is not Driver.BUILTIN or configuration.model is None:
         raise ConfigurationError(
@@ -668,6 +670,7 @@ async def run_headless(
                     else None,
                     diagnostics=diagnostics,
                     stop_requested=stop_requested.is_set,
+                    user_input=user_input,
                 )
 
             factory = session_factory or new_session

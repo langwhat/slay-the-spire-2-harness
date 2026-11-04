@@ -58,6 +58,7 @@ from sts2_harness.results import (
 from sts2_harness.route_plan import Edge, MovementStatus, RoutePlan, reconcile_plan, replace_plan
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.tools.inputs import RunNext, RunPlan
+from sts2_harness.user_input_values import UserInputSource
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -81,10 +82,18 @@ class RunAgent(Agent):
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
+        user_input: UserInputSource | None = None,
     ) -> None:
         if tools.notes is None:
             raise ValueError("Run requires the run's notes owner.")
-        super().__init__(None, tools, recovery, materials=materials, diagnostics=diagnostics)
+        super().__init__(
+            None,
+            tools,
+            recovery,
+            materials=materials,
+            diagnostics=diagnostics,
+            user_input=user_input,
+        )
         self._client = client
         self._notes = tools.notes
         self._prompts = prompts if prompts is not None else PackagedPrompts()

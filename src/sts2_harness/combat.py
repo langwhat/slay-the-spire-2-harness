@@ -30,6 +30,7 @@ from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import ActionToolResult, Reason, ReasonCode
 from sts2_harness.tools import ToolCatalog
+from sts2_harness.user_input_values import UserInputSource
 
 _LOG = logging.getLogger(__name__)
 
@@ -60,8 +61,16 @@ class CombatAgent(Agent):
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
+        user_input: UserInputSource | None = None,
     ) -> None:
-        super().__init__(llm, tools, recovery, materials=materials, diagnostics=diagnostics)
+        super().__init__(
+            llm,
+            tools,
+            recovery,
+            materials=materials,
+            diagnostics=diagnostics,
+            user_input=user_input,
+        )
         self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._opening_notes = opening_notes
         self._opening_delivered = False
