@@ -199,9 +199,10 @@ class RunDelivery:
             "noncard_objects": noncards,
             "object_descriptions": object_descriptions,
             "modifier_descriptions": [
-                {
-                    **_identity(observation, ref),
-                    **{
+                {**_identity(observation, ref), **modifier_texts}
+                for ref, value in observation.modifier_descriptions.items()
+                if (
+                    modifier_texts := {
                         key: text
                         for key, text in _json(value).items()
                         if not (
@@ -209,9 +210,8 @@ class RunDelivery:
                             and getattr(observation.objects[ref], key) is None
                             and text is None
                         )
-                    },
-                }
-                for ref, value in observation.modifier_descriptions.items()
+                    }
+                )
             ],
             "mechanisms": mechanisms,
             "upgrades": [
@@ -234,6 +234,7 @@ class RunDelivery:
                     ],
                 }
                 for ref, values in sorted(observation.generated.items())
+                if values
             ],
         }
         if self.role is native.DecisionOwner.RUN and source.map is not MISSING:
@@ -314,6 +315,13 @@ class RunDelivery:
         }
         if location.owner is self.role and isinstance(state, (native.RunState, native.CombatState)):
             for action in state.actions:
+                if (
+                    state.screen is native.RunScreen.MAP
+                    and action.destination is not MISSING
+                    and not action.enabled
+                    and action.reason is MISSING
+                ):
+                    continue
                 value = _json(action)
                 if action.subject is not MISSING:
                     subject = _identity(observation, action.subject)

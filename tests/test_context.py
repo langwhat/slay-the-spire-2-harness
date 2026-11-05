@@ -3,11 +3,13 @@ from os.path import commonprefix
 from types import MappingProxyType
 
 import httpx2 as httpx
+import pytest
 from pydantic import MISSING, JsonValue
 from test_mod_client import COMBAT, RUN
 
 from sts2_harness.client import ModClient
 from sts2_harness.client.models import (
+    Action,
     CardEntry,
     CombatPlayer,
     CombatState,
@@ -20,6 +22,7 @@ from sts2_harness.client.models import (
     Observation,
     Power,
     ResourceCosts,
+    RunScreen,
     RunState,
     StateCompleted,
     TerminalResult,
@@ -224,9 +227,91 @@ def test_generated_directories_keep_stable_keys_and_card_order_through_changes()
         ] == [("CARD.TWO", "CARD.ONE"), ("CARD.ONE",)]
 
 
-def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics() -> None:
+@pytest.mark.parametrize("minimal", [False, True])
+def test_modifier_relations_omit_absent_content_but_preserve_unknowns_and_clear_old_text(
+    minimal: bool,
+) -> None:
+    original = Observation.model_validate_json(COMBAT)
+    card = original.objects["c1"]
+    assert isinstance(card, CardEntry)
+    absent = original.model_copy(
+        update={
+            "objects": {**original.objects, "c1": card.model_copy(update={"enchantment": None})},
+            "modifier_descriptions": {
+                "c1": ModifierDescriptions(enchantment=None, affliction=None)
+            },
+        }
+    )
+    raw = absent.to_json()
+    context = Context(DecisionOwner.COMBAT, minimal=minimal)
+    context.begin_group(absent, "")
+    context.append_task(CombatActInput(), absent)
+    first = context.model_input()[-1]
+    assert isinstance(first, TaskMessage) and isinstance(first.content, ActContent)
+    assert first.content.observation.current is not MISSING
+    assert first.content.observation.current.modifier_descriptions == ()
+
+    unknown = original.model_copy(update={"modifier_descriptions": absent.modifier_descriptions})
+    details = DetailData(
+        objects=unknown.objects,
+        descriptions=unknown.descriptions,
+        modifier_descriptions=unknown.modifier_descriptions,
+        generated=unknown.generated,
+        mechanisms=unknown.mechanisms,
+    )
+    call = ToolCall("inspect", "combat_inspect", "{}")
+    reply = AssistantMessage(
+        ResponsesReply.from_json(
+            '[{"type":"function_call","call_id":"inspect",'
+            '"name":"combat_inspect","arguments":"{}"}]'
+        )
+    )
+    context.append_reply(reply)
+    context.append_tool_result(call, QueryToolResult(ReadCompleted(), unknown, details))
+    result = context.model_input()[-1]
+    assert isinstance(result, RunResultMessage) and result.content.data is details
+    assert result.content.observation is not None
+    assert result.content.observation.current is not MISSING
+    relations = result.content.observation.current.modifier_descriptions
+    assert relations is not MISSING and len(relations) == 1
+    assert relations[0].ref == "c1" and relations[0].enchantment is None
+    assert relations[0].affliction is MISSING
+
+    context.append_reply(reply)
+    context.append_tool_result(call, QueryToolResult(ReadCompleted(), original))
+    described = context.model_input()[-1]
+    assert isinstance(described, RunResultMessage)
+    assert '"enchantment":"附魔说明"' in described.text
+    context.append_reply(reply)
+    context.append_tool_result(call, QueryToolResult(ReadCompleted(), absent))
+    cleared = context.model_input()[-1]
+    assert isinstance(cleared, RunResultMessage) and cleared.content.observation is not None
+    assert cleared.content.observation.current is not MISSING
+    assert cleared.content.observation.current.modifier_descriptions is MISSING
+    assert cleared.content.observation.current.removed is not MISSING
+    assert cleared.content.observation.current.removed.modifier_descriptions == ("c1",)
+    context.finish_group()
+    candidate = context.compaction_candidate()
+    context.validate_compaction(candidate)
+    context.install_compaction(candidate)
+    next_node = absent.model_copy(
+        update={"location": absent.location.model_copy(update={"node_id": "next"})}
+    )
+    context.begin_group(next_node, "")
+    context.append_task(CombatActInput(), next_node)
+    reset = context.model_input()[-1]
+    assert isinstance(reset, TaskMessage) and isinstance(reset.content, ActContent)
+    assert reset.content.observation.current is not MISSING
+    assert reset.content.observation.current.modifier_descriptions == ()
+    assert absent.to_json() == raw
+
+
+@pytest.mark.parametrize("minimal", [False, True])
+def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics(
+    minimal: bool,
+) -> None:
     observation = Observation.model_validate_json(COMBAT)
-    context = Context(DecisionOwner.COMBAT)
+    context = Context(DecisionOwner.COMBAT, minimal=minimal)
     call = ToolCall("inspect", "combat_inspect", "{}")
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
     first = context.model_input()[-1]
@@ -238,7 +323,7 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     assert [
         (item.source.ref, len(item.previews))
         for item in first.content.observation.current.generated
-    ] == [("c1", 1), ("c2", 0)]
+    ] == [("c1", 1)]
     same_definition_new_source = observation.model_copy(
         update={
             "generated": MappingProxyType(
@@ -257,7 +342,7 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
         (item.source.ref, len(item.previews))
         for item in second.content.observation.current.generated
     ] == [("c2", 1)]
-    cleared = observation.model_copy(update={"generated": MappingProxyType({})})
+    cleared = observation.model_copy(update={"generated": MappingProxyType({"c1": (), "c2": ()})})
     context.append_tool_result(call, QueryToolResult(ReadCompleted(), cleared))
     empty = context.model_input()[-1]
     assert isinstance(empty, RunResultMessage)
@@ -278,7 +363,7 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     assert [
         (item.source.ref, len(item.previews))
         for item in returned.content.observation.current.generated
-    ] == [("c1", 1), ("c2", 0)]
+    ] == [("c1", 1)]
     changed_text = observation.mechanisms[0].model_copy(update={"text": "甲变化"})
     same_owner_same_id = changed_text.model_copy(update={"text": "同 ID 的第二条正文"})
     mechanisms = observation.model_copy(
@@ -313,7 +398,7 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     assert [
         (item.source.ref, len(item.previews))
         for item in reset.content.observation.current.generated
-    ] == [("c1", 1), ("c2", 0)]
+    ] == [("c1", 1)]
     assert reset.content.observation.current.mechanisms is not MISSING
     assert len(reset.content.observation.current.mechanisms) == len(observation.mechanisms)
     empty_mechanisms = next_node.model_copy(update={"mechanisms": ()})
@@ -339,6 +424,67 @@ def test_generated_sources_clear_and_reset_while_mechanisms_keep_owner_semantics
     assert len(restored_mechanisms.content.observation.current.mechanisms) == len(
         observation.mechanisms
     )
+
+
+@pytest.mark.parametrize("minimal", [False, True])
+def test_map_decisions_keep_legal_special_moves_and_explained_disabled_choices(
+    minimal: bool,
+) -> None:
+    observation = Observation.model_validate_json(RUN)
+    assert isinstance(observation.state, RunState)
+    actions = (
+        Action(ref="later", label="Travel", enabled=False, destination="map:later"),
+        Action(
+            ref="blocked", label="Travel", enabled=False, destination="map:blocked", reason="Gate"
+        ),
+        Action(ref="near", label="Travel", enabled=True, destination="map:near"),
+        Action(ref="flight", label="Travel", enabled=True, destination="map:far"),
+        Action(ref="other", label="Other", enabled=False),
+    )
+    public_map = Observation.model_validate_json(COMBAT).map
+    assert public_map is not MISSING
+    public_map = public_map.model_copy(update={"legal_destinations": ("map:near", "map:far")})
+    observation = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(update={"actions": actions}),
+            "map": public_map,
+        }
+    )
+    raw = observation.to_json()
+    context = Context(DecisionOwner.RUN, minimal=minimal)
+    context.begin_group(observation, "")
+    context.append_task(RunActInput(), observation)
+    first = context.model_input()[-1]
+    assert isinstance(first, TaskMessage) and isinstance(first.content, RunActContent)
+    decision = first.content.observation.decision
+    assert decision.actions is not MISSING
+    assert [action.ref for action in decision.actions] == ["blocked", "near", "flight", "other"]
+    assert decision.actions[0].reason == "Gate"
+    assert {action.destination for action in decision.actions if action.enabled} == {
+        "map:near",
+        "map:far",
+    }
+    current = first.content.observation.current
+    assert current is not MISSING and current.dynamic_map is not MISSING
+    assert current.dynamic_map is not None
+    assert current.dynamic_map.legal_destinations == ("map:near", "map:far")
+    assert current.map_topology is not MISSING and current.map_topology is not None
+    assert len(current.map_topology.nodes) == len(public_map.nodes)
+
+    event = observation.model_copy(
+        update={"state": observation.state.model_copy(update={"screen": RunScreen.EVENT})}
+    )
+    context.append_task(RunActInput(), event)
+    next_task = context.model_input()[-1]
+    assert isinstance(next_task, TaskMessage) and isinstance(next_task.content, RunActContent)
+    menu = next_task.content.observation.decision.actions
+    assert menu is not MISSING
+    assert [action.ref for action in menu] == ["later", "blocked", "near", "flight", "other"]
+    context.finish_group()
+    candidate = context.compaction_candidate()
+    context.validate_compaction(candidate)
+    context.install_compaction(candidate)
+    assert observation.to_json() == raw
 
 
 def test_foreign_role_menus_and_their_details_do_not_leak_or_change_raw_observation() -> None:
