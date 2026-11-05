@@ -274,7 +274,7 @@ def test_first_group_compaction_preserves_mechanism_multiplicity() -> None:
 
 
 @pytest.mark.parametrize("count", [0, 1, 3])
-def test_changed_group_entry_rebuilds_mechanisms_before_compaction(count: int) -> None:
+def test_changed_group_entry_preserves_mechanism_delta_through_compaction(count: int) -> None:
     original = Observation.model_validate_json(COMBAT)
     opening = original.model_copy(update={"mechanisms": (original.mechanisms[0],) * 2})
     changed = original.model_copy(update={"mechanisms": (original.mechanisms[0],) * count})
@@ -283,9 +283,14 @@ def test_changed_group_entry_rebuilds_mechanisms_before_compaction(count: int) -
     context.begin_group(changed, "")
     context.append_task(CombatActInput(), changed)
     frame = json.loads(context.model_input()[-1].text)["observation"]
-    assert frame["scene"]["reset"] is True
-    assert len(frame["current"]["mechanisms"]) == count
-    context.install_compaction(context.compaction_candidate())
+    assert "scene" not in frame
+    assert len(frame["current"].get("mechanisms", [])) == max(count - 2, 0)
+    removed = frame["current"].get("removed", {}).get("mechanisms", [])
+    assert len(removed) == max(2 - count, 0)
+    candidate = context.compaction_candidate()
+    baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]
+    assert len(baseline["current"]["mechanisms"]) == 2
+    context.install_compaction(candidate)
     context.append_tool_result(
         ToolCall("inspect", "combat_inspect", "{}"), QueryToolResult(ReadCompleted(), changed)
     )

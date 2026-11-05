@@ -490,7 +490,7 @@ class ActionBoundarySource(Source):
 
 
 @pytest.mark.parametrize("difference", ["ordinary", "observation", "notes"])
-def test_action_boundary_task_omission_requires_complete_recorded_evidence(
+def test_action_boundary_tasks_retain_observations_and_validate_recorded_notes(
     tmp_path: Path, difference: str
 ) -> None:
     async def scenario() -> None:
@@ -521,29 +521,23 @@ def test_action_boundary_task_omission_requires_complete_recorded_evidence(
         assert len(tasks) == 2
         assert isinstance(tasks[-1].content, ActContent)
         action_result = next(item for item in original.input if isinstance(item, ResultSnapshot))
-        assert action_result.observation is not None
+        assert action_result.observation is None
+        assert isinstance(tasks[0].content, ActContent)
+        initial = tasks[0].content.observation
         if difference == "observation":
-            assert isinstance(tasks[0].content, ActContent)
-            initial = tasks[0].content.observation
             incoming = tasks[-1].content.observation
             assert initial is not None and incoming is not None
             assert initial.scene is not MISSING and initial.current is not MISSING
-            assert incoming.scene is not MISSING
-            assert incoming.scene == initial.scene and incoming.scene.reset is True
-            assert incoming.decision == action_result.observation.decision
+            assert incoming.scene is MISSING
+            assert incoming.decision == initial.decision
             assert initial.current.card_descriptions is not MISSING
-            assert incoming.current == initial.current.model_copy(
-                update={
-                    "card_descriptions": tuple(
-                        entry
-                        for entry in initial.current.card_descriptions
-                        if entry.ref != "card:1:2"
-                    )
-                }
-            )
+            assert incoming.current is not MISSING
+            assert incoming.current.model_dump(mode="json") == {
+                "removed": {"card_descriptions": ["card:1:2"]}
+            }
         else:
             assert tasks[-1].content.observation == RunObservation(
-                decision=action_result.observation.decision,
+                decision=initial.decision,
             )
         if difference == "notes":
             invalid = tmp_path / "extra-notes.sqlite"
@@ -640,9 +634,8 @@ def test_action_boundary_task_omission_requires_complete_recorded_evidence(
             assert result.recording_id == journal.manifest.recording_id
             candidate = journal.request(original.sequence)
             retained_tasks = [item for item in candidate.input if isinstance(item, TaskSnapshot)]
-            assert len(retained_tasks) == (2 if difference == "observation" else 1)
-            if difference == "observation":
-                assert retained_tasks[-1] == tasks[-1]
+            assert len(retained_tasks) == 2
+            assert retained_tasks[-1] == tasks[-1]
             assert [item for item in candidate.input if isinstance(item, AssistantSnapshot)] == [
                 item for item in original.input if isinstance(item, AssistantSnapshot)
             ]

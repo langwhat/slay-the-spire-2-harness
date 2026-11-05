@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from pydantic import MISSING
 from test_lifecycle import Campaign
 from test_mod_client import COMBAT
 from test_replay import record_campaign
@@ -17,7 +18,7 @@ from sts2_harness.capacity import CapacityPolicy, CompactionDecision, measure
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
 from sts2_harness.context import Context
-from sts2_harness.context.models import CombatActInput, ReviewContent
+from sts2_harness.context.models import ActContent, CombatActInput, ReviewContent
 from sts2_harness.journal import Journal, Manifest
 from sts2_harness.journal_models import LiteralText, ResultSnapshot, TaskSnapshot, TextSnapshot
 from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall, ToolResultMessage
@@ -258,7 +259,18 @@ def test_combat_compaction_recording_replays_without_repeating_actions(
         assert isinstance(preparation.baseline.value, LiteralText)
         baseline = json.loads(preparation.baseline.value.body)["context_baseline"]
         assert baseline["opening_notes"] == "Opening plan."
-        assert baseline["observation"]["current"]["player"]["hp"] == (5 if stage == "review" else 7)
+        assert baseline["observation"]["current"]["player"]["hp"] == (
+            7 if stage == "review" else 10
+        )
+        retained_players = [
+            content.observation.current.player
+            for item in preparation.input_after
+            if isinstance(item, TaskSnapshot)
+            and isinstance(content := item.content, ActContent)
+            and content.observation.current is not MISSING
+            and content.observation.current.player is not MISSING
+        ]
+        assert [player.hp for player in retained_players] == ([5] if stage == "review" else [7, 5])
         call_ids = [
             item.call_id for item in preparation.input_after if isinstance(item, ResultSnapshot)
         ]

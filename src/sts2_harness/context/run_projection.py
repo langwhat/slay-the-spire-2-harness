@@ -89,7 +89,6 @@ class RunDelivery:
     next_profile: int = 1
     role: native.DecisionOwner = native.DecisionOwner.RUN
     route_plan: RoutePlan | None = None
-    reset_pending: bool = False
     actions: list[JsonValue] | None = None
     decision: dict[str, JsonValue] | None = None
 
@@ -171,7 +170,7 @@ class RunDelivery:
         node_changed = self.scene is None or any(
             scene[k] != self.scene[k] for k in ("game_instance_id", "run_id", "node_id")
         )
-        reset = node_changed or self.reset_pending
+        reset = node_changed
         mechanisms: list[JsonValue] = []
         for mechanism in observation.mechanisms:
             body = _json(mechanism)
@@ -377,5 +376,4 @@ class RunDelivery:
         self.phase = state.phase
         self.actions = actions
         self.decision = complete_decision
-        self.reset_pending = False
         return result

@@ -187,9 +187,7 @@ class Materials:
             )
         return source
 
-    def messages(
-        self, source: tuple[MessageSnapshot, ...], repeated_tasks: frozenset[int] = frozenset()
-    ) -> tuple[MessageSnapshot, ...]:
+    def messages(self, source: tuple[MessageSnapshot, ...]) -> tuple[MessageSnapshot, ...]:
         delivered: dict[tuple[str, str | None], DocumentSnapshot] = {}
         mapped_deliveries: set[tuple[str, str | None]] = set()
         result: list[MessageSnapshot] = []
@@ -202,12 +200,7 @@ class Materials:
             if changed:
                 mapped_deliveries.add(key)
 
-        guidance_removed = False
-        for index, message in enumerate(source):
-            if guidance_removed and index in repeated_tasks:
-                guidance_removed = False
-                continue
-            guidance_removed = False
+        for message in source:
             if isinstance(message, TextSnapshot):
                 value = self.archived_text(message.value)
                 if isinstance(value, GuidanceText):
@@ -228,7 +221,6 @@ class Materials:
                         documents.append(document)
                         remember(document, original != document)
                     if not documents and value.documents:
-                        guidance_removed = True
                         continue
                     value = value.model_copy(update={"documents": tuple(documents)})
                 result.append(message.model_copy(update={"value": value}))

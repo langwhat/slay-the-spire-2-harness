@@ -269,7 +269,7 @@ def test_run_receives_full_visible_card_guidance_and_appends_only_changes(tmp_pa
         "Complete rules for CARD.NEW.\nFurther details for CARD.NEW."
     )
     assert wire[2][: len(wire[1])] == wire[1]
-    assert [message.get("role") for message in wire[2][len(wire[1]) :]] == [None, None]
+    assert [message.get("role") for message in wire[2][len(wire[1]) :]] == [None, None, "user"]
 
 
 def test_combat_appends_new_or_changed_knowledge_before_the_next_request(tmp_path: Path) -> None:
@@ -407,6 +407,6 @@ def test_combat_appends_new_or_changed_knowledge_before_the_next_request(tmp_pat
         }
     ]
     assert wire[2][: len(wire[1])] == wire[1]
-    assert [message.get("role") for message in wire[2][len(wire[1]) :]] == [None, None]
+    assert [message.get("role") for message in wire[2][len(wire[1]) :]] == [None, None, "user"]
     assert wire[3][1]["role"] == "system"
     assert json.loads(wire[3][1]["content"]) == additions[0]

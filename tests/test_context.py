@@ -476,20 +476,28 @@ def test_foreign_role_menus_and_their_details_do_not_leak_or_change_raw_observat
     assert projection.current.model_dump(mode="json")["mechanisms"] == []
 
 
-def test_task_omission_uses_only_the_actual_tail_and_preserves_native_assistant() -> None:
+def test_action_tasks_own_their_state_and_preserve_native_assistant() -> None:
 
     observation = Observation.model_validate_json(COMBAT)
     context = Context(DecisionOwner.COMBAT)
     call = ToolCall("act", "combat_act", "{}")
     context.append_tool_result(
-        call, ActionToolResult(ActionCompleted(completed_steps=1), observation)
+        call,
+        ActionToolResult(ActionCompleted(completed_steps=1), observation),
+        defer_observation=True,
     )
+    result = context.model_input()[-1]
+    assert isinstance(result, RunResultMessage) and result.content.observation is None
     context.append_task(CombatActInput(), observation)
-    assert len(context.model_input()) == 1
-    context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
+    task = context.model_input()[-1]
+    assert isinstance(task, TaskMessage) and isinstance(task.content, ActContent)
+    assert task.content.observation.current is not MISSING
+    assert "instruction" not in task.text
     assert len(context.model_input()) == 2
     context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
-    assert len(context.model_input()) == 2
+    assert len(context.model_input()) == 3
+    context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
+    assert len(context.model_input()) == 3
     assistant = AssistantMessage(
         ResponsesReply.from_json(
             '[{"type":"reasoning","id":"reasoning","summary":[],"encrypted_content":"opaque"},'
@@ -499,17 +507,19 @@ def test_task_omission_uses_only_the_actual_tail_and_preserves_native_assistant(
     context.append_reply(assistant)
     context.append_task(CombatActInput(opening_notes="固定开场笔记"), observation)
     assert context.model_input()[-2] is assistant
-    assert len(context.model_input()) == 4
-    context.append_tool_result(call, QueryToolResult(ReadCompleted(), observation))
+    assert len(context.model_input()) == 5
+    context.append_tool_result(
+        call, QueryToolResult(ReadCompleted(), observation), defer_observation=True
+    )
     assert isinstance(context.model_input()[-1], RunResultMessage)
     context.append_task(CombatActInput(), observation)
-    assert len(context.model_input()) == 6
+    assert len(context.model_input()) == 7
     # Technical acquisition identity does not create a different gameplay observation.
     refreshed = observation.model_copy(
         update={"stamp": observation.stamp.model_copy(update={"observation_sequence": 99})}
     )
     context.append_task(CombatActInput(), refreshed)
-    assert len(context.model_input()) == 6
+    assert len(context.model_input()) == 7
 
 
 def test_review_appends_its_actual_report_without_unrelated_live_state() -> None:
@@ -909,6 +919,7 @@ def test_minimal_context_retains_completed_decision_and_compacts_without_notes()
     upgraded = observation.model_copy(
         update={"objects": {**observation.objects, "c1": card.model_copy(update={"upgrades": 1})}}
     )
+    upgraded = Observation.model_validate_json(upgraded.to_json().replace('"c1"', '"c3"'))
     context = Context(DecisionOwner.COMBAT, minimal=True)
     context.begin_group(observation, "Opening notes must not be delivered")
     context.append_task(CombatActInput(), observation)
@@ -923,6 +934,7 @@ def test_minimal_context_retains_completed_decision_and_compacts_without_notes()
     context.append_tool_result(
         ToolCall("a1", "combat_act", "{}"),
         ActionToolResult(ActionCompleted(completed_steps=1), upgraded),
+        defer_observation=True,
     )
     context.finish_group()
     first = context.model_input()
@@ -933,8 +945,15 @@ def test_minimal_context_retains_completed_decision_and_compacts_without_notes()
     assert messages[: len(first)] == first
     assert any("Old decision reasoning" in message.text for message in messages)
     assert any(isinstance(message, AssistantMessage) for message in messages)
-    assert isinstance(messages[-1], RunResultMessage)
-    assert messages[-1].source.observation == upgraded
+    assert isinstance(messages[-1], TaskMessage)
+    assert messages[-1].observation == upgraded
+    assert isinstance(messages[-1].content, ActContent)
+    projection = messages[-1].content.observation
+    assert projection.scene is not MISSING and projection.scene.reset is MISSING
+    assert projection.scene.removed == ("c1",)
+    assert projection.catalog_additions is not MISSING
+    assert projection.current is not MISSING and projection.current.removed is not MISSING
+    assert projection.current.removed.cards == ("c1",)
     candidate, baseline_message = context.compaction_input()
     baseline = json.loads(baseline_message.text)["context_baseline"]
     assert "opening_notes" not in baseline
@@ -945,7 +964,7 @@ def test_minimal_context_retains_completed_decision_and_compacts_without_notes()
     assert profile["content"]["upgrades"] == 0
     context.validate_compaction(candidate)
     context.install_compaction(candidate)
-    assert context.model_input()[-len(first) :] == first
+    assert context.model_input()[-len(messages) :] == messages
 
 
 def test_minimal_run_context_keeps_active_queries_guidance_and_route_plan() -> None:

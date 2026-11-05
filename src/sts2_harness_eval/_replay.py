@@ -10,15 +10,6 @@ from pydantic import MISSING
 
 from sts2_harness.capacity import CapacityPolicy, RecoveryDecision
 from sts2_harness.client import models as native
-from sts2_harness.context import repeats_action_result
-from sts2_harness.context.models import (
-    ActContent,
-    CombatActInput,
-    RunActContent,
-    RunActInput,
-    RunObservation,
-    RunResultMessage,
-)
 from sts2_harness.game import (
     Admit,
     Admitted,
@@ -50,7 +41,6 @@ from sts2_harness.journal import (
     SceneVariant,
 )
 from sts2_harness.journal_models import (
-    AssistantSnapshot,
     AttemptCause,
     ConfigurationSnapshot,
     DocumentLookup,
@@ -71,11 +61,8 @@ from sts2_harness.journal_models import (
     PromptRead,
     PromptReadResult,
     RecordedRecovery,
-    ResultSnapshot,
-    RunTaskSnapshot,
     SkillListing,
     SkillListingResult,
-    TaskSnapshot,
     ToolSet,
     ToolSnapshot,
     VariantPrefixOutcome,
@@ -102,14 +89,12 @@ from sts2_harness.llm.messages import (
     ModelUnavailable,
     PreparedRequest,
     RequestPreparation,
-    TextRole,
     ToolDefinition,
     Usage,
 )
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
 from sts2_harness.results import Reason
 from sts2_harness.session import RunSession, SessionDependencies
-from sts2_harness.tools import ToolName
 from sts2_harness_eval.results import (
     ArchiveUnreadable,
     InputComponent,
@@ -309,86 +294,6 @@ class Timeline:
     def check_cursor(self, record: Dependency) -> None:
         if record.confirmed_operation_cursor != self.cursor:
             _different(record.sequence, InputComponent.CURSOR)
-
-    def repeated_tasks(self, record: ModelRecord, input: ModelInput) -> frozenset[int]:
-        repeated: set[int] = set()
-        for index, message in enumerate(record.input):
-            if index < 3 or not isinstance(message, (TaskSnapshot, RunTaskSnapshot)):
-                continue
-            previous = record.input[index - 2]
-            assistant = record.input[index - 3]
-            if not isinstance(previous, ResultSnapshot) or not isinstance(
-                assistant, AssistantSnapshot
-            ):
-                continue
-            calls = AssistantMessage(assistant.native_reply).tool_calls
-            action_name = (
-                ToolName.COMBAT_ACT
-                if record.role is native.DecisionOwner.COMBAT
-                else ToolName.RUN_ACT
-            )
-            if len(calls) != 1 or (calls[0].id, calls[0].name) != (previous.call_id, action_name):
-                continue
-            results = tuple(
-                item
-                for item in input
-                if isinstance(item, RunResultMessage) and item.call_id == previous.call_id
-            )
-            if len(results) != 1 or archive_input(results) != (previous,):
-                continue
-            result = results[0]
-            task: CombatActInput | RunActInput
-            if record.role is native.DecisionOwner.COMBAT:
-                if result.content.observation is None:
-                    continue
-                projected = RunObservation(decision=result.content.observation.decision)
-                if message != TaskSnapshot(
-                    role=TextRole.USER, content=ActContent(observation=projected)
-                ):
-                    continue
-                task = CombatActInput()
-            else:
-                if result.content.observation is None:
-                    continue
-                run_projected = RunObservation(decision=result.content.observation.decision)
-                if message != RunTaskSnapshot(
-                    role=TextRole.USER, content=RunActContent(observation=run_projected)
-                ):
-                    continue
-                task = RunActInput()
-            observation = self._task_observation(record, index)
-            if observation is not None and repeats_action_result(
-                record.role, result, task, observation
-            ):
-                repeated.add(index)
-        return frozenset(repeated)
-
-    def _task_observation(self, target: ModelRecord, index: int) -> native.Observation | None:
-        observation: native.Observation | None = None
-        for record in self.records:
-            if record.sequence > target.sequence:
-                break
-            if isinstance(record, Record) and isinstance(record.request, Admit):
-                reply = record.reply
-                observation = (
-                    reply.observations[-1]
-                    if reply is not None
-                    and isinstance(reply.outcome, Admitted)
-                    and reply.outcome.allowed
-                    and reply.observations
-                    else None
-                )
-                continue
-            if not isinstance(record, ModelRecord) or (record.role, record.stream) != (
-                target.role,
-                target.stream,
-            ):
-                continue
-            if len(record.input) <= index:
-                continue
-            # The task's first request binds its observation; later reads cannot replace it.
-            return observation if record.input[index] == target.input[index] else None
-        return None
 
 
 class ReplayGame:
@@ -729,9 +634,7 @@ class ReplayModel:
         materials = self._timeline.materials
         treated = materials is not None and self._timeline.original(record.sequence)
         expected_input = (
-            materials.messages(record.input, self._timeline.repeated_tasks(record, input))
-            if treated and materials is not None
-            else record.input
+            materials.messages(record.input) if treated and materials is not None else record.input
         )
         expected_tools = (
             materials.tool_snapshots(record.tools)

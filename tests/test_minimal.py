@@ -107,15 +107,37 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 {"run_inspect", "run_act", "run_plan", "run_next"},
                 {"combat_inspect", "combat_act"},
             )
+            messages = request["input"]
+            assert isinstance(messages, list)
+            latest = messages[-1]
+            assert isinstance(latest, dict) and latest.get("role") == "user"
+            content = latest["content"]
+            assert isinstance(content, str)
+            task = json.loads(content)
+            assert task["task"] == "act" and "observation" in task
+            assert "instruction" not in task
 
         first = campaign.inputs[0]["input"]
         second = campaign.inputs[1]["input"]
         assert isinstance(first, list) and isinstance(second, list)
         assert second[: len(first)] == first
+        result = second[-2]
+        assert isinstance(result, dict) and result["type"] == "function_call_output"
+        output = result["output"]
+        assert isinstance(output, str) and json.loads(output)["observation"] is None
         first_combat = campaign.inputs[2]["input"]
         next_combat = campaign.inputs[3]["input"]
         assert isinstance(first_combat, list) and isinstance(next_combat, list)
         assert next_combat[: len(first_combat)] == first_combat
+        result = next_combat[-2]
+        assert isinstance(result, dict) and result["type"] == "function_call_output"
+        output = result["output"]
+        assert isinstance(output, str) and json.loads(output)["observation"] is None
+        task = next_combat[-1]
+        assert isinstance(task, dict) and isinstance(task["content"], str)
+        observation = json.loads(task["content"])["observation"]
+        assert "scene" not in observation
+        assert observation["current"] == {"turn": 2}
         assert '"call_id": "battle1"' in json.dumps(next_combat)
         after_battle = campaign.inputs[5 if consecutive else 4]["input"]
         assert isinstance(after_battle, list)

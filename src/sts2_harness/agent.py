@@ -260,6 +260,7 @@ class Agent(ABC):
         context = await self._prepare(observation)
         self._append_task(context, task, observation)
         while True:
+            latest: native.Observation | None = None
             self._deliver_user_input(context, task)
             try:
                 reply = await self._request(context)
@@ -293,6 +294,8 @@ class Agent(ABC):
                 if latest is not None:
                     observation = latest
             context = await self._prepare(observation)
+            if isinstance(task, ActTask) and latest is not None:
+                self._append_task(context, task, observation)
 
     def _deliver_user_input(self, context: Context, task: DecisionTask) -> None:
         # Each logical request freezes its input here, so HTTP retries reuse the same content
@@ -341,7 +344,7 @@ class Agent(ABC):
     ) -> native.Observation | None:
         if self._diagnostics is not None:
             self._diagnostics.tool_finished(call.name, result.outcome)
-        context.append_tool_result(call, result)
+        context.append_tool_result(call, result, defer_observation=isinstance(task, ActTask))
         pause = self._recovery.record_outcome(result)
         observation = result.observation
         if observation is not None and (
@@ -372,7 +375,7 @@ class Agent(ABC):
             raise RuntimeError("No model action is awaiting feedback.")
         if self._diagnostics is not None:
             self._diagnostics.tool_finished(self._pending_call.name, outcome.outcome)
-        self._context.append_tool_result(self._pending_call, outcome)
+        self._context.append_tool_result(self._pending_call, outcome, defer_observation=True)
         self._pending_call = None
         if not self._tools.minimal or (
             isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None

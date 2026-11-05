@@ -307,6 +307,10 @@ do not establish savings when cached input is discounted.
 The archive records the mode so offline replay uses the same behavior. Ordinary gameplay
 and its prompts remain unchanged when minimal gameplay is disabled (the default).
 
+In both modes, an ongoing role receives action receipts and query data in tool results,
+with fresh state delivered once in the next `act` task. Results retain their observation
+when control leaves that role. Previously sent messages remain unchanged.
+
 The default Mod URL is `http://127.0.0.1:17877`. Use `--mod-url URL` and `--output DIRECTORY`
 to override the connection and output directory; the default output directory is `runs`.
 `status.json` publishes the control endpoint, current lifecycle, identities, archive path,

@@ -158,26 +158,6 @@ def same_observation(
     )
 
 
-def repeats_action_result(
-    role: native.DecisionOwner,
-    last: RunResultMessage,
-    task: TaskInput,
-    observation: native.Observation,
-) -> bool:
-    if isinstance(task, CombatActInput):
-        ordinary = task.opening_notes is MISSING
-    elif isinstance(task, RunActInput):
-        ordinary = task.strategy_notes is MISSING and task.handoff is None
-    else:
-        return False
-    return (
-        ordinary
-        and isinstance(last.source, ActionToolResult)
-        and last.source.observation is not None
-        and same_observation(role, last.source.observation, observation)
-    )
-
-
 class Context:
     def __init__(
         self,
@@ -258,18 +238,11 @@ class Context:
         self._group_number += 1
         delivery = deepcopy(self._delivery)
         known = set(delivery.catalog.values())
-        if self._role is native.DecisionOwner.RUN and delivery.scene is not None:
+        if delivery.scene is not None:
             assert delivery.decision is not None
             wire: dict[str, JsonValue] = {"decision": delivery.decision}
         else:
             projected = delivery.project(visible_observation(observation, self._role), observation)
-            changed = (
-                delivery.scene != self._delivery.scene
-                or delivery.current != self._delivery.current
-                or delivery.actions != self._delivery.actions
-            )
-            if changed and self._role is native.DecisionOwner.COMBAT:
-                self._delivery.reset_pending = True
             wire = _JSON_OBJECT.validate_json(projected.to_json())
         names = {
             ident: f"baseline{self._group_number}.{ident}"
@@ -540,8 +513,6 @@ class Context:
         self._delivery.current = reconstructed_current
         self._delivery.actions = reconstructed_actions
         self._delivery.decision = reconstructed_decision
-        if self._active_group is None or self._active_group is group:
-            self._delivery.reset_pending = False
         if not has_retained_observation:
             decision = initial.get("decision")
             if isinstance(decision, dict) and isinstance(decision.get("phase"), str):
@@ -601,30 +572,21 @@ class Context:
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
                 if same_observation(self._role, last.observation, observation):
                     return
-            if isinstance(last, RunResultMessage) and repeats_action_result(
-                self._role, last, task, observation
-            ):
-                return
+        projected = self._delivery.project(
+            visible_observation(observation, self._role), observation
+        )
         if isinstance(task, CombatActInput):
-            projected = self._combat_delivery.project(
-                visible_observation(observation, self._role), observation
-            )
             content = ActContent(observation=projected, opening_notes=task.opening_notes)
         else:
-            run_projected = self._run_delivery.project(
-                visible_observation(observation, self._role), observation
-            )
             if task.handoff is not None:
                 content = RunActHandoffContent(
-                    observation=run_projected,
+                    observation=projected,
                     strategy_notes=task.strategy_notes,
                     battle_report=task.handoff.report,
                     combat_review=task.handoff.review,
                 )
             else:
-                content = RunActContent(
-                    observation=run_projected, strategy_notes=task.strategy_notes
-                )
+                content = RunActContent(observation=projected, strategy_notes=task.strategy_notes)
         message = TaskMessage(TextRole.USER, content.to_json(), content, task, observation)
         self._history.append(message)
 
@@ -669,7 +631,9 @@ class Context:
         )
         self._history.append(RunAutomaticMessage(TextRole.USER, content.to_json(), content, result))
 
-    def append_tool_result(self, call: ToolCall, result: ToolResult) -> None:
+    def append_tool_result(
+        self, call: ToolCall, result: ToolResult, *, defer_observation: bool = False
+    ) -> None:
         delivery = (
             self._run_delivery if self._role is native.DecisionOwner.RUN else self._combat_delivery
         )
@@ -678,6 +642,7 @@ class Context:
                 visible_observation(result.observation, self._role), result.observation
             )
             if result.observation is not None
+            and not (defer_observation and result.observation.location.owner is self._role)
             else None
         )
         content = RunProjectedResult(

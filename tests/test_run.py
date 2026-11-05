@@ -269,10 +269,10 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
         initial = requests[0].input[-1]
         assert isinstance(initial, RunTaskSnapshot) and isinstance(initial.content, RunActContent)
         assert initial.content.strategy_notes == "Reserve potion."
-        read = requests[1].input[-1]
+        read = requests[1].input[-2]
         assert isinstance(read, ResultSnapshot) and isinstance(read.data, NotesData)
         assert read.data.value.model_dump() == {"text": "Reserve potion."}
-        edit = requests[2].input[-1]
+        edit = requests[2].input[-2]
         assert isinstance(edit, ResultSnapshot) and isinstance(edit.data, NotesData)
         assert edit.data.value.model_dump() == {"updated": True}
         combined_task = requests[3].input[-1]
@@ -466,10 +466,11 @@ def test_run_tasks_keep_new_handoffs_and_notes_without_consuming_observation_del
     context.append_tool_result(
         ToolCall("act", "run_act", "{}"),
         ActionToolResult(ActionCompleted(completed_steps=1), observation),
+        defer_observation=True,
     )
     size = len(context.model_input())
     context.append_task(RunActInput(), observation)
-    assert len(context.model_input()) == size
+    assert len(context.model_input()) == size + 1
     task_input = RunActInput(handoff=handoff("A new lesson."))
     context.append_task(task_input, observation)
     current = context.model_input()[-1]
@@ -477,11 +478,11 @@ def test_run_tasks_keep_new_handoffs_and_notes_without_consuming_observation_del
     assert current.content.battle_report == handoff().report
     assert current.content.combat_review == "A new lesson."
     assert current.content.strategy_notes is MISSING
-    assert len(context.model_input()) == size + 1
-    context.append_task(task_input, observation)
-    assert len(context.model_input()) == size + 1
-    context.append_task(RunActInput("Changed notes", handoff("A new lesson.")), observation)
     assert len(context.model_input()) == size + 2
+    context.append_task(task_input, observation)
+    assert len(context.model_input()) == size + 2
+    context.append_task(RunActInput("Changed notes", handoff("A new lesson.")), observation)
+    assert len(context.model_input()) == size + 3
     assert first.content.strategy_notes == ""
 
 

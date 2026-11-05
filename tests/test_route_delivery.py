@@ -166,7 +166,13 @@ def test_planning_keeps_previous_route_after_rejection_and_travels_to_unique_nex
             "presentation": {"status": "not_available"},
             "restoration": {"status": "not_needed"},
         }
-        assert accepted["observation"]["current"]["dynamic_map"]["plan"]["reason"] == "rest"
+        assert accepted["observation"] is None
+        planned = http.inputs[1]["input"]
+        assert isinstance(planned, list) and isinstance(task := planned[-1], dict)
+        assert isinstance(content := task["content"], str)
+        assert (
+            json.loads(content)["observation"]["current"]["dynamic_map"]["plan"]["reason"] == "rest"
+        )
         assert rejected["outcome"]["reason"]["code"] == "ambiguous_next"
 
     asyncio.run(scenario())

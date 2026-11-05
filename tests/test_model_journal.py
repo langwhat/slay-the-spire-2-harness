@@ -260,13 +260,13 @@ def test_combat_requests_keep_retry_query_and_native_continuation(
         assert archive.storage.native_blocks == 5
         assert second.base_sequence == first.sequence
         assert second.prefix_length == len(first.input)
-        assert len(second.input) == len(first.input) + 2
-        result = second.input[-1]
+        assert len(second.input) == len(first.input) + 3
+        result = second.input[-2]
         assert isinstance(result, ResultSnapshot) and isinstance(result.data, DocumentData)
         assert result.data.document.text.body == "Recorded guidance."
-        assert isinstance(second.input[-2], AssistantSnapshot)
-        assert second.input[-2].native_output == first.attempts[1].reply.native_output
-        assert isinstance(reread.input[-1], ResultSnapshot)
+        assert isinstance(second.input[-3], AssistantSnapshot)
+        assert second.input[-3].native_output == first.attempts[1].reply.native_output
+        assert isinstance(reread.input[-2], ResultSnapshot)
         material_reads = archive.materials()
         prompt_reads = [item for item in material_reads if item.request.kind is MaterialKind.PROMPT]
         explicit_reads = [item for item in material_reads if item.request.kind is MaterialKind.READ]
@@ -289,11 +289,11 @@ def test_combat_requests_keep_retry_query_and_native_continuation(
         assert reread.sequence < settlement[0].sequence < resumed.sequence
         assert resumed.sequence < settlement[1].sequence < third.sequence
         assert resumed.confirmed_operation_cursor == 0
-        unknown = resumed.input[-1]
+        unknown = resumed.input[-2]
         assert isinstance(unknown, ResultSnapshot) and isinstance(unknown.outcome, ActionUnknown)
         assert unknown.outcome.confirmed_steps == 0 and unknown.outcome.uncertain_step == 1
         assert battle.actions[0].operation_id != battle.actions[1].operation_id
-        assert reread.suffix_length == second.suffix_length == 2
+        assert reread.suffix_length == second.suffix_length == 3
         assert archive.manifest.initial_notes == ""
         assert archive.manifest.model_requests_supported
         destination = tmp_path / "selected.json"
@@ -318,7 +318,7 @@ def test_combat_requests_keep_retry_query_and_native_continuation(
         assert len(exported["records"]) == 1
         assert exported["records"][0]["sequence"] == second.sequence
         assert (
-            exported["records"][0]["input"][-1]["data"]["document"]["text"]["body"]
+            exported["records"][0]["input"][-2]["data"]["document"]["text"]["body"]
             == "Recorded guidance."
         )
         captured = capsys.readouterr()

@@ -92,7 +92,6 @@ class VisibleObservation(SemanticValue):
 
 class ActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
-    instruction: str = "Make the next battle decision using combat_act."
     observation: RunObservation
     opening_notes: str | MISSING = MISSING
 
@@ -125,9 +124,6 @@ class RunHandoffInput:
 
 class RunActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
-    instruction: str = (
-        "Make the next run decision using run_plan, run_next, or run_act as appropriate."
-    )
     observation: RunObservation
     strategy_notes: str | MISSING = MISSING
 
