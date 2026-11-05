@@ -392,11 +392,6 @@ class RunAgent(Agent):
         )
         if self._pending_auto is None:
             await super().accept(outcome)
-            assert self._context is not None
-            if not self._tools.minimal or (
-                isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None
-            ):
-                self._context.finish_group()
             self._force_strategy = False
             return
         progress, before = self._pending_auto
@@ -454,14 +449,18 @@ class RunAgent(Agent):
         return await super()._prepare(observation)
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
-        blocks = (self._prompts.read("minimal/run"),) if self._tools.minimal else (
-            self._prompts.read("run-tasks"),
-            self._prompts.read("run-report-reader"),
-            self._prompts.read("run-task-rules"),
-            "\n",
-            self._prompts.read("run-projected-reader"),
-            "\n",
-            self._prompts.read("run-observations"),
+        blocks = (
+            (self._prompts.read("minimal/run"),)
+            if self._tools.minimal
+            else (
+                self._prompts.read("run-tasks"),
+                self._prompts.read("run-report-reader"),
+                self._prompts.read("run-task-rules"),
+                "\n",
+                self._prompts.read("run-projected-reader"),
+                "\n",
+                self._prompts.read("run-observations"),
+            )
         )
         if self._user_input is not None:
             blocks += ("\n", self._prompts.read("viewer-input"))

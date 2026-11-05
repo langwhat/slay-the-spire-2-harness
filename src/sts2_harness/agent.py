@@ -37,6 +37,7 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import (
+    ActionCompleted,
     ActionToolResult,
     Failed,
     QueryToolResult,
@@ -373,3 +374,7 @@ class Agent(ABC):
             self._diagnostics.tool_finished(self._pending_call.name, outcome.outcome)
         self._context.append_tool_result(self._pending_call, outcome)
         self._pending_call = None
+        if not self._tools.minimal or (
+            isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None
+        ):
+            self._context.finish_group()

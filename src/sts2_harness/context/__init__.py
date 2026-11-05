@@ -343,7 +343,8 @@ class Context:
             (TextMessage(TextRole.USER, GuidanceContent(guidance=guidance)),) if guidance else ()
         )
         baseline_message = TextMessage(
-            TextRole.USER, json.dumps(baseline, ensure_ascii=False, separators=(",", ":"))
+            TextRole.USER,
+            json.dumps(baseline, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         )
         candidate: ModelInput = (*self._system, *prefix, baseline_message, *retained)
         return candidate, baseline_message

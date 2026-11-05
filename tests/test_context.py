@@ -812,6 +812,22 @@ def test_run_compaction_candidate_uses_prior_group_baseline_and_keeps_active_que
     ]
 
 
+def test_minimal_context_preserves_identical_baseline_for_unchanged_state() -> None:
+    for role, source, task in (
+        (DecisionOwner.RUN, RUN, RunActInput()),
+        (DecisionOwner.COMBAT, COMBAT, CombatActInput()),
+    ):
+        observation = Observation.model_validate_json(source)
+        context = Context(role, minimal=True)
+        context.begin_group(observation, "")
+        context.append_task(task, observation)
+        first = context.model_input()[0].text
+        context.finish_group()
+        context.begin_group(observation, "")
+        context.append_task(task, observation)
+        assert context.model_input()[0].text == first
+
+
 def test_minimal_context_discards_completed_decision_and_delivers_current_task() -> None:
     import json
 

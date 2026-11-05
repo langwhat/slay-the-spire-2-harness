@@ -62,7 +62,9 @@ def test_external_without_credentials(tmp_path: Path) -> None:
     result = cli(tmp_path, "check-config", "--set", "STS2_DRIVER=external")
     assert result.returncode == 0
     assert json.loads(result.stdout) == {
-        "driver": "external", "model_configured": False, "minimal": False
+        "driver": "external",
+        "model_configured": False,
+        "minimal": False,
     }
 
 
@@ -71,9 +73,7 @@ def test_minimal_environment_precedence_and_cli_override(tmp_path: Path) -> None
     defaults.write_text("STS2_MINIMAL=true\nLLM_MODEL=fake\nLLM_AUTH=none\n")
     assert load_configuration(defaults, {}, {}).minimal
     assert not load_configuration(defaults, {"STS2_MINIMAL": "false"}, {}).minimal
-    assert load_configuration(
-        defaults, {"STS2_MINIMAL": "false"}, {"STS2_MINIMAL": "true"}
-    ).minimal
+    assert load_configuration(defaults, {"STS2_MINIMAL": "false"}, {"STS2_MINIMAL": "true"}).minimal
     assert not load_configuration(
         defaults, {"STS2_MINIMAL": "true"}, {"STS2_MINIMAL": "false"}
     ).minimal

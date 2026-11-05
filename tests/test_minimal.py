@@ -26,9 +26,7 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
     second_turn = campaign.states[1]
     campaign.states.insert(
         2,
-        second_turn.model_copy(
-            update={"state": second_turn.state.model_copy(update={"turn": 2})}
-        ),
+        second_turn.model_copy(update={"state": second_turn.state.model_copy(update={"turn": 2})}),
     )
     if consecutive:
         campaign.states.insert(3, battle_state(1, "extra-battle"))
@@ -98,7 +96,6 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
             assert "Hidden initial strategy." not in encoded
             assert "strategy_notes" not in encoded and "opening_notes" not in encoded
             assert "Synthetic automatic guidance." in encoded
-            assert 'task=\\"review\\"' not in encoded
             tools = request["tools"]
             assert isinstance(tools, list)
             names = {

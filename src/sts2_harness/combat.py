@@ -28,7 +28,7 @@ from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.prompts import PackagedPrompts, PromptReader
-from sts2_harness.results import ActionCompleted, ActionToolResult, Reason, ReasonCode
+from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input_values import UserInputSource
 
@@ -37,12 +37,16 @@ _LOG = logging.getLogger(__name__)
 
 def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool) -> MaterialParts:
     blocks: list[MaterialText | str] = []
-    names = ("minimal/combat",) if minimal else (
-        "combat-tasks",
-        "report-reader",
-        "combat-task-rules",
-        "projected-reader",
-        "combat-observations",
+    names = (
+        ("minimal/combat",)
+        if minimal
+        else (
+            "combat-tasks",
+            "report-reader",
+            "combat-task-rules",
+            "projected-reader",
+            "combat-observations",
+        )
     )
     for name in (*names, *(("viewer-input",) if viewer_input else ())):
         if blocks:
@@ -97,14 +101,6 @@ class CombatAgent(Agent):
             assert self._context is not None
             self._context.finish_group()
         return decision
-
-    async def accept(self, outcome: ActionToolResult) -> None:
-        await super().accept(outcome)
-        assert self._context is not None
-        if not self._tools.minimal or (
-            isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None
-        ):
-            self._context.finish_group()
 
     def _append_task(
         self, context: Context, task: DecisionTask, observation: native.Observation
