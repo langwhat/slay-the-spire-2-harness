@@ -35,18 +35,14 @@ from sts2_harness.user_input_values import UserInputSource
 _LOG = logging.getLogger(__name__)
 
 
-def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool) -> MaterialParts:
+def _system(prompts: PromptReader, *, viewer_input: bool) -> MaterialParts:
     blocks: list[MaterialText | str] = []
     names = (
-        ("minimal/combat",)
-        if minimal
-        else (
-            "combat-tasks",
-            "report-reader",
-            "combat-task-rules",
-            "projected-reader",
-            "combat-observations",
-        )
+        "combat-tasks",
+        "report-reader",
+        "combat-task-rules",
+        "projected-reader",
+        "combat-observations",
     )
     for name in (*names, *(("viewer-input",) if viewer_input else ())):
         if blocks:
@@ -87,7 +83,6 @@ class CombatAgent(Agent):
                 _system(
                     self._prompts,
                     viewer_input=self._user_input is not None,
-                    minimal=self._tools.minimal,
                 ),
             ),
         )

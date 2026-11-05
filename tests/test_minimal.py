@@ -94,7 +94,6 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
         for request in campaign.inputs:
             encoded = json.dumps(request)
             assert "Hidden initial strategy." not in encoded
-            assert "strategy_notes" not in encoded and "opening_notes" not in encoded
             assert "Synthetic automatic guidance." in encoded
             tools = request["tools"]
             assert isinstance(tools, list)
@@ -115,6 +114,7 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
             assert isinstance(content, str)
             task = json.loads(content)
             assert task["task"] == "act" and "observation" in task
+            assert "strategy_notes" not in task and "opening_notes" not in task
             assert "instruction" not in task
 
         first = campaign.inputs[0]["input"]

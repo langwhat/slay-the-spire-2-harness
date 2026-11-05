@@ -450,17 +450,13 @@ class RunAgent(Agent):
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
         blocks = (
-            (self._prompts.read("minimal/run"),)
-            if self._tools.minimal
-            else (
-                self._prompts.read("run-tasks"),
-                self._prompts.read("run-report-reader"),
-                self._prompts.read("run-task-rules"),
-                "\n",
-                self._prompts.read("run-projected-reader"),
-                "\n",
-                self._prompts.read("run-observations"),
-            )
+            self._prompts.read("run-tasks"),
+            self._prompts.read("run-report-reader"),
+            self._prompts.read("run-task-rules"),
+            "\n",
+            self._prompts.read("run-projected-reader"),
+            "\n",
+            self._prompts.read("run-observations"),
         )
         if self._user_input is not None:
             blocks += ("\n", self._prompts.read("viewer-input"))

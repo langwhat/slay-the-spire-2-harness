@@ -295,8 +295,8 @@ Add `--minimal` to `start` or `headless` for minimal gameplay, or set
 `STS2_MINIMAL=true` in `.env` or the process environment. As with other settings, `--set`
 overrides the process environment, which overrides `.env`; explicit `--minimal` takes
 precedence over all three. Use `--set STS2_MINIMAL=false` to disable an environment default.
-`check-config` reports the resolved mode. Minimal gameplay uses separate prompts
-under `prompts/minimal/`, removes knowledge/skill query and notes tools, and skips model
+`check-config` reports the resolved mode. Both modes use the same full gameplay prompts.
+Minimal gameplay removes knowledge/skill query and notes tools, and skips model
 battle reviews and standalone report-processing calls. Automatic knowledge injection,
 public inspections, route planning, and automatic progression remain available. Dialogue,
 reasoning, and observation updates stay append-only between the existing capacity-triggered
