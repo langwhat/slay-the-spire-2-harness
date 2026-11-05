@@ -291,6 +291,17 @@ admission, not the game's scene pause. Manual Pause retains the current session 
 After a terminal result the backend stays resident, waiting for a new user-started run.
 Every new run has fresh notes, contexts, recovery state, and an archive directory.
 
+Add `--minimal` to `start` or `headless` for minimal gameplay. It uses separate prompts
+under `prompts/minimal/`, removes knowledge/skill query and notes tools, and skips model
+battle reviews and standalone report-processing calls. Automatic knowledge injection,
+public inspections, route planning, and automatic progression remain available. Each new
+decision drops completed dialogue and reasoning, retaining current state and the active
+tool/correction chain. Failed or uncertain actions retain their feedback until corrected.
+Stable instructions and tools, plus append-only calls within a decision, preserve cache
+opportunities; changing the current-state baseline can reduce dynamic cache reuse.
+The archive records the mode so offline replay uses the same behavior. Ordinary gameplay
+and its prompts remain unchanged when the flag is absent.
+
 The default Mod URL is `http://127.0.0.1:17877`. Use `--mod-url URL` and `--output DIRECTORY`
 to override the connection and output directory; the default output directory is `runs`.
 `status.json` publishes the control endpoint, current lifecycle, identities, archive path,

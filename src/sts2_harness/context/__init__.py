@@ -149,8 +149,15 @@ def repeats_action_result(
 
 
 class Context:
-    def __init__(self, role: native.DecisionOwner, *, system: tuple[TextMessage, ...] = ()) -> None:
+    def __init__(
+        self,
+        role: native.DecisionOwner,
+        *,
+        system: tuple[TextMessage, ...] = (),
+        minimal: bool = False,
+    ) -> None:
         self._role = role
+        self._minimal = minimal
         self._history: list[TextMessage | AssistantMessage | ToolResultMessage] = list(system)
         self._system = system
         self._combat_delivery = RunDelivery(role=native.DecisionOwner.COMBAT)
@@ -221,7 +228,11 @@ class Context:
         self._group_number += 1
         delivery = deepcopy(self._delivery)
         known = set(delivery.catalog.values())
-        if self._role is native.DecisionOwner.RUN and delivery.scene is not None:
+        if (
+            self._role is native.DecisionOwner.RUN
+            and delivery.scene is not None
+            and not self._minimal
+        ):
             assert delivery.decision is not None
             wire: dict[str, JsonValue] = {"decision": delivery.decision}
         else:
@@ -264,6 +275,9 @@ class Context:
             tuple(self._guidance.values()),
             deepcopy(route_plan),
         )
+        if self._minimal:
+            self._last_group = None
+            self.install_compaction(self.compaction_candidate())
 
     def finish_group(self) -> None:
         if self._active_group is None:
@@ -305,8 +319,10 @@ class Context:
             observation["catalog_additions"] = profiles
         values: dict[str, JsonValue] = {"observation": observation}
         if self._role is native.DecisionOwner.RUN:
-            values.update(strategy_notes=group.notes, route_plan=group.route_plan)
-        else:
+            if not self._minimal:
+                values["strategy_notes"] = group.notes
+            values["route_plan"] = group.route_plan
+        elif not self._minimal:
             values["opening_notes"] = group.notes
         baseline: dict[str, JsonValue] = {"context_baseline": values}
         system_guidance = {

@@ -180,6 +180,7 @@ async def run_interactive(
                 recording_id = uuid4().hex
                 archive = directory / recording_id / "archive.sqlite"
                 manifest = Manifest(
+                    minimal=configuration.minimal,
                     capacity_policy=CapacityPolicy.for_configuration(model),
                     materials=materials.settings
                     if materials is not None

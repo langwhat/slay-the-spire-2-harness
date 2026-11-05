@@ -8,6 +8,7 @@ import signal
 import sys
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -113,6 +114,9 @@ def _build_parser() -> _Parser:
     )
     parser.add_argument("--ascension", type=int, default=0)
     parser.add_argument("--seed")
+    parser.add_argument(
+        "--minimal", action="store_true", help="Play with current decision context and fewer tools."
+    )
     parser.add_argument("--archive", type=Path)
     parser.add_argument(
         "--view", choices=["timeline", "operation", "model", "request"], default="timeline"
@@ -236,12 +240,18 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
     try:
         arguments = parser.parse_args(argv)
         command: str = arguments.command
+        minimal: bool = arguments.minimal
+        if minimal and command not in ("start", "headless"):
+            raise ConfigurationError("Minimal mode requires start or headless.")
         if command == "journal":
             return _inspect_evidence(arguments)
         # argparse is confined to this input boundary; extract concrete values immediately.
         env_file: str = arguments.env_file
         settings: list[str] = arguments.set
         config = load_configuration(Path(env_file), os.environ, _overrides(settings))
+        if minimal and config.driver is not Driver.BUILTIN:
+            raise ConfigurationError("Minimal mode requires builtin driving.")
+        config = replace(config, minimal=minimal)
         input_port: int | None = arguments.input_port if config.user_input else None
         if command == "headless":
             asyncio.run(_headless(_headless_options(arguments), config, materials, input_port))

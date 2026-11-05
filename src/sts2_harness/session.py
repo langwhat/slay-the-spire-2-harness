@@ -94,6 +94,7 @@ class RunSession:
                 self._combat,
                 new_run=self._new_run,
                 diagnostics=self._diagnostics,
+                minimal=self._manifest.minimal,
             )
         )
         return self
@@ -142,6 +143,7 @@ class RunSession:
             notes_write_guard=self._notes_write_guard,
             skills=self._dependencies.documents,
             supplements=self._dependencies.documents,
+            minimal=self._manifest.minimal,
         )
 
     async def _notes_write_guard(

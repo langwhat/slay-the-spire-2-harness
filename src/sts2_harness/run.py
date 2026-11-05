@@ -393,7 +393,10 @@ class RunAgent(Agent):
         if self._pending_auto is None:
             await super().accept(outcome)
             assert self._context is not None
-            self._context.finish_group()
+            if not self._tools.minimal or (
+                isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None
+            ):
+                self._context.finish_group()
             self._force_strategy = False
             return
         progress, before = self._pending_auto
@@ -412,7 +415,6 @@ class RunAgent(Agent):
         self._context.append_automatic(
             progress, outcome, invalidated=movement is MovementStatus.INVALIDATED
         )
-        self._context.finish_group()
         after = outcome.observation
         # Localized text changes alone cannot establish gameplay progress.
         self._force_strategy = (
@@ -421,6 +423,8 @@ class RunAgent(Agent):
             or after.game_language != before.game_language
             or after.model_copy(update={"stamp": before.stamp}) == before
         )
+        if not self._tools.minimal or not self._force_strategy:
+            self._context.finish_group()
         self._pending_auto = None
 
     async def enter_act(self, start: ActStart) -> None:
@@ -450,7 +454,7 @@ class RunAgent(Agent):
         return await super()._prepare(observation)
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
-        blocks = (
+        blocks = (self._prompts.read("minimal/run"),) if self._tools.minimal else (
             self._prompts.read("run-tasks"),
             self._prompts.read("run-report-reader"),
             self._prompts.read("run-task-rules"),
@@ -458,17 +462,20 @@ class RunAgent(Agent):
             self._prompts.read("run-projected-reader"),
             "\n",
             self._prompts.read("run-observations"),
-            *(("\n", self._prompts.read("viewer-input")) if self._user_input is not None else ()),
         )
+        if self._user_input is not None:
+            blocks += ("\n", self._prompts.read("viewer-input"))
         system = (TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),)
         if documents:
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
-        return Context(native.DecisionOwner.RUN, system=system)
+        return Context(native.DecisionOwner.RUN, system=system, minimal=self._tools.minimal)
 
     def _append_task(
         self, context: Context, task: DecisionTask, observation: native.Observation
     ) -> None:
-        notes = self._notes.read() if not self._notes_delivered else MISSING
+        notes = (
+            self._notes.read() if not self._notes_delivered and not self._tools.minimal else MISSING
+        )
         if isinstance(task, HandoffTask):
             context.append_task(RunHandoffInput(task.handoff, notes))
         elif isinstance(task, ActTask):

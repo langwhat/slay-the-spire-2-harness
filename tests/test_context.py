@@ -2,7 +2,7 @@ import asyncio
 from types import MappingProxyType
 
 import httpx2 as httpx
-from pydantic import MISSING
+from pydantic import MISSING, JsonValue
 from test_mod_client import COMBAT, RUN
 
 from sts2_harness.client import ModClient
@@ -810,6 +810,144 @@ def test_run_compaction_candidate_uses_prior_group_baseline_and_keeps_active_que
         "a1",
         "q1",
     ]
+
+
+def test_minimal_context_discards_completed_decision_and_delivers_current_task() -> None:
+    import json
+
+    observation = Observation.model_validate_json(COMBAT)
+    card = observation.objects["c1"]
+    assert isinstance(card, CardEntry)
+    upgraded = observation.model_copy(
+        update={"objects": {**observation.objects, "c1": card.model_copy(update={"upgrades": 1})}}
+    )
+    context = Context(DecisionOwner.COMBAT, minimal=True)
+    context.begin_group(observation, "Opening notes must not be delivered")
+    context.append_task(CombatActInput(), observation)
+    context.append_correction("Old decision reasoning")
+    context.append_reply(
+        AssistantMessage(
+            ResponsesReply.from_json(
+                '[{"type":"function_call","call_id":"a1","name":"combat_act","arguments":"{}"}]'
+            )
+        )
+    )
+    context.append_tool_result(
+        ToolCall("a1", "combat_act", "{}"),
+        ActionToolResult(ActionCompleted(completed_steps=1), upgraded),
+    )
+    context.finish_group()
+    context.begin_group(upgraded, "Opening notes must not be delivered")
+    context.append_task(CombatActInput(), upgraded)
+
+    messages = context.model_input()
+    assert all("Old decision reasoning" not in message.text for message in messages)
+    assert not any(
+        isinstance(message, (AssistantMessage, RunResultMessage)) for message in messages
+    )
+    assert isinstance(messages[-1], TaskMessage)
+    assert isinstance(messages[-1].content, ActContent)
+    baseline = json.loads(messages[0].text)["context_baseline"]
+    assert "opening_notes" not in baseline
+    binding = next(
+        item for item in baseline["observation"]["scene"]["bindings"] if item["ref"] == "c1"
+    )
+    profile = baseline["observation"]["catalog_additions"][binding["profile"]]
+    assert profile["content"]["upgrades"] == 1
+    context.validate_compaction(context.compaction_candidate())
+
+
+def test_minimal_run_context_keeps_active_queries_guidance_and_route_plan() -> None:
+    import json
+
+    from sts2_harness.knowledge import DocumentView
+    from sts2_harness.material_text import MaterialText
+
+    observation = Observation.model_validate_json(RUN)
+    context = Context(DecisionOwner.RUN, minimal=True)
+    guidance = DocumentView(
+        id="automatic:current-act",
+        name=MaterialText.create("automatic:name", "Current act guidance"),
+        text=MaterialText.create("automatic:text", "Keep this automatic guidance."),
+        resources=(),
+    )
+    context.append_materials((guidance,))
+    plan: JsonValue = {"reason": "Reach a rest site", "edges": [{"from": "n1", "to": "n2"}]}
+    context.begin_group(observation, "Notes must not be delivered", plan)
+    context.append_task(RunActInput(), observation)
+    first = context.model_input()
+    context.append_reply(
+        AssistantMessage(
+            ResponsesReply.from_json(
+                '[{"type":"function_call","call_id":"q1","name":"run_inspect","arguments":"{}"}]'
+            )
+        )
+    )
+    context.append_tool_result(
+        ToolCall("q1", "run_inspect", "{}"),
+        QueryToolResult(
+            Failed(
+                reason=Reason(code=ReasonCode.QUERY_FAILED, message="Current query failed"),
+                suggested_actions=(Suggestion(message="Inspect again if needed."),),
+            ),
+            observation,
+        ),
+    )
+    continuing = context.model_input()
+    context.begin_group(observation, "Different notes", None)
+    context.append_task(RunActInput(), observation)
+    assert context.model_input()[: len(continuing)] == continuing
+    assert continuing[: len(first)] == first
+    assert "Current query failed" in continuing[-1].text
+    context.validate_compaction(context.compaction_candidate())
+
+    context.finish_group()
+    context.begin_group(observation, "Notes must not be delivered", plan)
+    context.append_task(RunActInput(), observation)
+    messages = context.model_input()
+    baseline = next(
+        json.loads(message.text)["context_baseline"]
+        for message in messages
+        if '"context_baseline"' in message.text
+    )
+    assert baseline["route_plan"] == plan
+    assert "strategy_notes" not in baseline
+    assert any("Keep this automatic guidance." in message.text for message in messages)
+    assert all("Current query failed" not in message.text for message in messages)
+    assert isinstance(messages[-1], TaskMessage)
+    context.validate_compaction(context.compaction_candidate())
+
+
+def test_minimal_run_decision_starts_from_current_node_instead_of_previous_node() -> None:
+    import json
+
+    observation = Observation.model_validate_json(RUN)
+    assert isinstance(observation.state, RunState)
+    changed = observation.model_copy(
+        update={
+            "location": observation.location.model_copy(update={"node_id": "next-node"}),
+            "state": observation.state.model_copy(
+                update={"player": observation.state.player.model_copy(update={"gold": 23})}
+            ),
+        }
+    )
+    context = Context(DecisionOwner.RUN, minimal=True)
+    context.begin_group(observation, "")
+    context.append_task(RunActInput(), observation)
+    context.finish_group()
+    context.begin_group(changed, "")
+    context.append_task(RunActInput(), changed)
+
+    messages = context.model_input()
+    baseline = json.loads(messages[0].text)["context_baseline"]["observation"]
+    assert baseline["scene"]["node_id"] == "next-node"
+    assert baseline["current"]["player"]["gold"] == 23
+    task = messages[-1]
+    assert isinstance(task, TaskMessage)
+    assert isinstance(task.content, RunActContent)
+    assert task.content.observation.scene is MISSING
+    assert task.content.observation.current is MISSING
+    context.validate_compaction(context.compaction_candidate())
 
 
 def test_run_compaction_retains_historical_profile_and_later_upgrade() -> None:

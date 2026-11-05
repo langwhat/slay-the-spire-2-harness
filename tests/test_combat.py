@@ -357,6 +357,7 @@ class BattleHTTP:
         materials: MaterialReader | None = None,
         source: DecisionSource | None = None,
         protocol: Protocol = Protocol.RESPONSES,
+        minimal: bool = False,
     ) -> CombatHandoff | RunEnded:
         async with ModClient("http://mod", transport=httpx.MockTransport(self.mod)) as client:
             assert self.opening.location.run_id is not None
@@ -379,6 +380,7 @@ class BattleHTTP:
                 observe=execution.observe,
                 inspect=execution.inspect,
                 catalog=execution.catalog,
+                minimal=minimal,
             )
             async with Llm(
                 configuration(tmp_path, LLM_PROTOCOL=protocol.value),
@@ -387,7 +389,9 @@ class BattleHTTP:
                 role = source or CombatAgent(
                     llm, tools, self.budget, opening_notes="Opening notes.", materials=materials
                 )
-                return await CombatTask(execution, role, self.opening, self.budget).run()
+                return await CombatTask(
+                    execution, role, self.opening, self.budget, minimal=minimal
+                ).run()
 
 
 def test_reply_protocol_closes_all_calls_and_resets_query_recovery(tmp_path: Path) -> None:

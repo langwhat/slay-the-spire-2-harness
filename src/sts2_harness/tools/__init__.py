@@ -126,10 +126,12 @@ class ToolCatalog:
         query_view: QueryView = QueryView.ROLE,
         notes_write_guard: Callable[[native.Observation | None], Awaitable[QueryToolResult | None]]
         | None = None,
+        minimal: bool = False,
     ) -> None:
         if role is native.DecisionOwner.RUN and notes is None:
             raise ValueError("Run tools require the run's notes owner.")
         self._notes_owner = notes
+        self.minimal = minimal
         self._query_view = query_view
         self._notes_write_guard = notes_write_guard
         self.action_name = (
@@ -163,6 +165,18 @@ class ToolCatalog:
             )
             for item in DEFINITIONS
             if item.name.startswith(role.value + "_")
+            and (
+                not minimal
+                or ToolName(item.name)
+                in {
+                    ToolName.RUN_ACT,
+                    ToolName.RUN_PLAN,
+                    ToolName.RUN_NEXT,
+                    ToolName.RUN_INSPECT,
+                    ToolName.COMBAT_ACT,
+                    ToolName.COMBAT_INSPECT,
+                }
+            )
         )
         self._names = frozenset(item.name for item in self.definitions)
 

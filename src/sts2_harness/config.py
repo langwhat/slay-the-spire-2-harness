@@ -63,6 +63,7 @@ class Configuration:
     driver: Driver
     model: ModelConfiguration | None
     user_input: bool = False
+    minimal: bool = False
 
 
 _KEYS = frozenset(

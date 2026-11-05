@@ -64,6 +64,26 @@ def test_external_without_credentials(tmp_path: Path) -> None:
     assert json.loads(result.stdout) == {"driver": "external", "model_configured": False}
 
 
+def test_minimal_flag_requires_builtin_gameplay_startup(tmp_path: Path) -> None:
+    external = cli(tmp_path, "start", "--minimal", "--set", "STS2_DRIVER=external")
+    assert external.returncode == 2
+    assert "Minimal mode requires builtin driving." in external.stderr
+    check = cli(tmp_path, "check-config", "--minimal")
+    assert check.returncode == 2
+    assert "Minimal mode requires start or headless." in check.stderr
+    headless = cli(
+        tmp_path,
+        "headless",
+        "--minimal",
+        "--set",
+        "LLM_MODEL=fake",
+        "--set",
+        "LLM_AUTH=none",
+    )
+    assert headless.returncode == 2
+    assert "Headless startup requires --game and --template." in headless.stderr
+
+
 @pytest.mark.parametrize("protocol", list(Protocol))
 @pytest.mark.parametrize("auth", list(AuthKind))
 def test_protocol_authentication_and_defaults(

@@ -145,7 +145,7 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[12] = 12
+    schema_version: Literal[13] = 13
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -155,6 +155,7 @@ class Manifest(native.WireModel):
     run_id: str
     materials: SessionMaterials
     capacity_policy: CapacityPolicy = CapacityPolicy()
+    minimal: bool = False
     seed: str | None = None
     template: str | None = None
     initial_notes: str | None = None

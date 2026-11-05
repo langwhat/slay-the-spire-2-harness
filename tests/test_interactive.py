@@ -114,7 +114,10 @@ def ready_run() -> native.Observation:
     return native.Observation.model_validate_json(json.dumps(value))
 
 
-def test_resident_process_waits_for_start_and_isolates_new_runs(tmp_path: Path) -> None:
+@pytest.mark.parametrize("minimal", [False, True])
+def test_resident_process_waits_for_start_and_isolates_new_runs(
+    tmp_path: Path, minimal: bool
+) -> None:
     from sts2_harness.interactive import InteractiveOptions, run_interactive
 
     stop = asyncio.Event()
@@ -129,7 +132,7 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(tmp_path: Path) 
     inputs: list[dict[str, JsonValue]] = []
     manifests: list[Manifest] = []
     sessions: list[RunSession] = []
-    process_configuration = Configuration(Driver.BUILTIN, configuration(tmp_path))
+    process_configuration = Configuration(Driver.BUILTIN, configuration(tmp_path), minimal=minimal)
 
     def mod(request: httpx.Request) -> httpx.Response:
         nonlocal connected, control, pause_writes, observation
@@ -276,7 +279,8 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(tmp_path: Path) 
     for path in archives:
         archive = Journal.open(path)
         assert archive.manifest.initial_notes == ""
-        assert archive.manifest.schema_version == 12
+        assert archive.manifest.schema_version == 13
+        assert archive.manifest.minimal is minimal
         assert archive.operations()[0].request.kind.value == "pause"
         assert archive.gaps == ()
         archive.close()

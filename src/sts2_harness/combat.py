@@ -28,23 +28,23 @@ from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.prompts import PackagedPrompts, PromptReader
-from sts2_harness.results import ActionToolResult, Reason, ReasonCode
+from sts2_harness.results import ActionCompleted, ActionToolResult, Reason, ReasonCode
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input_values import UserInputSource
 
 _LOG = logging.getLogger(__name__)
 
 
-def _system(prompts: PromptReader, *, viewer_input: bool) -> MaterialParts:
+def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool) -> MaterialParts:
     blocks: list[MaterialText | str] = []
-    for name in (
+    names = ("minimal/combat",) if minimal else (
         "combat-tasks",
         "report-reader",
         "combat-task-rules",
         "projected-reader",
         "combat-observations",
-        *(("viewer-input",) if viewer_input else ()),
-    ):
+    )
+    for name in (*names, *(("viewer-input",) if viewer_input else ())):
         if blocks:
             blocks.append("\n")
         blocks.append(prompts.read(name))
@@ -79,12 +79,17 @@ class CombatAgent(Agent):
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
         system = (
             TextMessage(
-                TextRole.SYSTEM, _system(self._prompts, viewer_input=self._user_input is not None)
+                TextRole.SYSTEM,
+                _system(
+                    self._prompts,
+                    viewer_input=self._user_input is not None,
+                    minimal=self._tools.minimal,
+                ),
             ),
         )
         if documents:
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
-        return Context(native.DecisionOwner.COMBAT, system=system)
+        return Context(native.DecisionOwner.COMBAT, system=system, minimal=self._tools.minimal)
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         decision = await super().decide(task, observation)
@@ -96,12 +101,15 @@ class CombatAgent(Agent):
     async def accept(self, outcome: ActionToolResult) -> None:
         await super().accept(outcome)
         assert self._context is not None
-        self._context.finish_group()
+        if not self._tools.minimal or (
+            isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None
+        ):
+            self._context.finish_group()
 
     def _append_task(
         self, context: Context, task: DecisionTask, observation: native.Observation
     ) -> None:
-        context.begin_group(observation, self._opening_notes)
+        context.begin_group(observation, "" if self._tools.minimal else self._opening_notes)
         if isinstance(task, ReviewTask):
             context.append_task(CombatReviewInput(task.report))
             return
@@ -109,7 +117,9 @@ class CombatAgent(Agent):
             raise TypeError("Combat accepts action and review tasks only.")
         context.append_task(
             CombatActInput(
-                self._opening_notes if not self._opening_delivered else MISSING,
+                self._opening_notes
+                if not self._opening_delivered and not self._tools.minimal
+                else MISSING,
             ),
             observation,
         )
@@ -125,6 +135,7 @@ class CombatTask:
         recovery: ToolRecoveryBudget,
         *,
         diagnostics: Diagnostics | None = None,
+        minimal: bool = False,
     ) -> None:
         self._diagnostics = diagnostics
         if not isinstance(opening.state, native.CombatState):
@@ -135,6 +146,7 @@ class CombatTask:
         self._last = opening
         self._last_turn = opening.state.turn
         self._recovery = recovery
+        self._minimal = minimal
 
     def _same_run(self, location: native.Location) -> bool:
         return (
@@ -250,6 +262,8 @@ class CombatTask:
                 if battle_finished:
                     break
             report = self._report()
+            if self._minimal:
+                return CombatHandoff(report)
             while True:
                 reviewed = await self._execution.run_unit(self._role, ReviewTask(report))
                 if isinstance(reviewed, TaskComplete):

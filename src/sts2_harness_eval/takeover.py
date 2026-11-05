@@ -421,6 +421,7 @@ class _Takeover:
                 initial=initial,
             )
             manifest = Manifest(
+                minimal=plan.manifest.minimal,
                 capacity_policy=self.model.capacity_policy,
                 recording_id=uuid4().hex,
                 core_version="0.1.0",

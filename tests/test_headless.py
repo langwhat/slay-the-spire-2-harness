@@ -258,7 +258,7 @@ def test_headless_owns_two_concurrent_children_and_runs_one_session_each(tmp_pat
                             seed=f"SEED{index}",
                         ),
                     ),
-                    Configuration(Driver.BUILTIN, configuration(tmp_path)),
+                    Configuration(Driver.BUILTIN, configuration(tmp_path), minimal=bool(index)),
                     stop_requested=asyncio.Event(),
                     session_factory=session,
                 )
@@ -278,6 +278,7 @@ def test_headless_owns_two_concurrent_children_and_runs_one_session_each(tmp_pat
         assert reader.gaps == ()
         assert reader.manifest.initial_notes == ""
         assert reader.manifest.headless is not None
+        assert reader.manifest.minimal is bool(reader.manifest.headless.requested_ascension)
         assert reader.manifest.headless.initial_control.mode.value == "running"
         opening = json.loads((archive.parent / "initial-observation.json").read_text())
         assert opening["input_readiness"] == "ready"

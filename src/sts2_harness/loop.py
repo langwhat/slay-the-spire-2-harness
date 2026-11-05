@@ -38,6 +38,7 @@ class DefaultFlow:
         *,
         new_run: Callable[[], RunRole],
         diagnostics: Diagnostics | None = None,
+        minimal: bool = False,
     ) -> None:
         self._diagnostics = diagnostics
         self._active_role: native.DecisionOwner | None = None
@@ -50,6 +51,7 @@ class DefaultFlow:
         self._initialized = False
         self._act: int | None = None
         self._pending: CombatHandoff | None = None
+        self._minimal = minimal
 
     def _enter_role(self, role: native.DecisionOwner) -> None:
         if self._active_role is role:
@@ -110,15 +112,18 @@ class DefaultFlow:
                     self._act = act
                     self._initialized = True
                 if observation.location.owner is native.DecisionOwner.COMBAT:
-                    if self._pending is None:
+                    if self._pending is None or self._minimal:
                         self._enter_role(native.DecisionOwner.COMBAT)
-                        role = self._combat(observation, self._notes.read())
+                        role = self._combat(
+                            observation, "" if self._minimal else self._notes.read()
+                        )
                         result = await CombatTask(
                             self._execution,
                             role,
                             observation,
                             self._recovery,
                             diagnostics=self._diagnostics,
+                            minimal=self._minimal,
                         ).run()
                         if isinstance(result, RunEnded):
                             return result

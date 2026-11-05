@@ -349,8 +349,9 @@ def test_mechanical_rules_use_verified_languages_and_keep_event_choices_for_stra
 
 
 @pytest.mark.parametrize("outcome", ["failed", "unknown", "nonprogress", "locale"])
+@pytest.mark.parametrize("minimal", [False, True])
 def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_request(
-    tmp_path: Path, outcome: str
+    tmp_path: Path, outcome: str, minimal: bool
 ) -> None:
     from sts2_harness.journal_models import AutomaticSnapshot
     from sts2_harness.results import ActionCompleted, ActionStopped, ActionUnknown
@@ -451,6 +452,7 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
                     entry_documents_enabled=False, act_guidance={}, battle_guidance=()
                 ),
                 recording_id="force",
+                minimal=minimal,
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",

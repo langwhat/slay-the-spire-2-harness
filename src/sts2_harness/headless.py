@@ -626,6 +626,7 @@ async def run_headless(
             run_id = instance.opening.location.run_id
             assert run_id is not None
             manifest = Manifest(
+                minimal=configuration.minimal,
                 capacity_policy=CapacityPolicy.for_configuration(model),
                 materials=materials.settings
                 if materials is not None
