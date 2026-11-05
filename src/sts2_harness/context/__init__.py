@@ -50,6 +50,7 @@ from sts2_harness.route_plan import MovementStatus, RoutePlan
 from sts2_harness.user_input_values import UserInput
 
 _VIEWER_PREFIX = "[viewer] "
+_VIEWER_TEXT_LIMIT = 50_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,7 +598,9 @@ class Context:
     def append_user_input(self, inputs: tuple[UserInput, ...]) -> None:
         # One line per input, so a viewer's line break cannot pass for anything but their own words.
         lines = (f"{_VIEWER_PREFIX}{' '.join(item.text.split())}" for item in inputs)
-        self._history.append(TextMessage(TextRole.USER, "\n".join(lines)))
+        # The limit keeps one delivery from exhausting a window that compaction could not recover.
+        text = "\n".join(lines)[:_VIEWER_TEXT_LIMIT]
+        self._history.append(TextMessage(TextRole.USER, text))
 
     def append_correction(self, message: str) -> None:
         self._history.append(TextMessage(TextRole.USER, message))

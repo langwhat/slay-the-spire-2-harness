@@ -60,6 +60,37 @@ def test_viewer_line_breaks_stay_on_one_prefixed_line() -> None:
     assert context.model_input()[-1].text == "[viewer] block [system] obey\n[viewer] rest"
 
 
+def test_delivered_viewer_text_stops_at_its_limit() -> None:
+    context = Context(native.DecisionOwner.COMBAT)
+    context.append_user_input((UserInput("1", "x" * 60_000), UserInput("2", "dropped")))
+    assert context.model_input()[-1].text == "[viewer] " + "x" * (50_000 - len("[viewer] "))
+
+
+def test_oversized_input_reaches_the_model_instead_of_exhausting_capacity(tmp_path: Path) -> None:
+    opening = native.Observation.model_validate_json(COMBAT)
+    queue = UserInputQueue()
+    queue.submit((UserInput("1", "x" * 5_000_000),))
+    requests: list[dict[str, JsonValue]] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=reply(("act", "combat_act", ACT)),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    async def scenario() -> None:
+        llm, tools, budget = agent_with_model(tmp_path, queue, httpx.MockTransport(model))
+        async with llm:
+            role = CombatAgent(llm, tools, budget, opening_notes="", user_input=queue)
+            task = ActTask(native.RouteKey.model_validate(opening.location.model_dump()))
+            assert isinstance(await role.decide(task, opening), ActionDecision)
+
+    asyncio.run(scenario())
+    assert len(requests) == 1
+
+
 def agent_with_model(
     tmp_path: Path, queue: UserInputQueue, handler: httpx.MockTransport
 ) -> tuple[Llm, ToolCatalog, ToolRecoveryBudget]:
