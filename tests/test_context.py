@@ -1,4 +1,5 @@
 import asyncio
+from os.path import commonprefix
 from types import MappingProxyType
 
 import httpx2 as httpx
@@ -826,6 +827,77 @@ def test_minimal_context_preserves_identical_baseline_for_unchanged_state() -> N
         context.begin_group(observation, "")
         context.append_task(task, observation)
         assert context.model_input()[0].text == first
+
+
+def test_baseline_preserves_static_descriptions_before_changing_combat_state() -> None:
+    import json
+
+    observation = Observation.model_validate_json(COMBAT)
+    assert isinstance(observation.state, CombatState)
+    changed = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(
+                update={
+                    "turn": 2,
+                    "player": observation.state.player.model_copy(update={"hp": 8}),
+                    "enemies": tuple(
+                        enemy.model_copy(update={"block": 1}) for enemy in observation.state.enemies
+                    ),
+                }
+            )
+        }
+    )
+    for minimal in (False, True):
+        baselines: list[str] = []
+        for current in (observation, changed):
+            context = Context(DecisionOwner.COMBAT, minimal=minimal)
+            context.begin_group(current, "")
+            context.append_task(CombatActInput(), current)
+            candidate, baseline = context.compaction_input()
+            context.validate_compaction(candidate)
+            context.install_compaction(candidate)
+            baselines.append(baseline.text)
+        shared = commonprefix(baselines)
+        assert "造成3点伤害。" in shared
+        assert "附魔说明" in shared
+        assert '"deck"' in shared
+        assert '"inventory"' in shared
+        before, after = (json.loads(text)["context_baseline"]["observation"] for text in baselines)
+        assert before["current"]["player"]["hp"] == 10
+        assert after["current"]["player"]["hp"] == 8
+        assert after["current"]["actors"]["enemies"][0]["block"] == 1
+
+
+def test_baseline_preserves_map_prefix_across_run_scene_changes() -> None:
+    import json
+
+    combat = Observation.model_validate_json(COMBAT)
+    observation = Observation.model_validate_json(RUN).model_copy(update={"map": combat.map})
+    assert isinstance(observation.state, RunState)
+    changed = observation.model_copy(
+        update={
+            "location": observation.location.model_copy(update={"node_id": "next-node"}),
+            "state": observation.state.model_copy(
+                update={"player": observation.state.player.model_copy(update={"gold": 90})}
+            ),
+        }
+    )
+    for minimal in (False, True):
+        baselines: list[str] = []
+        for current in (observation, changed):
+            context = Context(DecisionOwner.RUN, minimal=minimal)
+            context.begin_group(current, "")
+            context.append_task(RunActInput(), current)
+            candidate, baseline = context.compaction_input()
+            context.validate_compaction(candidate)
+            baselines.append(baseline.text)
+        shared = commonprefix(baselines)
+        assert "ENCOUNTER.BOSS" in shared
+        assert '"map_topology"' in shared
+        before, after = (json.loads(text)["context_baseline"]["observation"] for text in baselines)
+        assert before["scene"]["node_id"] == "node"
+        assert after["scene"]["node_id"] == "next-node"
+        assert after["current"]["player"]["gold"] == 90
 
 
 def test_minimal_context_discards_completed_decision_and_delivers_current_task() -> None:

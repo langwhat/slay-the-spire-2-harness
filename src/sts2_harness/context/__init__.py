@@ -94,6 +94,36 @@ def _rename_profiles(value: JsonValue, names: dict[str, str]) -> JsonValue:
 
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+_BASELINE_FIELDS: dict[str, tuple[str, ...]] = {
+    "observation": ("current", "catalog_additions", "scene", "decision"),
+    "current": (
+        "map_topology",
+        "dynamic_map",
+        "encounter",
+        "progress",
+        "inventory",
+        "deck",
+        "noncard_objects",
+        "upgrades",
+        "modifier_descriptions",
+        "object_descriptions",
+        "card_descriptions",
+        "generated",
+        "mechanisms",
+    ),
+}
+
+
+def _baseline_order(value: JsonValue, section: str = "") -> JsonValue:
+    if isinstance(value, list):
+        return [_baseline_order(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    # Stable state sections precede live state; all other object keys stay deterministic.
+    preferred = _BASELINE_FIELDS.get(section, ())
+    keys = [key for key in preferred if key in value]
+    keys.extend(key for key in sorted(value) if key not in preferred)
+    return {key: _baseline_order(value[key], key) for key in keys}
 
 
 def _message_observation(
@@ -344,7 +374,7 @@ class Context:
         )
         baseline_message = TextMessage(
             TextRole.USER,
-            json.dumps(baseline, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+            json.dumps(_baseline_order(baseline), ensure_ascii=False, separators=(",", ":")),
         )
         candidate: ModelInput = (*self._system, *prefix, baseline_message, *retained)
         return candidate, baseline_message
