@@ -258,11 +258,7 @@ class Context:
         self._group_number += 1
         delivery = deepcopy(self._delivery)
         known = set(delivery.catalog.values())
-        if (
-            self._role is native.DecisionOwner.RUN
-            and delivery.scene is not None
-            and not self._minimal
-        ):
+        if self._role is native.DecisionOwner.RUN and delivery.scene is not None:
             assert delivery.decision is not None
             wire: dict[str, JsonValue] = {"decision": delivery.decision}
         else:
@@ -305,9 +301,6 @@ class Context:
             tuple(self._guidance.values()),
             deepcopy(route_plan),
         )
-        if self._minimal:
-            self._last_group = None
-            self.install_compaction(self.compaction_candidate())
 
     def finish_group(self) -> None:
         if self._active_group is None:

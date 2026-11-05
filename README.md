@@ -298,11 +298,12 @@ precedence over all three. Use `--set STS2_MINIMAL=false` to disable an environm
 `check-config` reports the resolved mode. Minimal gameplay uses separate prompts
 under `prompts/minimal/`, removes knowledge/skill query and notes tools, and skips model
 battle reviews and standalone report-processing calls. Automatic knowledge injection,
-public inspections, route planning, and automatic progression remain available. Each new
-decision drops completed dialogue and reasoning, retaining current state and the active
-tool/correction chain. Failed or uncertain actions retain their feedback until corrected.
-Stable instructions and tools, plus append-only calls within a decision, preserve cache
-opportunities; changing the current-state baseline can reduce dynamic cache reuse.
+public inspections, route planning, and automatic progression remain available. Dialogue,
+reasoning, and observation updates stay append-only between the existing capacity-triggered
+compactions, preserving opportunities to reuse cached prefixes. Run context lasts one act
+and Combat context lasts one battle. Failed or uncertain actions retain their feedback
+until corrected. Minimal gameplay targets lower total usage cost; fewer input tokens alone
+do not establish savings when cached input is discounted.
 The archive records the mode so offline replay uses the same behavior. Ordinary gameplay
 and its prompts remain unchanged when minimal gameplay is disabled (the default).
 

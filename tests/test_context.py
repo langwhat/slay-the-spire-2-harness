@@ -813,7 +813,7 @@ def test_run_compaction_candidate_uses_prior_group_baseline_and_keeps_active_que
     ]
 
 
-def test_minimal_context_preserves_identical_baseline_for_unchanged_state() -> None:
+def test_minimal_context_reuses_unchanged_task_without_rewriting_history() -> None:
     for role, source, task in (
         (DecisionOwner.RUN, RUN, RunActInput()),
         (DecisionOwner.COMBAT, COMBAT, CombatActInput()),
@@ -822,11 +822,11 @@ def test_minimal_context_preserves_identical_baseline_for_unchanged_state() -> N
         context = Context(role, minimal=True)
         context.begin_group(observation, "")
         context.append_task(task, observation)
-        first = context.model_input()[0].text
+        first = context.model_input()
         context.finish_group()
         context.begin_group(observation, "")
         context.append_task(task, observation)
-        assert context.model_input()[0].text == first
+        assert context.model_input() == first
 
 
 def test_baseline_preserves_static_descriptions_before_changing_combat_state() -> None:
@@ -900,7 +900,7 @@ def test_baseline_preserves_map_prefix_across_run_scene_changes() -> None:
         assert after["current"]["player"]["gold"] == 90
 
 
-def test_minimal_context_discards_completed_decision_and_delivers_current_task() -> None:
+def test_minimal_context_retains_completed_decision_and_compacts_without_notes() -> None:
     import json
 
     observation = Observation.model_validate_json(COMBAT)
@@ -925,24 +925,27 @@ def test_minimal_context_discards_completed_decision_and_delivers_current_task()
         ActionToolResult(ActionCompleted(completed_steps=1), upgraded),
     )
     context.finish_group()
+    first = context.model_input()
     context.begin_group(upgraded, "Opening notes must not be delivered")
     context.append_task(CombatActInput(), upgraded)
 
     messages = context.model_input()
-    assert all("Old decision reasoning" not in message.text for message in messages)
-    assert not any(
-        isinstance(message, (AssistantMessage, RunResultMessage)) for message in messages
-    )
-    assert isinstance(messages[-1], TaskMessage)
-    assert isinstance(messages[-1].content, ActContent)
-    baseline = json.loads(messages[0].text)["context_baseline"]
+    assert messages[: len(first)] == first
+    assert any("Old decision reasoning" in message.text for message in messages)
+    assert any(isinstance(message, AssistantMessage) for message in messages)
+    assert isinstance(messages[-1], RunResultMessage)
+    assert messages[-1].source.observation == upgraded
+    candidate, baseline_message = context.compaction_input()
+    baseline = json.loads(baseline_message.text)["context_baseline"]
     assert "opening_notes" not in baseline
     binding = next(
         item for item in baseline["observation"]["scene"]["bindings"] if item["ref"] == "c1"
     )
     profile = baseline["observation"]["catalog_additions"][binding["profile"]]
-    assert profile["content"]["upgrades"] == 1
-    context.validate_compaction(context.compaction_candidate())
+    assert profile["content"]["upgrades"] == 0
+    context.validate_compaction(candidate)
+    context.install_compaction(candidate)
+    assert context.model_input()[-len(first) :] == first
 
 
 def test_minimal_run_context_keeps_active_queries_guidance_and_route_plan() -> None:
@@ -993,17 +996,17 @@ def test_minimal_run_context_keeps_active_queries_guidance_and_route_plan() -> N
     context.begin_group(observation, "Notes must not be delivered", plan)
     context.append_task(RunActInput(), observation)
     messages = context.model_input()
-    baseline = next(
-        json.loads(message.text)["context_baseline"]
-        for message in messages
-        if '"context_baseline"' in message.text
-    )
+    assert messages[: len(continuing)] == continuing
+    candidate, baseline_message = context.compaction_input()
+    baseline = json.loads(baseline_message.text)["context_baseline"]
     assert baseline["route_plan"] == plan
     assert "strategy_notes" not in baseline
     assert any("Keep this automatic guidance." in message.text for message in messages)
-    assert all("Current query failed" not in message.text for message in messages)
+    assert any("Current query failed" in message.text for message in messages)
     assert isinstance(messages[-1], TaskMessage)
-    context.validate_compaction(context.compaction_candidate())
+    context.validate_compaction(candidate)
+    context.install_compaction(candidate)
+    assert any("Keep this automatic guidance." in message.text for message in context.model_input())
 
 
 def test_minimal_run_decision_starts_from_current_node_instead_of_previous_node() -> None:
@@ -1023,18 +1026,18 @@ def test_minimal_run_decision_starts_from_current_node_instead_of_previous_node(
     context.begin_group(observation, "")
     context.append_task(RunActInput(), observation)
     context.finish_group()
+    first = context.model_input()
     context.begin_group(changed, "")
     context.append_task(RunActInput(), changed)
 
     messages = context.model_input()
-    baseline = json.loads(messages[0].text)["context_baseline"]["observation"]
-    assert baseline["scene"]["node_id"] == "next-node"
-    assert baseline["current"]["player"]["gold"] == 23
+    assert messages[: len(first)] == first
     task = messages[-1]
     assert isinstance(task, TaskMessage)
     assert isinstance(task.content, RunActContent)
-    assert task.content.observation.scene is MISSING
-    assert task.content.observation.current is MISSING
+    projected = json.loads(task.content.observation.to_json())
+    assert projected["scene"]["node_id"] == "next-node"
+    assert projected["current"]["player"]["gold"] == 23
     context.validate_compaction(context.compaction_candidate())
 
 

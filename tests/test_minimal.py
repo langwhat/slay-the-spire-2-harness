@@ -112,12 +112,17 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
         second = campaign.inputs[1]["input"]
         assert isinstance(first, list) and isinstance(second, list)
         assert second[: len(first)] == first
-        next_combat_decision = json.dumps(campaign.inputs[3]["input"])
-        assert '"call_id": "battle1"' not in next_combat_decision
-        after_battle = json.dumps(campaign.inputs[5 if consecutive else 4]["input"])
-        assert '"call_id": "plan"' not in after_battle
-        assert '"call_id": "travel"' not in after_battle
-        assert "battle_report" in after_battle and "route_plan" in after_battle
+        first_combat = campaign.inputs[2]["input"]
+        next_combat = campaign.inputs[3]["input"]
+        assert isinstance(first_combat, list) and isinstance(next_combat, list)
+        assert next_combat[: len(first_combat)] == first_combat
+        assert '"call_id": "battle1"' in json.dumps(next_combat)
+        after_battle = campaign.inputs[5 if consecutive else 4]["input"]
+        assert isinstance(after_battle, list)
+        assert after_battle[: len(second)] == second
+        text = json.dumps(after_battle)
+        assert '"call_id": "travel"' in text
+        assert "battle_report" in text
 
         archive = Journal.open(path)
         assert archive.manifest.minimal
@@ -184,8 +189,11 @@ def test_minimal_combat_keeps_uncertain_feedback_until_success(
         assert ("Unconfirmed." if unknown else "Dispatch failed.") in text
         assert '"call_id": "first"' in text
         after_success = json.dumps(battle.inputs[2]["input"])
-        assert "Synthetic current reasoning." not in after_success
-        assert '"call_id": "first"' not in after_success
-        assert '"call_id": "next"' not in after_success
+        assert "Synthetic current reasoning." in after_success
+        assert '"call_id": "first"' in after_success
+        assert '"call_id": "next"' in after_success
+        continued = battle.inputs[2]["input"]
+        assert isinstance(continued, list)
+        assert continued[: len(recovery)] == recovery
 
     asyncio.run(scenario())
