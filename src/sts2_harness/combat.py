@@ -35,7 +35,7 @@ from sts2_harness.user_input_values import UserInputSource
 _LOG = logging.getLogger(__name__)
 
 
-def _system(prompts: PromptReader) -> MaterialParts:
+def _system(prompts: PromptReader, *, viewer_input: bool) -> MaterialParts:
     blocks: list[MaterialText | str] = []
     for name in (
         "combat-tasks",
@@ -43,6 +43,7 @@ def _system(prompts: PromptReader) -> MaterialParts:
         "combat-task-rules",
         "projected-reader",
         "combat-observations",
+        *(("viewer-input",) if viewer_input else ()),
     ):
         if blocks:
             blocks.append("\n")
@@ -76,7 +77,11 @@ class CombatAgent(Agent):
         self._opening_delivered = False
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
-        system = (TextMessage(TextRole.SYSTEM, _system(self._prompts)),)
+        system = (
+            TextMessage(
+                TextRole.SYSTEM, _system(self._prompts, viewer_input=self._user_input is not None)
+            ),
+        )
         if documents:
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
         return Context(native.DecisionOwner.COMBAT, system=system)

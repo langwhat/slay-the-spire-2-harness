@@ -62,6 +62,7 @@ class ModelConfiguration:
 class Configuration:
     driver: Driver
     model: ModelConfiguration | None
+    user_input: bool = False
 
 
 _KEYS = frozenset(
@@ -114,7 +115,11 @@ def load_configuration(
     if any(binding.error for binding in parse_stream(StringIO(content))):
         raise ConfigurationError("Invalid syntax in the local defaults file.")
     defaults = dotenv_values(stream=StringIO(content), interpolate=False)
-    known_names = {"STS2_DRIVER", *(f"LLM_{key}" for key in _KEYS if key != "DRIVER")}
+    known_names = {
+        "STS2_DRIVER",
+        "STS2_USER_INPUT",
+        *(f"LLM_{key}" for key in _KEYS if key != "DRIVER"),
+    }
     if any(name.startswith(("LLM_", "STS2_")) and name not in known_names for name in defaults):
         raise ConfigurationError("Unknown setting name in the local defaults file.")
     values = {key: value for key, value in defaults.items() if value is not None}
@@ -132,7 +137,13 @@ def load_configuration(
         driver = Driver(get("DRIVER", Driver.BUILTIN))
     except ValueError:
         raise ConfigurationError("Invalid STS2_DRIVER; choose builtin or external.") from None
+    raw_user_input = values.get("STS2_USER_INPUT", "")
+    if raw_user_input not in ("", "true", "false"):
+        raise ConfigurationError("Invalid STS2_USER_INPUT; choose true or false.")
+    user_input = raw_user_input == "true"
     if driver is Driver.EXTERNAL:
+        if user_input:
+            raise ConfigurationError("User input requires builtin driving.")
         return Configuration(driver, None)
     try:
         protocol = Protocol(get("PROTOCOL", Protocol.RESPONSES))
@@ -210,6 +221,7 @@ def load_configuration(
             context_window,
             get("CAPACITY_VERIFIED_ENDPOINT"),
         ),
+        user_input,
     )
 
 

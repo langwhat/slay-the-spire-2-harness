@@ -458,6 +458,7 @@ class RunAgent(Agent):
             self._prompts.read("run-projected-reader"),
             "\n",
             self._prompts.read("run-observations"),
+            *(("\n", self._prompts.read("viewer-input")) if self._user_input is not None else ()),
         )
         system = (TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),)
         if documents:

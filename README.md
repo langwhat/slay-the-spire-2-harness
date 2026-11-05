@@ -43,6 +43,7 @@ names in the local file fail validation; unrelated process environment keys are 
 | Variable | Default / meaning |
 | --- | --- |
 | `STS2_DRIVER` | `builtin`; `external` needs no model configuration |
+| `STS2_USER_INPUT` | `false`; `true` enables [live user input](#live-user-input) |
 | `LLM_PROTOCOL` | `responses`; also `chat-completions`, `messages` |
 | `LLM_MODEL` | Required for builtin; configure once locally |
 | `LLM_BASE_URL` | `https://api.openai.com/v1`; Messages uses `https://api.anthropic.com` |
@@ -304,8 +305,10 @@ by the model adapter fail explicitly before connection.
 
 ## Live user input
 
-`--input-port PORT` lets `start` and `headless` accept live viewer input on `127.0.0.1:PORT`. It
-requires builtin driving and is off by default.
+`STS2_USER_INPUT=true` lets `start` and `headless` accept live viewer input on
+`127.0.0.1:17879` and adds the viewer rule to the Run and Combat system prompts; `--input-port PORT`
+selects another port. It requires builtin driving and is off by default, which leaves the prompts
+unchanged.
 
 `POST /inputs` with `{ "inputs": [{ "id": "...", "text": "..." }] }` appends to a memory-only FIFO,
 ignoring ids it has already seen. Input enters the current role's Context as `[viewer] text` lines
@@ -317,7 +320,8 @@ drops the rest.
 }`. A delivery means the input left the queue for a Context, not that all its text fit or that a
 model request succeeded. `instance`
 changes when the backend restarts, so clients can resubmit undelivered input. Runs that received
-input cannot be replayed offline without it.
+input cannot be replayed offline without it, and recordings made with the setting on carry the
+viewer rule.
 
 ## External gameplay tools
 

@@ -102,7 +102,7 @@ def _build_parser() -> _Parser:
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
     parser.add_argument("--mod-url", default="http://127.0.0.1:17877", metavar="URL")
     parser.add_argument("--tool-port", type=int, default=17878, metavar="PORT")
-    parser.add_argument("--input-port", type=int, metavar="PORT")
+    parser.add_argument("--input-port", type=int, default=17879, metavar="PORT")
     parser.add_argument("--output", type=Path, default=Path("runs"), metavar="DIRECTORY")
     parser.add_argument("--game", type=Path, metavar="EXECUTABLE")
     parser.add_argument("--template", type=Path, metavar="MANIFEST")
@@ -242,9 +242,7 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
         env_file: str = arguments.env_file
         settings: list[str] = arguments.set
         config = load_configuration(Path(env_file), os.environ, _overrides(settings))
-        input_port: int | None = arguments.input_port
-        if input_port is not None and config.driver is Driver.EXTERNAL:
-            raise ConfigurationError("User input requires builtin driving.")
+        input_port: int | None = arguments.input_port if config.user_input else None
         if command == "headless":
             asyncio.run(_headless(_headless_options(arguments), config, materials, input_port))
             return 0

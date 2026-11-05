@@ -6,12 +6,14 @@ import httpx2 as httpx
 import pytest
 from pydantic import JsonValue
 from test_combat import reply
-from test_mod_client import COMBAT
+from test_mod_client import COMBAT, RUN
 from test_responses import configuration
 
 from sts2_harness.cli import main
 from sts2_harness.client import models as native
+from sts2_harness.client.http import CatalogResult, InspectResult
 from sts2_harness.combat import CombatAgent
+from sts2_harness.config import ConfigurationError, load_configuration
 from sts2_harness.context import Context
 from sts2_harness.decisions import (
     ActionDecision,
@@ -24,7 +26,11 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.llm.client import Llm
-from sts2_harness.results import ActionCompleted, ActionToolResult, QueryToolResult, ReadCompleted
+from sts2_harness.material_text import MaterialText
+from sts2_harness.notes import Notes
+from sts2_harness.prompts import PackagedPrompts
+from sts2_harness.results import ActionCompleted, ActionToolResult
+from sts2_harness.run import ActStart, RunAgent
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input import UserInputQueue, create_input_app, serving_user_input
 from sts2_harness.user_input_values import UserInput
@@ -81,7 +87,7 @@ def test_oversized_input_reaches_the_model_instead_of_exhausting_capacity(tmp_pa
         )
 
     async def scenario() -> None:
-        llm, tools, budget = agent_with_model(tmp_path, queue, httpx.MockTransport(model))
+        llm, tools, budget = agent_with_model(tmp_path, httpx.MockTransport(model))
         async with llm:
             role = CombatAgent(llm, tools, budget, opening_notes="", user_input=queue)
             task = ActTask(native.RouteKey.model_validate(opening.location.model_dump()))
@@ -91,28 +97,33 @@ def test_oversized_input_reaches_the_model_instead_of_exhausting_capacity(tmp_pa
     assert len(requests) == 1
 
 
-def agent_with_model(
-    tmp_path: Path, queue: UserInputQueue, handler: httpx.MockTransport
-) -> tuple[Llm, ToolCatalog, ToolRecoveryBudget]:
-    opening = native.Observation.model_validate_json(COMBAT)
+UNAVAILABLE = native.TechnicalError(
+    status=native.ResultStatus.FAILED,
+    error=native.InternalError(code=native.ErrorCode.INTERNAL_ERROR, message="Unavailable."),
+)
 
+
+def tools_for(
+    owner: native.DecisionOwner, opening: native.Observation, notes: Notes | None = None
+) -> ToolCatalog:
     async def observe() -> native.Observation:
         return opening
 
-    async def inspect(*_: object) -> QueryToolResult:
-        return QueryToolResult(ReadCompleted(), opening)
+    async def inspect(_: native.InspectQuery) -> InspectResult:
+        return UNAVAILABLE
 
-    async def catalog(*_: object) -> QueryToolResult:
-        return QueryToolResult(ReadCompleted(), opening)
+    async def catalog(_: native.CatalogRequest) -> CatalogResult:
+        return UNAVAILABLE
 
+    return ToolCatalog(owner, notes=notes, observe=observe, inspect=inspect, catalog=catalog)
+
+
+def agent_with_model(
+    tmp_path: Path, handler: httpx.MockTransport
+) -> tuple[Llm, ToolCatalog, ToolRecoveryBudget]:
     return (
         Llm(configuration(tmp_path, LLM_EXTRA_RETRIES="1"), transport=handler, sleep=_no_sleep),
-        ToolCatalog(
-            native.DecisionOwner.COMBAT,
-            observe=observe,  # pyright: ignore[reportArgumentType]
-            inspect=inspect,  # pyright: ignore[reportArgumentType]
-            catalog=catalog,  # pyright: ignore[reportArgumentType]
-        ),
+        tools_for(native.DecisionOwner.COMBAT, native.Observation.model_validate_json(COMBAT)),
         ToolRecoveryBudget(),
     )
 
@@ -148,7 +159,7 @@ def test_input_enters_at_each_logical_request_and_retries_reuse_the_frozen_reque
         return httpx.Response(200, content=body, headers={"Content-Type": "text/event-stream"})
 
     async def scenario() -> None:
-        llm, tools, budget = agent_with_model(tmp_path, queue, httpx.MockTransport(model))
+        llm, tools, budget = agent_with_model(tmp_path, httpx.MockTransport(model))
         async with llm:
             role = CombatAgent(llm, tools, budget, opening_notes="", user_input=queue)
             decision = await role.decide(
@@ -180,7 +191,7 @@ def test_retrying_an_interrupted_task_does_not_repeat_it(tmp_path: Path) -> None
         )
 
     async def scenario() -> None:
-        llm, tools, budget = agent_with_model(tmp_path, queue, httpx.MockTransport(model))
+        llm, tools, budget = agent_with_model(tmp_path, httpx.MockTransport(model))
         async with llm:
             role = CombatAgent(llm, tools, budget, opening_notes="", user_input=queue)
             task = ActTask(native.RouteKey.model_validate(opening.location.model_dump()))
@@ -206,7 +217,7 @@ def test_closing_review_leaves_input_for_a_later_decision(tmp_path: Path) -> Non
         return httpx.Response(200, content=body, headers={"Content-Type": "text/event-stream"})
 
     async def scenario() -> None:
-        llm, tools, budget = agent_with_model(tmp_path, queue, httpx.MockTransport(model))
+        llm, tools, budget = agent_with_model(tmp_path, httpx.MockTransport(model))
         async with llm:
             role = CombatAgent(llm, tools, budget, opening_notes="", user_input=queue)
             await role.decide(
@@ -275,11 +286,100 @@ def test_user_input_requires_builtin_driving(
             "start",
             "--env-file",
             str(tmp_path / "absent"),
-            "--input-port",
-            "0",
+            "--set",
+            "STS2_USER_INPUT=true",
             "--set",
             "STS2_DRIVER=external",
         ]
     )
     assert status == 2
     assert "builtin" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("value", "enabled"), ((None, False), ("", False), ("false", False), ("true", True))
+)
+def test_user_input_setting_defaults_to_off(
+    tmp_path: Path, value: str | None, enabled: bool
+) -> None:
+    overrides = {"STS2_DRIVER": "builtin"} | ({} if value is None else {"STS2_USER_INPUT": value})
+    environment = {"LLM_MODEL": "model", "LLM_BASE_URL": "http://127.0.0.1:1", "LLM_AUTH": "none"}
+    config = load_configuration(tmp_path / "absent", environment, overrides)
+    assert config.user_input is enabled
+
+
+def test_invalid_user_input_setting_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="STS2_USER_INPUT"):
+        load_configuration(tmp_path / "absent", {"STS2_USER_INPUT": "on"}, {})
+
+
+_VIEWER_RULE = "viewer-rule-sentinel"
+
+
+class _ReadNames:
+    def __init__(self) -> None:
+        self.names: list[str] = []
+
+    def read(self, name: str) -> MaterialText:
+        self.names.append(name)
+        if name == "viewer-input":
+            return MaterialText.create("prompt:" + name, _VIEWER_RULE)
+        return PackagedPrompts().read(name)
+
+
+@pytest.mark.parametrize("enabled", (False, True))
+def test_run_reads_the_viewer_rule_only_with_a_user_input_source(
+    tmp_path: Path, enabled: bool
+) -> None:
+    opening = native.Observation.model_validate_json(RUN)
+
+    async def scenario() -> list[str]:
+        prompts = _ReadNames()
+        tools = tools_for(native.DecisionOwner.RUN, opening, Notes(""))
+        async with Llm(configuration(tmp_path)) as llm:
+            agent = RunAgent(
+                lambda: llm,
+                tools,
+                ToolRecoveryBudget(),
+                prompts=prompts,
+                user_input=UserInputQueue() if enabled else None,
+            )
+            await agent.enter_act(ActStart(opening))
+        return prompts.names
+
+    assert ("viewer-input" in asyncio.run(scenario())) is enabled
+
+
+@pytest.mark.parametrize("enabled", (False, True))
+def test_combat_request_carries_the_viewer_rule_only_with_a_user_input_source(
+    tmp_path: Path, enabled: bool
+) -> None:
+    opening = native.Observation.model_validate_json(COMBAT)
+
+    requests: list[dict[str, JsonValue]] = []
+
+    def model(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=reply(("act", "combat_act", ACT)),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    async def scenario() -> None:
+        prompts = _ReadNames()
+        llm, tools, budget = agent_with_model(tmp_path, httpx.MockTransport(model))
+        async with llm:
+            role = CombatAgent(
+                llm,
+                tools,
+                budget,
+                opening_notes="",
+                prompts=prompts,
+                user_input=UserInputQueue() if enabled else None,
+            )
+            task = ActTask(native.RouteKey.model_validate(opening.location.model_dump()))
+            await role.decide(task, opening)
+
+    asyncio.run(scenario())
+    assert (_VIEWER_RULE in json.dumps(requests[0])) is enabled
