@@ -8,7 +8,6 @@ import signal
 import sys
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
 
@@ -215,7 +214,11 @@ def _headless_options(arguments: argparse.Namespace) -> HeadlessOptions:
 def _print_configuration_summary(config: Configuration) -> None:
     model = config.model
     # Free-form model IDs, URLs, header names and values can all carry credentials.
-    summary = {"driver": config.driver.value, "model_configured": model is not None}
+    summary = {
+        "driver": config.driver.value,
+        "model_configured": model is not None,
+        "minimal": config.minimal,
+    }
     print(json.dumps(summary))
     if model is not None:
         print(
@@ -248,10 +251,10 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
         # argparse is confined to this input boundary; extract concrete values immediately.
         env_file: str = arguments.env_file
         settings: list[str] = arguments.set
-        config = load_configuration(Path(env_file), os.environ, _overrides(settings))
-        if minimal and config.driver is not Driver.BUILTIN:
-            raise ConfigurationError("Minimal mode requires builtin driving.")
-        config = replace(config, minimal=minimal)
+        overrides = _overrides(settings)
+        if minimal:
+            overrides["STS2_MINIMAL"] = "true"
+        config = load_configuration(Path(env_file), os.environ, overrides)
         input_port: int | None = arguments.input_port if config.user_input else None
         if command == "headless":
             asyncio.run(_headless(_headless_options(arguments), config, materials, input_port))

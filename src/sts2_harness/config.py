@@ -119,6 +119,7 @@ def load_configuration(
     known_names = {
         "STS2_DRIVER",
         "STS2_USER_INPUT",
+        "STS2_MINIMAL",
         *(f"LLM_{key}" for key in _KEYS if key != "DRIVER"),
     }
     if any(name.startswith(("LLM_", "STS2_")) and name not in known_names for name in defaults):
@@ -142,9 +143,15 @@ def load_configuration(
     if raw_user_input not in ("", "true", "false"):
         raise ConfigurationError("Invalid STS2_USER_INPUT; choose true or false.")
     user_input = raw_user_input == "true"
+    raw_minimal = values.get("STS2_MINIMAL", "")
+    if raw_minimal not in ("", "true", "false"):
+        raise ConfigurationError("Invalid STS2_MINIMAL; choose true or false.")
+    minimal = raw_minimal == "true"
     if driver is Driver.EXTERNAL:
         if user_input:
             raise ConfigurationError("User input requires builtin driving.")
+        if minimal:
+            raise ConfigurationError("Minimal mode requires builtin driving.")
         return Configuration(driver, None)
     try:
         protocol = Protocol(get("PROTOCOL", Protocol.RESPONSES))
@@ -223,6 +230,7 @@ def load_configuration(
             get("CAPACITY_VERIFIED_ENDPOINT"),
         ),
         user_input,
+        minimal,
     )
 
 

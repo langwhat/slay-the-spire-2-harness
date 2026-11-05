@@ -61,7 +61,52 @@ def test_precedence_and_snapshot(tmp_path: Path) -> None:
 def test_external_without_credentials(tmp_path: Path) -> None:
     result = cli(tmp_path, "check-config", "--set", "STS2_DRIVER=external")
     assert result.returncode == 0
-    assert json.loads(result.stdout) == {"driver": "external", "model_configured": False}
+    assert json.loads(result.stdout) == {
+        "driver": "external", "model_configured": False, "minimal": False
+    }
+
+
+def test_minimal_environment_precedence_and_cli_override(tmp_path: Path) -> None:
+    defaults = tmp_path / ".env"
+    defaults.write_text("STS2_MINIMAL=true\nLLM_MODEL=fake\nLLM_AUTH=none\n")
+    assert load_configuration(defaults, {}, {}).minimal
+    assert not load_configuration(defaults, {"STS2_MINIMAL": "false"}, {}).minimal
+    assert load_configuration(
+        defaults, {"STS2_MINIMAL": "false"}, {"STS2_MINIMAL": "true"}
+    ).minimal
+    assert not load_configuration(
+        defaults, {"STS2_MINIMAL": "true"}, {"STS2_MINIMAL": "false"}
+    ).minimal
+    configured = cli(tmp_path, "check-config")
+    assert configured.returncode == 0, configured.stderr
+    assert json.loads(configured.stdout.splitlines()[0])["minimal"] is True
+    disabled = cli(tmp_path, "check-config", "--set", "STS2_MINIMAL=false")
+    assert disabled.returncode == 0, disabled.stderr
+    assert json.loads(disabled.stdout.splitlines()[0])["minimal"] is False
+    forced = cli(
+        tmp_path,
+        "start",
+        "--minimal",
+        "--set",
+        "STS2_MINIMAL=false",
+        "--set",
+        "STS2_DRIVER=external",
+        environment={"STS2_MINIMAL": "invalid"},
+    )
+    assert forced.returncode == 2
+    assert "Minimal mode requires builtin driving." in forced.stderr
+
+
+def test_minimal_environment_rejects_external_driving(tmp_path: Path) -> None:
+    result = cli(
+        tmp_path,
+        "start",
+        "--set",
+        "STS2_DRIVER=external",
+        environment={"STS2_MINIMAL": "true"},
+    )
+    assert result.returncode == 2
+    assert "Minimal mode requires builtin driving." in result.stderr
 
 
 def test_minimal_flag_requires_builtin_gameplay_startup(tmp_path: Path) -> None:
@@ -127,6 +172,7 @@ def test_protocol_authentication_and_defaults(
     "setting",
     [
         "LLM_PROTOCOL=SECRET",
+        "STS2_MINIMAL=SECRET",
         "LLM_BASE_URL=https://SECRET:bad/",
         "LLM_AUTH=SECRET",
         "LLM_REQUEST_TIMEOUT_S=nan",
