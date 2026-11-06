@@ -15,7 +15,7 @@ from sts2_harness.context.models import (
     RunFinishedState,
     VisibleObservation,
 )
-from sts2_harness.context.run_models import RunObservation
+from sts2_harness.context.run_models import ProfileKind, RunObservation
 from sts2_harness.route_plan import RoutePlan
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -296,7 +296,7 @@ class RunDelivery:
                         affliction = _json(obj.affliction)
                         if ref in observation.modifier_descriptions:
                             affliction["profile"] = intern(
-                                "mechanism",
+                                ProfileKind.MECHANISM,
                                 {
                                     "kind": native.MechanismKind.AFFLICTION,
                                     "definition_id": obj.affliction.definition_id,
