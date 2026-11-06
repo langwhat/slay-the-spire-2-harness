@@ -234,9 +234,14 @@ class Generated(SemanticValue):
     previews: tuple[GeneratedPreview, ...]
 
 
+class HandAffliction(native.Modifier):
+    profile: native.Nonempty | MISSING = MISSING
+
+
 class HandCard(Reference):
     cost: native.ResourceCosts | MISSING = MISSING
     playable: bool | None | MISSING = MISSING
+    affliction: HandAffliction | MISSING = MISSING
     previews: tuple[TargetPreview, ...] | MISSING = MISSING
 
 

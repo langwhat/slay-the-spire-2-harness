@@ -102,3 +102,90 @@ def test_hand_preserves_missing_null_false_and_clears_on_phase_exit() -> None:
     assert fresh.current is not MISSING
     assert fresh.current.hand is not MISSING and fresh.current.hand is not None
     assert fresh.current.hand[1].playable is None
+
+
+def test_hand_afflictions_share_rule_text_without_merging_live_instances() -> None:
+    raw = json.loads(COMBAT)
+    for ref, amount in (("c1", 0), ("c2", None)):
+        raw["objects"][ref]["affliction"] = {
+            "definition_id": "AFFLICTION.BOUND",
+            "name": "Bound",
+            "amount": amount,
+            "status": "active",
+        }
+        raw["modifier_descriptions"][ref] = {
+            "enchantment": None,
+            "affliction": "Play at most one Bound card per turn.",
+        }
+    raw["objects"]["c2"]["name"] = "Another card"
+    original = Observation.model_validate_json(json.dumps(raw))
+    delivery = RunDelivery(role=DecisionOwner.COMBAT)
+    payload = json.loads(
+        delivery.project(visible_observation(original, DecisionOwner.COMBAT), original).to_json()
+    )
+    hand = {entry["ref"]: entry for entry in payload["current"]["hand"]}
+    first, second = hand["c1"]["affliction"], hand["c2"]["affliction"]
+    assert first == {
+        "definition_id": "AFFLICTION.BOUND",
+        "name": "Bound",
+        "amount": 0,
+        "status": "active",
+        "profile": first["profile"],
+    }
+    assert second["amount"] is None
+    assert first["profile"] == second["profile"]
+    assert payload["catalog_additions"][first["profile"]]["content"] == {
+        "kind": "affliction",
+        "definition_id": "AFFLICTION.BOUND",
+        "name": "Bound",
+        "text": "Play at most one Bound card per turn.",
+    }
+    assert all("affliction" not in card for card in payload["current"]["cards"])
+    assert all("affliction" not in text for text in payload["current"]["modifier_descriptions"])
+    for binding in payload["scene"]["bindings"]:
+        profile = payload["catalog_additions"][binding["profile"]]
+        if profile["kind"] == "card":
+            assert "affliction" not in profile["content"]
+
+
+def test_hand_affliction_unknown_text_clearing_and_pile_transitions() -> None:
+    raw = json.loads(COMBAT)
+    modifier = {"definition_id": "AFFLICTION.BOUND", "name": "Bound", "amount": 2}
+    raw["objects"]["c1"]["affliction"] = modifier
+    raw["modifier_descriptions"]["c1"]["affliction"] = None
+    raw["state"]["piles"]["hand"] = ["c2"]
+    raw["state"]["piles"]["discard"] = ["c1"]
+    delivery = RunDelivery(role=DecisionOwner.COMBAT)
+
+    def project() -> str:
+        observation = Observation.model_validate_json(json.dumps(raw))
+        return delivery.project(
+            visible_observation(observation, DecisionOwner.COMBAT), observation
+        ).to_json()
+
+    opening = json.loads(project())
+    assert opening["current"]["cards"][0]["affliction"] == modifier
+    raw["state"]["piles"]["hand"] = ["c2", "c1"]
+    raw["state"]["piles"]["discard"] = []
+    entered = json.loads(project())
+    current = entered["current"]
+    afflicted = current["hand"][1]["affliction"]
+    assert entered["catalog_additions"][afflicted["profile"]]["content"]["text"] is None
+    assert "affliction" not in current["cards"][0]
+    assert current["modifier_descriptions"][0]["enchantment"] == "附魔说明"
+    assert "affliction" not in current["modifier_descriptions"][0]
+    del raw["modifier_descriptions"]["c1"]
+    missing = json.loads(project())
+    assert "profile" not in missing["current"]["hand"][1]["affliction"]
+    raw["objects"]["c1"]["affliction"] = None
+    cleared = json.loads(project())
+    assert "affliction" not in cleared["current"]["hand"][1]
+    raw["objects"]["c1"]["affliction"] = {**modifier, "amount": 0, "status": "inactive"}
+    raw["state"]["piles"]["hand"] = ["c2"]
+    raw["state"]["piles"]["discard"] = ["c1"]
+    left = json.loads(project())
+    assert left["current"]["cards"][0]["affliction"] == {
+        **modifier,
+        "amount": 0,
+        "status": "inactive",
+    }

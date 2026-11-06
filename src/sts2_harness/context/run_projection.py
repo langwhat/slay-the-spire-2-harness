@@ -98,6 +98,18 @@ class RunDelivery:
         state = observation.state
         location = source.location
         additions: dict[str, JsonValue] = {}
+        hand_refs = (
+            set(state.piles.hand)
+            if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState)
+            else set[str]()
+        )
+
+        hand_affliction_refs = {
+            ref
+            for ref in hand_refs
+            if isinstance(obj := observation.objects.get(ref), native.CardEntry)
+            and obj.affliction is not None
+        }
 
         def intern(kind: str, content: dict[str, JsonValue]) -> str:
             profile: dict[str, JsonValue] = {
@@ -131,6 +143,8 @@ class RunDelivery:
                 modifier = raw.get(key)
                 if isinstance(modifier, dict):
                     content[key] = {k: modifier[k] for k in ("definition_id", "name")}
+            if ref in hand_refs:
+                content.pop("affliction", None)
             profile = intern(obj.kind, content)
             bindings.append({**identity, "kind": obj.kind, "profile": profile})
             if isinstance(obj, native.CardEntry):
@@ -149,12 +163,9 @@ class RunDelivery:
                     "affliction",
                 )
                 live = {k: raw[k] for k in keys if k in raw}
-                if (
-                    self.role is native.DecisionOwner.COMBAT
-                    and isinstance(state, native.CombatState)
-                    and ref in state.piles.hand
-                ):
+                if ref in hand_refs:
                     live.pop("playable", None)
+                    live.pop("affliction", None)
                 live = _card_defaults({**live, "keywords": raw["keywords"]})
                 cards.append({**identity, **live})
                 if ref in observation.descriptions:
@@ -231,7 +242,8 @@ class RunDelivery:
                     modifier_texts := {
                         key: text
                         for key, text in _json(value).items()
-                        if not (
+                        if not (key == "affliction" and ref in hand_affliction_refs)
+                        and not (
                             isinstance(observation.objects.get(ref), native.CardEntry)
                             and getattr(observation.objects[ref], key) is None
                             and text is None
@@ -280,6 +292,19 @@ class RunDelivery:
                     entry["cost"] = _json(obj.cost)
                     if obj.playable is not MISSING:
                         entry["playable"] = obj.playable
+                    if obj.affliction is not None:
+                        affliction = _json(obj.affliction)
+                        if ref in observation.modifier_descriptions:
+                            affliction["profile"] = intern(
+                                "mechanism",
+                                {
+                                    "kind": native.MechanismKind.AFFLICTION,
+                                    "definition_id": obj.affliction.definition_id,
+                                    "name": obj.affliction.name,
+                                    "text": observation.modifier_descriptions[ref].affliction,
+                                },
+                            )
+                        entry["affliction"] = affliction
                     if location.owner is self.role and obj.previews is not MISSING:
                         entry["previews"] = [
                             {"target": _identity(observation, preview.target), "text": preview.text}
