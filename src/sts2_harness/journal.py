@@ -182,7 +182,7 @@ class Manifest(native.WireModel):
             or self.template != initial.template
             or self.game_version != initial.game_version
             or initial.control.mode is not native.ControlIntent.RUNNING
-            or not isinstance(initial.observation.state, native.CombatState)
+            or not isinstance(initial.observation.state, (native.RunState, native.CombatState))
         ):
             raise ValueError("Scene initial conditions do not match the fresh recording.")
         return self
