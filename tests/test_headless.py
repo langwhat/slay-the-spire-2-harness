@@ -998,3 +998,47 @@ def test_repeated_cancellation_waits_for_owned_shutdown(
             await asyncio.gather(close, return_exceptions=True)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+@pytest.mark.parametrize("development_replay", [False, True])
+def test_replay_presentation_is_explicit_and_isolated_from_normal_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, development_replay: bool
+) -> None:
+    import asyncio
+
+    from sts2_harness.headless import HeadlessOptions, OwnedHeadlessInstance, StandardRunRecipe
+    from sts2_harness.journal import StandardCharacter
+
+    game, template = game_fixture(tmp_path)
+    game.write_text(
+        game.read_text().replace(
+            "recipe = json.loads(start.read_text())",
+            "recipe = json.loads(start.read_text())\n"
+            '(start.parent / "replay-env.json").write_text(json.dumps({k:v for k,v in '
+            'os.environ.items() if k.startswith("STS2AGENT_REPLAY")}))',
+        )
+    )
+    monkeypatch.setenv("STS2AGENT_REPLAY_ACTIVE", "1")
+    monkeypatch.setenv("STS2AGENT_REPLAY_PRESENTATION", "instant")
+
+    async def scenario() -> None:
+        async with OwnedHeadlessInstance(
+            HeadlessOptions(
+                game,
+                template,
+                tmp_path / "runs",
+                recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="REPLAY"),
+            ),
+            development_checkpoints=True,
+            development_replay=development_replay,
+        ) as instance:
+            actual = json.loads((instance.directory / "replay-env.json").read_text())
+            expected = (
+                {"STS2AGENT_REPLAY_ACTIVE": "1", "STS2AGENT_REPLAY_PRESENTATION": "instant"}
+                if development_replay
+                else {}
+            )
+            assert actual == expected
+
+    asyncio.run(scenario())

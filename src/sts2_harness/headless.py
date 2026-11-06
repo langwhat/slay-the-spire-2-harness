@@ -119,10 +119,12 @@ class OwnedHeadlessInstance:
         stop_requested: asyncio.Event | None = None,
         mode: HeadlessLaunchMode = HeadlessLaunchMode.RECIPE,
         development_checkpoints: bool = False,
+        development_replay: bool = False,
     ) -> None:
         self.options = options
         self._mode = mode
         self._development_checkpoints = development_checkpoints
+        self._development_replay = development_replay
         self._stop_requested = stop_requested
         self.process: asyncio.subprocess.Process | None = None
         self.diagnostics: Diagnostics | None = None
@@ -264,6 +266,9 @@ class OwnedHeadlessInstance:
                 self.environment["STS2AGENT_START_RUN_FILE"] = str(start)
             if self._development_checkpoints:
                 self.environment["STS2_ALLOW_CHECKPOINTS"] = "true"
+            if self._development_replay:
+                self.environment["STS2AGENT_REPLAY_ACTIVE"] = "1"
+                self.environment["STS2AGENT_REPLAY_PRESENTATION"] = "instant"
             self.environment["STS2AGENT_GRACEFUL_HEADLESS_EXIT"] = "1"
             self._outputs = tuple(
                 BoundedChildOutput(self.directory, stream) for stream in ChildStream
