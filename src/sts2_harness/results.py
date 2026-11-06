@@ -28,6 +28,7 @@ class ReasonCode(StrEnum):
     BUSY = "busy"
     MODEL_UNAVAILABLE = "model_unavailable"
     INVALID_ARGUMENTS = "invalid_arguments"
+    BATCH_ABORTED = "batch_aborted"
     WRONG_ROLE = "wrong_role"
     ILLEGAL_ACTION = "illegal_action"
     SELECTION_REQUIRED = "selection_required"

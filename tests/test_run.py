@@ -354,8 +354,8 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
     http = RunHTTP(
         [
             reply(
-                ("write", "run_notes", '{"mode":"replace","text":"must not write"}'),
                 ("game", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}'),
+                ("write", "run_notes", '{"mode":"replace","text":"must not write"}'),
             ),
             reply(
                 ("invalid", "run_notes", '{"mode":"replace","text":"must not write","extra":true}')
@@ -407,8 +407,8 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
             if isinstance(item, dict) and item.get("type") == "function_call_output"
         ]
         assert [item["call_id"] for item in outputs] == [
-            "write",
             "game",
+            "write",
             "invalid",
             "read",
             "forbidden",

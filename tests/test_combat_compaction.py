@@ -104,6 +104,17 @@ def reasoning_query(protocol: Protocol, ident: str) -> bytes:
                 },
                 {"type": "content_block_stop", "index": 2},
                 {
+                    "type": "content_block_start",
+                    "index": 3,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": f"{ident}-followup",
+                        "name": "combat_inspect",
+                        "input": {"area": "state"},
+                    },
+                },
+                {"type": "content_block_stop", "index": 3},
+                {
                     "type": "message_delta",
                     "delta": {"stop_reason": "tool_use"},
                     "usage": {"output_tokens": 5},
@@ -112,7 +123,11 @@ def reasoning_query(protocol: Protocol, ident: str) -> bytes:
             ]
         )
         return sse(stream)
-    payload = response(protocol, (ident, "combat_inspect", '{"area":"state"}'))
+    payload = response(
+        protocol,
+        (ident, "combat_inspect", '{"area":"state"}'),
+        (f"{ident}-followup", "combat_inspect", '{"area":"state"}'),
+    )
     chunks = payload.decode().split("\n\n")
     chunk = json.loads(chunks[0][len("data: ") :])
     if protocol is Protocol.RESPONSES:
@@ -276,9 +291,9 @@ def test_combat_compaction_recording_replays_without_repeating_actions(
             item.call_id for item in preparation.input_after if isinstance(item, ResultSnapshot)
         ]
         expected = {
-            "before_action": ["q1", "a1"],
-            "after_query": ["q1", "a1", "q2"],
-            "review": ["q2", "a2"],
+            "before_action": ["q1", "q1-followup", "a1"],
+            "after_query": ["q1", "q1-followup", "a1", "q2", "q2-followup"],
+            "review": ["q2", "q2-followup", "a2"],
         }
         assert call_ids == expected[stage]
         wire = json.dumps(campaign.inputs[records.index(compressed)], ensure_ascii=False)
@@ -296,7 +311,11 @@ def test_combat_compaction_recording_replays_without_repeating_actions(
                 for item in record.input
             )
         )
-        expected_review = ["q2", "a2"] if stage == "review" else ["q1", "a1", "q2", "a2"]
+        expected_review = (
+            ["q2", "q2-followup", "a2"]
+            if stage == "review"
+            else ["q1", "q1-followup", "a1", "q2", "q2-followup", "a2"]
+        )
         assert [
             item.call_id for item in review.input if isinstance(item, ResultSnapshot)
         ] == expected_review

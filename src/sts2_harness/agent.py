@@ -41,13 +41,14 @@ from sts2_harness.results import (
     ActionToolResult,
     Failed,
     QueryToolResult,
+    ReadCompleted,
     Reason,
     ReasonCode,
     Rejected,
     Suggestion,
     WriteUnknown,
 )
-from sts2_harness.tools import ToolCatalog
+from sts2_harness.tools import ToolCatalog, ToolName
 from sts2_harness.user_input_values import UserInputSource
 
 type MaterialReader = Callable[[native.Observation], Awaitable[tuple[DocumentView, ...]]]
@@ -103,7 +104,7 @@ class Agent(ABC):
                 suggested_actions=(
                     Suggestion(
                         message=(
-                            "Follow the current task and submit at most one permitted tool call."
+                            "Resubmit with at most one game-action tool, placed last."
                         )
                     ),
                 ),
@@ -280,19 +281,29 @@ class Agent(ABC):
                     raise DecisionInterrupted(
                         Reason(code=ReasonCode.INVALID_ARGUMENTS, message=message), True
                     )
-            elif len(calls) > 1:
-                self._reject_multiple_calls(context, calls, observation)
+            elif any(
+                call.name in (ToolName.RUN_ACT, ToolName.COMBAT_ACT, ToolName.RUN_NEXT)
+                for call in calls[:-1]
+            ):
+                self._reject_action_layout(context, calls, observation)
             else:
-                call = calls[0]
-                result = await self._dispatch(call, task, observation)
-                if isinstance(result, ActionProposal):
-                    self._pending_call = call
-                    return ActionDecision(
-                        result, isinstance(task, ActTask) and task.handoff is not None
-                    )
-                latest = self._close_query(context, task, bound, call, result)
-                if latest is not None:
-                    observation = latest
+                for index, call in enumerate(calls):
+                    result = await self._dispatch(call, task, observation)
+                    if isinstance(result, ActionProposal):
+                        self._pending_call = call
+                        return ActionDecision(
+                            result, isinstance(task, ActTask) and task.handoff is not None
+                        )
+                    try:
+                        current = self._close_query(context, task, bound, call, result)
+                    except DecisionInterrupted:
+                        self._abort_calls(context, calls[index + 1 :], index + 1, call)
+                        raise
+                    if current is not None:
+                        observation = latest = current
+                    if not isinstance(result.outcome, ReadCompleted):
+                        self._abort_calls(context, calls[index + 1 :], index + 1, call)
+                        break
             context = await self._prepare(observation)
             if isinstance(task, ActTask) and latest is not None:
                 self._append_task(context, task, observation)
@@ -314,11 +325,12 @@ class Agent(ABC):
             return self._tools.dispatch_action(call, task)
         return await self._tools.dispatch(call)
 
-    def _reject_multiple_calls(
+    def _reject_action_layout(
         self, context: Context, calls: tuple[ToolCall, ...], observation: native.Observation
     ) -> None:
         result = self._reject(
-            "Submit at most one tool call per response; none of these calls was executed.",
+            "At most one game-action tool is allowed per response, "
+            "and it must be last; none of these calls was executed.",
             observation,
         )
         for call in calls:
@@ -333,6 +345,29 @@ class Agent(ABC):
                 ),
                 True,
             )
+
+    def _abort_calls(
+        self, context: Context, calls: tuple[ToolCall, ...], position: int, stopped: ToolCall
+    ) -> None:
+        result = QueryToolResult(
+            Rejected(
+                reason=Reason(
+                    code=ReasonCode.BATCH_ABORTED,
+                    message=f"Not executed: stopped after call {position} ({stopped.name}).",
+                ),
+                suggested_actions=(
+                    Suggestion(
+                        message="Decide again from the results above; "
+                        "resubmit this call only if it is still needed."
+                    ),
+                ),
+            ),
+            None,
+        )
+        for call in calls:
+            if self._diagnostics is not None:
+                self._diagnostics.tool_finished(call.name, result.outcome)
+            context.append_tool_result(call, result)
 
     def _close_query(
         self,

@@ -675,7 +675,14 @@ def test_changed_run_ends_without_review_or_old_run_stats(tmp_path: Path, mode: 
 def test_query_lifetime_change_precedes_exhausted_failure_budget(tmp_path: Path) -> None:
     class ChangedDuringQuery(BattleHTTP):
         def __init__(self) -> None:
-            super().__init__([reply(("missing", "combat_skill", '{"mode":"read","id":"missing"}'))])
+            super().__init__(
+                [
+                    reply(
+                        ("missing", "combat_skill", '{"mode":"read","id":"missing"}'),
+                        ("unexecuted", "combat_act", '{"steps":[{"kind":"end_turn"}]}'),
+                    )
+                ]
+            )
             self.reads = 0
 
         def mod(self, request: httpx.Request) -> httpx.Response:
