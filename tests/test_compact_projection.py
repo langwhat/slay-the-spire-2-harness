@@ -43,6 +43,7 @@ def test_hand_changes_do_not_resend_card_details_or_other_piles() -> None:
     assert set(third["current"]) == {"hand", "discard", "cards"}
     assert third["current"]["cards"][0]["playable"] is False
     assert [entry["ref"] for entry in third["current"]["discard"]] == ["c1"]
+    assert "cost" not in third["current"]["discard"][0]
 
 
 def test_hand_preserves_preview_authority_and_explicit_empty() -> None:

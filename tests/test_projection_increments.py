@@ -6,6 +6,7 @@ from test_mod_client import COMBAT, RUN
 
 from sts2_harness.client.models import (
     CardEntry,
+    CostSymbol,
     DecisionOwner,
     Observation,
     PublicMap,
@@ -13,11 +14,19 @@ from sts2_harness.client.models import (
 )
 from sts2_harness.context import CombatActInput, Context, QueryToolResult, ReadCompleted
 from sts2_harness.context.models import AutomaticProgress, BaselineMessage, RunActInput
-from sts2_harness.llm.messages import ToolCall
+from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall
 from sts2_harness.results import ActionCompleted, ActionToolResult
 
 
-def test_one_card_cost_change_does_not_repeat_unchanged_cards() -> None:
+@pytest.mark.parametrize(
+    "cost",
+    [
+        ResourceCosts(energy=0),
+        ResourceCosts(energy=CostSymbol.X, stars=2),
+        ResourceCosts(energy=None, stars=CostSymbol.NONE),
+    ],
+)
+def test_one_card_cost_change_does_not_repeat_unchanged_cards(cost: ResourceCosts) -> None:
     observation = Observation.model_validate_json(COMBAT)
     card = observation.objects["c1"]
     assert isinstance(card, CardEntry)
@@ -25,13 +34,22 @@ def test_one_card_cost_change_does_not_repeat_unchanged_cards() -> None:
         update={
             "objects": {
                 **observation.objects,
-                "c1": card.model_copy(update={"cost": ResourceCosts(energy=0)}),
+                "c1": card.model_copy(update={"cost": cost}),
             }
         }
     )
     context = Context(DecisionOwner.COMBAT)
     context.append_task(CombatActInput(), observation)
+    prefix = tuple(message.text for message in context.model_input())
     context.begin_group(observation, "")
+    context.append_reply(
+        AssistantMessage(
+            ResponsesReply.from_json(
+                '[{"type":"function_call","call_id":"inspect",'
+                '"name":"combat_inspect","arguments":"{}"}]'
+            )
+        )
+    )
     context.append_tool_result(
         ToolCall("inspect", "combat_inspect", "{}"), QueryToolResult(ReadCompleted(), changed)
     )
@@ -40,6 +58,18 @@ def test_one_card_cost_change_does_not_repeat_unchanged_cards() -> None:
     cards = json.dumps(increment["current"]["cards"])
     assert '"c1"' in cards
     assert '"c2"' not in cards, "A cost change must not resend an unchanged card."
+    hand = {entry["ref"]: entry for entry in increment["current"]["hand"]}
+    assert hand["c1"]["cost"] == json.loads(cost.to_json())
+    assert hand["c2"]["cost"] == json.loads(card.cost.to_json())
+    assert tuple(message.text for message in context.model_input())[: len(prefix)] == prefix
+    context.install_compaction(context.compaction_candidate())
+    context.finish_group()
+    context.begin_group(changed, "")
+    context.finish_group()
+    baseline = json.loads(context.compaction_candidate()[0].text)["context_baseline"]
+    hand = {entry["ref"]: entry for entry in baseline["observation"]["current"]["hand"]}
+    assert hand["c1"]["cost"] == json.loads(cost.to_json())
+    context.install_compaction(context.compaction_candidate())
 
 
 def test_run_group_resource_change_keeps_unchanged_entries_incremental() -> None:

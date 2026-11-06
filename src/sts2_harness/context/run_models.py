@@ -235,6 +235,7 @@ class Generated(SemanticValue):
 
 
 class HandCard(Reference):
+    cost: native.ResourceCosts | MISSING = MISSING
     playable: bool | None | MISSING = MISSING
     previews: tuple[TargetPreview, ...] | MISSING = MISSING
 

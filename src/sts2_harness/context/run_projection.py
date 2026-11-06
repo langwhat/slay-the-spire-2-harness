@@ -277,6 +277,7 @@ class RunDelivery:
                 entry = _identity(observation, ref)
                 obj = observation.objects.get(ref)
                 if isinstance(obj, native.CardEntry):
+                    entry["cost"] = _json(obj.cost)
                     if obj.playable is not MISSING:
                         entry["playable"] = obj.playable
                     if location.owner is self.role and obj.previews is not MISSING:
