@@ -131,7 +131,11 @@ def test_native_chat_continuation_preserves_opaque_fields_and_tool_schema(tmp_pa
             assert reply.assistant.native.to_json() == retained
             assert reply.assistant.text == ""
             await llm.complete(
-                (*history, reply.assistant, ToolResultMessage("call_1", PlainResult("card info"))),
+                (
+                    *history,
+                    reply.assistant,
+                    ToolResultMessage("call_1", PlainResult("semantic card info"), "card info"),
+                ),
                 tools,
             )
         wire = json.loads(requests[1].content)

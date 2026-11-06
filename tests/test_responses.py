@@ -207,7 +207,12 @@ def test_complete_and_continue_native_reply_once(tmp_path: Path) -> None:
             assert reply.assistant.tool_calls[0].arguments == '{"reference":"c1"}'
             restored = AssistantMessage(ResponsesReply.from_json(retained))
             await llm.complete(
-                (*history, restored, ToolResultMessage("call_1", PlainResult("card info"))), tools
+                (
+                    *history,
+                    restored,
+                    ToolResultMessage("call_1", PlainResult("semantic card info"), "card info"),
+                ),
+                tools,
             )
         wire = json.loads(requests[1].content)
         assert wire["input"][:2] == [

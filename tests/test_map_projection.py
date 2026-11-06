@@ -97,7 +97,6 @@ def test_complete_dynamic_replacement_contains_accepted_remaining_plan_and_fresh
         "unknown_odds": {},
         "special_movement": {"free_travel_active": None, "remaining_uses": None},
         "plan": {
-            "reason": "Retain the branch",
             "edges": [
                 {"from": "map:1:0", "to": "map:2:0"},
                 {"from": "map:2:0", "to": "map:3:2"},

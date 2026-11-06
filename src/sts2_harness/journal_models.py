@@ -31,6 +31,7 @@ from sts2_harness.client import models as native
 from sts2_harness.config import Authentication, AuthKind, ModelConfiguration, Protocol
 from sts2_harness.context.models import (
     ActContent,
+    BaselineMessage,
     HandoffContent,
     ReviewContent,
     RunActContent,
@@ -105,6 +106,10 @@ class DocumentReference(native.WireModel):
     document_digest: str
 
 
+class TextReference(native.WireModel):
+    text_digest: str
+
+
 class NativeReference(native.WireModel):
     native_digest: str
 
@@ -125,6 +130,24 @@ def _decode_native(value: object, info: ValidationInfo) -> object:
 
 type NativeOutput = Annotated[
     str, BeforeValidator(_decode_native), PlainSerializer(_encode_native, return_type=JsonValue)
+]
+
+
+def _encode_text(value: str, info: SerializationInfo) -> JsonValue:
+    if isinstance(info.context, BlobEncoding):
+        return {"text_digest": info.context.write(BlobKind.VALUE, value.encode())}
+    return value
+
+
+def _decode_text(value: object, info: ValidationInfo) -> object:
+    if isinstance(info.context, BlobDecoding):
+        reference = TextReference.model_validate(value)
+        return info.context.read(reference.text_digest).decode()
+    return value
+
+
+type RenderedText = Annotated[
+    str, BeforeValidator(_decode_text), PlainSerializer(_encode_text, return_type=JsonValue)
 ]
 
 
@@ -369,6 +392,7 @@ def archive_text(value: str | MaterialText | MaterialParts | GuidanceContent) ->
 
 class MessageKind(StrEnum):
     TEXT = "text"
+    BASELINE = "baseline"
     TASK = "task"
     RUN_TASK = "run_task"
     AUTOMATIC = "automatic"
@@ -382,22 +406,32 @@ class TextSnapshot(native.WireModel):
     value: ArchivedText
 
 
+class BaselineSnapshot(native.WireModel):
+    kind: Literal[MessageKind.BASELINE] = MessageKind.BASELINE
+    role: TextRole
+    content: dict[str, JsonValue]
+    text: RenderedText
+
+
 class TaskSnapshot(native.WireModel):
     kind: Literal[MessageKind.TASK] = MessageKind.TASK
     role: TextRole
     content: ActContent | ReviewContent
+    text: RenderedText
 
 
 class RunTaskSnapshot(native.WireModel):
     kind: Literal[MessageKind.RUN_TASK] = MessageKind.RUN_TASK
     role: TextRole
     content: RunActContent | RunActHandoffContent | HandoffContent
+    text: RenderedText
 
 
 class AutomaticSnapshot(native.WireModel):
     kind: Literal[MessageKind.AUTOMATIC] = MessageKind.AUTOMATIC
     role: TextRole
     content: RunAutomaticContent
+    text: RenderedText
 
 
 class NativeSnapshot(native.WireModel):
@@ -427,6 +461,7 @@ class AssistantSnapshot(NativeSnapshot):
 class ResultSnapshot(native.WireModel):
     kind: Literal[MessageKind.RESULT] = MessageKind.RESULT
     call_id: str
+    text: RenderedText
     outcome: Outcome
     observation: RunObservation | None
     data: ArchivedData | MISSING = MISSING
@@ -434,6 +469,7 @@ class ResultSnapshot(native.WireModel):
 
 type MessageSnapshot = (
     TextSnapshot
+    | BaselineSnapshot
     | TaskSnapshot
     | RunTaskSnapshot
     | AutomaticSnapshot
@@ -447,22 +483,31 @@ def archive_input(input: ModelInput) -> tuple[MessageSnapshot, ...]:
     messages: list[MessageSnapshot] = []
     for message in input:
         if isinstance(message, RunAutomaticMessage):
-            messages.append(AutomaticSnapshot(role=message.role, content=message.content))
+            messages.append(
+                AutomaticSnapshot(role=message.role, content=message.content, text=message.text)
+            )
         elif isinstance(message, TaskMessage):
             content = message.content
             if isinstance(content, (RunActContent, HandoffContent)):
-                messages.append(RunTaskSnapshot(role=message.role, content=content))
+                messages.append(
+                    RunTaskSnapshot(role=message.role, content=content, text=message.text)
+                )
             else:
-                messages.append(TaskSnapshot(role=message.role, content=content))
+                messages.append(TaskSnapshot(role=message.role, content=content, text=message.text))
         elif isinstance(message, RunResultMessage):
             result = message.content
             messages.append(
                 ResultSnapshot(
                     call_id=message.call_id,
+                    text=message.text,
                     outcome=result.outcome,
                     observation=result.observation,
                     data=archive_data(result),
                 )
+            )
+        elif isinstance(message, BaselineMessage):
+            messages.append(
+                BaselineSnapshot(role=message.role, content=message.content, text=message.text)
             )
         elif isinstance(message, TextMessage):
             messages.append(TextSnapshot(role=message.role, value=archive_text(message.value)))

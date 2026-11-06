@@ -51,10 +51,7 @@ class StructuredText(Protocol):
 class ToolResultMessage:
     call_id: str
     content: StructuredText
-
-    @property
-    def text(self) -> str:
-        return self.content.to_json()
+    text: str
 
 
 @dataclass(frozen=True, slots=True)

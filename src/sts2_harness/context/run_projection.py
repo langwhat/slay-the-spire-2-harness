@@ -149,6 +149,12 @@ class RunDelivery:
                     "affliction",
                 )
                 live = {k: raw[k] for k in keys if k in raw}
+                if (
+                    self.role is native.DecisionOwner.COMBAT
+                    and isinstance(state, native.CombatState)
+                    and ref in state.piles.hand
+                ):
+                    live.pop("playable", None)
                 live = _card_defaults({**live, "keywords": raw["keywords"]})
                 cards.append({**identity, **live})
                 if ref in observation.descriptions:
@@ -243,10 +249,22 @@ class RunDelivery:
             current["dynamic_map"] = _json(dynamic)
         if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState):
             current["turn"] = state.turn
-            current["piles"] = {
-                key: _refs(observation, getattr(state.piles, key))
-                for key in ("hand", "draw", "discard", "exhaust", "other")
-            }
+            hand: list[JsonValue] = []
+            for ref in state.piles.hand:
+                entry = _identity(observation, ref)
+                obj = observation.objects.get(ref)
+                if isinstance(obj, native.CardEntry):
+                    if obj.playable is not MISSING:
+                        entry["playable"] = obj.playable
+                    if location.owner is self.role and obj.previews is not MISSING:
+                        entry["previews"] = [
+                            {"target": _identity(observation, preview.target), "text": preview.text}
+                            for preview in obj.previews
+                        ]
+                hand.append(entry)
+            current["hand"] = hand
+            for key in ("draw", "discard", "exhaust", "other"):
+                current[key] = _refs(observation, getattr(state.piles, key))
             actors: dict[str, JsonValue] = {
                 "enemies": [_json(actor) for actor in state.enemies],
                 "inactive_enemies": [_json(actor) for actor in state.inactive_enemies],
@@ -335,19 +353,6 @@ class RunDelivery:
                 selection["candidates"] = _refs(observation, state.selection.candidates)
                 selection["selected"] = _refs(observation, state.selection.selected)
                 decision["selection"] = selection
-            if isinstance(state, native.CombatState):
-                decision["hand_previews"] = [
-                    {
-                        **_identity(observation, ref),
-                        "previews": [
-                            {"target": _identity(observation, preview.target), "text": preview.text}
-                            for preview in obj.previews
-                        ],
-                    }
-                    for ref in state.piles.hand
-                    if isinstance((obj := observation.objects.get(ref)), native.CardEntry)
-                    and obj.previews is not MISSING
-                ]
             if isinstance(state, native.RunState):
                 offers: list[JsonValue] = []
                 for offer in state.offers:

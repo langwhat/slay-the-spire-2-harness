@@ -234,12 +234,9 @@ class Generated(SemanticValue):
     previews: tuple[GeneratedPreview, ...]
 
 
-class Piles(SemanticValue):
-    hand: tuple[Reference, ...]
-    draw: tuple[Reference, ...]
-    discard: tuple[Reference, ...]
-    exhaust: tuple[Reference, ...]
-    other: tuple[Reference, ...]
+class HandCard(Reference):
+    playable: bool | None | MISSING = MISSING
+    previews: tuple[TargetPreview, ...] | MISSING = MISSING
 
 
 class Actors(SemanticValue):
@@ -266,7 +263,11 @@ class Current(SemanticValue):
     progress: native.Progress | MISSING = MISSING
     player: native.CombatPlayer | native.Player | native.RunPlayer | MISSING = MISSING
     turn: int | None | MISSING = MISSING
-    piles: Piles | None | MISSING = MISSING
+    hand: tuple[HandCard, ...] | None | MISSING = MISSING
+    draw: tuple[Reference, ...] | None | MISSING = MISSING
+    discard: tuple[Reference, ...] | None | MISSING = MISSING
+    exhaust: tuple[Reference, ...] | None | MISSING = MISSING
+    other: tuple[Reference, ...] | None | MISSING = MISSING
     actors: Actors | None | MISSING = MISSING
     orbs: native.Orbs | None | MISSING = MISSING
     inventory: Inventory | MISSING = MISSING
@@ -316,10 +317,6 @@ class Offer(SemanticValue):
     amount: native.Number | None | MISSING = MISSING
 
 
-class HandPreview(Reference):
-    previews: tuple[TargetPreview, ...]
-
-
 class Decision(SemanticValue):
     phase: native.Phase
     screen: native.RunScreen | native.CombatScreen | native.TerminalScreen
@@ -328,7 +325,6 @@ class Decision(SemanticValue):
     selection: Selection | None
     offers: tuple[Offer, ...] | MISSING = MISSING
     event: native.EventState | None | MISSING = MISSING
-    hand_previews: tuple[HandPreview, ...] | MISSING = MISSING
 
 
 class RunObservation(SemanticValue):

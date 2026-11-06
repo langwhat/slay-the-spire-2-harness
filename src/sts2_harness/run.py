@@ -130,7 +130,6 @@ class RunAgent(Agent):
         if self._plan is None:
             return None
         plan = Plan(
-            reason=self._plan.reason,
             edges=tuple(
                 PlanEdge(source=edge.source, destination=edge.destination)
                 for edge in self._plan.edges

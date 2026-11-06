@@ -964,6 +964,7 @@ def test_recorded_estimate_covers_actual_protocol_body_and_changed_material(
                     RunResultMessage(
                         "call_1",
                         RunProjectedResult(outcome=ReadCompleted(), observation=None),
+                        '{"outcome":{"status":"completed"},"observation":null}',
                         QueryToolResult(ReadCompleted(), None),
                     ),
                 ),
@@ -1124,8 +1125,10 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
     )
     from sts2_harness.journal_models import (
         AutomaticSnapshot,
+        BaselineSnapshot,
         ConfigurationSnapshot,
         NotesData,
+        RunTaskSnapshot,
         ToolSet,
         archive_input,
     )
@@ -1136,7 +1139,7 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
     from test_mod_client import COMBAT, RUN
 
     from sts2_harness.context import Context, RunActInput
-    from sts2_harness.context.models import RunActContent, TaskMessage
+    from sts2_harness.context.models import BaselineMessage, RunActContent, TaskMessage
 
     context = Context(native.DecisionOwner.RUN)
     run = native.Observation.model_validate_json(RUN)
@@ -1154,7 +1157,12 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
     )
     messages = archive_input(
         tuple(
-            RunResultMessage(call_id=str(index), content=result, source=source)
+            RunResultMessage(
+                call_id=str(index),
+                content=result,
+                text=f"exact result {index}\n中文",
+                source=source,
+            )
             for index, result in enumerate(results)
         )
         + (
@@ -1174,6 +1182,8 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
                 ),
                 source=source,
             ),
+            task,
+            BaselineMessage(TextRole.USER, "exact baseline", {"current": {"hp": 7}}),
         )
     )
     journal = Journal.create(
@@ -1201,8 +1211,17 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
     with closing(Journal.open(journal.path)) as reopened:
         record = reopened.requests()[0]
         assert record.input == messages
-        first, unavailable, combat, automatic_run, automatic_combat = record.input
+        first, unavailable, combat, automatic_run, automatic_combat, saved_task, baseline = (
+            record.input
+        )
         assert isinstance(first, ResultSnapshot)
+        assert isinstance(saved_task, RunTaskSnapshot)
+        assert isinstance(baseline, BaselineSnapshot)
+        assert isinstance(automatic_run, AutomaticSnapshot)
+        assert first.text == "exact result 0\n中文"
+        assert saved_task.text == task.text
+        assert baseline.text == "exact baseline"
+        assert automatic_run.text == "automatic"
         assert first.observation == observation
         assert isinstance(first.data, NotesData) and first.data.value == NotesText(text="note")
         assert isinstance(unavailable, ResultSnapshot) and unavailable.observation is None
@@ -1219,11 +1238,17 @@ def test_journal_reopens_run_and_combat_projection_shapes(tmp_path: Path) -> Non
 def test_journal_result_requires_one_projection_shape() -> None:
     from pydantic import ValidationError
 
+    with pytest.raises(ValidationError, match="text"):
+        ResultSnapshot.model_validate_json(
+            '{"call_id":"missing-text","outcome":{"status":"completed"},"observation":null}'
+        )
     with pytest.raises(ValidationError, match="observation"):
-        ResultSnapshot.model_validate_json('{"call_id":"missing","outcome":{"status":"completed"}}')
+        ResultSnapshot.model_validate_json(
+            '{"call_id":"missing","text":"exact","outcome":{"status":"completed"}}'
+        )
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         ResultSnapshot.model_validate_json(
-            '{"call_id":"mixed","outcome":{"status":"completed"},'
+            '{"call_id":"mixed","text":"exact","outcome":{"status":"completed"},'
             '"observation":null,"state":null,"updates":{}}'
         )
 
@@ -1245,7 +1270,9 @@ def test_run_result_record_rejects_malformed_observation(observation: str) -> No
 
     with pytest.raises(ValidationError):
         ResultSnapshot.model_validate_json(
-            '{"call_id":"q","outcome":{"status":"completed"},"observation":' + observation + "}"
+            '{"call_id":"q","text":"exact","outcome":{"status":"completed"},"observation":'
+            + observation
+            + "}"
         )
 
 

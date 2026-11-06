@@ -776,9 +776,11 @@ def test_rewards_stay_with_strategy_and_pure_dialogue_advances_from_changed_nati
             assert isinstance(message.content, RunAutomaticContent)
             observation = message.content.observation
             assert observation is not None and observation.current is not MISSING
-            assert observation.current.model_dump(mode="json")["object_descriptions"] == [
-                {"ref": "event", "name": "Event", "definition_id": "EVENT.TEST", "text": text}
-            ]
+            assert observation.current.object_descriptions is not MISSING
+            (description,) = observation.current.object_descriptions
+            assert description.ref == "event"
+            assert description.name == "Event" and description.definition_id == "EVENT.TEST"
+            assert description.text == text
         assert [
             step.step.action for step in http.actions if isinstance(step.step, native.Interact)
         ] == ["claim", "skip", "dialogue", "dialogue", "choose"]

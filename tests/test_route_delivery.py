@@ -170,9 +170,9 @@ def test_planning_keeps_previous_route_after_rejection_and_travels_to_unique_nex
         planned = http.inputs[1]["input"]
         assert isinstance(planned, list) and isinstance(task := planned[-1], dict)
         assert isinstance(content := task["content"], str)
-        assert (
-            json.loads(content)["observation"]["current"]["dynamic_map"]["plan"]["reason"] == "rest"
-        )
+        assert json.loads(content)["observation"]["current"]["dynamic_map"]["plan"] == {
+            "edges": [{"from": "map:0:0", "to": "map:1:0"}]
+        }
         assert rejected["outcome"]["reason"]["code"] == "ambiguous_next"
 
     asyncio.run(scenario())
@@ -423,13 +423,10 @@ def test_real_plan_is_retained_in_successive_historical_compaction_baselines(
         assert len(baselines) == 2
         for text in baselines:
             baseline = json.loads(text)["context_baseline"]
-            assert baseline["route_plan"] == {
-                "reason": "rest",
-                "edges": [{"from": "map:0:0", "to": "map:1:0"}],
+            assert "route_plan" not in baseline
+            assert baseline["observation"]["current"]["dynamic_map"]["plan"] == {
+                "edges": [{"from": "map:0:0", "to": "map:1:0"}]
             }
-            assert (
-                baseline["observation"]["current"]["dynamic_map"]["plan"] == baseline["route_plan"]
-            )
 
     asyncio.run(scenario())
 

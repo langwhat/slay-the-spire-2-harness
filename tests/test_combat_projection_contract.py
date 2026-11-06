@@ -15,7 +15,7 @@ def test_combat_delivers_complete_description_independently_of_cost() -> None:
     context.append_task(CombatActInput(), original)
     first = json.loads(context.model_input()[-1].text)["observation"]
     assert first["current"]["card_descriptions"][0]["text"] == "Deal 6 damage. Draw 1 card."
-    assert {item["ref"] for item in first["current"]["piles"]["hand"]} == {"c1", "c2"}
+    assert {item["ref"] for item in first["current"]["hand"]} == {"c1", "c2"}
     changed = original.model_copy(
         update={"objects": {"c1": card.model_copy(update={"playable": False})}}
     )
@@ -24,7 +24,10 @@ def test_combat_delivers_complete_description_independently_of_cost() -> None:
     )
     second = json.loads(context.model_input()[-1].text)["observation"]
     assert "card_descriptions" not in second.get("current", {})
-    assert second["current"]["cards"][0]["playable"] is False
+    assert (
+        next(item for item in second["current"]["hand"] if item["ref"] == "c1")["playable"] is False
+    )
+    assert "cards" not in second["current"]
     assert "catalog_additions" not in second
 
 
@@ -44,7 +47,7 @@ def test_combat_preserves_live_facts_previews_and_complete_descriptions() -> Non
     assert current["orbs"]["slots"][0]["passive"] == 0
     assert current["deck"][0]["ref"] == "c1"
     assert decision["selection"]["selected"] == []
-    previews = {item["ref"]: item["previews"] for item in decision["hand_previews"]}
+    previews = {item["ref"]: item["previews"] for item in current["hand"]}
     assert previews["c1"][0]["target"] == {
         "ref": "e1",
         "name": "敌人",

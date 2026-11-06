@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import MISSING
+from pydantic import MISSING, JsonValue
 
 from sts2_harness.client import models as native
 from sts2_harness.context.run_models import RunObservation
@@ -149,6 +149,11 @@ type TaskInput = CombatActInput | CombatReviewInput | RunActInput | RunHandoffIn
 type TaskContent = (
     ActContent | ReviewContent | RunActContent | RunActHandoffContent | HandoffContent
 )
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineMessage(TextMessage):
+    content: dict[str, JsonValue]
 
 
 @dataclass(frozen=True, slots=True)

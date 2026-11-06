@@ -90,12 +90,12 @@ def _encode(input: ModelInput) -> list[dict[str, JsonValue]]:
         match message:
             case TextMessage():
                 encoded.append({"role": message.role.value, "content": message.text})
-            case ToolResultMessage(call_id, content):
+            case ToolResultMessage(call_id):
                 encoded.append(
                     {
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": content.to_json(),
+                        "output": message.text,
                     }
                 )
             case AssistantMessage(native):

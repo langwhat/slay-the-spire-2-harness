@@ -12,6 +12,7 @@ from sts2_harness.context.entries import Collection, apply_entries, ordered
 from sts2_harness.context.models import (
     ActContent,
     AutomaticProgress,
+    BaselineMessage,
     CombatActInput,
     CombatReviewInput,
     HandoffContent,
@@ -28,6 +29,7 @@ from sts2_harness.context.models import (
     TaskInput,
     TaskMessage,
 )
+from sts2_harness.context.rendering import render
 from sts2_harness.context.run_models import RunObservation
 from sts2_harness.context.run_projection import RunDelivery
 from sts2_harness.context.view import visible_observation
@@ -94,36 +96,6 @@ def _rename_profiles(value: JsonValue, names: dict[str, str]) -> JsonValue:
 
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
-_BASELINE_FIELDS: dict[str, tuple[str, ...]] = {
-    "observation": ("current", "catalog_additions", "scene", "decision"),
-    "current": (
-        "map_topology",
-        "dynamic_map",
-        "encounter",
-        "progress",
-        "inventory",
-        "deck",
-        "noncard_objects",
-        "upgrades",
-        "modifier_descriptions",
-        "object_descriptions",
-        "card_descriptions",
-        "generated",
-        "mechanisms",
-    ),
-}
-
-
-def _baseline_order(value: JsonValue, section: str = "") -> JsonValue:
-    if isinstance(value, list):
-        return [_baseline_order(item) for item in value]
-    if not isinstance(value, dict):
-        return value
-    # Stable state sections precede live state; all other object keys stay deterministic.
-    preferred = _BASELINE_FIELDS.get(section, ())
-    keys = [key for key in preferred if key in value]
-    keys.extend(key for key in sorted(value) if key not in preferred)
-    return {key: _baseline_order(value[key], key) for key in keys}
 
 
 def _message_observation(
@@ -272,7 +244,7 @@ class Context:
             catalog,
             notes,
             tuple(self._guidance.values()),
-            deepcopy(route_plan),
+            {"edges": deepcopy(route_plan["edges"])} if isinstance(route_plan, dict) else None,
         )
 
     def finish_group(self) -> None:
@@ -317,7 +289,10 @@ class Context:
         if self._role is native.DecisionOwner.RUN:
             if not self._minimal:
                 values["strategy_notes"] = group.notes
-            values["route_plan"] = group.route_plan
+            current = observation.get("current")
+            dynamic = current.get("dynamic_map") if isinstance(current, dict) else None
+            if not isinstance(dynamic, dict):
+                values["route_plan"] = group.route_plan
         elif not self._minimal:
             values["opening_notes"] = group.notes
         baseline: dict[str, JsonValue] = {"context_baseline": values}
@@ -338,10 +313,7 @@ class Context:
         prefix = (
             (TextMessage(TextRole.USER, GuidanceContent(guidance=guidance)),) if guidance else ()
         )
-        baseline_message = TextMessage(
-            TextRole.USER,
-            json.dumps(_baseline_order(baseline), ensure_ascii=False, separators=(",", ":")),
-        )
+        baseline_message = BaselineMessage(TextRole.USER, render(baseline), baseline)
         candidate: ModelInput = (*self._system, *prefix, baseline_message, *retained)
         return candidate, baseline_message
 
@@ -359,9 +331,9 @@ class Context:
         retained = tuple(self._history[group.start :])
         prefix_length = len(candidate) - len(retained)
         baseline_message = candidate[prefix_length - 1]
-        if not isinstance(baseline_message, TextMessage):
+        if not isinstance(baseline_message, BaselineMessage):
             raise ValueError("The compaction baseline is missing.")
-        envelope = _JSON_OBJECT.validate_json(baseline_message.text)
+        envelope = baseline_message.content
         baseline = envelope.get("context_baseline")
         if not isinstance(baseline, dict):
             raise ValueError("The compaction baseline is invalid.")
@@ -564,7 +536,15 @@ class Context:
                     strategy_notes=task.strategy_notes,
                 )
             )
-            self._history.append(TaskMessage(TextRole.USER, content.to_json(), content, task, None))
+            self._history.append(
+                TaskMessage(
+                    TextRole.USER,
+                    render(_JSON_OBJECT.validate_json(content.to_json())),
+                    content,
+                    task,
+                    None,
+                )
+            )
             return
         if observation is None:
             raise TypeError("An act task requires a current observation.")
@@ -587,7 +567,13 @@ class Context:
                 )
             else:
                 content = RunActContent(observation=projected, strategy_notes=task.strategy_notes)
-        message = TaskMessage(TextRole.USER, content.to_json(), content, task, observation)
+        message = TaskMessage(
+            TextRole.USER,
+            render(_JSON_OBJECT.validate_json(content.to_json())),
+            content,
+            task,
+            observation,
+        )
         self._history.append(message)
 
     def _last_entry(self) -> TextMessage | AssistantMessage | ToolResultMessage | None:
@@ -629,7 +615,14 @@ class Context:
             outcome=result.outcome,
             observation=observation,
         )
-        self._history.append(RunAutomaticMessage(TextRole.USER, content.to_json(), content, result))
+        self._history.append(
+            RunAutomaticMessage(
+                TextRole.USER,
+                render(_JSON_OBJECT.validate_json(content.to_json())),
+                content,
+                result,
+            )
+        )
 
     def append_tool_result(
         self, call: ToolCall, result: ToolResult, *, defer_observation: bool = False
@@ -650,7 +643,14 @@ class Context:
             observation=observation,
             data=result.data if isinstance(result, QueryToolResult) else MISSING,
         )
-        self._history.append(RunResultMessage(call.id, content, result))
+        self._history.append(
+            RunResultMessage(
+                call_id=call.id,
+                content=content,
+                text=render(_JSON_OBJECT.validate_json(content.to_json())),
+                source=result,
+            )
+        )
         if isinstance(result, QueryToolResult):
             self._record_query_documents(result)
 

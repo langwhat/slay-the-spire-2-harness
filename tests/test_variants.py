@@ -229,6 +229,7 @@ def test_document_versions_keep_explicit_result_links_and_reject_unknown_sources
             for item in actual_results:
                 assert isinstance(item.data, DocumentData)
                 assert item.data.document.text.body == "Plan from the current public state."
+                assert "Plan from the current public state." in item.text
             assert [item for item in resumed.input if isinstance(item, AssistantSnapshot)] == [
                 item for item in original.input if isinstance(item, AssistantSnapshot)
             ]

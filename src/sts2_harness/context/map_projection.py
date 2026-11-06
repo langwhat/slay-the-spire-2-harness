@@ -33,7 +33,6 @@ class PlanEdge(SemanticValue):
 
 
 class Plan(SemanticValue):
-    reason: str
     edges: tuple[PlanEdge, ...]
 
 
@@ -66,7 +65,6 @@ def project_map(
         special_movement=SpecialMovement(free_travel_active=None, remaining_uses=None),
         plan=(
             Plan(
-                reason=plan.reason,
                 edges=tuple(
                     PlanEdge(source=edge.source, destination=edge.destination)
                     for edge in plan.edges

@@ -39,10 +39,8 @@ def _encode(input: ModelInput) -> list[dict[str, JsonValue]]:
         match message:
             case TextMessage():
                 encoded.append({"role": message.role.value, "content": message.text})
-            case ToolResultMessage(call_id, content):
-                encoded.append(
-                    {"role": "tool", "tool_call_id": call_id, "content": content.to_json()}
-                )
+            case ToolResultMessage(call_id):
+                encoded.append({"role": "tool", "tool_call_id": call_id, "content": message.text})
             case AssistantMessage(native):
                 if not isinstance(native, ChatCompletionsReply):
                     raise ModelUnavailable(FailureKind.CONFIGURATION)

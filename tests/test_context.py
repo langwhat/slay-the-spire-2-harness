@@ -46,6 +46,7 @@ from sts2_harness.context.models import (
     RunResultMessage,
     TaskMessage,
 )
+from sts2_harness.context.run_models import Description
 from sts2_harness.decisions import BattleLocation, BattleReport, BoundaryValues, CombatHandoff
 from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall
 from sts2_harness.results import ActionCompleted, Failed, Reason, ReasonCode, Suggestion
@@ -62,8 +63,8 @@ def test_task_delivers_complete_state_and_latest_details_without_rewriting_histo
     assert isinstance(first.content, ActContent)
     projected = first.content.observation
     assert projected.current is not MISSING
-    assert projected.current.piles is not MISSING and projected.current.piles is not None
-    assert tuple(card.ref for card in projected.current.piles.hand) == ("c2", "c1")
+    assert projected.current.hand is not MISSING and projected.current.hand is not None
+    assert tuple(card.ref for card in projected.current.hand) == ("c2", "c1")
     assert projected.scene is not MISSING
     assert {binding.ref: binding.name for binding in projected.scene.bindings}["c1"] == "牌"
     context.append_task(CombatActInput(), observation)
@@ -123,9 +124,10 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
     assert projected is not None and projected.current is not MISSING
     assert projected.current.cards is MISSING
     assert projected.current.card_descriptions is not MISSING
-    assert [(item.ref, item.text) for item in projected.current.card_descriptions] == [
-        ("c1", "新正文")
-    ]
+    assert len(projected.current.card_descriptions) == 1
+    description = projected.current.card_descriptions[0]
+    assert isinstance(description, Description)
+    assert (description.ref, description.text) == ("c1", "新正文")
     assert projected.current.modifier_descriptions is not MISSING
     assert [
         (item.ref, item.enchantment, item.affliction)
@@ -145,9 +147,10 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
         and returned.content.observation.current is not MISSING
     )
     assert returned.content.observation.current.card_descriptions is not MISSING
-    assert [
-        (item.ref, item.text) for item in returned.content.observation.current.card_descriptions
-    ] == [("c1", None)]
+    assert len(returned.content.observation.current.card_descriptions) == 1
+    restored_description = returned.content.observation.current.card_descriptions[0]
+    assert isinstance(restored_description, Description)
+    assert (restored_description.ref, restored_description.text) == ("c1", None)
     assert original_projected.current.cards is not MISSING
     assert (
         next(item for item in original_projected.current.cards if item.ref == "c1").cost
@@ -172,14 +175,15 @@ def test_results_deliver_latest_changes_and_full_explicit_data_independently() -
         moved.content.observation is not None and moved.content.observation.current is not MISSING
     )
     current = moved.content.observation.current
-    assert current.piles is not MISSING and current.piles is not None
-    assert tuple(item.ref for item in current.piles.hand) == ("c2",)
-    assert tuple(item.ref for item in current.piles.discard) == ("c1",)
+    assert current.hand is not MISSING and current.hand is not None
+    assert tuple(item.ref for item in current.hand) == ("c2",)
+    assert current.discard is not MISSING and current.discard is not None
+    assert tuple(item.ref for item in current.discard) == ("c1",)
     assert isinstance(current.player, CombatPlayer)
     assert current.player.powers == ()
-    assert current.cards is MISSING
-    assert moved.content.observation.decision.hand_previews is not MISSING
-    assert tuple(item.ref for item in moved.content.observation.decision.hand_previews) == ("c2",)
+    assert current.cards is not MISSING
+    assert tuple(item.ref for item in current.cards) == ("c1",)
+    assert current.cards[0].playable is card.playable
     assert isinstance(original_projected.current.player, CombatPlayer)
     assert original_projected.current.player.powers[0].amount == 0
 
@@ -196,15 +200,16 @@ def test_generated_directories_keep_stable_keys_and_card_order_through_changes()
     context.append_task(CombatActInput(), observation)
     first = context.model_input()[-1]
     assert isinstance(first, TaskMessage)
-    initial = ActContent.model_validate_json(first.text).observation
+    assert isinstance(first.content, ActContent)
+    initial = first.content.observation
     assert initial.current is not MISSING and initial.current.generated is not MISSING
     assert [entry.source.ref for entry in initial.current.generated] == ["c1", "c2"]
     assert [entry.source.definition_id for entry in initial.current.generated[1].previews] == [
         "CARD.TWO",
         "CARD.ONE",
     ]
-    assert initial.current.piles is not MISSING and initial.current.piles is not None
-    assert tuple(item.ref for item in initial.current.piles.hand) == ("c2", "c1")
+    assert initial.current.hand is not MISSING and initial.current.hand is not None
+    assert tuple(item.ref for item in initial.current.hand) == ("c2", "c1")
     changed = {"c2": (first_card,), "c1": (second_card, first_card)}
     call = ToolCall("inspect", "combat_inspect", "{}")
     for directory in (changed, {}):
@@ -817,7 +822,7 @@ def test_run_combat_result_keeps_permanent_facts_without_combat_internals() -> N
     assert isinstance(combat_message.content, ActContent)
     combat_projection = combat_message.content.observation
     assert combat_projection.current is not MISSING
-    assert combat_projection.current.piles is not MISSING
+    assert combat_projection.current.hand is not MISSING
     assert combat_projection.current.actors is not MISSING
     assert combat_projection.scene is not MISSING
     assert {item.ref for item in combat_projection.scene.bindings} == set(observation.objects)
@@ -891,7 +896,11 @@ def test_fake_http_battle_transition_preserves_run_handoff_and_notes() -> None:
         context.append_task(RunActInput(strategy_notes="Save potion."), after)
         messages = context.model_input()
         assert "Save potion." in messages[0].text
-        assert '"deck":[{"ref":"c1"' in messages[1].text
+        battle = messages[1]
+        assert isinstance(battle, RunResultMessage) and battle.content.observation is not None
+        assert battle.content.observation.current is not MISSING
+        assert battle.content.observation.current.deck is not MISSING
+        assert battle.content.observation.current.deck[0].ref == "c1"
         assert '"piles"' not in messages[1].text
         assert '"enemies"' not in messages[1].text
         assert "Need faster damage." in messages[2].text
@@ -1164,7 +1173,7 @@ def test_minimal_run_context_keeps_active_queries_guidance_and_route_plan() -> N
     assert messages[: len(continuing)] == continuing
     candidate, baseline_message = context.compaction_input()
     baseline = json.loads(baseline_message.text)["context_baseline"]
-    assert baseline["route_plan"] == plan
+    assert baseline["route_plan"] == {"edges": [{"from": "n1", "to": "n2"}]}
     assert "strategy_notes" not in baseline
     assert any("Keep this automatic guidance." in message.text for message in messages)
     assert any("Current query failed" in message.text for message in messages)

@@ -2,9 +2,11 @@
 
 from dataclasses import dataclass
 
-from pydantic import MISSING
+from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
+from sts2_harness.context.models import RunProjectedResult
+from sts2_harness.context.rendering import render
 from sts2_harness.journal import ArchivedReplacement
 from sts2_harness.journal_models import (
     ArchivedData,
@@ -21,7 +23,10 @@ from sts2_harness.journal_models import (
     MessageSnapshot,
     ModelRecord,
     NamedText,
+    NativeData,
+    NotesData,
     PartsText,
+    PlanArchiveData,
     PromptReadResult,
     ResultSnapshot,
     SkillListingResult,
@@ -34,7 +39,10 @@ from sts2_harness.knowledge import (
     Document,
     Documents,
     DocumentView,
+    KnowledgeEntry,
+    KnowledgeLookup,
     Resource,
+    SkillList,
     SkillRead,
     SkillSummary,
     SubjectId,
@@ -42,6 +50,7 @@ from sts2_harness.knowledge import (
 from sts2_harness.llm.messages import TextRole, ToolDefinition
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
 from sts2_harness.prompts import PromptReader
+from sts2_harness.results import QueryData
 from sts2_harness_eval.results import MaterialDifference, Rejected, RejectReason
 
 
@@ -74,6 +83,66 @@ class VariantError(MaterialUnavailable):
     @property
     def rejection(self) -> Rejected:
         return Rejected(RejectReason.INPUT_MISMATCH, None, MaterialDifference(str(self)))
+
+
+_JSON = TypeAdapter(dict[str, JsonValue])
+
+
+def _document_view(source: DocumentSnapshot) -> DocumentView:
+    return DocumentView(
+        id=source.id,
+        name=MaterialText(id=source.name.id, version=source.name.version, body=source.name.body),
+        text=MaterialText(id=source.text.id, version=source.text.version, body=source.text.body),
+        resources=tuple(
+            Resource(
+                key=item.key,
+                description=MaterialText(
+                    id=item.description.id,
+                    version=item.description.version,
+                    body=item.description.body,
+                ),
+            )
+            for item in source.resources
+        ),
+        resource=source.resource,
+    )
+
+
+def _query_data(source: ArchivedData | MISSING) -> QueryData | MISSING:
+    if source is MISSING:
+        return MISSING
+    if isinstance(source, DocumentData):
+        return _document_view(source.document)
+    if isinstance(source, SkillsData):
+        return SkillList(
+            skills=tuple(
+                SkillSummary(
+                    id=item.id,
+                    name=MaterialText(
+                        id=item.name.id, version=item.name.version, body=item.name.body
+                    ),
+                    description=MaterialText(
+                        id=item.description.id,
+                        version=item.description.version,
+                        body=item.description.body,
+                    ),
+                )
+                for item in source.skills
+            )
+        )
+    if isinstance(source, KnowledgeData):
+        return KnowledgeLookup(
+            entries=tuple(
+                KnowledgeEntry(
+                    definition=item.definition,
+                    supplements=tuple(_document_view(doc) for doc in item.supplements),
+                )
+                for item in source.entries
+            ),
+            missing_ids=source.missing_ids,
+        )
+    assert isinstance(source, (NativeData, NotesData, PlanArchiveData))
+    return source.value
 
 
 class Materials:
@@ -237,7 +306,15 @@ class Materials:
                             original.supplements, entry.supplements, strict=True
                         ):
                             remember(document, old != document)
-                result.append(message.model_copy(update={"data": data}))
+                text = message.text
+                if data != message.data:
+                    content = RunProjectedResult(
+                        outcome=message.outcome,
+                        observation=message.observation,
+                        data=_query_data(data),
+                    )
+                    text = render(_JSON.validate_json(content.to_json(), strict=True))
+                result.append(message.model_copy(update={"data": data, "text": text}))
                 continue
             result.append(message)
         return tuple(result)

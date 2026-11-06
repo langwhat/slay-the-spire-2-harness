@@ -269,6 +269,7 @@ def test_messages_native_wire_and_recorded_continuation(tmp_path: Path) -> None:
                     RunResultMessage(
                         "call_1",
                         RunProjectedResult(outcome=ReadCompleted(), observation=None),
+                        "Frozen tool result: 中文.",
                         QueryToolResult(ReadCompleted(), None),
                     ),
                     TextMessage(TextRole.USER, "Auxiliary."),
@@ -310,7 +311,7 @@ def test_messages_native_wire_and_recorded_continuation(tmp_path: Path) -> None:
                 {
                     "type": "tool_result",
                     "tool_use_id": "call_1",
-                    "content": '{"outcome":{"status":"completed"},"observation":null}',
+                    "content": "Frozen tool result: 中文.",
                 }
             ],
         }

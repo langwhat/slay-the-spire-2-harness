@@ -12,7 +12,7 @@ from sts2_harness.client.models import (
     ResourceCosts,
 )
 from sts2_harness.context import CombatActInput, Context, QueryToolResult, ReadCompleted
-from sts2_harness.context.models import AutomaticProgress, RunActInput
+from sts2_harness.context.models import AutomaticProgress, BaselineMessage, RunActInput
 from sts2_harness.llm.messages import ToolCall
 from sts2_harness.results import ActionCompleted, ActionToolResult
 
@@ -69,9 +69,15 @@ def test_run_group_resource_change_keeps_unchanged_entries_incremental() -> None
     assert set(frame["current"]) == {"player"}
     assert frame["current"]["player"]["gold"] == 1
     context.finish_group()
-    baseline = json.loads(context.compaction_candidate()[0].text)["context_baseline"]
-    assert baseline["observation"]["current"]["player"]["gold"] == opening.state.player.gold
-    assert len(baseline["observation"]["current"]["cards"]) == 2
+    baseline_message = context.compaction_candidate()[0]
+    assert isinstance(baseline_message, BaselineMessage)
+    baseline = baseline_message.content["context_baseline"]
+    assert isinstance(baseline, dict)
+    observation = baseline["observation"]
+    assert isinstance(observation, dict) and isinstance(current := observation["current"], dict)
+    assert isinstance(player := current["player"], dict)
+    assert player["gold"] == opening.state.player.gold
+    assert isinstance(cards := current["cards"], list) and len(cards) == 2
     context.install_compaction(context.compaction_candidate())
     context.append_task(RunActInput(strategy_notes="Keep current strategy."), changed)
     assert "current" not in json.loads(context.model_input()[-1].text)["observation"]
@@ -388,10 +394,19 @@ def test_compaction_preserves_entry_removals_defaults_and_mechanism_multiplicity
     context.begin_group(opening, "")
     context.append_task(CombatActInput(), opening)
     candidate = context.compaction_candidate()
-    baseline = json.loads(candidate[0].text)["context_baseline"]["observation"]["current"]
-    assert [entry["ref"] for entry in baseline["cards"]] == ["c1", "c2"]
-    assert [entry["ref"] for entry in baseline["card_descriptions"]] == ["c2"]
-    assert len(baseline["mechanisms"]) == 1
+    baseline_message = candidate[0]
+    assert isinstance(baseline_message, BaselineMessage)
+    envelope = baseline_message.content["context_baseline"]
+    assert isinstance(envelope, dict) and isinstance(observation := envelope["observation"], dict)
+    assert isinstance(baseline := observation["current"], dict)
+    cards = baseline["cards"]
+    assert isinstance(cards, list)
+    assert [entry["ref"] for entry in cards if isinstance(entry, dict)] == ["c1", "c2"]
+    descriptions = baseline["card_descriptions"]
+    assert isinstance(descriptions, list)
+    assert [entry["ref"] for entry in descriptions if isinstance(entry, dict)] == ["c2"]
+    mechanisms = baseline["mechanisms"]
+    assert isinstance(mechanisms, list) and len(mechanisms) == 1
     context.install_compaction(candidate)
     context.append_tool_result(
         ToolCall("inspect", "combat_inspect", "{}"), QueryToolResult(ReadCompleted(), opening)

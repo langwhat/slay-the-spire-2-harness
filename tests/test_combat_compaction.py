@@ -20,7 +20,7 @@ from sts2_harness.config import Protocol
 from sts2_harness.context import Context
 from sts2_harness.context.models import ActContent, CombatActInput, ReviewContent
 from sts2_harness.journal import Journal, Manifest
-from sts2_harness.journal_models import LiteralText, ResultSnapshot, TaskSnapshot, TextSnapshot
+from sts2_harness.journal_models import BaselineSnapshot, ResultSnapshot, TaskSnapshot
 from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall, ToolResultMessage
 from sts2_harness.results import ActionCompleted, ActionToolResult
 from sts2_harness_eval import Reached, reach
@@ -255,13 +255,14 @@ def test_combat_compaction_recording_replays_without_repeating_actions(
         preparation = compressed.preparation
         assert preparation is not None and preparation.input_after is not None
         assert preparation.baseline is not None
-        assert isinstance(preparation.baseline, TextSnapshot)
-        assert isinstance(preparation.baseline.value, LiteralText)
-        baseline = json.loads(preparation.baseline.value.body)["context_baseline"]
+        assert isinstance(preparation.baseline, BaselineSnapshot)
+        baseline = preparation.baseline.content["context_baseline"]
+        assert isinstance(baseline, dict)
+        assert isinstance(observation := baseline["observation"], dict)
+        assert isinstance(current := observation["current"], dict)
+        assert isinstance(player := current["player"], dict)
         assert baseline["opening_notes"] == "Opening plan."
-        assert baseline["observation"]["current"]["player"]["hp"] == (
-            7 if stage == "review" else 10
-        )
+        assert player["hp"] == (7 if stage == "review" else 10)
         retained_players = [
             content.observation.current.player
             for item in preparation.input_after
