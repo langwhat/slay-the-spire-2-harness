@@ -39,14 +39,13 @@ class Plan(SemanticValue):
 class DynamicMap(SemanticValue):
     position: str | None
     legal_destinations: tuple[str, ...] | None
-    unknown_odds: dict[str, native.MapOdds | None]
     special_movement: SpecialMovement
     plan: Plan | None
 
 
 def project_map(
     public_map: native.PublicMap, progress: native.Progress, plan: RoutePlan | None
-) -> tuple[MapTopology, DynamicMap]:
+) -> tuple[MapTopology, DynamicMap, dict[str, native.MapOdds]]:
     topology = MapTopology(
         bosses=public_map.bosses,
         nodes=tuple(
@@ -57,11 +56,6 @@ def project_map(
     dynamic = DynamicMap(
         position=progress.position,
         legal_destinations=public_map.legal_destinations,
-        unknown_odds={
-            node.position: node.odds
-            for node in public_map.nodes
-            if isinstance(node.odds, native.MapOdds)
-        },
         special_movement=SpecialMovement(free_travel_active=None, remaining_uses=None),
         plan=(
             Plan(
@@ -74,4 +68,9 @@ def project_map(
             else None
         ),
     )
-    return topology, dynamic
+    unknown_odds = {
+        node.position: node.odds
+        for node in public_map.nodes
+        if isinstance(node.odds, native.MapOdds)
+    }
+    return topology, dynamic, unknown_odds

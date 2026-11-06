@@ -180,9 +180,7 @@ class RunDelivery:
         mechanisms: list[JsonValue] = []
         for mechanism in observation.mechanisms:
             owner = (
-                observation.objects.get(mechanism.owner)
-                if mechanism.owner is not MISSING
-                else None
+                observation.objects.get(mechanism.owner) if mechanism.owner is not MISSING else None
             )
             full_object_rule = (
                 mechanism.kind is native.MechanismKind.RELIC
@@ -266,9 +264,12 @@ class RunDelivery:
             ],
         }
         if self.role is native.DecisionOwner.RUN and source.map is not MISSING:
-            topology, dynamic = project_map(source.map, state.progress, self.route_plan)
+            topology, dynamic, unknown_odds = project_map(
+                source.map, state.progress, self.route_plan
+            )
             current["map_topology"] = _json(topology)
             current["dynamic_map"] = _json(dynamic)
+            current["unknown_odds"] = {ref: _json(odds) for ref, odds in unknown_odds.items()}
         if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState):
             current["turn"] = state.turn
             hand: list[JsonValue] = []
@@ -322,7 +323,7 @@ class RunDelivery:
             and isinstance(previous_progress, dict)
             and previous_progress.get("act") == state.progress.act
         )
-        for section in ("map_topology", "dynamic_map"):
+        for section in ("map_topology", "dynamic_map", "unknown_odds"):
             if section not in current:
                 continue
             if same_act and current[section] == self.current.get(section):

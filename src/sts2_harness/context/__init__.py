@@ -398,7 +398,7 @@ class Context:
                     reconstructed_current = {
                         key: value
                         for key, value in reconstructed_current.items()
-                        if key in ("map_topology", "dynamic_map") and same_act
+                        if key in ("map_topology", "dynamic_map", "unknown_odds") and same_act
                     }
                 previous = (
                     reconstructed_scene["bindings"]

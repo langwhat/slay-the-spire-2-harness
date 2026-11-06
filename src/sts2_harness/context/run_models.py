@@ -260,6 +260,7 @@ class Current(SemanticValue):
     removed: RemovedEntries | MISSING = MISSING
     map_topology: MapTopology | None | MISSING = MISSING
     dynamic_map: DynamicMap | None | MISSING = MISSING
+    unknown_odds: dict[str, native.MapOdds] | None | MISSING = MISSING
     progress: native.Progress | MISSING = MISSING
     player: native.CombatPlayer | native.Player | native.RunPlayer | MISSING = MISSING
     turn: int | None | MISSING = MISSING

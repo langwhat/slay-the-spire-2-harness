@@ -45,6 +45,7 @@ _SECTION_ORDER: dict[str, tuple[str, ...]] = {
     "observation": ("catalog_additions", "current", "scene", "decision"),
     "current": (
         "map_topology",
+        "unknown_odds",
         "dynamic_map",
         "encounter",
         "progress",

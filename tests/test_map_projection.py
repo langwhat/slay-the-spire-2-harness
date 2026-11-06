@@ -18,7 +18,7 @@ def test_projects_complete_native_topology_and_dynamic_sections() -> None:
     )
     progress = Progress(act=1, floor=0, position="map:0:0", room_type="ancient")
 
-    topology, dynamic = project_map(raw_map, progress, None)
+    topology, dynamic, odds = project_map(raw_map, progress, None)
 
     assert json.loads(topology.to_json()) == {
         "bosses": [{"name": "首领", "definition_id": "ENCOUNTER.BOSS"}],
@@ -27,10 +27,12 @@ def test_projects_complete_native_topology_and_dynamic_sections() -> None:
             {"id": "map:0:0", "room_type": "ancient", "children": ["map:1:0"]},
         ],
     }
+    assert {ref: json.loads(value.to_json()) for ref, value in odds.items()} == {
+        "map:1:0": {"monster": 0.6, "event": 0.4}
+    }
     assert json.loads(dynamic.to_json()) == {
         "position": "map:0:0",
         "legal_destinations": ["map:1:0", "map:1:2"],
-        "unknown_odds": {"map:1:0": {"monster": 0.6, "event": 0.4}},
         "special_movement": {"free_travel_active": None, "remaining_uses": None},
         "plan": None,
     }
@@ -41,14 +43,14 @@ def test_unknown_and_known_empty_destinations_stay_distinct() -> None:
     unknown = PublicMap.model_validate_json('{"bosses":[],"nodes":[],"legal_destinations":null}')
     empty = PublicMap.model_validate_json('{"bosses":[],"nodes":[],"legal_destinations":[]}')
 
-    topology, unknown_dynamic = project_map(unknown, progress, None)
-    _, empty_dynamic = project_map(empty, progress, None)
+    topology, unknown_dynamic, odds = project_map(unknown, progress, None)
+    _, empty_dynamic, _ = project_map(empty, progress, None)
 
     assert json.loads(topology.to_json()) == {"bosses": [], "nodes": []}
+    assert odds == {}
     assert json.loads(unknown_dynamic.to_json()) == {
         "position": None,
         "legal_destinations": None,
-        "unknown_odds": {},
         "special_movement": {"free_travel_active": None, "remaining_uses": None},
         "plan": None,
     }
@@ -83,22 +85,21 @@ def test_complete_dynamic_replacement_contains_accepted_remaining_plan_and_fresh
         edges=(Edge("map:1:0", "map:2:0"), Edge("map:2:0", "map:3:2")),
     )
 
-    topology, dynamic = project_map(first, progress, plan)
-    same_topology, refreshed = project_map(second, progress, plan)
+    topology, dynamic, odds = project_map(first, progress, plan)
+    same_topology, refreshed, refreshed_odds = project_map(second, progress, plan)
 
     assert topology == same_topology
-    moved_topology, _ = project_map(
+    moved_topology, _, _ = project_map(
         first, progress.model_copy(update={"floor": 2, "position": "map:2:0"}), None
     )
     assert moved_topology == topology
-    assert json.loads(dynamic.to_json())["unknown_odds"] == {
+    assert {ref: json.loads(value.to_json()) for ref, value in odds.items()} == {
         "map:1:0": {"monster": 0, "shop": 0.75}
     }
     assert DynamicMap.model_validate_json(dynamic.to_json()) == dynamic
     assert json.loads(refreshed.to_json()) == {
         "position": "map:1:0",
         "legal_destinations": [],
-        "unknown_odds": {},
         "special_movement": {"free_travel_active": None, "remaining_uses": None},
         "plan": {
             "edges": [
@@ -107,4 +108,5 @@ def test_complete_dynamic_replacement_contains_accepted_remaining_plan_and_fresh
             ],
         },
     }
+    assert refreshed_odds == {}
     assert DynamicMap.model_validate_json(refreshed.to_json()) == refreshed
