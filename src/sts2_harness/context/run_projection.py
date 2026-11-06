@@ -179,6 +179,28 @@ class RunDelivery:
         reset = node_changed
         mechanisms: list[JsonValue] = []
         for mechanism in observation.mechanisms:
+            owner = (
+                observation.objects.get(mechanism.owner)
+                if mechanism.owner is not MISSING
+                else None
+            )
+            full_object_rule = (
+                mechanism.kind is native.MechanismKind.RELIC
+                and isinstance(owner, native.RelicEntry)
+            ) or (
+                mechanism.kind is native.MechanismKind.POTION
+                and isinstance(owner, native.PotionEntry)
+            )
+            if (
+                full_object_rule
+                and owner is not None
+                and mechanism.definition_id == owner.definition_id
+                and mechanism.name == owner.name
+                and mechanism.text is not None
+                and mechanism.owner is not MISSING
+                and observation.descriptions.get(mechanism.owner) == mechanism.text
+            ):
+                continue
             body = _json(mechanism)
             body.pop("owner", None)
             profile = intern("mechanism", body)
