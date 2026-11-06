@@ -23,8 +23,8 @@ def test_projects_complete_native_topology_and_dynamic_sections() -> None:
     assert json.loads(topology.to_json()) == {
         "bosses": [{"name": "首领", "definition_id": "ENCOUNTER.BOSS"}],
         "nodes": [
-            {"id": "map:0:0", "room_type": "ancient", "children": ["map:1:0"]},
             {"id": "map:1:0", "room_type": "unknown", "children": []},
+            {"id": "map:0:0", "room_type": "ancient", "children": ["map:1:0"]},
         ],
     }
     assert json.loads(dynamic.to_json()) == {
@@ -87,6 +87,10 @@ def test_complete_dynamic_replacement_contains_accepted_remaining_plan_and_fresh
     same_topology, refreshed = project_map(second, progress, plan)
 
     assert topology == same_topology
+    moved_topology, _ = project_map(
+        first, progress.model_copy(update={"floor": 2, "position": "map:2:0"}), None
+    )
+    assert moved_topology == topology
     assert json.loads(dynamic.to_json())["unknown_odds"] == {
         "map:1:0": {"monster": 0, "shop": 0.75}
     }

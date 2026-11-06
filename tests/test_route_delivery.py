@@ -21,7 +21,10 @@ def test_run_observation_delivers_map_sections_and_replaces_dynamic_facts() -> N
     context = Context(native.DecisionOwner.RUN)
     context.append_task(RunActInput(), observation)
     first = json.loads(context.model_input()[-1].text)["observation"]
-    assert first["current"]["map_topology"]["nodes"][0]["id"] == "map:0:0"
+    assert [node["id"] for node in first["current"]["map_topology"]["nodes"]] == [
+        "map:1:0",
+        "map:0:0",
+    ]
     assert first["current"]["dynamic_map"]["legal_destinations"] == ["map:1:0"]
     assert "updates" not in first
     changed = observation.model_copy(

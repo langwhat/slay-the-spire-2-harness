@@ -51,7 +51,7 @@ def project_map(
         bosses=public_map.bosses,
         nodes=tuple(
             MapNode(id=node.position, room_type=node.room_type, children=node.children)
-            for node in public_map.nodes
+            for node in reversed(public_map.nodes)
         ),
     )
     dynamic = DynamicMap(
