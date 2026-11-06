@@ -30,7 +30,7 @@ Use the questions for the decision at hand. They guide planning; they are not an
 
 Use current previews and announced intents without applying their included modifiers twice. Block produced is not necessarily HP saved. Separate guaranteed, plausible, and unavailable continuations. Estimate probabilities only when they affect the choice.
 
-If neither line kills now, compare both through the same later enemy action that could cause HP loss. Include intervening player turns and quiet enemy actions. Calculate the damage needed before that action, including enemy block, growth, and still-active modifiers. Use known pile membership, draw counts, actual shuffle timing, and any known top-deck order to assess what those turns can afford. If the difference occurs later, extend both lines through that attack, setup payoff, or loss of useful draws. Earlier lethal alone saves no HP when the skipped actions would cause no HP loss; include the growth, pollution, resource costs, and bad-draw risk it avoids.
+Unless a line ends the battle now, compare both through the same later enemy action that could cause HP loss. Include intervening player turns and quiet enemy actions. Calculate the damage needed before that action, including enemy block, growth, and still-active modifiers. Use known pile membership, draw counts, actual shuffle timing, and any known top-deck order to assess what those turns can afford. If the difference occurs later, extend both lines through that attack, setup payoff, or loss of useful draws. Earlier lethal alone saves no HP when the skipped actions would cause no HP loss; include the growth, pollution, resource costs, and bad-draw risk it avoids.
 
 ## Before choosing a kill, stun, or phase transition
 
