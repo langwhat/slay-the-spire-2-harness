@@ -49,6 +49,9 @@ class SkillMode(StrEnum):
 
 class SkillListInput(native.WireModel):
     mode: Literal[SkillMode.LIST]
+    text: str | MISSING = MISSING
+    offset: Annotated[int, Field(ge=0)] | MISSING = MISSING
+    limit: Annotated[int, Field(ge=1, le=20)] | MISSING = MISSING
 
 
 class SkillReadInput(native.WireModel):

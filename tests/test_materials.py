@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import httpx2 as httpx
+import pytest
 from test_responses import completed, configuration
 
 from sts2_harness.client import models as native
@@ -269,6 +270,12 @@ def test_skill_queries_reject_unadvertised_reads_and_report_real_io_failure(tmp_
             '{"mode":"read","id":"missing","resource":null}',
             '{"mode":"read","id":"missing","path":"secret"}',
             '{"mode":"read","id":"missing","id":"unknown"}',
+            '{"mode":"list","offset":-1}',
+            '{"mode":"list","limit":0}',
+            '{"mode":"list","limit":21}',
+            '{"mode":"list","limit":"2"}',
+            '{"mode":"list","text":null}',
+            '{"mode":"read","id":"missing","text":"ignored"}',
         ):
             rejected = await enabled.dispatch(ToolCall("bad", "run_skill", arguments))
             assert isinstance(rejected.outcome, Rejected)
@@ -452,5 +459,85 @@ def test_document_failures_identify_the_logical_source_for_reads_and_lookup(tmp_
             assert str(tmp_path) not in str(failure.value)
         with pytest.raises(UnknownDocument, match="unknown-guide"):
             await documents.read(SkillRead("unknown-guide"))
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("role", (DecisionOwner.RUN, DecisionOwner.COMBAT))
+def test_skill_discovery_is_bounded_and_searchable(tmp_path: Path, role: DecisionOwner) -> None:
+    from sts2_harness.knowledge import SkillList
+    from sts2_harness.results import ReadCompleted
+
+    source = FileDocuments(
+        tuple(
+            DocumentSource(
+                id=f"guide:{index:02}",
+                name="Queen route" if index == 7 else f"Guide {index}",
+                description="CARD.POMMEL_STRIKE access" if index < 3 else "Other effects",
+                path=tmp_path / "unread-during-discovery.txt",
+            )
+            for index in reversed(range(23))
+        )
+    )
+
+    async def unavailable() -> NoReturn:
+        raise ClientUnavailable(ClientFailureKind.CONNECTION)
+
+    async def unavailable_query(query: native.InspectQuery | native.CatalogRequest) -> NoReturn:
+        raise AssertionError("Skill discovery needs no native query.")
+
+    async def scenario() -> None:
+        tools = ToolCatalog(
+            role,
+            observe=unavailable,
+            inspect=unavailable_query,
+            catalog=unavailable_query,
+            notes=Notes("") if role is DecisionOwner.RUN else None,
+            skills=source,
+        )
+        tool = "run_skill" if role is DecisionOwner.RUN else "combat_skill"
+        first = await tools.dispatch(ToolCall("first", tool, '{"mode":"list"}'))
+        assert isinstance(first.outcome, ReadCompleted)
+        assert isinstance(first.data, SkillList)
+        assert len(first.data.skills) == 20
+        assert [skill.id for skill in first.data.skills] == [f"guide:{i:02}" for i in range(20)]
+        assert first.data.total == 23
+        assert first.data.next_offset == 20
+        tail = await tools.dispatch(ToolCall("tail", tool, '{"mode":"list","offset":20}'))
+        assert isinstance(tail.data, SkillList)
+        assert [skill.id for skill in tail.data.skills] == ["guide:20", "guide:21", "guide:22"]
+        assert tail.data.total == 23 and tail.data.next_offset is None
+
+        selected = await tools.dispatch(
+            ToolCall("selected", tool, '{"mode":"list","text":"card.pommel_strike","limit":2}')
+        )
+        assert isinstance(selected.data, SkillList)
+        assert [skill.id for skill in selected.data.skills] == ["guide:00", "guide:01"]
+        assert selected.data.total == 3 and selected.data.next_offset == 2
+        last = await tools.dispatch(
+            ToolCall(
+                "last", tool, '{"mode":"list","text":"card.pommel_strike","offset":2,"limit":2}'
+            )
+        )
+        assert isinstance(last.data, SkillList)
+        assert [skill.id for skill in last.data.skills] == ["guide:02"]
+        assert last.data.total == 3 and last.data.next_offset is None
+
+        for search, expected in (
+            (" qUeEn ", ["guide:07"]),
+            ("guide:22", ["guide:22"]),
+            ("missing", []),
+        ):
+            found = await tools.dispatch(
+                ToolCall("match", tool, json.dumps({"mode": "list", "text": search}))
+            )
+            assert isinstance(found.data, SkillList)
+            assert [skill.id for skill in found.data.skills] == expected
+            assert found.data.total == len(expected) and found.data.next_offset is None
+
+        beyond = await tools.dispatch(ToolCall("beyond", tool, '{"mode":"list","offset":99}'))
+        assert isinstance(beyond.data, SkillList)
+        assert beyond.data.skills == () and beyond.data.total == 23
+        assert beyond.data.next_offset is None
 
     asyncio.run(scenario())

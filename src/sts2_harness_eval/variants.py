@@ -128,7 +128,9 @@ def _query_data(source: ArchivedData | MISSING) -> QueryData | MISSING:
                     ),
                 )
                 for item in source.skills
-            )
+            ),
+            total=source.total,
+            next_offset=source.next_offset,
         )
     if isinstance(source, KnowledgeData):
         return KnowledgeLookup(

@@ -293,6 +293,8 @@ class DocumentData(native.WireModel):
 class SkillsData(native.WireModel):
     kind: Literal[DataKind.SKILLS] = DataKind.SKILLS
     skills: tuple[SkillSnapshot, ...]
+    total: Annotated[int, Field(ge=0)]
+    next_offset: Annotated[int, Field(ge=0)] | None
 
 
 class NativeData(native.WireModel):
@@ -335,7 +337,11 @@ def archive_data(data: RunProjectedResult) -> ArchivedData | MISSING:
     if isinstance(value, DocumentView):
         return DocumentData(document=DocumentSnapshot.of(value))
     if isinstance(value, SkillList):
-        return SkillsData(skills=tuple(SkillSnapshot.of(skill) for skill in value.skills))
+        return SkillsData(
+            skills=tuple(SkillSnapshot.of(skill) for skill in value.skills),
+            total=value.total,
+            next_offset=value.next_offset,
+        )
     if isinstance(value, (NotesText, NotesUpdated)):
         return NotesData(value=value)
     if isinstance(value, PlanData):

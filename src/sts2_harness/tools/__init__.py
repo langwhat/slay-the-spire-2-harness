@@ -290,7 +290,30 @@ class ToolCatalog:
         try:
             if isinstance(query, SkillListInput):
                 summaries = await self._skills.list(self._role) if self._skills is not None else ()
-                return QueryToolResult(ReadCompleted(), observation, SkillList(skills=summaries))
+                text = query.text.strip().casefold() if query.text is not MISSING else ""
+                matches = sorted(
+                    (
+                        item
+                        for item in summaries
+                        if any(
+                            text in value.casefold()
+                            for value in (item.id, item.name.body, item.description.body)
+                        )
+                    ),
+                    key=lambda item: item.id,
+                )
+                offset = query.offset if query.offset is not MISSING else 0
+                limit = query.limit if query.limit is not MISSING else 20
+                end = offset + limit
+                return QueryToolResult(
+                    ReadCompleted(),
+                    observation,
+                    SkillList(
+                        skills=tuple(matches[offset:end]),
+                        total=len(matches),
+                        next_offset=end if end < len(matches) else None,
+                    ),
+                )
             if self._skills is None:
                 raise UnknownDocument("The requested document is not configured.")
             resource = query.resource if query.resource is not MISSING else None

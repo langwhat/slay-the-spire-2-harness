@@ -21,6 +21,7 @@ from sts2_harness.journal_models import (
     NamedText,
     PartsText,
     ResultSnapshot,
+    SkillsData,
     TaskSnapshot,
     TextSnapshot,
     ToolSet,
@@ -29,7 +30,7 @@ from sts2_harness.journal_models import (
 from sts2_harness.knowledge import Document, DocumentView, SkillRead, SkillSummary, SubjectId
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialText
-from sts2_harness.materials import FileDocuments
+from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness_eval import ModelAnchor, Reached, Rejected, reach, take_over
 from sts2_harness_eval.cases import (
@@ -50,9 +51,45 @@ from sts2_harness_eval.variants import (
 )
 
 
-def test_historical_variant_retains_native_history_and_reopens(tmp_path: Path) -> None:
+def test_historical_variant_retains_paged_discovery_and_native_history(tmp_path: Path) -> None:
     async def scenario() -> None:
-        case = await source_case(tmp_path / "source.sqlite", start=False)
+        source = Source()
+        source.responses = iter(
+            [
+                next(source.responses),
+                reply(
+                    (
+                        "discover",
+                        "combat_skill",
+                        '{"mode":"list","text":"queen","offset":1,"limit":1}',
+                    )
+                ),
+                *source.responses,
+            ]
+        )
+        documents = FileDocuments(
+            tuple(
+                DocumentSource(f"guide:{i}", f"Guide {i}", "Queen response", tmp_path / "unused")
+                for i in range(3)
+            )
+        )
+        case = await source_case(
+            tmp_path / "source.sqlite",
+            start=False,
+            source=source,
+            documents=documents,
+            target_position=3,
+        )
+        with closing(Journal.open(case.source.archive)) as original:
+            recorded = original.request(case.source.anchor.model_sequence)
+            discovery = next(
+                item
+                for item in recorded.input
+                if isinstance(item, ResultSnapshot) and isinstance(item.data, SkillsData)
+            )
+            assert isinstance(discovery.data, SkillsData)
+            assert [skill.id for skill in discovery.data.skills] == ["guide:1"]
+            assert discovery.data.total == 3 and discovery.data.next_offset == 2
         prompt = PackagedPrompts().read("combat-task-rules")
         variant = MaterialVariant(
             start=HistoricalStart(),
@@ -99,6 +136,13 @@ def test_historical_variant_retains_native_history_and_reopens(tmp_path: Path) -
             assert preparations[-1].source_model_sequence == case.source.anchor.model_sequence
             assert all(item.source_reply_sequence is not None for item in preparations[:-1])
             assert all(item.configuration is not None for item in preparations)
+            resumed = journal.request(case.source.anchor.model_sequence)
+            replayed_discovery = next(
+                item
+                for item in resumed.input
+                if isinstance(item, ResultSnapshot) and isinstance(item.data, SkillsData)
+            )
+            assert replayed_discovery.data == discovery.data
             target = journal.requests()[-1]
             anchor = ModelAnchor(journal.manifest.recording_id, target.sequence)
         async with reach(branch, anchor) as reached:

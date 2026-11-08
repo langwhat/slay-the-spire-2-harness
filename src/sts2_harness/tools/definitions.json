@@ -479,7 +479,7 @@
   },
   {
     "name": "run_skill",
-    "description": "Read task guidance and associated resources relevant to non-combat decisions and run planning. Request guidance when needed and reuse already available guidance while it remains applicable. Reading guidance does not select a route, execute game actions, or start another agent. The result includes the current role observation and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
+    "description": "Read task guidance and associated resources relevant to non-combat decisions and run planning. Request guidance when needed and reuse already available guidance while it remains applicable. Reading guidance does not select a route, execute game actions, or start another agent. The result includes the current role observation and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. For discovery, narrow with text when you know a topic or stable ID: it matches a case-insensitive substring in the public id, name, or description, not the full text. Results are ordered by id and limited to 20 entries by default. Set limit from 1 to 20 and offset from 0; continue with next_offset and the same text filter until next_offset is null. total counts all matching entries, not just this page. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
     "input_schema": {
       "oneOf": [
         {
@@ -487,6 +487,21 @@
           "properties": {
             "mode": {
               "const": "list"
+            },
+            "text": {
+              "type": "string",
+              "description": "Case-insensitive substring in id, name, or description; surrounding whitespace is ignored."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 20
             }
           },
           "required": [
@@ -521,7 +536,7 @@
   },
   {
     "name": "combat_skill",
-    "description": "Read battle-related task guidance and associated resources. Request guidance when it is needed for the current decision and reuse already available guidance while it remains applicable. Reading guidance does not execute actions or start another agent. The result includes the current role observation and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
+    "description": "Read battle-related task guidance and associated resources. Request guidance when it is needed for the current decision and reuse already available guidance while it remains applicable. Reading guidance does not execute actions or start another agent. The result includes the current role observation and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. For discovery, narrow with text when you know a topic or stable ID: it matches a case-insensitive substring in the public id, name, or description, not the full text. Results are ordered by id and limited to 20 entries by default. Set limit from 1 to 20 and offset from 0; continue with next_offset and the same text filter until next_offset is null. total counts all matching entries, not just this page. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
     "input_schema": {
       "oneOf": [
         {
@@ -529,6 +544,21 @@
           "properties": {
             "mode": {
               "const": "list"
+            },
+            "text": {
+              "type": "string",
+              "description": "Case-insensitive substring in id, name, or description; surrounding whitespace is ignored."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 20
             }
           },
           "required": [

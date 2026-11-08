@@ -1,9 +1,9 @@
 """Supplementary documents keep their identity separate from native subjects."""
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Annotated, Protocol
 
-from pydantic import MISSING, JsonValue, TypeAdapter, model_serializer
+from pydantic import MISSING, Field, JsonValue, TypeAdapter, model_serializer
 
 from sts2_harness.client import models as native
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
@@ -90,6 +90,8 @@ class SkillSummary(native.WireModel):
 
 class SkillList(native.WireModel):
     skills: tuple[SkillSummary, ...]
+    total: Annotated[int, Field(ge=0)]
+    next_offset: Annotated[int, Field(ge=0)] | None
 
 
 class SkillProvider(Protocol):
