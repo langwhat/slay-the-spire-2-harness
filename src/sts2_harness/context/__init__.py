@@ -55,6 +55,13 @@ from sts2_harness.user_input_values import UserInput
 
 _VIEWER_PREFIX = "[viewer] "
 _VIEWER_TEXT_LIMIT = 50_000
+_CARD_OFFER_CHECK = (
+    "Skipping is a complete answer when offered. Use strategy_notes or the current state to "
+    "identify the binding constraint and the turn it requires at ordinary energy. After paying "
+    "this card's cost, can that turn still be played? Choose the card only if that turn becomes "
+    "more reachable, or identify a different gain larger than the play its cost displaces. "
+    "A stronger attainable new line can replace the current plan."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -581,9 +588,18 @@ class Context:
         if isinstance(task, CombatActInput):
             content = ActContent(observation=projected, opening_notes=task.opening_notes)
         else:
+            state = observation.state
+            card_offer_check = (
+                _CARD_OFFER_CHECK
+                if isinstance(state, native.RunState)
+                and state.screen in (native.RunScreen.REWARDS, native.RunScreen.SELECTION)
+                and any(offer.kind is native.OfferKind.CARD for offer in state.offers)
+                else MISSING
+            )
             if task.handoff is not None and task.handoff != self._previous_battle:
                 content = RunActHandoffContent(
                     observation=projected,
+                    card_offer_check=card_offer_check,
                     strategy_notes=task.strategy_notes,
                     battle_report=task.handoff.report,
                     combat_review=task.handoff.review,
@@ -592,6 +608,7 @@ class Context:
                 previous = task.previous_battle
                 content = RunActContent(
                     observation=projected,
+                    card_offer_check=card_offer_check,
                     strategy_notes=task.strategy_notes,
                     previous_battle=(
                         PreviousBattle(battle_report=previous.report, combat_review=previous.review)

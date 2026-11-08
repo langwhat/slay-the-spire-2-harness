@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx2 as httpx
 import pytest
 from test_combat import reply
-from test_mod_client import RUN
+from test_mod_client import COMBAT, RUN
 from test_responses import configuration
 from test_run import RunHTTP
 
@@ -21,6 +21,83 @@ from sts2_harness.material_text import MaterialText
 from sts2_harness.notes import Notes
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog
+
+
+def card_reward(observation: native.Observation) -> native.Observation:
+    combat = native.Observation.model_validate_json(COMBAT)
+    assert isinstance(observation.state, native.RunState)
+    return observation.model_copy(
+        update={
+            "state": observation.state.model_copy(
+                update={
+                    "screen": native.RunScreen.REWARDS,
+                    "offers": (
+                        native.Offer(
+                            ref="card-reward",
+                            kind=native.OfferKind.CARD,
+                            contents=("c1",),
+                            actions=("travel",),
+                        ),
+                    ),
+                }
+            ),
+            "objects": {
+                **observation.objects,
+                "c1": combat.objects["c1"],
+                "card-reward": native.OfferEntry(kind=native.ObjectKind.OFFER, name="Card reward"),
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("with_handoff", [False, True])
+def test_card_offer_check_follows_current_reward_even_when_projection_is_unchanged(
+    with_handoff: bool,
+) -> None:
+    from pydantic import MISSING
+    from test_run import handoff
+
+    from sts2_harness.context import Context
+    from sts2_harness.context.models import RunActContent, RunActInput, TaskMessage
+    from sts2_harness.llm.messages import ToolCall
+    from sts2_harness.results import QueryToolResult, ReadCompleted
+
+    observation = card_reward(native.Observation.model_validate_json(RUN))
+    assert isinstance(observation.state, native.RunState)
+    context = Context(native.DecisionOwner.RUN)
+    task = RunActInput(
+        strategy_notes="Ordinary energy 3; the repeatable defense costs 3.",
+        handoff=handoff() if with_handoff else None,
+    )
+    context.append_task(task, observation)
+    first = context.model_input()[-1]
+    assert isinstance(first, TaskMessage)
+    check = json.loads(first.text).get("card_offer_check")
+    assert isinstance(check, str) and check
+    context.append_tool_result(
+        ToolCall("read", "run_inspect", '{"area":"state"}'),
+        QueryToolResult(ReadCompleted(), observation),
+    )
+    context.append_task(task, observation)
+    repeated = context.model_input()[-1]
+    assert isinstance(repeated, TaskMessage) and isinstance(repeated.content, RunActContent)
+    assert repeated.content.observation.current is MISSING
+    assert json.loads(repeated.text)["card_offer_check"] == check
+
+    selection = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(update={"screen": native.RunScreen.SELECTION})
+        }
+    )
+    context.append_task(RunActInput(), selection)
+    assert json.loads(context.model_input()[-1].text)["card_offer_check"] == check
+
+    for state in (
+        observation.state.model_copy(update={"offers": ()}),
+        observation.state.model_copy(update={"screen": native.RunScreen.SHOP}),
+    ):
+        context.append_task(RunActInput(), observation.model_copy(update={"state": state}))
+        assert "card_offer_check" not in json.loads(context.model_input()[-1].text)
 
 
 @pytest.mark.parametrize("minimal", [False, True])
@@ -105,10 +182,13 @@ def test_session_retains_latest_battle_after_reward_actions_and_replays_new_node
 ) -> None:
     from contextlib import closing
 
+    from pydantic import MISSING
     from test_lifecycle import Campaign, battle_state, run_state, terminal
     from test_replay import record_campaign
 
+    from sts2_harness.context.models import RunActContent
     from sts2_harness.journal import Journal
+    from sts2_harness.journal_models import RunTaskSnapshot
     from sts2_harness_eval import Reached, reach
 
     campaign = Campaign()
@@ -126,6 +206,8 @@ def test_session_retains_latest_battle_after_reward_actions_and_replays_new_node
         campaign.states[index] = state.model_copy(
             update={"state": state.state.model_copy(update={"screen": native.RunScreen.EVENT})}
         )
+    for index in (1, 2):
+        campaign.states[index] = card_reward(campaign.states[index])
     action = '{"steps":[{"kind":"interact","action":"travel"}]}'
     campaign.responses = iter(
         [
@@ -156,6 +238,14 @@ def test_session_retains_latest_battle_after_reward_actions_and_replays_new_node
         with closing(Journal.open(path)) as journal:
             assert journal.manifest.run_context_policy == "node_local_v1"
             assert len(journal.requests()) == 8
+            reward_task = journal.requests()[3].input[-1]
+            next_task = journal.requests()[4].input[-1]
+            assert isinstance(reward_task, RunTaskSnapshot)
+            assert isinstance(reward_task.content, RunActContent)
+            assert isinstance(reward_task.content.card_offer_check, str)
+            assert isinstance(next_task, RunTaskSnapshot)
+            assert isinstance(next_task.content, RunActContent)
+            assert next_task.content.card_offer_check is MISSING
         actions_before = tuple(campaign.actions)
         for anchor in anchors:
             async with reach(path, anchor) as result:

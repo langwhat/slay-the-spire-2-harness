@@ -131,6 +131,7 @@ class PreviousBattle(SemanticValue):
 class RunActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     observation: RunObservation
+    card_offer_check: str | MISSING = MISSING
     strategy_notes: str | MISSING = MISSING
     previous_battle: PreviousBattle | MISSING = MISSING
 
