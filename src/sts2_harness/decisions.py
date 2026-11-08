@@ -85,6 +85,7 @@ class CombatHandoff:
 class ActTask:
     expected_route: native.RouteKey
     handoff: CombatHandoff | None = None
+    previous_battle: CombatHandoff | None = None
 
 
 @dataclass(frozen=True, slots=True)

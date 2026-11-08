@@ -438,7 +438,7 @@ def test_automatic_material_versions_deduplicate_only_complete_delivered_views(
         assert isinstance(result, TakeoverCompleted)
         with closing(Journal.open(branch)) as journal:
             assert result.recording_id == journal.manifest.recording_id
-            assert journal.manifest.schema_version == 13
+            assert journal.manifest.schema_version == 14
             assert journal.manifest.materials.battle_guidance == ("guide", "other")
             selected = journal.request(case.source.anchor.model_sequence)
             guidance = [

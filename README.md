@@ -298,18 +298,28 @@ precedence over all three. Use `--set STS2_MINIMAL=false` to disable an environm
 `check-config` reports the resolved mode. Both modes use the same full gameplay prompts.
 Minimal gameplay removes knowledge/skill query and notes tools, and skips model
 battle reviews and standalone report-processing calls. Automatic knowledge injection,
-public inspections, route planning, and automatic progression remain available. Dialogue,
-reasoning, and observation updates stay append-only between the existing capacity-triggered
-compactions, preserving opportunities to reuse cached prefixes. Run context lasts one act
-and Combat context lasts one battle. Failed or uncertain actions retain their feedback
-until corrected. Minimal gameplay targets lower total usage cost; fewer input tokens alone
-do not establish savings when cached input is discounted.
-The archive records the mode so offline replay uses the same behavior. Ordinary gameplay
-and its prompts remain unchanged when minimal gameplay is disabled (the default).
+public inspections, route planning, and automatic progression remain available.
+Minimal gameplay targets lower total usage cost; fewer input tokens alone do not establish
+savings when cached input is discounted. The archive records the mode so offline replay
+uses the same behavior. Ordinary gameplay is the default.
+
+In both modes, the next Run model decision after a confirmed native node change starts
+a fresh context with the current observation, map and route plan, applicable guidance,
+and latest battle evidence. Rebuilding waits for a complete native map and settled action
+feedback. Ordinary gameplay also carries the current strategy notes. Queries and actions within the
+same node stay in order, so opening a reward or continuing a shop purchase preserves the
+local decision. A change of decision owner within one node does not reset this history.
+The Run agent and route plan still last one act; Combat context lasts one battle.
+Capacity-triggered compaction remains available for long local interactions. Failed or
+uncertain actions retain the feedback needed for recovery. Full history stays in the
+archive even when earlier nodes leave the model input. New archives record
+`run_context_policy=node_local_v1` in schema 14; earlier schemas require their matching
+core version for inspection and replay.
 
 In both modes, an ongoing role receives action receipts and query data in tool results,
 with fresh state delivered once in the next `act` task. Results retain their observation
-when control leaves that role. Previously sent messages remain unchanged.
+when control leaves that role. Messages append within the active context between capacity
+compactions.
 
 The default Mod URL is `http://127.0.0.1:17877`. Use `--mod-url URL` and `--output DIRECTORY`
 to override the connection and output directory; the default output directory is `runs`.

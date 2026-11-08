@@ -114,6 +114,7 @@ class ReviewContent(SemanticValue):
 class RunActInput:
     strategy_notes: str | MISSING = MISSING
     handoff: CombatHandoff | None = None
+    previous_battle: CombatHandoff | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,10 +123,16 @@ class RunHandoffInput:
     strategy_notes: str | MISSING = MISSING
 
 
+class PreviousBattle(SemanticValue):
+    battle_report: BattleReport
+    combat_review: str | None
+
+
 class RunActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     observation: RunObservation
     strategy_notes: str | MISSING = MISSING
+    previous_battle: PreviousBattle | MISSING = MISSING
 
 
 class RunActHandoffContent(RunActContent):

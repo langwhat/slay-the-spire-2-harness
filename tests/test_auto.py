@@ -578,7 +578,7 @@ def test_auto_preserves_handoff_before_next_combat_and_act_rebuild(
 ) -> None:
     from test_lifecycle import CodeCombat, battle_state
 
-    from sts2_harness.context.models import HandoffContent, RunActHandoffContent
+    from sts2_harness.context.models import HandoffContent, RunActContent, RunActHandoffContent
     from sts2_harness.execution import Execution
     from sts2_harness.execution.recovery import ToolRecoveryBudget
     from sts2_harness.journal_models import AutomaticSnapshot, RunTaskSnapshot
@@ -659,8 +659,15 @@ def test_auto_preserves_handoff_before_next_combat_and_act_rebuild(
         assert requests[0].stream == ("run:2" if cross_act else "run:1")
         last_task = requests[-1].input[-1]
         assert isinstance(last_task, RunTaskSnapshot) and isinstance(
-            last_task.content, RunActHandoffContent
+            last_task.content, RunActContent
         )
+        reports = [
+            message.content.battle_report
+            for message in requests[-1].input
+            if isinstance(message, RunTaskSnapshot)
+            and isinstance(message.content, (HandoffContent, RunActHandoffContent))
+        ]
+        assert [report.location.act for report in reports] == ([1, 2] if cross_act else [1])
         assert last_task.content.strategy_notes is MISSING
         assert len(http.actions) == 4 and len(requests) == 3
         archive.close()

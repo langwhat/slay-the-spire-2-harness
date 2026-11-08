@@ -16,6 +16,7 @@ from sts2_harness.context.models import (
     CombatActInput,
     CombatReviewInput,
     HandoffContent,
+    PreviousBattle,
     ReviewContent,
     RunActContent,
     RunActHandoffContent,
@@ -33,6 +34,7 @@ from sts2_harness.context.rendering import render
 from sts2_harness.context.run_models import RunObservation
 from sts2_harness.context.run_projection import RunDelivery
 from sts2_harness.context.view import visible_observation
+from sts2_harness.decisions import CombatHandoff
 from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
 from sts2_harness.llm.messages import (
     AssistantMessage,
@@ -149,6 +151,7 @@ class Context:
         self._last_group: _Group | None = None
         self._active_group: _Group | None = None
         self._group_number = 0
+        self._previous_battle: CombatHandoff | None = None
         for message in system:
             if isinstance(message.value, GuidanceContent):
                 self._record_documents(message.value.guidance)
@@ -289,6 +292,24 @@ class Context:
         if self._role is native.DecisionOwner.RUN:
             if not self._minimal:
                 values["strategy_notes"] = group.notes
+            if self._previous_battle is not None:
+                battle = PreviousBattle(
+                    battle_report=self._previous_battle.report,
+                    combat_review=self._previous_battle.review,
+                )
+                retained_battles = (
+                    PreviousBattle(
+                        battle_report=message.content.battle_report,
+                        combat_review=message.content.combat_review,
+                    )
+                    if isinstance(message.content, (RunActHandoffContent, HandoffContent))
+                    else message.content.previous_battle
+                    for message in retained
+                    if isinstance(message, TaskMessage)
+                    and isinstance(message.content, (RunActContent, HandoffContent))
+                )
+                if battle not in retained_battles:
+                    values["previous_battle"] = _JSON_OBJECT.validate_json(battle.to_json())
             current = observation.get("current")
             dynamic = current.get("dynamic_map") if isinstance(current, dict) else None
             if not isinstance(dynamic, dict):
@@ -536,6 +557,8 @@ class Context:
                     strategy_notes=task.strategy_notes,
                 )
             )
+            if isinstance(task, RunHandoffInput):
+                self._previous_battle = task.handoff
             self._history.append(
                 TaskMessage(
                     TextRole.USER,
@@ -558,7 +581,7 @@ class Context:
         if isinstance(task, CombatActInput):
             content = ActContent(observation=projected, opening_notes=task.opening_notes)
         else:
-            if task.handoff is not None:
+            if task.handoff is not None and task.handoff != self._previous_battle:
                 content = RunActHandoffContent(
                     observation=projected,
                     strategy_notes=task.strategy_notes,
@@ -566,7 +589,17 @@ class Context:
                     combat_review=task.handoff.review,
                 )
             else:
-                content = RunActContent(observation=projected, strategy_notes=task.strategy_notes)
+                previous = task.previous_battle
+                content = RunActContent(
+                    observation=projected,
+                    strategy_notes=task.strategy_notes,
+                    previous_battle=(
+                        PreviousBattle(battle_report=previous.report, combat_review=previous.review)
+                        if previous is not None and previous != self._previous_battle
+                        else MISSING
+                    ),
+                )
+            self._previous_battle = task.handoff or task.previous_battle or self._previous_battle
         message = TaskMessage(
             TextRole.USER,
             render(_JSON_OBJECT.validate_json(content.to_json())),

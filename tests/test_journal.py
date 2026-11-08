@@ -1498,10 +1498,10 @@ def test_archive_open_rejects_old_versions_and_reads_current_version(
     with pytest.raises(ArchiveError, match="schema is unsupported"):
         Journal.open(path)
     with sqlite3.connect(path) as connection:
-        manifest["schema_version"] = 13
+        manifest["schema_version"] = 14
         connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
     reopened = Journal.open(path)
-    assert reopened.manifest.schema_version == 13
+    assert reopened.manifest.schema_version == 14
     assert reopened.operations() == ()
     reopened.close()
 

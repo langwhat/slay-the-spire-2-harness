@@ -141,10 +141,19 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
         assert '"call_id": "battle1"' in json.dumps(next_combat)
         after_battle = campaign.inputs[5 if consecutive else 4]["input"]
         assert isinstance(after_battle, list)
-        assert after_battle[: len(second)] == second
         text = json.dumps(after_battle)
-        assert '"call_id": "travel"' in text
-        assert "battle_report" in text
+        assert '"call_id": "travel"' not in text and '"call_id": "plan"' not in text
+        current_task = after_battle[-1]
+        assert isinstance(current_task, dict) and isinstance(current_task["content"], str)
+        current = json.loads(current_task["content"])
+        observation = current["observation"]
+        assert observation["scene"]["node_id"] == "reward"
+        assert observation["scene"]["reset"] is True
+        assert {"progress", "player", "inventory", "map_topology", "dynamic_map"} <= set(
+            observation["current"]
+        )
+        assert observation["decision"]["actions"][0]["ref"] == "advance"
+        assert current["battle_report"]["last_observed_turn"] == (None if consecutive else 2)
 
         archive = Journal.open(path)
         assert archive.manifest.minimal

@@ -71,7 +71,7 @@ def response(protocol: Protocol, *calls: tuple[str, str, str], text: str | None 
 
 def campaign_with_history(protocol: Protocol) -> Campaign:
     campaign = Campaign()
-    # Keep all three Run decisions in the same act so the oldest group can be discarded.
+    # Keep the Run decisions in one native node to exercise capacity fallback.
     campaign.states[3] = run_state(1, "next-room")
     campaign.states[4] = battle_state(1, "battle2")
     for index in (0, 3):
@@ -93,6 +93,11 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
     reward["state"]["screen"] = "event"
     reward["state"]["actions"][0]["ref"] = "advance"
     campaign.states[2] = native.Observation.model_validate_json(json.dumps(reward))
+    for index in (0, 2, 3):
+        observation = campaign.states[index]
+        campaign.states[index] = observation.model_copy(
+            update={"location": observation.location.model_copy(update={"node_id": "shared-event"})}
+        )
     random_text = "".join(random.Random(2026).choices(string.ascii_letters, k=6000))
     campaign.responses = iter(
         [

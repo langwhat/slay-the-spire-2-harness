@@ -279,7 +279,7 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(
     for path in archives:
         archive = Journal.open(path)
         assert archive.manifest.initial_notes == ""
-        assert archive.manifest.schema_version == 13
+        assert archive.manifest.schema_version == 14
         assert archive.manifest.minimal is minimal
         assert archive.operations()[0].request.kind.value == "pause"
         assert archive.gaps == ()

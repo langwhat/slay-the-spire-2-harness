@@ -51,6 +51,7 @@ class DefaultFlow:
         self._initialized = False
         self._act: int | None = None
         self._pending: CombatHandoff | None = None
+        self._latest_handoff: CombatHandoff | None = None
         self._minimal = minimal
 
     def _enter_role(self, role: native.DecisionOwner) -> None:
@@ -127,7 +128,7 @@ class DefaultFlow:
                         ).run()
                         if isinstance(result, RunEnded):
                             return result
-                        self._pending = result
+                        self._pending = self._latest_handoff = result
                         observation = None
                         continue
                     task = HandoffTask(self._pending)
@@ -135,6 +136,7 @@ class DefaultFlow:
                     task = ActTask(
                         native.RouteKey.model_validate(observation.location.model_dump()),
                         self._pending,
+                        self._latest_handoff,
                     )
                 self._enter_role(native.DecisionOwner.RUN)
                 outcome = await self._execution.run_unit(self._run, task)
