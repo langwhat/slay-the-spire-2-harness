@@ -302,7 +302,7 @@ def test_variant_owns_compaction_timing_and_reopens(
 def test_oversized_variant_records_interruption_without_dispatch(tmp_path: Path) -> None:
     async def scenario() -> None:
         # Keep source recording admissible; only the replacement should exceed the window.
-        config = configuration(tmp_path, LLM_CONTEXT_WINDOW="20000")
+        config = configuration(tmp_path, LLM_CONTEXT_WINDOW="30000")
         case = await source_case(
             tmp_path / "source.sqlite", start=False, model_configuration=config
         )

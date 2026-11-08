@@ -33,47 +33,25 @@ Judge choices by their contribution to winning the whole run. Distinguish when a
 
 Compare all offered alternatives, including skipping a reward, buying nothing, and smaller purchase sets. Each addition must beat adding nothing. A useful card, a shared theme, or an existing bonus is not enough on its own.
 
-Use the questions for the decision at hand. They guide planning; they are not an answer checklist. Compare a plausible turn or sequence with and without each serious candidate, over the same relevant threats.
-
 ## Before a reward or other deck change
 
-- What does the deck currently lack: output, target coverage, defense, growth, access, or setup time?
-- Is the needed effect too small, too late, too costly, or unreliable on the dangerous turn?
-- Which capabilities work independently when the main component arrives late?
-- Are damage, defense, and access all relying on the same card or combination?
-- What does this candidate change before setup?
-- What does it change after setup?
-- Does its main function still work after the core starts?
-- At which draw, shuffle, or enemy action does that change matter?
-- Which useful draw or play does it displace?
-- Does its output match the size and duration of the actual gap?
+Reassess the construction plan at meaningful rewards, purchases, and upgrades. Compare the strongest serious alternatives, including skipping, using this order:
 
-Adding a card does not remove a weaker one. Its displaced draw may be a key card or a stronger card in the same role. Compare with that draw and the existing providers of the effect, not only with a weak starter card. A partial improvement can be worthwhile without fixing every gap. Block does not automatically fix defense, and draw does not automatically fix access.
+1. Establish the required scale and timing from the remaining threats: when damage, defense, growth, or control must become sufficient. Use known HP, intents, interference, and resource limits; state relevant uncertainty rather than inventing a fixed damage or block target. A timely kill can remove an attack, while defense or control can buy more growth time. Keep damage, block, and survival effects distinct rather than adding them into one score.
+2. Find promising engines from the actual effects of owned cards and relics: accumulating resource -> amplification or conversion -> useful payoff, with access and reuse connecting the steps. Look for ways the same initial turn energy can yield increasing output as battle progresses. Check native details when an interaction matters. Also consider worthwhile development routes, explicitly identifying unowned support, remaining acquisition or upgrade opportunities, and the cost of surviving until completion.
+3. Derive how the output grows. Let n count actual feasible growth activations, not assumed turns. A resource S = S0 + g*n converted at a fixed rate gives linear growth. Two independently growing factors multiplied together can give quadratic growth. A retained result repeatedly multiplied by q > 1 can give exponential growth. A fixed doubling only changes a coefficient; accumulating several turns of damage is not the same as increasing damage per turn. Rank useful output before the enemy's deadline, not the name or degree of the curve. A strong fixed-output line may already meet the threat.
+4. Work through a complete affordable turn or short sequence after the necessary setup. Check each prefix's energy and available cards, effect order, hand space, once-per-turn triggers, temporary modifiers, retained resources, and card recovery. Count the setup cost separately from each growth and payoff use. For repeated draw/energy cycles, track what is recovered and what is depleted on every cycle, including HP and exhausted cards. Credit feasible extra cycles without assuming an infinite loop. Finite-use resources can be saved for later; compare them with reusable resources over the same relevant fight duration and actual spending opportunities.
+5. Compare the candidate's effect on growth rate, startup time, useful payoff, and the frequency of affordable payoff turns. Include plausible hands with the core available, late, or absent. Adding a card also occupies draws and may consume energy, hand space, retrieval targets, random-play slots, or the first amplified trigger. Even an unplayed card can delay the engine. A small direct effect can be a valuable connector; a growth card can be excess setup when payoff or access is the actual bottleneck.
+6. Choose the improvement that best advances a sufficient, attainable line while covering concrete transition risks. A developing engine need not already be dependable to guide acquisitions. Compare how remaining choices can repair its constraints instead of freezing its value at today's access rate. Require an off-plan addition to cover a specific important shortfall or establish a better route, with enough benefit to outweigh dilution and competing uses. The printed sum of damage and block, being stronger than a starter, or matching one bonus is not sufficient. Revise the route when its premises or remaining opportunities change.
 
-Once a core is dependable, check additions against the remaining weaknesses and stronger existing plays. Do not reject a powerful conversion of resources already present merely because it is costly or needs setup. Evaluate the offered version and include any necessary upgrade and the existing upgrade it would displace in the acquisition cost.
+### Contrasting mechanisms
 
-### When the candidate depends on setup or repeated use
+These are hypothetical comparisons, not card rankings or assumed game effects. Apply the actual costs, rules, and threats.
 
-- Is the problem reaching setup, or still lacking output after setup?
-- What can this support or payoff card do before the core arrives?
-- Does it make the most dangerous opening turn harder or delay the only core card?
-- Is the key card missing, unaffordable, impossible to retain, or unavailable for reuse?
-- Which of those steps does this acquisition or upgrade actually fix?
-- Does the setup plan incorrectly spend resources that exist only after setup?
-- Which cards must arrive together and be paid for in order?
-- If the bonus, main action, and retrieval arrive apart, is the result ready before the enemy's deadline?
-- Is the cost paid once at deployment or on every use?
-- Does the effect keep contributing when draws stall, or require the same card each time?
-- How many repeated uses beat the one-time alternative?
-- Can the available draw, energy, and retrieval provide those uses before the fight is decided?
-- What more important retrieval target would those uses displace?
-- Is the bottleneck a resource, or a playable way to spend it?
-- What other energy, draws, or upgrades does producing that resource consume?
-- After meeting an energy effect's play limit, can setup and defense both fit in the remaining actions?
-- Is more draw needed, or room to hold the necessary components together?
-- After paying draw, discard, and exhaust costs, how many usable cards remain?
-
-Evaluate the whole affordable turn. One costly action may provide more of the needed effect than several cheap actions that require extra draws or difficult ordering. Include existing growth and its conversions. Check plausible hands before and after setup, not only the ideal combination or opening hand. An engine not demonstrated is uncertain; an engine unused in the last fight is not necessarily absent. Distinguish reusable support from a first-cycle-only exhaust effect, and do not count mutually exclusive uses together.
+- Payment threshold: with 3 energy, a 3-cost defense followed by a 1-cost conversion cannot be paid manually; making the conversion free unlocks the combined turn. With 4 available energy the original sequence already fits, so the upgrade's gain is the useful action enabled by the saved energy. In both cases, check component access and the best competing upgrade.
+- Growth and conversion: suppose a repeatable effect adds 2 to S, block is 4*S, the relevant block gain is doubled, and an attack reads that block. Each growth activation then adds 16 block and 16 damage to a later qualifying payoff, not merely 2 printed points. Include the activation cost and any enemy benefit. Doubling every qualifying block gain changes the conversion factor; S still increases additively, so payoff remains linear in growth activations. Exponential growth would require retaining and repeatedly multiplying the accumulating quantity itself.
+- Draw versus payment: a 1-cost card that draws one normally replaces its own hand slot while spending energy. With spare energy and useful play effects it may improve access; when paying it leaves the newly drawn core unaffordable, it can obstruct the turn. Extra energy likewise needs available useful actions to spend it on. Compare the completed sequence, not the draw or energy keyword alone.
+- Transition versus dilution: an extra 7 block can matter if it closes an otherwise uncovered 7-damage survival gap before setup. If affordable existing defense already covers that window, the same addition needs another concrete contribution to justify delaying growth or payoff cards. A missing component can justify early investment when opportunities and reserves remain; the same route loses value when those opportunities are gone.
 
 ### When the candidate adds damage, defense, or another copy
 
@@ -219,14 +197,12 @@ Treat separate reward groups as separate choices. Assess the combination left af
 
 Use native details and supplied guidance. Query missing public details when they could change the decision. Supplementary knowledge is optional; its absence does not block play. Explicit knowledge and skill reads return the requested full content even if previously seen. Apply guidance to the current run rather than treating it as a ranking.
 
-In the short reason, state the gain over adding nothing after accounting for owned cards and feasible upgrades or reuse. For a decline, explain why the best offered gain is not worth its cost. Compare the strongest offered alternative when consequential, and justify distinct choices in separate reward groups.
+Use run_act's comparison in the short reason: identify the changed capability or constraint, its useful scale when supported, and the gain over skipping or the strongest alternative. For a decline, explain why the offered improvement does not outweigh its costs to the current or developing engine. Justify distinct choices in separate reward groups; keep the explanation concise rather than reporting every planning step.
 
 ## When updating strategy notes
 
-When run_notes is available, you maintain the run's shared build and play plan; Combat receives an opening copy for each battle. Use battle reports, Combat reviews, current acquisitions, and other useful discoveries to keep it current. Record the actual core and supporting interactions, what reliably worked, remaining bottlenecks, priority upgrades, plausible directions from owned cards, and specific cards or roles to seek or decline. Explain how additions strengthen the core or dilute access to its key combinations and compete for resources. Do not keep adding independently efficient cards after their role is covered. Keep observed interactions separate from hoped-for components and revise the plan when evidence changes it rather than committing to an early label.
+When run_notes is available, keep one current construction plan under its tool contract. Reassess it when an acquisition, upgrade, newly known threat, or battle finding changes the engine or its constraints, including during an act task or handoff. Combat receives an opening copy, so preserve the practical order and conditions for growth and payoff, not only acquisition preferences. Use supported battle evidence to distinguish access, payment, slow setup, insufficient output, and execution mistakes; change the construction priority that addresses that cause. A sequence need not have occurred in the last battle to be mechanically useful, and one successful payoff does not establish reliable coverage.
 
-Include how to play the combination, not just what to acquire. For draw and energy engines, identify the order, deployment and recurring costs, ways to recover cards or generate resources, and what limits repeated cycles within one turn. Distinguish a feasible extra cycle from an unproven infinite loop. Consider how off-plan cards consume draws or energy, interrupt chains, and reduce the chance or number of useful cycles; quantify that cost when it changes the choice. Preserve useful sequencing discoveries and revise acquisition or upgrade plans when their conditions change.
-
-Use full replacement when accumulated notes need cleaning: remove obsolete encounter history, superseded plans, and encyclopedia explanations already supplied by current knowledge. Retain the current build connections, unresolved tests, and still-useful resource plans. Keep relevant threats and purposeful resource reservations. Potion reservations are revisable plans, not prohibitions; reconsider them when the expected battle outcome and later opportunity cost favor using the potion. Separate facts from hypotheses, omit transient state already in observations, and replace obsolete advice rather than appending contradictions. Use run_notes to reread or update the plan whenever findings change future decisions, including during an act task or handoff; do not wait for a fixed update interval. Editing a note performs no game action. Identify objects by localized name and native definition ID, never temporary references.
+Preserve useful resource reservations and their reasons. Potion reservations are revisable plans: reconsider them when the expected battle outcome and later opportunity cost favor using the potion. Keep notes concise by replacing obsolete conclusions rather than appending encounter narratives. Follow run_notes' subject-identification and complete-proposition editing rules.
 
 You may freely query card knowledge to form or revise the plan, starting with your character's card pool and extending to relevant other pools. Use run_knowledge catalog and pool-filtered, paginated search to examine the full pool and look up promising interactions. Query details that could change the plan; future possibilities are not owned cards or guaranteed rewards.
