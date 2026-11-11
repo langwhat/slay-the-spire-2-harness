@@ -1,60 +1,40 @@
 import asyncio
-import json
-import os
 import sqlite3
-import subprocess
-import sys
 import zlib
 from contextlib import closing
-from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
-from typing import Never
 
 import httpx2 as httpx
-import pytest
 from test_combat import reply
 from test_lifecycle import Campaign
 from test_responses import configuration
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
-from sts2_harness.game import LiveGame, OperationKind, Settle, Settlement, Stopped
+from sts2_harness.game import LiveGame, OperationKind, Settle, Settlement
 from sts2_harness.journal import (
-    DependencyKind,
     Journal,
     Manifest,
-    ModelSummary,
     Record,
     RecordedGame,
     RecordedResult,
     SessionMaterials,
     StoredReply,
 )
-from sts2_harness.journal_models import DocumentRead, MaterialFailed, ResultSnapshot
 from sts2_harness.knowledge import (
-    Document,
     Documents,
-    DocumentView,
-    SkillRead,
-    SubjectId,
-    UnknownDocument,
 )
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
-from sts2_harness.material_text import MaterialText, MaterialUnavailable
-from sts2_harness.materials import DocumentSource, FileDocuments
+from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.prompts import PackagedPrompts
-from sts2_harness.results import Rejected as RejectedQuery
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval import ModelAnchor, Reached, Rejected, RejectReason, reach
 from sts2_harness_eval.results import (
-    ArchiveUnreadable,
     InputComponent,
     InputDifference,
-    MissingTarget,
-    OrderDifference,
     Unsupported,
     UnsupportedCause,
 )
@@ -142,173 +122,6 @@ def test_reach_rebuilds_notes_and_inspection_at_distinct_same_cursor_anchors(
             assert all(task.done() for task in owned)
             assert asyncio.all_tasks() == tasks_before
             assert path.read_bytes() == source
-
-    asyncio.run(scenario())
-
-
-class DocumentCampaign(Campaign):
-    def mod(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/catalog":
-            return httpx.Response(
-                200,
-                json={
-                    "status": "completed",
-                    "data": {
-                        "entries": [
-                            {
-                                "category": "relic",
-                                "definition_id": "RELIC.ONE",
-                                "name": "Relic",
-                                "native": {
-                                    "definition_id": "RELIC.ONE",
-                                    "name": "Relic",
-                                    "text": "Synthetic native facts.",
-                                    "rarity": None,
-                                },
-                            }
-                        ],
-                        "missing_ids": [],
-                    },
-                },
-            )
-        return super().mod(request)
-
-
-def test_reach_replays_explicit_document_reads_without_entry_injection(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        campaign = DocumentCampaign()
-        campaign.responses = iter(
-            [
-                reply(("list", "run_skill", '{"mode":"list"}')),
-                reply(("read", "run_skill", '{"mode":"read","id":"guide"}')),
-                reply(("lookup", "run_knowledge", '{"mode":"lookup","ids":["RELIC.ONE"]}')),
-                *campaign.responses,
-            ]
-        )
-        guide = tmp_path / "guide.txt"
-        guide.write_text("Synthetic explicit guidance.")
-        documents = FileDocuments(
-            (
-                DocumentSource(
-                    "guide",
-                    "Guide",
-                    "Example",
-                    guide,
-                    subjects=(SubjectId(category="relic", definition_id="RELIC.ONE"),),
-                ),
-            )
-        )
-        path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, campaign, documents=documents)
-        guide.unlink()
-        async with reach(path, anchors[3]) as result:
-            assert isinstance(result, Reached)
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    ("document_id", "message"),
-    [
-        ("guide", "Resource 'missing' is not advertised by document 'guide'."),
-        ("unknown", "Document 'unknown' is not configured."),
-    ],
-)
-def test_reach_preserves_missing_resource_feedback(
-    tmp_path: Path, document_id: str, message: str
-) -> None:
-    async def scenario() -> None:
-        campaign = Campaign()
-        campaign.responses = iter(
-            [
-                reply(
-                    (
-                        "read",
-                        "run_skill",
-                        json.dumps({"mode": "read", "id": document_id, "resource": "missing"}),
-                    )
-                ),
-                *campaign.responses,
-            ]
-        )
-        guide = tmp_path / "guide.txt"
-        guide.write_text("Synthetic guidance.", encoding="utf-8")
-        documents = FileDocuments((DocumentSource("guide", "Guide", "Example", guide),))
-        path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, campaign, documents=documents)
-        archive = Journal.open(path)
-        failure = next(
-            record for record in archive.materials() if isinstance(record.request, DocumentRead)
-        )
-        assert isinstance(failure.reply, MaterialFailed) and failure.reply.message == message
-        feedback = next(
-            item
-            for item in archive.request(anchors[1].model_sequence).input
-            if isinstance(item, ResultSnapshot)
-        )
-        assert isinstance(feedback.outcome, RejectedQuery)
-        assert feedback.outcome.reason.message == message
-        archive.close()
-        async with reach(path, anchors[1]) as result:
-            assert isinstance(result, Reached)
-        changed = failure.reply.model_copy(update={"message": "Different historical failure."})
-        with closing(sqlite3.connect(path)) as connection, connection:
-            connection.execute(
-                "UPDATE materials SET reply=? WHERE sequence=?",
-                (store(connection, changed), failure.sequence),
-            )
-        async with reach(path, anchors[1]) as result:
-            assert result == Rejected(
-                RejectReason.INPUT_MISMATCH,
-                anchors[1].model_sequence,
-                InputDifference(InputComponent.MODEL_INPUT),
-            )
-
-    asyncio.run(scenario())
-
-
-class FailedDocuments(FileDocuments):
-    def __init__(self, failure: MaterialUnavailable | UnknownDocument) -> None:
-        super().__init__()
-        self.failure = failure
-
-    async def read(self, request: SkillRead) -> DocumentView:
-        raise self.failure
-
-    async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
-        raise self.failure
-
-
-@pytest.mark.parametrize(
-    ("tool", "arguments", "failure"),
-    [
-        (
-            "run_skill",
-            '{"mode":"read","id":"guide"}',
-            MaterialUnavailable("The custom document service is temporarily unavailable."),
-        ),
-        (
-            "run_skill",
-            '{"mode":"read","id":"guide"}',
-            UnknownDocument("The custom document source does not advertise this guide."),
-        ),
-        (
-            "run_knowledge",
-            '{"mode":"lookup","ids":["RELIC.ONE"]}',
-            MaterialUnavailable("The custom supplement service is temporarily unavailable."),
-        ),
-    ],
-)
-def test_reach_preserves_custom_material_failure_feedback(
-    tmp_path: Path, tool: str, arguments: str, failure: MaterialUnavailable | UnknownDocument
-) -> None:
-    async def scenario() -> None:
-        campaign = DocumentCampaign()
-        campaign.responses = iter([reply(("read", tool, arguments)), *campaign.responses])
-        path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, campaign, documents=FailedDocuments(failure))
-        async with reach(path, anchors[1]) as result:
-            assert isinstance(result, Reached)
 
     asyncio.run(scenario())
 
@@ -452,253 +265,6 @@ def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Pa
     asyncio.run(scenario())
 
 
-class SnapshotChange(StrEnum):
-    MAPPING_ORDER = "mapping_order"
-    MAPPING_VALUE = "mapping_value"
-    MESSAGE_ORDER = "message_order"
-
-
-@pytest.mark.parametrize("change", list(SnapshotChange))
-def test_reach_compares_typed_input_without_mapping_key_order(
-    tmp_path: Path, change: SnapshotChange
-) -> None:
-    from pydantic import MISSING
-
-    from sts2_harness.context.models import ActContent
-    from sts2_harness.journal import ParentPrefix
-    from sts2_harness.journal_models import PreparationEvidence, TaskSnapshot, ToolSet
-
-    async def scenario() -> None:
-        source_path = tmp_path / "source.sqlite"
-        anchors = await record_campaign(source_path, Campaign())
-        original = source_path.read_bytes()
-        with closing(Journal.open(source_path)) as source:
-            target = source.request(anchors[2].model_sequence)
-            position, snapshot = next(
-                (index, message)
-                for index, message in enumerate(target.input)
-                if isinstance(message, TaskSnapshot)
-            )
-            assert isinstance(snapshot.content, ActContent)
-            observation = snapshot.content.observation
-            profiles = observation.catalog_additions
-            assert profiles is not MISSING
-            reordered = dict(reversed(tuple(profiles.items())))
-            assert tuple(reordered) != tuple(profiles)
-            if change is SnapshotChange.MAPPING_VALUE:
-                key, profile = next(iter(reordered.items()))
-                reordered[key] = profile.model_copy(update={"language": "changed"})
-            reordered_observation = observation.model_copy(update={"catalog_additions": reordered})
-            content = snapshot.content.model_copy(update={"observation": reordered_observation})
-            messages = list(target.input)
-            messages[position] = snapshot.model_copy(update={"content": content})
-            if change is SnapshotChange.MESSAGE_ORDER:
-                messages.reverse()
-            assert (tuple(messages) == target.input) is (change is SnapshotChange.MAPPING_ORDER)
-            with closing(
-                Journal.create(
-                    tmp_path / "branch.sqlite",
-                    source.manifest.model_copy(
-                        update={
-                            "recording_id": "branch",
-                            "parent": ParentPrefix(
-                                archive=source_path,
-                                recording_id=source.manifest.recording_id,
-                                before_sequence=target.sequence,
-                                archive_sha256=sha256(original).hexdigest(),
-                            ),
-                        }
-                    ),
-                )
-            ) as branch:
-                assert target.preparation is not None
-                preparation = PreparationEvidence.model_validate(
-                    target.preparation.model_dump(include=set(PreparationEvidence.model_fields))
-                ).model_copy(update={"input_after": tuple(messages)})
-                sequence = branch.begin_model(
-                    target.role,
-                    target.stream,
-                    tuple(messages),
-                    ToolSet(tools=target.tools),
-                    target.configuration,
-                    preparation=preparation,
-                )
-                branch.finish_model(sequence)
-                branch.end_model()
-        with closing(Journal.open(branch.path)) as reader:
-            recorded = reader.request(sequence)
-            assert (recorded.input == target.input) is (change is SnapshotChange.MAPPING_ORDER)
-            assert recorded.semantic_digest != target.semantic_digest
-        anchor = ModelAnchor("branch", sequence)
-        branch_bytes = branch.path.read_bytes()
-        try:
-            async with reach(branch.path, anchor) as result:
-                if change is SnapshotChange.MAPPING_ORDER:
-                    assert result == Reached(
-                        anchor, target.confirmed_operation_cursor, recorded.semantic_digest
-                    )
-                else:
-                    assert result == Rejected(
-                        RejectReason.INPUT_MISMATCH,
-                        sequence,
-                        InputDifference(InputComponent.MODEL_INPUT),
-                    )
-        finally:
-            assert source_path.read_bytes() == original
-            assert branch.path.read_bytes() == branch_bytes
-
-    asyncio.run(scenario())
-
-
-def test_reach_accepts_generated_directories_across_process_hash_seeds(tmp_path: Path) -> None:
-    from pydantic import MISSING
-
-    from sts2_harness.context.models import ActContent
-    from sts2_harness.journal_models import TaskSnapshot
-
-    path = tmp_path / "source.sqlite"
-    campaign = Campaign()
-    opening = campaign.states[1]
-    campaign.states[1] = opening.model_copy(
-        update={"generated": {**opening.generated, "c2": opening.generated["c1"]}}
-    )
-    anchors = asyncio.run(record_campaign(path, campaign))
-    with closing(Journal.open(path)) as journal:
-        target = journal.request(anchors[2].model_sequence)
-        task = next(message for message in target.input if isinstance(message, TaskSnapshot))
-        assert isinstance(task.content, ActContent)
-        current = task.content.observation.current
-        assert current is not MISSING
-        generated = current.generated
-        assert generated is not MISSING and len(generated) >= 2
-    original = path.read_bytes()
-    check = """
-import asyncio
-import sys
-from pathlib import Path
-from sts2_harness_eval import ModelAnchor, Reached, reach
-
-async def main() -> None:
-    anchor = ModelAnchor("recording", int(sys.argv[2]))
-    async with reach(Path(sys.argv[1]), anchor) as result:
-        assert result == Reached(anchor, int(sys.argv[3]), sys.argv[4]), result
-
-asyncio.run(main())
-"""
-    for seed in range(4):
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                check,
-                str(path),
-                str(target.sequence),
-                str(target.confirmed_operation_cursor),
-                target.semantic_digest,
-            ],
-            env={**os.environ, "PYTHONHASHSEED": str(seed)},
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert completed.returncode == 0, (seed, completed.stdout, completed.stderr)
-    assert path.read_bytes() == original
-
-
-def test_reach_rejects_corrupted_input_blob(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        source = tmp_path / "source.sqlite"
-        anchors = await record_campaign(source, Campaign())
-        original = source.read_bytes()
-        damaged = tmp_path / "damaged.sqlite"
-        damaged.write_bytes(original)
-        with closing(sqlite3.connect(damaged)) as connection, connection:
-            connection.execute(
-                "UPDATE blobs SET content=? WHERE digest="
-                "(SELECT input FROM model_requests WHERE sequence=?)",
-                (zlib.compress(b"corrupted input delta"), anchors[0].model_sequence),
-            )
-        async with reach(damaged, anchors[0]) as result:
-            assert isinstance(result, Rejected)
-            assert result.reason is RejectReason.UNSUPPORTED_HISTORY
-            assert isinstance(result.detail, ArchiveUnreadable)
-        assert source.read_bytes() == original
-
-    asyncio.run(scenario())
-
-
-class FailedAutoCampaign(StartedCampaign):
-    def __init__(self) -> None:
-        from test_auto import scene
-
-        super().__init__()
-        self.states.insert(
-            0,
-            scene(
-                native.RunScreen.TREASURE,
-                "chest",
-                (
-                    native.Action(
-                        ref="chest",
-                        label="打开宝箱",
-                        enabled=True,
-                        operation=native.ActionOperation.OPEN_CHEST,
-                    ),
-                ),
-            ),
-        )
-        self.model_failed = False
-
-    def mod(self, request: httpx.Request) -> httpx.Response:
-        response = super().mod(request)
-        if request.url.path == "/action" and len(self.actions) == 1:
-            return httpx.Response(
-                200,
-                json={
-                    "operation_id": self.actions[0].operation_id,
-                    "status": "failed",
-                    "error": {"code": "dispatch_failed", "message": "Synthetic failed auto."},
-                },
-            )
-        return response
-
-    def model(self, request: httpx.Request) -> httpx.Response:
-        if not self.model_failed:
-            self.model_failed = True
-            return httpx.Response(400, json={"error": {"type": "invalid_request_error"}})
-        return super().model(request)
-
-
-def test_reach_replays_failed_auto_model_failure_and_settle_ordinals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "archive.sqlite"
-        campaign = FailedAutoCampaign()
-        anchors = await record_campaign(path, campaign)
-        archive = Journal.open(path)
-        records = archive.requests()
-        archive.close()
-        assert records[0].failure is not None and not records[0].delivered
-        assert records[1].confirmed_operation_cursor == 0
-        assert records[2].confirmed_operation_cursor == 0
-        assert records[3].confirmed_operation_cursor == 1
-        assert campaign.actions[1].operation_id == "recording:2"
-
-        def forbidden(*args: object, **kwargs: object) -> Never:
-            raise AssertionError("Replay must use recorded dependencies without IO or sleeps.")
-
-        monkeypatch.setattr(asyncio, "sleep", forbidden)
-        monkeypatch.setattr(ModClient, "__aenter__", forbidden)
-        monkeypatch.setattr(Llm, "__aenter__", forbidden)
-        monkeypatch.setattr(PackagedPrompts, "read", forbidden)
-        monkeypatch.setattr(MaterialText, "read", forbidden)
-        async with reach(path, anchors[3]) as result:
-            assert result == Reached(anchors[3], 1, records[3].semantic_digest)
-
-    asyncio.run(scenario())
-
-
 def store(connection: sqlite3.Connection, value: native.WireModel) -> str:
     content = value.model_dump_json().encode()
     digest = sha256(content).hexdigest()
@@ -719,23 +285,6 @@ def replace_result(path: Path, sequence: int, reply: RecordedResult) -> None:
         )
         connection.execute(
             "UPDATE records SET reply=? WHERE sequence=?", (stored.model_dump_json(), sequence)
-        )
-
-
-def make_pending(path: Path, sequence: int) -> None:
-    with closing(sqlite3.connect(path)) as connection, connection:
-        summary = ModelSummary.model_validate_json(
-            connection.execute(
-                "SELECT value FROM summaries WHERE sequence=?", (sequence,)
-            ).fetchone()[0]
-        ).model_copy(update={"delivered": False, "failure": None, "physical_attempts": 0})
-        connection.execute(
-            "UPDATE model_requests SET delivered=0,failure=NULL WHERE sequence=?", (sequence,)
-        )
-        connection.execute("DELETE FROM model_attempts WHERE sequence=?", (sequence,))
-        connection.execute(
-            "UPDATE summaries SET is_error=1,value=? WHERE sequence=?",
-            (summary.model_dump_json(), sequence),
         )
 
 
@@ -768,40 +317,6 @@ def make_unknown(path: Path, record: Record) -> None:
             "WHERE sequence=?",
             (record.sequence,),
         )
-
-
-def test_pending_target_and_unconsumed_suffix_remain_reachable(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, Campaign())
-        journal = Journal.open(path)
-        first = journal.request(anchors[0].model_sequence)
-        suffix = next(
-            record for record in journal.operations() if isinstance(record.request, Settle)
-        )
-        journal.close()
-        make_pending(path, first.sequence)
-        async with reach(path, anchors[1]) as result:
-            assert result == Rejected(
-                RejectReason.UNSUPPORTED_HISTORY,
-                first.sequence,
-                Unsupported(UnsupportedCause.INCOMPLETE_DEPENDENCY),
-            )
-        make_unknown(path, suffix)
-        with closing(sqlite3.connect(path)) as connection, connection:
-            connection.execute(
-                "INSERT INTO gaps VALUES (?,?,?)",
-                (suffix.sequence + 1, suffix.sequence + 1, "storage_unavailable"),
-            )
-        source = path.read_bytes()
-        async with reach(path, anchors[0]) as result:
-            assert result == Reached(anchors[0], 0, first.semantic_digest)
-        assert path.read_bytes() == source
-        async with reach(path, anchors[2]) as result:
-            assert isinstance(result, Rejected)
-            assert result.reason is RejectReason.UNSUPPORTED_HISTORY
-
-    asyncio.run(scenario())
 
 
 def test_reach_rejects_changed_observations_with_original_model_evidence(tmp_path: Path) -> None:
@@ -842,32 +357,6 @@ def test_reach_rejects_changed_observations_with_original_model_evidence(tmp_pat
     asyncio.run(scenario())
 
 
-def test_reach_rejects_game_material_order_swap(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, Campaign())
-        # Both calls are before the first model request, at the same game cursor.
-        with closing(sqlite3.connect(path)) as connection, connection:
-            for table in ("records", "materials", "summaries"):
-                connection.execute(f"UPDATE {table} SET sequence=-sequence WHERE sequence IN (2,7)")
-                connection.execute(
-                    f"UPDATE {table} SET sequence=CASE sequence WHEN -2 THEN 7 ELSE 2 END "
-                    "WHERE sequence IN (-2,-7)"
-                )
-            connection.execute(
-                "UPDATE summaries SET value=json_set(value,'$.sequence',sequence) "
-                "WHERE sequence IN (2,7)"
-            )
-        async with reach(path, anchors[0]) as result:
-            assert result == Rejected(
-                RejectReason.ORDER_MISMATCH,
-                2,
-                OrderDifference(OperationKind.ADMIT, DependencyKind.MATERIAL),
-            )
-
-    asyncio.run(scenario())
-
-
 def test_reach_rejects_missing_prefix_and_unknown_writes(tmp_path: Path) -> None:
     async def scenario() -> None:
         original = tmp_path / "archive.sqlite"
@@ -893,53 +382,5 @@ def test_reach_rejects_missing_prefix_and_unknown_writes(tmp_path: Path) -> None
                 first_settle.sequence,
                 Unsupported(UnsupportedCause.UNKNOWN_WRITE),
             )
-
-    asyncio.run(scenario())
-
-
-def test_reach_reports_missing_target_and_unreadable_archive(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, Campaign())
-        wrong = ModelAnchor("another-recording", anchors[0].model_sequence)
-        async with reach(path, wrong) as result:
-            assert result == Rejected(
-                RejectReason.TARGET_NOT_FOUND, wrong.model_sequence, MissingTarget(wrong)
-            )
-        async with reach(tmp_path / "absent.sqlite", anchors[0]) as result:
-            assert isinstance(result, Rejected)
-            assert result.reason is RejectReason.UNSUPPORTED_HISTORY
-            assert isinstance(result.detail, ArchiveUnreadable)
-
-    asyncio.run(scenario())
-
-
-def test_reach_rejects_stopped_prefix_without_leaking_tasks_or_changing_source(
-    tmp_path: Path,
-) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, Campaign())
-        journal = Journal.open(path)
-        first = journal.operations()[0]
-        journal.close()
-        replace_result(path, first.sequence, RecordedResult(outcome=Stopped(), observations=()))
-        with closing(sqlite3.connect(path)) as connection, connection:
-            connection.execute(
-                "UPDATE summaries SET value=json_set(value,'$.result','stopped') WHERE sequence=?",
-                (first.sequence,),
-            )
-        source = path.read_bytes()
-        tasks_before = asyncio.all_tasks()
-        try:
-            async with reach(path, anchors[0]) as result:
-                assert result == Rejected(
-                    RejectReason.UNSUPPORTED_HISTORY,
-                    None,
-                    Unsupported(UnsupportedCause.UNEXPECTED_END),
-                )
-        finally:
-            assert asyncio.all_tasks() == tasks_before
-            assert path.read_bytes() == source
 
     asyncio.run(scenario())

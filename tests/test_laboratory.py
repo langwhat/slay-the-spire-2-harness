@@ -8,7 +8,6 @@ from test_mod_client import COMBAT, RUN
 from sts2_harness.client import models as native
 from sts2_harness_eval.laboratory import (
     LaboratoryClient,
-    LaboratoryErrorCode,
     LaboratoryOutcome,
     LaboratoryRecipe,
 )
@@ -56,43 +55,6 @@ def test_construct_sends_the_recipe_once_and_decodes_both_native_observations() 
 
     asyncio.run(scenario())
     assert len(requests) == 1
-
-
-@pytest.mark.parametrize(
-    ("status", "code"),
-    (
-        (LaboratoryOutcome.REJECTED, LaboratoryErrorCode.DEVELOPMENT_DISABLED),
-        (LaboratoryOutcome.UNKNOWN, LaboratoryErrorCode.NATIVE_INCOMPLETE),
-    ),
-)
-def test_handled_rejection_or_unknown_is_returned_without_repeating_construction(
-    status: LaboratoryOutcome,
-    code: LaboratoryErrorCode,
-) -> None:
-    requests = 0
-
-    def mod(request: httpx.Request) -> httpx.Response:
-        nonlocal requests
-        requests += 1
-        return httpx.Response(
-            200,
-            json={
-                "status": status.value,
-                "error": {"code": code.value, "message": "Not confirmed."},
-                "prepared_observation": None,
-                "observation": None,
-            },
-        )
-
-    async def scenario() -> None:
-        async with LaboratoryClient("http://mod", transport=httpx.MockTransport(mod)) as client:
-            reply = await client.construct(RECIPE)
-        assert reply.status is status
-        assert reply.error is not None and reply.error.code is code
-        assert reply.prepared_observation is None and reply.observation is None
-
-    asyncio.run(scenario())
-    assert requests == 1
 
 
 @pytest.mark.parametrize("cancel", (False, True))

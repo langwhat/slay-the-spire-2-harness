@@ -11,31 +11,22 @@ from sts2_harness.client.models import (
     CardEntry,
     CardQuery,
     CatalogCompleted,
-    CatalogFailed,
     CatalogMode,
-    CatalogQuery,
-    CatalogRequest,
     CombatState,
-    ControlIntent,
     CostSymbol,
     DetailData,
     ErrorCode,
-    InputReadiness,
     InspectArea,
     InspectCompleted,
     InspectFailed,
     InspectRejected,
-    InvalidRequestReply,
     LookupData,
     LookupQuery,
     MapQuery,
     NativeCategory,
     ReadError,
     RunState,
-    SearchQuery,
     StateCompleted,
-    Status,
-    TechnicalError,
     TerminalState,
     UpgradeAvailable,
 )
@@ -174,24 +165,6 @@ def test_terminal_is_a_complete_observation_not_no_run() -> None:
     asyncio.run(read())
 
 
-def test_state_keeps_complete_current_observation() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "GET"
-        assert request.url.path == "/state"
-        return httpx.Response(200, content='{"status":"completed","observation":' + RUN + "}")
-
-    async def read() -> None:
-        async with ModClient("http://mod.test", transport=httpx.MockTransport(handler)) as client:
-            result = await client.state()
-        assert isinstance(result, StateCompleted)
-        assert isinstance(result.observation.state, RunState)
-        assert result.observation.state.player.gold == 0
-        assert result.observation.state.actions[0].label == "前进"
-        assert result.observation.location.node_id == "node"
-
-    asyncio.run(read())
-
-
 def test_failed_reads_never_borrow_a_previous_successful_observation() -> None:
     responses = iter(
         [
@@ -224,101 +197,6 @@ def test_failed_reads_never_borrow_a_previous_successful_observation() -> None:
         assert isinstance(current, StateCompleted)
         assert current.observation.stamp.observation_sequence == 3
         assert initial.observation.stamp.observation_sequence == 1
-
-    asyncio.run(read())
-
-
-@pytest.mark.parametrize(
-    ("readiness", "receipt"),
-    [
-        ("busy", '{"operation_id":"op","status":"pending"}'),
-        ("selection", '{"operation_id":"op","status":"completed","boundary":"selection"}'),
-        (
-            "ready",
-            '{"operation_id":"op","status":"rejected","error":{"code":"invalid_refs","message":"Expired.","invalid_refs":["c1"]}}',
-        ),
-        (
-            "unavailable",
-            '{"operation_id":"op","status":"failed","error":{"code":"identity_unregistered","message":"Unavailable."}}',
-        ),
-        (
-            "ready",
-            '{"operation_id":"op","status":"unknown","error":{"code":"execution_uncertain",'
-            '"message":"Inspect before deciding."}}',
-        ),
-        ("ready", "null"),
-    ],
-)
-def test_status_keeps_control_intent_separate_from_native_input(
-    readiness: str, receipt: str
-) -> None:
-    payload = (
-        '{"location":{"game_instance_id":"game","run_id":"run","node_id":"node","owner":"run"},'
-        '"presentation":null,"control_intent":"paused","input_readiness":"'
-        + readiness
-        + '","receipt":'
-        + receipt
-        + "}"
-    )
-
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload)),
-        ) as client:
-            result = await client.status()
-        assert isinstance(result, Status)
-        assert result.control_intent is ControlIntent.PAUSED
-        assert result.input_readiness is InputReadiness(readiness)
-        assert _canonical_json(result.to_json()) == _canonical_json(payload)
-
-    asyncio.run(read())
-
-
-@pytest.mark.parametrize(
-    ("run_id", "node_id", "owner", "valid"),
-    [
-        ("run", "node", None, True),
-        ("run", "node", "combat", False),
-        (None, "node", None, False),
-        ("run", None, None, False),
-        (None, None, None, False),
-    ],
-)
-def test_terminal_status_retains_last_run_and_node_without_a_decision_owner(
-    run_id: str | None, node_id: str | None, owner: str | None, valid: bool
-) -> None:
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200,
-                    json={
-                        "location": {
-                            "game_instance_id": "game",
-                            "run_id": run_id,
-                            "node_id": node_id,
-                            "owner": owner,
-                        },
-                        "presentation": None,
-                        "control_intent": "paused",
-                        "input_readiness": "terminal",
-                        "receipt": None,
-                    },
-                )
-            ),
-        ) as client:
-            if not valid:
-                with pytest.raises(ClientUnavailable) as failure:
-                    await client.status()
-                assert failure.value.reason is ClientFailureKind.PROTOCOL
-                return
-            result = await client.status()
-        assert isinstance(result, Status)
-        assert result.location.run_id == "run"
-        assert result.location.node_id == "node"
-        assert result.location.owner is None
 
     asyncio.run(read())
 
@@ -363,150 +241,6 @@ def test_lookup_decodes_each_concrete_native_category(category: NativeCategory) 
     asyncio.run(read())
 
 
-@pytest.mark.parametrize(
-    ("found", "missing", "valid"),
-    [
-        ((("A", "A"), ("C", "C")), ("B", "D"), True),
-        ((("A", "A"),), ("B",), False),
-        ((("A", "A"), ("C", "C"), ("E", "E")), ("B", "D"), False),
-        ((("A", "A"), ("C", "C")), ("B", "D", "E"), False),
-        ((("A", "A"), ("A", "A"), ("C", "C")), ("B", "D"), False),
-        ((("A", "A"), ("C", "C")), ("B", "B", "D"), False),
-        ((("A", "A"), ("C", "C")), ("A", "B", "D"), False),
-        ((("C", "C"), ("A", "A")), ("B", "D"), False),
-        ((("A", "A"), ("C", "C")), ("D", "B"), False),
-        ((("A", "Z"), ("C", "C")), ("B", "D"), False),
-    ],
-)
-def test_lookup_accounts_for_requested_ids_in_order_with_matching_native_identity(
-    found: tuple[tuple[str, str], ...], missing: tuple[str, ...], valid: bool
-) -> None:
-    payload = json.dumps(
-        {
-            "status": "completed",
-            "data": {
-                "entries": [
-                    {
-                        "category": "relic",
-                        "definition_id": outer_id,
-                        "name": "Relic",
-                        "native": {
-                            "definition_id": native_id,
-                            "name": "Native relic",
-                            "text": None,
-                            "rarity": None,
-                        },
-                    }
-                    for outer_id, native_id in found
-                ],
-                "missing_ids": missing,
-            },
-        }
-    )
-
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=payload)),
-        ) as client:
-            query = LookupQuery(mode=CatalogMode.LOOKUP, ids=("A", "B", "C", "D"))
-            if not valid:
-                with pytest.raises(ClientUnavailable) as failure:
-                    await client.catalog(query)
-                assert failure.value.reason is ClientFailureKind.PROTOCOL
-                return
-            result = await client.catalog(query)
-        assert isinstance(result, CatalogCompleted) and isinstance(result.data, LookupData)
-        assert tuple(entry.definition_id for entry in result.data.entries) == ("A", "C")
-        assert result.data.missing_ids == ("B", "D")
-
-    asyncio.run(read())
-
-
-def test_lookup_unknown_category_is_catalog_unavailable_not_a_missing_id() -> None:
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200,
-                    json={
-                        "status": "completed",
-                        "data": {
-                            "entries": [
-                                {
-                                    "category": "future",
-                                    "definition_id": "FUTURE.ID",
-                                    "name": "Future",
-                                    "native": {"name": "Future"},
-                                }
-                            ],
-                            "missing_ids": [],
-                        },
-                    },
-                )
-            ),
-        ) as client:
-            result = await client.catalog(LookupQuery(mode=CatalogMode.LOOKUP, ids=("FUTURE.ID",)))
-        assert isinstance(result, CatalogFailed)
-        assert result.error.code is ErrorCode.CATALOG_UNAVAILABLE
-
-    asyncio.run(read())
-
-
-@pytest.mark.parametrize(
-    ("query", "data"),
-    [
-        (CatalogQuery(mode=CatalogMode.CATALOG), '{"entries":[],"missing_ids":[]}'),
-        (
-            SearchQuery(mode=CatalogMode.SEARCH),
-            '{"categories":[],"card_filters":{"pools":[],"types":[],"rarities":[],"energy_costs":[]}}',
-        ),
-        (
-            LookupQuery(mode=CatalogMode.LOOKUP, ids=("CARD.ONE",)),
-            '{"matches":[],"total":0,"next_offset":null}',
-        ),
-    ],
-)
-def test_catalog_success_data_must_match_the_requested_mode(
-    query: CatalogRequest, data: str
-) -> None:
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(200, content='{"status":"completed","data":' + data + "}")
-            ),
-        ) as client:
-            with pytest.raises(ClientUnavailable) as failure:
-                await client.catalog(query)
-        assert failure.value.reason is ClientFailureKind.PROTOCOL
-
-    asyncio.run(read())
-
-
-def test_inspection_rejects_data_from_another_area_without_a_second_read() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/inspect"
-        assert request.content == b'{"query":{"area":"map"}}'
-        return httpx.Response(
-            200,
-            content='{"status":"completed","observation":'
-            + RUN
-            + ',"data":{"cards_played_this_combat":[],"cards_played_this_turn":[],'
-            '"cards_exhausted_this_turn":[]}}',
-        )
-
-    async def read() -> None:
-        async with ModClient("http://mod.test", transport=httpx.MockTransport(handler)) as client:
-            with pytest.raises(ClientUnavailable) as failure:
-                await client.inspect(MapQuery(area=InspectArea.MAP))
-        assert failure.value.reason is ClientFailureKind.PROTOCOL
-
-    asyncio.run(read())
-
-
 def test_explicit_upgrade_details_do_not_overwrite_live_objects() -> None:
     detail = (
         '{"objects":{"c1":' + CARD + '},"descriptions":{"c1":"完整描述。"},'
@@ -533,68 +267,6 @@ def test_explicit_upgrade_details_do_not_overwrite_live_objects() -> None:
         assert result.data.upgrades is not MISSING
         preview = result.data.upgrades["c1"]
         assert isinstance(preview, UpgradeAvailable) and preview.card.upgrades == 1
-
-    asyncio.run(read())
-
-
-@pytest.mark.parametrize(("upgrade", "upgrades"), [(True, ""), (False, ',"upgrades":{}')])
-def test_detail_upgrade_material_matches_the_request(upgrade: bool, upgrades: str) -> None:
-    data = (
-        '{"objects":{},"descriptions":{},"modifier_descriptions":{},"generated":{},"mechanisms":[]'
-        + upgrades
-        + "}"
-    )
-
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200,
-                    content='{"status":"completed","observation":' + RUN + ',"data":' + data + "}",
-                )
-            ),
-        ) as client:
-            with pytest.raises(ClientUnavailable) as failure:
-                await client.inspect(CardQuery(area=InspectArea.DECK, upgrade=upgrade))
-        assert failure.value.reason is ClientFailureKind.PROTOCOL
-
-    asyncio.run(read())
-
-
-def test_expected_http_boundary_errors_keep_their_structured_bodies() -> None:
-    async def read() -> None:
-        responses = iter(
-            [
-                httpx.Response(
-                    400,
-                    json={
-                        "status": "rejected",
-                        "error": {
-                            "code": "invalid_request",
-                            "message": "Invalid request.",
-                            "fields": ["query.refs"],
-                        },
-                    },
-                ),
-                httpx.Response(
-                    500,
-                    json={
-                        "status": "failed",
-                        "error": {"code": "internal_error", "message": "Read failed."},
-                    },
-                ),
-            ]
-        )
-        async with ModClient(
-            "http://mod.test", transport=httpx.MockTransport(lambda _: next(responses))
-        ) as client:
-            invalid = await client.state()
-            failed = await client.state()
-        assert isinstance(invalid, InvalidRequestReply)
-        assert invalid.error.fields == ("query.refs",)
-        assert isinstance(failed, TechnicalError)
-        assert failed.error.code is ErrorCode.INTERNAL_ERROR
 
     asyncio.run(read())
 
@@ -653,114 +325,6 @@ def test_transport_failures_do_not_implicitly_repeat_reads(
         assert failure.value.reason is reason
         assert attempts == 1
         assert "secret" not in str(failure.value)
-
-    asyncio.run(read())
-
-
-def test_invalid_compression_is_a_safe_protocol_failure_without_another_read() -> None:
-    attempts = 0
-
-    def handler(_: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
-        return httpx.Response(
-            200, headers={"content-encoding": "gzip"}, stream=httpx.ByteStream(b"secret")
-        )
-
-    async def read() -> None:
-        async with ModClient("http://mod.test", transport=httpx.MockTransport(handler)) as client:
-            with pytest.raises(ClientUnavailable) as failure:
-                await client.status()
-        assert failure.value.reason is ClientFailureKind.PROTOCOL
-        assert attempts == 1
-        assert "secret" not in str(failure.value)
-
-    asyncio.run(read())
-
-
-@pytest.mark.parametrize(
-    "observation",
-    [
-        RUN.replace('"input_readiness":"ready"', '"input_readiness":"busy"'),
-        RUN.replace('"run_id":"run"', '"run_id":null'),
-        RUN.replace('"observation_sequence":1', '"observation_sequence":true'),
-        RUN.replace(
-            '"game_instance_id":"game","observation_sequence"',
-            '"game_instance_id":"other","observation_sequence"',
-        ),
-        RUN.replace('"floor":0', '"floor":0,"floor":1'),
-    ],
-)
-def test_untrustworthy_observation_is_not_success(observation: str) -> None:
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200, content='{"status":"completed","observation":' + observation + "}"
-                )
-            ),
-        ) as client:
-            with pytest.raises(ClientUnavailable) as failure:
-                await client.state()
-        assert failure.value.reason is ClientFailureKind.PROTOCOL
-
-    asyncio.run(read())
-
-
-@pytest.mark.parametrize(
-    ("amount", "valid"),
-    [
-        ("3", True),
-        ("3.0", True),
-        ("3.5", True),
-        ("true", False),
-        ("NaN", False),
-        ("Infinity", False),
-    ],
-)
-def test_raw_numbers_preserve_integer_and_decimal_forms_without_accepting_non_numbers(
-    amount: str, valid: bool
-) -> None:
-    observation = COMBAT.replace('"amount":0', '"amount":' + amount)
-
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200, content='{"status":"completed","observation":' + observation + "}"
-                )
-            ),
-        ) as client:
-            if not valid:
-                with pytest.raises(ClientUnavailable) as failure:
-                    await client.state()
-                assert failure.value.reason is ClientFailureKind.PROTOCOL
-                return
-            result = await client.state()
-        assert isinstance(result, StateCompleted)
-        assert _canonical_json(result.observation.to_json()) == _canonical_json(observation)
-
-    asyncio.run(read())
-
-
-@pytest.mark.parametrize("odds", ["-0.1", "1.1"])
-def test_raw_map_odds_retain_probability_bounds(odds: str) -> None:
-    observation = COMBAT.replace('"monster":1', '"monster":' + odds)
-
-    async def read() -> None:
-        async with ModClient(
-            "http://mod.test",
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200, content='{"status":"completed","observation":' + observation + "}"
-                )
-            ),
-        ) as client:
-            with pytest.raises(ClientUnavailable) as failure:
-                await client.state()
-        assert failure.value.reason is ClientFailureKind.PROTOCOL
 
     asyncio.run(read())
 

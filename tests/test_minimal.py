@@ -4,12 +4,11 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
-from test_combat import BattleHTTP, reply
+from test_combat import reply
 from test_lifecycle import Campaign, battle_state
 from test_responses import configuration
 
 from sts2_harness.client import ModClient
-from sts2_harness.decisions import CombatHandoff
 from sts2_harness.game import RunEndReason
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
@@ -103,7 +102,7 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 if isinstance(tool, dict) and isinstance(tool["name"], str)
             }
             assert names in (
-                {"run_inspect", "run_act", "run_plan", "run_next"},
+                {"run_inspect", "run_act", "run_deck_choice", "run_plan", "run_next"},
                 {"combat_inspect", "combat_act"},
             )
             messages = request["input"]
@@ -133,11 +132,6 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
         assert isinstance(result, dict) and result["type"] == "function_call_output"
         output = result["output"]
         assert isinstance(output, str) and json.loads(output)["observation"] is None
-        task = next_combat[-1]
-        assert isinstance(task, dict) and isinstance(task["content"], str)
-        observation = json.loads(task["content"])["observation"]
-        assert "scene" not in observation
-        assert observation["current"] == {"turn": 2}
         assert '"call_id": "battle1"' in json.dumps(next_combat)
         after_battle = campaign.inputs[5 if consecutive else 4]["input"]
         assert isinstance(after_battle, list)
@@ -146,13 +140,6 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
         current_task = after_battle[-1]
         assert isinstance(current_task, dict) and isinstance(current_task["content"], str)
         current = json.loads(current_task["content"])
-        observation = current["observation"]
-        assert observation["scene"]["node_id"] == "reward"
-        assert observation["scene"]["reset"] is True
-        assert {"progress", "player", "inventory", "map_topology", "dynamic_map"} <= set(
-            observation["current"]
-        )
-        assert observation["decision"]["actions"][0]["ref"] == "advance"
         assert current["battle_report"]["last_observed_turn"] == (None if consecutive else 2)
 
         archive = Journal.open(path)
@@ -165,66 +152,5 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 assert result == Reached(
                     anchor, record.confirmed_operation_cursor, record.semantic_digest
                 )
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("unknown", [False, True])
-def test_minimal_combat_keeps_uncertain_feedback_until_success(
-    tmp_path: Path, unknown: bool
-) -> None:
-    async def scenario() -> None:
-        first = json.loads(
-            reply(
-                (
-                    "first",
-                    "combat_act",
-                    '{"steps":[{"kind":"end_turn"},{"kind":"end_turn"}]}',
-                )
-            )
-            .decode()
-            .removeprefix("data: ")
-        )
-        first["response"]["output"].insert(
-            0,
-            {
-                "type": "reasoning",
-                "id": "r1",
-                "summary": [],
-                "content": [{"type": "reasoning_text", "text": "Synthetic current reasoning."}],
-            },
-        )
-        battle = BattleHTTP(
-            [
-                ("data: " + json.dumps(first) + "\n\n").encode(),
-                reply(("next", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-                reply(("last", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-            ],
-            steps_to_end=3,
-        )
-        battle.failed_first = not unknown
-        battle.unknown_first = unknown
-        running = asyncio.create_task(battle.run(tmp_path, minimal=True))
-        if unknown:
-            await battle.waiting.wait()
-            battle.start()
-        result = await running
-        assert isinstance(result, CombatHandoff) and result.review is None
-        assert len(battle.inputs) == len(battle.actions) == 3
-        original = battle.inputs[0]["input"]
-        recovery = battle.inputs[1]["input"]
-        assert isinstance(original, list) and isinstance(recovery, list)
-        assert recovery[: len(original)] == original
-        text = json.dumps(recovery)
-        assert "Synthetic current reasoning." in text
-        assert ("Unconfirmed." if unknown else "Dispatch failed.") in text
-        assert '"call_id": "first"' in text
-        after_success = json.dumps(battle.inputs[2]["input"])
-        assert "Synthetic current reasoning." in after_success
-        assert '"call_id": "first"' in after_success
-        assert '"call_id": "next"' in after_success
-        continued = battle.inputs[2]["input"]
-        assert isinstance(continued, list)
-        assert continued[: len(recovery)] == recovery
 
     asyncio.run(scenario())

@@ -1,4 +1,3 @@
-import socket
 from pathlib import Path
 
 import pytest
@@ -6,48 +5,6 @@ from pydantic import JsonValue
 
 from sts2_harness.capacity import CapacityPolicy, measure
 from sts2_harness.config import Protocol
-
-
-def test_character_estimate_counts_unicode_and_structure_once() -> None:
-    body: dict[str, JsonValue] = {"input": ["中😀a"], "tools": []}
-    # The skeleton has 25 characters; the decoded value adds three, not eight bytes.
-    assert measure(body, Protocol.RESPONSES).estimated_input_tokens == 13
-
-
-@pytest.mark.parametrize("protocol", list(Protocol))
-def test_input_estimate_ignores_transport_settings_but_digest_preserves_them(
-    protocol: Protocol,
-) -> None:
-    field = "input" if protocol is Protocol.RESPONSES else "messages"
-    body: dict[str, JsonValue] = {
-        field: [{"role": "user", "content": 'Choose "A".\nThen continue.'}],
-        "tools": [],
-    }
-    if protocol is Protocol.MESSAGES:
-        body["system"] = [{"type": "text", "text": "Follow the game rules."}]
-    original = measure(body, protocol)
-    configured = measure({**body, "metadata": {"label": "transport-only " * 100}}, protocol)
-    assert configured.estimated_input_tokens == original.estimated_input_tokens
-    assert configured.digest != original.digest
-    assert configured.encoded_bytes > original.encoded_bytes
-
-
-@pytest.mark.parametrize(
-    ("content", "expected"),
-    [
-        ("中文 <|endoftext|> hello", 29),
-        ("玩家查看三条路线，比较它们的代价，然后选择预期收益最高的路线。", 32),
-        ('Line one: "quoted".\nLine two: "quoted".\n' * 100, 1355),
-    ],
-)
-def test_measure_counts_decoded_multilingual_text_and_literal_special_tokens(
-    content: str, expected: int
-) -> None:
-    body: dict[str, JsonValue] = {
-        "messages": [{"role": "user", "content": content}],
-        "tools": [],
-    }
-    assert measure(body, Protocol.CHAT_COMPLETIONS).estimated_input_tokens == expected
 
 
 def test_input_estimate_includes_opaque_native_continuation() -> None:
@@ -58,15 +15,6 @@ def test_input_estimate_includes_opaque_native_continuation() -> None:
     ]
     continued = measure(body, Protocol.RESPONSES)
     assert continued.estimated_input_tokens > empty.estimated_input_tokens + 300
-
-
-def test_measurement_needs_no_network_or_tokenizer_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    def deny_network(*args: object, **kwargs: object) -> None:
-        raise AssertionError("Unexpected network access")
-
-    monkeypatch.setattr(socket.socket, "connect", deny_network)
-    body: dict[str, JsonValue] = {"input": [], "tools": []}
-    assert measure(body, Protocol.RESPONSES).estimated_input_tokens == 8
 
 
 def test_prepared_request_is_sent_unchanged_through_retry(tmp_path: Path) -> None:

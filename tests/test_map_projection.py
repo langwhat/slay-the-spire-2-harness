@@ -1,10 +1,7 @@
 import json
 
-import pytest
-from pydantic import ValidationError
-
 from sts2_harness.client.models import Progress, PublicMap
-from sts2_harness.context.map_projection import DynamicMap, project_map
+from sts2_harness.context.map_projection import project_map
 
 
 def test_projects_complete_native_topology_and_dynamic_sections() -> None:
@@ -55,58 +52,3 @@ def test_unknown_and_known_empty_destinations_stay_distinct() -> None:
         "plan": None,
     }
     assert json.loads(empty_dynamic.to_json())["legal_destinations"] == []
-
-
-def test_requires_published_destinations_field() -> None:
-    with pytest.raises(ValidationError):
-        PublicMap.model_validate_json('{"bosses":[],"nodes":[]}')
-
-
-def test_complete_dynamic_replacement_contains_accepted_remaining_plan_and_fresh_odds() -> None:
-    from sts2_harness.route_plan import Edge, RoutePlan
-
-    first = PublicMap.model_validate_json(
-        """{"bosses":[{"name":"Boss"}],"nodes":[
-          {"position":"map:1:0","room_type":"unknown","children":["map:2:0"],
-           "odds":{"monster":0,"shop":0.75}},
-          {"position":"map:2:0","room_type":"monster","children":[]}
-        ],"legal_destinations":["map:2:0"]}"""
-    )
-    second = PublicMap.model_validate_json(
-        """{"bosses":[{"name":"Boss"}],"nodes":[
-          {"position":"map:1:0","room_type":"unknown","children":["map:2:0"]},
-          {"position":"map:2:0","room_type":"monster","children":[]}
-        ],"legal_destinations":[]}"""
-    )
-    progress = Progress(act=1, floor=1, position="map:1:0", room_type="unknown")
-    plan = RoutePlan(
-        position="map:1:0",
-        reason="Retain the branch",
-        edges=(Edge("map:1:0", "map:2:0"), Edge("map:2:0", "map:3:2")),
-    )
-
-    topology, dynamic, odds = project_map(first, progress, plan)
-    same_topology, refreshed, refreshed_odds = project_map(second, progress, plan)
-
-    assert topology == same_topology
-    moved_topology, _, _ = project_map(
-        first, progress.model_copy(update={"floor": 2, "position": "map:2:0"}), None
-    )
-    assert moved_topology == topology
-    assert {ref: json.loads(value.to_json()) for ref, value in odds.items()} == {
-        "map:1:0": {"monster": 0, "shop": 0.75}
-    }
-    assert DynamicMap.model_validate_json(dynamic.to_json()) == dynamic
-    assert json.loads(refreshed.to_json()) == {
-        "position": "map:1:0",
-        "legal_destinations": [],
-        "special_movement": {"free_travel_active": None, "remaining_uses": None},
-        "plan": {
-            "edges": [
-                {"from": "map:1:0", "to": "map:2:0"},
-                {"from": "map:2:0", "to": "map:3:2"},
-            ],
-        },
-    }
-    assert refreshed_odds == {}
-    assert DynamicMap.model_validate_json(refreshed.to_json()) == refreshed

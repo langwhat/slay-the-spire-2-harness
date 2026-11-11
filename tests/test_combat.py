@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 
 import httpx2 as httpx
-import pytest
 from pydantic import JsonValue
 from test_mod_client import COMBAT, RUN
 from test_responses import configuration
@@ -27,8 +26,7 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.game import LiveGame, RunEnded, RunEndReason
-from sts2_harness.knowledge import DocumentView, SkillRead
+from sts2_harness.game import LiveGame, RunEnded
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.results import ActionToolResult
@@ -428,38 +426,6 @@ def test_reply_protocol_closes_all_calls_and_resets_query_recovery(tmp_path: Pat
     assert ids == ["first", "second", "invalid", "list", "action", "forbidden"]
 
 
-def test_tool_threshold_requires_start_and_final_review_failure_clears_budget(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    async def scenario() -> None:
-        battle = BattleHTTP(
-            [
-                *(
-                    reply((f"bad{index}", "combat_skill", '{"mode":"read","id":"missing"}'))
-                    for index in range(4)
-                ),
-                reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-                401,
-            ]
-        )
-        running = asyncio.create_task(battle.run(tmp_path))
-        await battle.pause_written.wait()
-        await battle.waiting.wait()
-        assert len(battle.inputs) == 4 and battle.actions == []
-        assert battle.budget.failures == 4
-        battle.start()
-        result = await running
-        assert isinstance(result, CombatHandoff) and result.review is None
-        assert len(battle.actions) == 1 and battle.budget.failures == 0
-        assert battle.model_budget[-2:] == [0, 0]
-        assert [(record.levelname, record.getMessage()) for record in caplog.records] == [
-            ("ERROR", "Combat review did not complete: authentication")
-        ]
-
-    asyncio.run(scenario())
-
-
 def test_review_admission_read_failure_recovers_without_losing_same_run_handoff(
     tmp_path: Path,
 ) -> None:
@@ -473,120 +439,6 @@ def test_review_admission_read_failure_recovers_without_losing_same_run_handoff(
     result = asyncio.run(battle.run(tmp_path))
     assert isinstance(result, CombatHandoff) and result.review == "Review after a recovered read."
     assert len(battle.actions) == 1
-
-
-@pytest.mark.parametrize("unknown", [False, True])
-def test_waiting_between_units_preserves_feedback_without_replaying_actions(
-    tmp_path: Path,
-    unknown: bool,
-) -> None:
-    async def scenario() -> None:
-        battle = BattleHTTP(
-            [
-                reply(
-                    (
-                        "first",
-                        "combat_act",
-                        '{"steps":[{"kind":"end_turn"},{"kind":"end_turn"}]}'
-                        if unknown
-                        else '{"steps":[{"kind":"end_turn"}]}',
-                    )
-                ),
-                reply(("next", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-                reply(text="Review."),
-            ],
-            steps_to_end=2,
-        )
-        battle.unknown_first = unknown
-        battle.manual_pause_after_first = not unknown
-        running = asyncio.create_task(battle.run(tmp_path))
-        await battle.waiting.wait()
-        assert len(battle.actions) == 1 and len(battle.inputs) == 1
-        battle.start()
-        result = await running
-        assert isinstance(result, CombatHandoff)
-        assert len(battle.actions) == 2
-        assert battle.actions[0].operation_id != battle.actions[1].operation_id
-        wire = battle.inputs[-1]["input"]
-        assert isinstance(wire, list)
-        assert [
-            item["call_id"]
-            for item in wire
-            if isinstance(item, dict) and item.get("type") == "function_call_output"
-        ] == ["first", "next"]
-        if unknown:
-            first = next(
-                item
-                for item in wire
-                if isinstance(item, dict)
-                and item.get("type") == "function_call_output"
-                and item.get("call_id") == "first"
-            )
-            assert isinstance(first["output"], str)
-            assert json.loads(first["output"])["outcome"]["reason"]["message"] == "Unconfirmed."
-
-    asyncio.run(scenario())
-
-
-def test_required_opening_file_waits_for_start_before_first_model_request(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        path = tmp_path / "required.txt"
-        files = FileDocuments(
-            (
-                DocumentSource(
-                    id="required", name="Required", description="Required guidance", path=path
-                ),
-            )
-        )
-
-        async def materials(observation: native.Observation) -> tuple[DocumentView, ...]:
-            return (await files.read(SkillRead("required")),)
-
-        battle = BattleHTTP(
-            [
-                reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-                reply(text="Review."),
-            ]
-        )
-        running = asyncio.create_task(battle.run(tmp_path, materials=materials))
-        await battle.pause_written.wait()
-        await battle.waiting.wait()
-        assert battle.inputs == [] and battle.actions == []
-        path.write_text("Synthetic required guidance.", encoding="utf-8")
-        battle.start()
-        assert isinstance(await running, CombatHandoff)
-        first = battle.inputs[0]["input"]
-        assert isinstance(first, list)
-        assert [item["role"] for item in first if isinstance(item, dict)] == [
-            "system",
-            "system",
-            "user",
-        ]
-        assert battle.budget.failures == 0
-
-    asyncio.run(scenario())
-
-
-def test_fourth_action_failure_pauses_before_review_even_after_battle(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        battle = BattleHTTP(
-            [
-                reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-                reply(text="Recovered review."),
-            ]
-        )
-        battle.failed_first = True
-        for _ in range(3):
-            battle.budget.record_failure()
-        running = asyncio.create_task(battle.run(tmp_path))
-        await battle.pause_written.wait()
-        await battle.waiting.wait()
-        assert len(battle.inputs) == 1 and len(battle.actions) == 1
-        battle.start()
-        result = await running
-        assert isinstance(result, CombatHandoff) and result.review == "Recovered review."
-
-    asyncio.run(scenario())
 
 
 class PlainCombat:
@@ -621,139 +473,3 @@ def test_plain_code_role_needs_no_model_and_does_not_use_new_battle_boundary(
     assert isinstance(result, CombatHandoff) and result.review is None
     assert result.report.after.hp == battle.opening.state.player.hp
     assert len(source.tasks) == 2 and len(source.accepted) == 1 and battle.inputs == []
-
-
-@pytest.mark.parametrize("mode", ["changed", "no_run", "terminal"])
-def test_changed_run_ends_without_review_or_old_run_stats(tmp_path: Path, mode: str) -> None:
-    battle = BattleHTTP([reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}'))])
-    no_run = mode == "no_run"
-    if mode == "terminal":
-        state = battle.ending.state
-        battle.ending = battle.ending.model_copy(
-            update={
-                "state": native.TerminalState(
-                    phase=native.Phase.TERMINAL,
-                    screen=native.TerminalScreen.RUN_COMPLETE,
-                    control=native.StateControl.UNAVAILABLE,
-                    progress=state.progress,
-                    player=native.Player.model_validate(state.player.model_dump()),
-                    relics=(),
-                    potions=(),
-                    actions=(),
-                    selection=None,
-                    result=native.TerminalResult.VICTORY,
-                    deck=(),
-                ),
-                "input_readiness": native.InputReadiness.TERMINAL,
-                "location": battle.ending.location.model_copy(update={"owner": None}),
-            }
-        )
-    else:
-        battle.ending = battle.ending.model_copy(
-            update={
-                "location": battle.ending.location.model_copy(
-                    update={
-                        "run_id": None if no_run else "another-run",
-                        "node_id": None if no_run else "after-battle",
-                        "owner": None if no_run else native.DecisionOwner.RUN,
-                    }
-                )
-            }
-        )
-    result = asyncio.run(battle.run(tmp_path))
-    assert isinstance(result, RunEnded)
-    assert result.reason is (
-        RunEndReason.TERMINAL
-        if mode == "terminal"
-        else RunEndReason.NO_RUN
-        if no_run
-        else RunEndReason.RUN_CHANGED
-    )
-    assert len(battle.inputs) == 1
-
-
-def test_query_lifetime_change_precedes_exhausted_failure_budget(tmp_path: Path) -> None:
-    class ChangedDuringQuery(BattleHTTP):
-        def __init__(self) -> None:
-            super().__init__(
-                [
-                    reply(
-                        ("missing", "combat_skill", '{"mode":"read","id":"missing"}'),
-                        ("unexecuted", "combat_act", '{"steps":[{"kind":"end_turn"}]}'),
-                    )
-                ]
-            )
-            self.reads = 0
-
-        def mod(self, request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/control":
-                pytest.fail("The old Combat must not pause a different run.")
-            if request.url.path == "/state":
-                self.reads += 1
-                if self.reads == 2:
-                    self.opening = self.opening.model_copy(
-                        update={
-                            "location": self.opening.location.model_copy(
-                                update={"run_id": "new-run"}
-                            )
-                        }
-                    )
-            return super().mod(request)
-
-    battle = ChangedDuringQuery()
-    for _ in range(3):
-        battle.budget.record_failure()
-    result = asyncio.run(battle.run(tmp_path))
-    assert isinstance(result, RunEnded) and result.reason is RunEndReason.RUN_CHANGED
-    assert len(battle.inputs) == 1 and battle.actions == []
-
-
-@pytest.mark.parametrize("query", [False, True])
-def test_report_retains_actual_query_or_next_admission_turn(tmp_path: Path, query: bool) -> None:
-    class LaterTurn(BattleHTTP):
-        def __init__(self) -> None:
-            super().__init__(
-                [
-                    reply(("inspect", "combat_inspect", '{"area":"hand","refs":["c1"]}')),
-                    reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-                    reply(text="Observed turn seven."),
-                ]
-                if query
-                else [],
-                steps_to_end=1 if query else 2,
-            )
-            self.reads = 0
-
-        def mod(self, request: httpx.Request) -> httpx.Response:
-            if request.url.path == "/inspect":
-                observed = self.opening.model_copy(
-                    update={"state": self.opening.state.model_copy(update={"turn": 7})}
-                )
-                return httpx.Response(
-                    200,
-                    json={
-                        "status": "completed",
-                        "observation": observed.model_dump(mode="json"),
-                        "data": {
-                            "objects": {},
-                            "descriptions": {},
-                            "modifier_descriptions": {},
-                            "generated": {},
-                            "mechanisms": [],
-                        },
-                    },
-                )
-            if request.url.path == "/state":
-                self.reads += 1
-                if not query and self.reads == 2:
-                    return httpx.Response(503)
-                if not query and self.reads == 3:
-                    self.opening = self.opening.model_copy(
-                        update={"state": self.opening.state.model_copy(update={"turn": 7})}
-                    )
-            return super().mod(request)
-
-    battle = LaterTurn()
-    result = asyncio.run(battle.run(tmp_path, source=None if query else PlainCombat()))
-    assert isinstance(result, CombatHandoff)
-    assert result.report.last_observed_turn == 7

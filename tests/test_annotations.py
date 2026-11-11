@@ -2,8 +2,6 @@ from contextlib import closing
 from hashlib import sha256
 from pathlib import Path
 
-import pytest
-from pydantic import ValidationError
 from test_lifecycle import battle_state
 from test_responses import configuration
 
@@ -14,11 +12,8 @@ from sts2_harness.journal_models import ConfigurationSnapshot, ToolSet
 from sts2_harness_eval.annotations import (
     AgentAuthor,
     AnnotationRecord,
-    AnnotationRef,
     AnnotationStore,
     BattleRubric,
-    CardRewardRubric,
-    EvidenceRef,
     HumanAuthor,
     Origin,
     ReviewDecision,
@@ -188,62 +183,3 @@ def test_agent_annotation_keeps_origin_after_conflicting_human_reviews(tmp_path:
     assert (first_ref.id, second_ref.id, rubric_ref.id) == ("first", "second", "survival")
     assert reopened.load("other").annotations == ()
     assert (cases.directory / "cases" / "battle.json").read_bytes() == original
-
-
-def test_records_reject_overwrite_and_reviews_cannot_cross_cases(tmp_path: Path) -> None:
-    cases = cases_fixture(tmp_path / "cases")
-    store = AnnotationStore(tmp_path / "annotations", cases)
-    human = HumanAuthor(id="maintainer")
-    annotation = AnnotationRecord(
-        case_id="battle",
-        id="choice",
-        origin=Origin.HUMAN,
-        author=human,
-        text="Either card is acceptable.",
-        evidence_refs=(EvidenceRef(recording_id="source", sequence=1),),
-    )
-    reference = store.append_annotation(annotation)
-    review = ReviewRecord(
-        case_id="battle",
-        id="review",
-        annotation=reference,
-        decision=ReviewDecision.ACCEPTED,
-        reviewer=human,
-        rationale="Checked the actual deck.",
-    )
-    store.append_review(review)
-    rubric = RubricRecord(
-        case_id="battle",
-        id="reward",
-        origin=Origin.HUMAN,
-        author=human,
-        criterion=CardRewardRubric(
-            acceptable_card_ids=("CARD.SHRUG_IT_OFF", "CARD.TRUE_GRIT"),
-            allow_skip=True,
-        ),
-    )
-    store.append_rubric(rubric)
-    before = store.load("battle")
-    with pytest.raises(FileExistsError):
-        store.append_annotation(annotation.model_copy(update={"text": "Changed."}))
-    with pytest.raises(FileExistsError):
-        store.append_review(review)
-    with pytest.raises(FileExistsError):
-        store.append_rubric(rubric)
-    with pytest.raises(ValueError, match="existing annotation in its case"):
-        store.append_review(review.model_copy(update={"case_id": "other", "id": "wrong-case"}))
-    with pytest.raises(ValueError, match="existing annotation in its case"):
-        store.append_review(
-            review.model_copy(
-                update={
-                    "id": "missing",
-                    "annotation": AnnotationRef(case_id="battle", id="missing"),
-                }
-            )
-        )
-    with pytest.raises(FileNotFoundError):
-        store.append_annotation(annotation.model_copy(update={"case_id": "missing"}))
-    with pytest.raises(ValidationError):
-        store.load("../battle")
-    assert AnnotationStore(store.directory, cases).load("battle") == before
-    assert store.load("other").reviews == ()

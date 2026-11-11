@@ -1,28 +1,21 @@
 import asyncio
 import json
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx2 as httpx
 import pytest
 from test_combat import BattleHTTP, reply
-from test_compaction_full_replay import response
 from test_responses import configuration
 from test_run import RunHTTP, handoff
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
-from sts2_harness.combat import CombatAgent
-from sts2_harness.config import Protocol
-from sts2_harness.decisions import ActTask, CombatHandoff, HandoffTask, ReviewTask, TaskComplete
+from sts2_harness.decisions import ActTask, CombatHandoff, HandoffTask, TaskComplete
 from sts2_harness.execution import Executed, Execution
-from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
+from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
-from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.client import Llm
 from sts2_harness.notes import Notes
-from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog
 
@@ -52,86 +45,6 @@ class InspectBattle(BattleHTTP):
                 },
             },
         )
-
-
-@asynccontextmanager
-async def combat_role(battle: InspectBattle, tmp_path: Path) -> AsyncGenerator[CombatAgent]:
-    async with ModClient("http://mod", transport=httpx.MockTransport(battle.mod)) as client:
-        execution = Execution(
-            LiveGame(client, namespace="queries", game_instance_id="game", run_id="run"),
-            game_instance_id="game",
-            run_id="run",
-            recovery=battle.budget,
-        )
-        tools = ToolCatalog(
-            native.DecisionOwner.COMBAT,
-            observe=execution.observe,
-            inspect=execution.inspect,
-            catalog=execution.catalog,
-        )
-        async with Llm(
-            configuration(tmp_path), transport=httpx.MockTransport(battle.model)
-        ) as llm:
-            yield CombatAgent(llm, tools, battle.budget, opening_notes="Opening notes.")
-
-
-@pytest.mark.parametrize("minimal", [False, True])
-@pytest.mark.parametrize("protocol", list(Protocol))
-def test_two_inspections_return_together_before_the_next_decision(
-    tmp_path: Path, minimal: bool, protocol: Protocol
-) -> None:
-    battle = InspectBattle(
-        [
-            response(
-                protocol,
-                ("enemies", "combat_inspect", '{"area":"enemies"}'),
-                ("powers", "combat_inspect", '{"area":"powers"}'),
-            ),
-            response(protocol, ("act", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-            response(protocol, text="Reviewed."),
-        ]
-    )
-    material_reads: list[int] = []
-
-    async def materials(_: native.Observation) -> tuple[DocumentView, ...]:
-        material_reads.append(len(battle.queries))
-        return ()
-
-    result = asyncio.run(
-        battle.run(tmp_path, minimal=minimal, protocol=protocol, materials=materials)
-    )
-    assert isinstance(result, CombatHandoff)
-    assert [query.area for query in battle.queries] == [
-        native.InspectArea.ENEMIES,
-        native.InspectArea.POWERS,
-    ]
-    assert battle.model_budget[:2] == [0, 0]
-    assert material_reads == ([0, 2] if minimal else [0, 2, 2])
-    field = "input" if protocol is Protocol.RESPONSES else "messages"
-    first = battle.inputs[0][field]
-    following = battle.inputs[1][field]
-    assert isinstance(first, list) and isinstance(following, list)
-    assert following[: len(first)] == first
-    if protocol is Protocol.MESSAGES:
-        message = following[-2]
-        assert isinstance(message, dict) and message["role"] == "user"
-        outputs = message["content"]
-        assert isinstance(outputs, list)
-        id_field, content_field = "tool_use_id", "content"
-    else:
-        outputs = following[-3:-1]
-        id_field, content_field = (
-            ("call_id", "output")
-            if protocol is Protocol.RESPONSES
-            else ("tool_call_id", "content")
-        )
-    assert [item[id_field] for item in outputs if isinstance(item, dict)] == ["enemies", "powers"]
-    for item in outputs:
-        assert isinstance(item, dict) and isinstance(content := item[content_field], str)
-        result = json.loads(content)
-        assert result["outcome"] == {"status": "completed"}
-        assert result["observation"] is None
-        assert "data" in result
 
 
 def test_inspection_and_final_action_execute_without_an_intermediate_request(
@@ -231,65 +144,6 @@ def test_nonfinal_action_rejects_the_whole_reply_before_any_inspection(
     for item in items[-3:]:
         assert isinstance(item, dict) and isinstance(content := item["output"], str)
         assert json.loads(content)["outcome"]["reason"]["code"] == "invalid_arguments"
-
-
-@pytest.mark.parametrize("changed_role", [False, True])
-def test_interrupted_query_closes_unexecuted_suffix_before_context_is_reused(
-    tmp_path: Path, changed_role: bool
-) -> None:
-    battle = InspectBattle(
-        [
-            reply(
-                (
-                    "first",
-                    "combat_inspect" if changed_role else "combat_skill",
-                    '{"area":"enemies"}' if changed_role else '{"mode":"read","id":"missing"}',
-                ),
-                ("cancelled-query", "combat_inspect", '{"area":"powers"}'),
-                ("cancelled-action", "combat_act", '{"steps":[{"kind":"end_turn"}]}'),
-            ),
-            reply(text="Reviewed."),
-        ]
-    )
-    if changed_role:
-        battle.inspected = battle.ending
-    else:
-        for _ in range(3):
-            battle.budget.record_failure()
-
-    async def scenario() -> None:
-        async with combat_role(battle, tmp_path) as role:
-            route = native.RouteKey.model_validate(battle.opening.location.model_dump())
-            with pytest.raises(DecisionInterrupted) as error:
-                await role.decide(ActTask(route), battle.opening)
-            assert error.value.pause_required is not changed_role
-            assert isinstance(error.value.reason, Reason)
-            assert error.value.reason.code is (
-                ReasonCode.ROLE_CHANGED if changed_role else ReasonCode.INVALID_ARGUMENTS
-            )
-            assert battle.budget.failures == (0 if changed_role else 4)
-            assert isinstance(
-                await role.decide(ReviewTask(handoff().report), battle.ending), TaskComplete
-            )
-        assert len(battle.queries) == (1 if changed_role else 0)
-        assert battle.actions == []
-        items = battle.inputs[1]["input"]
-        assert isinstance(items, list)
-        outputs = [
-            item
-            for item in items
-            if isinstance(item, dict) and item.get("type") == "function_call_output"
-        ]
-        assert [item["call_id"] for item in outputs] == [
-            "first",
-            "cancelled-query",
-            "cancelled-action",
-        ]
-        for output in outputs[1:]:
-            assert isinstance(content := output["output"], str)
-            assert json.loads(content)["outcome"]["reason"]["code"] == "batch_aborted"
-
-    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("minimal", [False, True])

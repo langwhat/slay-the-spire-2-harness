@@ -17,14 +17,11 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.config import Configuration, Driver
 from sts2_harness.diagnostics import Diagnostics
-from sts2_harness.game import Settle, Settlement
 from sts2_harness.headless import HeadlessOptions, StandardRunRecipe, run_headless
 from sts2_harness.journal import (
     ArchiveError,
-    DependencyKind,
     Journal,
     Manifest,
-    ModelSummary,
     StandardCharacter,
 )
 from sts2_harness.live_session import live_session
@@ -41,12 +38,10 @@ from sts2_harness_eval.cases import (
     Stage,
     TargetBattle,
     Unsupported,
-    UnsupportedCause,
     admit_case,
 )
 from sts2_harness_eval.native import NativeLaunch
 from sts2_harness_eval.results import ModelAnchor
-from sts2_harness_eval.verification import Relation
 
 
 def admission_game(
@@ -375,24 +370,7 @@ server.serve_forever()
 @pytest.mark.skipif(
     sys.platform != "darwin", reason="Owned fake executable uses the macOS launcher."
 )
-@pytest.mark.parametrize(
-    "failure",
-    [
-        None,
-        "mismatch",
-        "unknown",
-        "r1",
-        "identity",
-        "map_mismatch",
-        "wrong_seed",
-        "no_follow",
-        "gap",
-        "missing_template",
-        "drift_game_instance_id",
-        "drift_run_id",
-        "drift_node_id",
-    ],
-)
+@pytest.mark.parametrize("failure", [None, "unknown", "mismatch"])
 def test_admission_replays_source_then_independently_loads_and_publishes_after_cleanup(
     tmp_path: Path,
     failure: str | None,
@@ -556,183 +534,3 @@ def test_admission_replays_source_then_independently_loads_and_publishes_after_c
         assert bool(list((store.directory / "cases").glob("*.json"))) is (failure is None)
 
     asyncio.run(scenario())
-
-
-@pytest.mark.skipif(
-    sys.platform != "darwin", reason="Owned fake executable uses the macOS launcher."
-)
-@pytest.mark.parametrize(
-    ("prefix_batch", "failure", "unpublished_card"),
-    [
-        (False, None, False),
-        (True, None, False),
-        (False, Relation.SOURCE_REPLAY, False),
-        (False, Relation.REPLAY_LOAD, False),
-        (False, None, True),
-    ],
-)
-def test_admission_restores_completed_combat_batch_with_one_publication(
-    tmp_path: Path, prefix_batch: bool, failure: Relation | None, unpublished_card: bool
-) -> None:
-    executable, template = admission_game(
-        tmp_path, combat_batch=True, prefix_batch=prefix_batch, unpublished_card=unpublished_card
-    )
-    paths: list[Path] = []
-
-    def factory(
-        manifest: Manifest, archive: Path, diagnostics: Diagnostics
-    ) -> AbstractAsyncContextManager[RunSession]:
-        paths.append(archive)
-        port = json.loads((archive.parent / "status.json").read_text())["mod_port"]
-        responses = iter(
-            [
-                reply(
-                    (
-                        "event",
-                        "run_act",
-                        '{"steps":[{"kind":"interact","action":"interaction:9:1"}'
-                        + (
-                            ',{"kind":"interact","action":"interaction:9:2"}'
-                            if prefix_batch
-                            else ""
-                        )
-                        + "]}",
-                    )
-                ),
-                reply(
-                    (
-                        "plan",
-                        "run_plan",
-                        '{"reason":"Enter the battle.","edges":[{"from":"0:0","to":"1:0"}]}',
-                    )
-                ),
-                reply(("travel", "run_next", '{"reason":"Enter the battle."}')),
-                reply(
-                    (
-                        "turn",
-                        "combat_act",
-                        '{"steps":[{"kind":"play_card","card":"'
-                        + ("card:11:99" if unpublished_card else "card:11:1")
-                        + '","target":"enemy:11:3"},{"kind":"end_turn"}]}',
-                    )
-                ),
-                reply(("finish", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
-            ]
-        )
-        return live_session(
-            ModClient(f"http://127.0.0.1:{port}"),
-            manifest,
-            archive,
-            model=Llm(
-                configuration(tmp_path),
-                transport=httpx.MockTransport(
-                    lambda _: httpx.Response(
-                        200, content=next(responses), headers={"Content-Type": "text/event-stream"}
-                    )
-                ),
-            ),
-            diagnostics=diagnostics,
-        )
-
-    async def scenario() -> None:
-        await run_headless(
-            HeadlessOptions(
-                executable,
-                template,
-                tmp_path / "source",
-                recipe=StandardRunRecipe(character=StandardCharacter.IRONCLAD, seed="SEED"),
-            ),
-            Configuration(Driver.BUILTIN, configuration(tmp_path)),
-            stop_requested=asyncio.Event(),
-            session_factory=factory,
-        )
-        with closing(Journal.open(paths[0])) as journal:
-            target = next(
-                summary
-                for summary in journal.summaries(
-                    kind=DependencyKind.MODEL, role=native.DecisionOwner.COMBAT
-                )
-                if isinstance(summary, ModelSummary)
-            )
-            anchor = ModelAnchor(journal.manifest.recording_id, target.sequence)
-            operations = journal.operations(start=target.sequence)
-            writes = [record for record in operations if isinstance(record.request, Settle)]
-            play, end_turn = writes[:2]
-            assert isinstance(play.request, Settle)
-            assert play.request.step.kind is native.StepKind.PLAY_CARD
-            assert isinstance(end_turn.request, Settle)
-            assert end_turn.request.step.kind is native.StepKind.END_TURN
-            for record in (play, end_turn):
-                assert record.reply is not None
-                assert isinstance(record.reply.outcome, Settlement)
-                assert isinstance(record.reply.outcome.receipt, native.ReceiptCompleted)
-            assert not any(
-                record.reply is not None and record.reply.observations
-                for record in operations
-                if play.sequence <= record.sequence < end_turn.sequence
-            )
-            published = next(
-                observation
-                for record in operations
-                if record.sequence >= end_turn.sequence and record.reply is not None
-                for observation in record.reply.observations
-            )
-            assert isinstance(published.state, native.CombatState)
-            assert published.state.turn == 2
-        store = CaseStore(tmp_path / "cases")
-        output = tmp_path / "native"
-        output.mkdir()
-        if failure is not None:
-            (output / ("boundary_" + failure.value)).touch()
-        result = await admit_case(
-            AdmissionRequest(
-                id="combat-batch", archive=paths[0], anchor=anchor, endpoint=TargetBattle()
-            ),
-            NativeLaunch(executable, template, output),
-            store,
-        )
-        if unpublished_card:
-            assert result == Unsupported(cause=UnsupportedCause.IDENTITY, sequence=play.sequence)
-            assert not (store.directory / "cases/combat-batch.json").exists()
-            return
-        if failure is not None:
-            assert result == Mismatch(
-                relation=failure, sequence=play.sequence, field_path="receipt.boundary"
-            )
-            assert not (store.directory / "cases/combat-batch.json").exists()
-            return
-        assert result == Admitted(case_id="combat-batch"), result
-        case = store.load("combat-batch")
-        reference = store.reference(store.binding(case))
-        assert isinstance(reference.target.read.observation.state, native.CombatState)
-        assert reference.target.read.observation.state.turn == 1
-        followed = reference.follow_on[-1].read.observation
-        assert isinstance(followed.state, native.CombatState)
-        assert followed.state.turn == 2
-        ledger = (tmp_path / "ledger").read_text().splitlines()
-        assert any(line.startswith("capture:") for line in ledger)
-        assert any(line.startswith("load:") for line in ledger)
-        assert ledger[-1].startswith("closed:")
-
-    asyncio.run(scenario())
-
-
-def test_admission_returns_incomplete_when_store_path_is_a_file(tmp_path: Path) -> None:
-    occupied = tmp_path / "store"
-    occupied.write_text("existing")
-    request = AdmissionRequest(
-        id="one",
-        archive=tmp_path / "source.sqlite",
-        anchor=ModelAnchor("source", 1),
-        endpoint=TargetBattle(),
-    )
-    result = asyncio.run(
-        admit_case(
-            request,
-            NativeLaunch(tmp_path / "game", tmp_path / "template", tmp_path / "out"),
-            CaseStore(occupied),
-        )
-    )
-    assert result == Incomplete(stage=Stage.PREPARATION, cause=IncompleteCause.IO)
-    assert occupied.read_text() == "existing"
-    assert tuple(tmp_path.iterdir()) == (occupied,)

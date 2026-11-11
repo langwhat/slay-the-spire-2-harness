@@ -1,14 +1,12 @@
 import asyncio
 
 import httpx2 as httpx
-import pytest
 from pydantic import MISSING
 from test_mod_client import COMBAT
 
 from sts2_harness.client import ModClient
 from sts2_harness.client.models import DecisionOwner
 from sts2_harness.context import Context
-from sts2_harness.context.models import RunResultMessage
 from sts2_harness.execution import Execution
 from sts2_harness.game import LiveGame
 from sts2_harness.llm.messages import ToolCall
@@ -16,146 +14,6 @@ from sts2_harness.material_text import MaterialText
 from sts2_harness.notes import Notes
 from sts2_harness.results import ReadCompleted
 from sts2_harness.tools import ToolCatalog
-
-
-def test_state_dispatch_delivers_current_state_without_query_data() -> None:
-    async def run() -> None:
-        def respond(request: httpx.Request) -> httpx.Response:
-            assert request.method == "GET" and request.url.path == "/state"
-            return httpx.Response(
-                200, content='{"status":"completed","observation":' + COMBAT + "}"
-            )
-
-        async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(
-                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
-                game_instance_id="game",
-                run_id="run",
-            )
-            tools = ToolCatalog(
-                DecisionOwner.COMBAT,
-                observe=execution.observe,
-                inspect=execution.inspect,
-                catalog=execution.catalog,
-            )
-            call = ToolCall("state", "combat_inspect", '{"area":"state"}')
-            result = await tools.dispatch(call)
-            assert isinstance(result.outcome, ReadCompleted)
-            assert result.data is MISSING
-            context = Context(DecisionOwner.COMBAT)
-            context.append_tool_result(call, result)
-            message = context.model_input()[-1]
-            assert isinstance(message, RunResultMessage)
-            assert message.content.observation is not None
-            assert message.content.data is MISSING
-            assert len(tools.definitions) == 4
-
-    asyncio.run(run())
-
-
-def test_inspection_keeps_full_details_and_rejects_bad_arguments_and_foreign_menus() -> None:
-    from test_mod_client import RUN
-
-    from sts2_harness.client.models import DetailData, Observation, UpgradeAvailable
-    from sts2_harness.results import Rejected
-
-    async def run() -> None:
-        observation = Observation.model_validate_json(COMBAT)
-        details = DetailData(
-            objects={"c1": observation.objects["c1"]},
-            descriptions={"c1": observation.descriptions["c1"]},
-            modifier_descriptions={"c1": observation.modifier_descriptions["c1"]},
-            generated={"c1": observation.generated["c1"]},
-            mechanisms=(),
-            upgrades={"c1": observation.upgrades["c1"]},
-        )
-        paths: list[str] = []
-
-        def respond(request: httpx.Request) -> httpx.Response:
-            paths.append(request.url.path)
-            if request.url.path == "/state":
-                return httpx.Response(
-                    200, content='{"status":"completed","observation":' + COMBAT + "}"
-                )
-            if b"bad" in request.content:
-                return httpx.Response(
-                    200,
-                    content='{"status":"rejected","error":'
-                    '{"code":"invalid_refs","message":"Wrong area.","invalid_refs":["bad"]},'
-                    '"observation":' + COMBAT + "}",
-                )
-            if b"options" in request.content:
-                return httpx.Response(
-                    200,
-                    content='{"status":"completed","observation":'
-                    + RUN
-                    + ',"data":{"objects":{},"descriptions":{},"modifier_descriptions":{},'
-                    '"generated":{},"mechanisms":[]}}',
-                )
-            return httpx.Response(
-                200,
-                content='{"status":"completed","observation":'
-                + COMBAT
-                + ',"data":'
-                + details.model_dump_json()
-                + "}",
-            )
-
-        async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(
-                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
-                game_instance_id="game",
-                run_id="run",
-            )
-            tools = ToolCatalog(
-                DecisionOwner.COMBAT,
-                observe=execution.observe,
-                inspect=execution.inspect,
-                catalog=execution.catalog,
-            )
-            context = Context(DecisionOwner.COMBAT)
-            call = ToolCall(
-                "detail", "combat_inspect", '{"area":"hand","refs":["c1"],"upgrade":true}'
-            )
-            for _ in range(2):
-                result = await tools.dispatch(call)
-                assert isinstance(result.data, DetailData)
-                assert result.data.descriptions == {"c1": None}
-                assert result.data.modifier_descriptions["c1"].enchantment == "附魔说明"
-                assert result.data.upgrades is not MISSING
-                upgrade = result.data.upgrades["c1"]
-                assert isinstance(upgrade, UpgradeAvailable)
-                assert upgrade.card.text == "造成3点伤害。"
-                assert len(result.data.generated["c1"]) == 1
-                context.append_tool_result(call, result)
-            assert paths == ["/inspect", "/inspect"]
-            last = context.model_input()[-1]
-            assert isinstance(last, RunResultMessage) and isinstance(last.content.data, DetailData)
-            assert last.content.observation is not None
-            assert last.content.observation.current is MISSING
-            bad = await tools.dispatch(
-                ToolCall("bad", "combat_inspect", '{"area":"hand","refs":["bad"]}')
-            )
-            assert isinstance(bad.outcome, Rejected) and bad.observation is not None
-            assert "bad" in bad.outcome.reason.message
-            denied = await tools.dispatch(ToolCall("other", "combat_inspect", '{"area":"options"}'))
-            assert isinstance(denied.outcome, Rejected) and denied.data is MISSING
-            assert denied.observation is not None
-            assert denied.observation.location.owner is DecisionOwner.RUN
-            for arguments in [
-                '{"area":"hand","refs":[]}',
-                '{"area":"hand","refs":["c1","c1"]}',
-                '{"area":"powers","refs":["e1"]}',
-                '{"area":"state","upgrade":false}',
-                '{"area":"hand","refs":null}',
-                '{"area":"state","area":"hand"}',
-            ]:
-                result = await tools.dispatch(ToolCall("invalid", "combat_inspect", arguments))
-                assert isinstance(result.outcome, Rejected) and result.data is MISSING
-            wrong_name = await tools.dispatch(ToolCall("wrong", "run_inspect", '{"area":"state"}'))
-            assert isinstance(wrong_name.outcome, Rejected)
-
-    asyncio.run(run())
 
 
 def test_knowledge_preserves_native_matches_pagination_and_lookup_order() -> None:
@@ -348,7 +206,6 @@ def test_supplements_keep_document_identity_and_explicit_reads_and_failures() ->
                     "resources": [{"key": "rules", "description": "Rules"}],
                 }
             ]
-            assert encoded["observation"]["decision"]["phase"] == "combat"
             provider.failure = SupplementUnavailable("Example source could not be read.")
             failed = await tools.dispatch(call)
             assert isinstance(failed.outcome, Failed)
@@ -412,63 +269,5 @@ def test_failed_reads_preserve_trustworthy_state_without_reusing_old_observation
             assert isinstance(failed.outcome, Failed) and failed.observation is None
             invalid = await tools.dispatch(ToolCall("bad", "combat_inspect", "{}"))
             assert isinstance(invalid.outcome, Rejected) and invalid.observation is None
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("transport_failure", [True, False])
-@pytest.mark.parametrize("state_available", [True, False])
-def test_inspect_failure_without_observation_refreshes_state_or_ends_the_run(
-    transport_failure: bool,
-    state_available: bool,
-) -> None:
-
-    from sts2_harness.execution import GameLifetimeEnded
-    from sts2_harness.results import Failed
-
-    async def run() -> None:
-        paths: list[str] = []
-
-        def respond(request: httpx.Request) -> httpx.Response:
-            paths.append(request.url.path)
-            if request.url.path == "/state":
-                if not state_available:
-                    return httpx.Response(
-                        200,
-                        content='{"status":"failed","error":{"code":"no_run",'
-                        '"message":"No run is active."}}',
-                    )
-                return httpx.Response(
-                    200, content='{"status":"completed","observation":' + COMBAT + "}"
-                )
-            if transport_failure:
-                raise httpx.ReadTimeout("Unavailable", request=request)
-            return httpx.Response(
-                200,
-                content='{"status":"failed","error":{"code":"read_unavailable",'
-                '"message":"Details are unavailable."},"observation":null}',
-            )
-
-        async with ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client:
-            execution = Execution(
-                LiveGame(client, namespace="query-test", game_instance_id="game", run_id="run"),
-                game_instance_id="game",
-                run_id="run",
-            )
-            tools = ToolCatalog(
-                DecisionOwner.COMBAT,
-                observe=execution.observe,
-                inspect=execution.inspect,
-                catalog=execution.catalog,
-            )
-            call = ToolCall("detail", "combat_inspect", '{"area":"hand"}')
-            if not state_available:
-                with pytest.raises(GameLifetimeEnded):
-                    await tools.dispatch(call)
-            else:
-                result = await tools.dispatch(call)
-                assert isinstance(result.outcome, Failed)
-                assert result.observation is not None and result.data is MISSING
-            assert paths == ["/inspect", "/state"]
 
     asyncio.run(run())

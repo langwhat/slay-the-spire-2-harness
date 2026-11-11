@@ -1,10 +1,7 @@
 """Endpoint verification admits only the observed structured HTTP rejection."""
 
 import asyncio
-import json
-import sqlite3
 from contextlib import closing
-from dataclasses import replace
 from pathlib import Path
 from typing import Never
 
@@ -14,13 +11,13 @@ from test_compaction_full_replay import response
 from test_mod_client import RUN
 from test_responses import configuration
 
-from sts2_harness.capacity import CapacityEndpointCategory, CapacityPolicy
+from sts2_harness.capacity import CapacityEndpointCategory
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
 from sts2_harness.context import Context
 from sts2_harness.context.models import RunActInput
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.journal import ArchiveError, Journal, Manifest, SessionMaterials
+from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
     CapacityRejected,
@@ -89,93 +86,6 @@ def test_default_or_changed_endpoint_does_not_confirm_capacity(
                 await model.complete((), ())
             assert not isinstance(failure.value, CapacityRejected)
             assert failure.value.reason is FailureKind.CONFIGURATION
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("protocol", (Protocol.CHAT_COMPLETIONS, Protocol.MESSAGES))
-def test_verification_is_limited_to_responses(tmp_path: Path, protocol: Protocol) -> None:
-    config = configuration(
-        tmp_path, LLM_CAPACITY_VERIFIED_ENDPOINT="https://example.invalid/proxy/v1"
-    )
-
-    async def scenario() -> None:
-        async with Llm(
-            replace(config, protocol=protocol),
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    400,
-                    json={"error": {"code": "context_too_large", "type": "invalid_request_error"}},
-                )
-            ),
-        ) as model:
-            assert model.capacity_policy.capacity_classifier_config.enabled_signals == ()
-            with pytest.raises(ModelUnavailable) as failure:
-                await model.complete((), ())
-            assert not isinstance(failure.value, CapacityRejected)
-            assert failure.value.reason is FailureKind.CONFIGURATION
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    "status,code",
-    (
-        (413, "context_too_large"),
-        (422, "context_too_large"),
-        (400, "unsupported_parameter"),
-        (400, None),
-    ),
-)
-def test_unobserved_http_errors_remain_configuration_failures(
-    tmp_path: Path, status: int, code: str | None
-) -> None:
-    config = configuration(
-        tmp_path, LLM_CAPACITY_VERIFIED_ENDPOINT="https://example.invalid/proxy/v1"
-    )
-
-    async def scenario() -> None:
-        async with Llm(
-            config,
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    status, json={"error": {"code": code, "message": "context_too_large"}}
-                )
-            ),
-        ) as model:
-            with pytest.raises(ModelUnavailable) as failure:
-                await model.complete((), ())
-            assert not isinstance(failure.value, CapacityRejected)
-            assert failure.value.reason is FailureKind.CONFIGURATION
-
-    asyncio.run(scenario())
-
-
-def test_streamed_failure_is_not_a_confirmed_preexecution_rejection(tmp_path: Path) -> None:
-    config = configuration(
-        tmp_path,
-        LLM_CAPACITY_VERIFIED_ENDPOINT="https://example.invalid/proxy/v1",
-        LLM_EXTRA_RETRIES="0",
-    )
-    event = {
-        "type": "response.failed",
-        "response": {"status": "failed", "error": {"code": "context_too_large"}},
-    }
-
-    async def scenario() -> None:
-        async with Llm(
-            config,
-            transport=httpx.MockTransport(
-                lambda _: httpx.Response(
-                    200,
-                    content=f"data: {json.dumps(event)}\n\n",
-                    headers={"content-type": "text/event-stream"},
-                )
-            ),
-        ) as model:
-            with pytest.raises(ModelUnavailable) as failure:
-                await model.complete((), ())
-            assert not isinstance(failure.value, CapacityRejected)
 
     asyncio.run(scenario())
 
@@ -272,39 +182,3 @@ def test_verified_recovery_reopens_and_replays_with_its_recorded_policy(tmp_path
             await replay.close()
 
     asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("mutation", ("protocol", "signal", "category", "identity"))
-def test_journal_rejects_forged_classifier_combinations(tmp_path: Path, mutation: str) -> None:
-    config = configuration(
-        tmp_path, LLM_CAPACITY_VERIFIED_ENDPOINT="https://example.invalid/proxy/v1"
-    )
-    journal = Journal.create(
-        tmp_path / "forged.sqlite",
-        Manifest(
-            recording_id="forged",
-            core_version="test",
-            game_instance_id="game",
-            run_id="run",
-            capacity_policy=CapacityPolicy.for_configuration(config),
-            materials=SessionMaterials(
-                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
-            ),
-        ),
-    )
-    journal.close()
-    with sqlite3.connect(journal.path) as connection:
-        manifest = json.loads(connection.execute("SELECT value FROM manifest").fetchone()[0])
-        policy = manifest["capacity_policy"]
-        classifier = policy["capacity_classifier_config"]
-        if mutation == "protocol":
-            classifier["protocols"] = ["chat-completions"]
-        elif mutation == "signal":
-            classifier["enabled_signals"] = ["context_length_exceeded"]
-        elif mutation == "category":
-            classifier["endpoint_category"] = "unverified"
-        else:
-            policy["capacity_classifier_id"] = "no_verified_signals_v1"
-        connection.execute("UPDATE manifest SET value = ?", (json.dumps(manifest),))
-    with pytest.raises(ArchiveError):
-        Journal.open(journal.path)

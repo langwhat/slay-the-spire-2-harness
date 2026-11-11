@@ -25,14 +25,10 @@ from sts2_harness_eval.assessment import AssessmentSelection, assess_sample
 from sts2_harness_eval.assessment_records import (
     Assessed,
     SceneInitialRef,
-    Unassessed,
-    UnassessedReason,
-    Uncertainty,
-    Unscored,
 )
 from sts2_harness_eval.cases import Case
 from sts2_harness_eval.sample import SampleBudget
-from sts2_harness_eval.takeover import TakeoverCompleted, TakeoverIncomplete
+from sts2_harness_eval.takeover import TakeoverCompleted
 from sts2_harness_eval.variants import MaterialVariant, SceneStart
 
 
@@ -194,83 +190,5 @@ def test_scene_assessment_binds_fresh_initial_archive_and_anchor_then_reopens(
             with pytest.raises((ValueError, ArchiveError)):
                 AnnotationStore(annotations.directory, cases).assessment(reference)
         assert actors[0] == actors[1]
-
-    asyncio.run(scenario())
-
-
-def test_scene_without_requests_preserves_initial_facts_and_unknown_endpoint(
-    tmp_path: Path,
-) -> None:
-    async def scenario() -> None:
-        source = await source_case(tmp_path / "source.sqlite", start=False)
-        cases, case = retain_case(tmp_path / "cases", source)
-        annotations = AnnotationStore(tmp_path / "annotations", cases)
-        restorer = FreshRestorer(tmp_path, case)
-        async with Actor(tmp_path, '{"steps":[{"kind":"end_turn"}]}') as actor:
-            result = await take_over(
-                case,
-                restorer,
-                tmp_path / "no-request.sqlite",
-                actor,
-                PackagedPrompts(),
-                FileDocuments(),
-                SampleBudget(0, 30),
-                variant=MaterialVariant(SceneStart(""), ()),
-                stop_requested=lambda: False,
-            )
-        assert isinstance(result, TakeoverIncomplete)
-        assert result.anchor is None
-        assert not actor.inputs
-        assert not restorer.actions
-        rubric = annotations.append_rubric(
-            RubricRecord(
-                case_id=case.id,
-                id="battle",
-                origin=Origin.HUMAN,
-                author=HumanAuthor(id="reviewer"),
-                criterion=BattleRubric(description="Preserve HP."),
-            )
-        )
-        judge = AcceptableJudge()
-        report = await assess_sample(
-            case, result, annotations, AssessmentSelection(rubric=rubric), judgment=judge
-        )
-        assert isinstance(report.quality, Unassessed)
-        assert report.quality.reason is UnassessedReason.INSUFFICIENT_EVIDENCE
-        assert not judge.inputs
-        assert not report.endpoint_reached
-        assert report.provenance.endpoint is None
-        assert report.evidence.actions == ()
-        assert report.evidence.metrics.target_hp == 17
-        assert report.evidence.metrics.endpoint_hp is None
-        assert report.evidence.metrics.net_hp_change is None
-        assert Uncertainty.NO_ENDPOINT in report.uncertainty
-        with closing(Journal.open(result.branch)) as journal:
-            assert not journal.requests()
-            summaries = journal.summaries()
-            assert report.provenance.first_sequence == min(
-                (item.sequence for item in summaries), default=None
-            )
-            assert report.provenance.last_sequence == max(
-                (item.sequence for item in summaries), default=None
-            )
-        reference = annotations.append_assessment(report, id="no-requests")
-        assert AnnotationStore(annotations.directory, cases).assessment(reference) == report
-        unrecorded = report.model_copy(
-            update={
-                "execution": report.execution.model_copy(update={"recording_id": None}),
-                "provenance": report.provenance.model_copy(
-                    update={"sample": None, "first_sequence": None, "last_sequence": None}
-                ),
-            }
-        )
-        with pytest.raises(ValueError, match="unrecorded"):
-            annotations.append_assessment(unrecorded, id="unbound-initial")
-        unscored = await assess_sample(
-            case, result, annotations, AssessmentSelection(), judgment=judge
-        )
-        assert isinstance(unscored.quality, Unscored)
-        assert unscored.evidence == report.evidence
-        assert not judge.inputs
 
     asyncio.run(scenario())

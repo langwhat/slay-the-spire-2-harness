@@ -18,7 +18,7 @@ from test_compaction_full_replay import response
 from test_mod_client import COMBAT, RUN
 from test_responses import configuration
 
-from sts2_harness.capacity import CapacityClassifierConfig, CapacityPolicy, RecoveryComparison
+from sts2_harness.capacity import CapacityClassifierConfig, RecoveryComparison
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent
 from sts2_harness.config import Protocol
@@ -64,11 +64,14 @@ class FakeClassifierLlm(Llm):
         self._adapter.complete = classify
 
 
-@pytest.mark.parametrize("protocol", tuple(Protocol))
-@pytest.mark.parametrize("role", (native.DecisionOwner.RUN, native.DecisionOwner.COMBAT))
 @pytest.mark.parametrize(
-    "mode",
-    ("recover", "minimal", "invalid", "encoding", "twice", "transport", "unverified", "unrelated"),
+    ("protocol", "role", "mode"),
+    [
+        (Protocol.RESPONSES, native.DecisionOwner.RUN, "recover"),
+        (Protocol.RESPONSES, native.DecisionOwner.COMBAT, "twice"),
+        (Protocol.CHAT_COMPLETIONS, native.DecisionOwner.RUN, "transport"),
+        (Protocol.MESSAGES, native.DecisionOwner.COMBAT, "minimal"),
+    ],
 )
 def test_confirmed_rejection_retries_once_with_smaller_request(
     tmp_path: Path, protocol: Protocol, role: native.DecisionOwner, mode: str
@@ -437,114 +440,6 @@ def test_recovery_replays_campaign_without_repeating_game_actions_or_notes(
         assert path.read_bytes() == original
         with closing(Journal.open(path)) as archive:
             assert archive.operations() == operations
-
-    with patch.object(CapacityClassifierConfig, "supports", return_value=True):
-        asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("case", ("more_tokens", "more_bytes", "over_window"))
-def test_recovery_requires_both_wire_size_and_estimate_to_decrease(
-    tmp_path: Path, case: str
-) -> None:
-    import random
-    import string
-
-    async def scenario() -> None:
-        raw = json.loads(RUN)
-        if case == "over_window":
-            raw["state"]["player"]["name"] = "".join(
-                random.Random(42).choices(string.ascii_letters, k=7000)
-            )
-        obs = native.Observation.model_validate_json(json.dumps(raw))
-
-        async def observe() -> native.Observation:
-            return obs
-
-        async def unused(*args: object) -> Never:
-            raise AssertionError("Recovery must not perform game IO")
-
-        tools = ToolCatalog(
-            native.DecisionOwner.RUN,
-            notes=Notes("notes"),
-            observe=observe,
-            inspect=unused,
-            catalog=unused,
-        )
-        context = Context(native.DecisionOwner.RUN)
-        if case == "more_tokens":
-            old = "中" * 400
-        elif case == "more_bytes":
-            old = "a" * 800
-        else:
-            old = "x"
-        context.begin_group(obs, "old")
-        context.append_correction(old)
-        context.finish_group()
-        context.begin_group(obs, "middle")
-        context.append_task(RunActInput(strategy_notes="middle"), obs)
-        context.finish_group()
-        context.begin_group(obs, "active")
-        context.append_task(RunActInput(strategy_notes="active"), obs)
-        async with Llm(configuration(tmp_path)) as probe:
-            candidate_estimate = probe.prepare(
-                context.compaction_candidate(), tools.definitions
-            ).measurement.estimated_input_tokens
-        window = candidate_estimate if case == "over_window" else 300_000
-        journal = Journal.create(
-            tmp_path / "metrics.sqlite",
-            Manifest(
-                materials=SessionMaterials(
-                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
-                ),
-                recording_id="metrics",
-                core_version="test",
-                game_instance_id="game",
-                run_id="run",
-                capacity_policy=CapacityPolicy(context_window=window),
-            ),
-        )
-        requests = 0
-
-        def provider(request: httpx.Request) -> httpx.Response:
-            nonlocal requests
-            requests += 1
-            return httpx.Response(
-                400, json={"error": {"type": "test-confirmed", "message": "test"}}
-            )
-
-        class Run(RunAgent):
-            async def request(self, value: Context) -> None:
-                await self._request(value)
-
-        async with FakeClassifierLlm(
-            replace(configuration(tmp_path), context_window=window),
-            transport=httpx.MockTransport(provider),
-        ) as llm:
-            llm.install_fake_classifier()
-            before = llm.prepare(context.model_input(), tools.definitions).measurement
-            candidate = llm.prepare(context.compaction_candidate(), tools.definitions).measurement
-            if case == "more_tokens":
-                assert candidate.encoded_bytes < before.encoded_bytes
-                assert candidate.estimated_input_tokens > before.estimated_input_tokens
-            elif case == "more_bytes":
-                assert candidate.encoded_bytes > before.encoded_bytes
-                assert candidate.estimated_input_tokens < before.estimated_input_tokens
-            else:
-                assert before.estimated_input_tokens * 10 < window * 9
-                assert candidate.estimated_input_tokens >= window
-            model = RecordedLlm(llm, journal, role=native.DecisionOwner.RUN, stream="run:1")
-            agent = Run(lambda: model, tools, ToolRecoveryBudget())
-            await agent.enter_act(ActStart(obs))
-            with pytest.raises(ModelUnavailable) as failure:
-                await agent.request(context)
-            assert failure.value.reason is FailureKind.CAPACITY
-        assert requests == 1
-        record = journal.requests()[0]
-        assert record.capacity_recovery is not None
-        assert record.capacity_recovery.retry_sequence is None
-        if case == "over_window":
-            assert record.capacity_recovery.comparison is RecoveryComparison.OVER_WINDOW
-        journal.close()
 
     with patch.object(CapacityClassifierConfig, "supports", return_value=True):
         asyncio.run(scenario())

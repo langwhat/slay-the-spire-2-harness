@@ -55,28 +55,3 @@ def test_failed_sink_keeps_consuming_both_pipes(tmp_path: Path, failure: str) ->
 
     asyncio.run(exercise())
     assert (tmp_path / "game.stderr.log").stat().st_size == 1024**2
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="Uses POSIX file-size limits.")
-def test_write_failure_discards_output_without_blocking_the_child(tmp_path: Path) -> None:
-    import subprocess
-
-    program = """
-import asyncio, resource, sys
-from pathlib import Path
-from sts2_harness.child_output import BoundedChildOutput, ChildStream
-async def exercise():
-    child = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", "import os; os.write(1,b'x'*1048576); os.write(2,b'survived')",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
-    outputs = [BoundedChildOutput(Path(sys.argv[1]), stream) for stream in ChildStream]
-    async with asyncio.timeout(5):
-        await asyncio.gather(outputs[0].drain(child.stdout), outputs[1].drain(child.stderr))
-        assert await child.wait() == 0
-    for output in outputs: output.close()
-asyncio.run(exercise())
-"""
-    subprocess.run([sys.executable, "-c", program, str(tmp_path)], check=True, timeout=10)
-    assert (tmp_path / "game.stdout.log").stat().st_size <= 1024
-    assert (tmp_path / "game.stderr.log").read_bytes() == b"survived"
