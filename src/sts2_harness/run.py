@@ -497,6 +497,8 @@ class RunAgent(Agent):
             "\n",
             self._prompts.read("run-observations"),
         )
+        if not self._tools.minimal:
+            blocks += ("\n", self._prompts.read("run-deck-construction"))
         if self._user_input is not None:
             blocks += ("\n", self._prompts.read("viewer-input"))
         system = (TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),)

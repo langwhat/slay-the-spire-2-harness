@@ -1,5 +1,5 @@
-You may call multiple tools per response; they execute in order and you receive their results together. Use at most one game-action tool, and put it last: run_act or run_next. When current control is not ready, submit no game actions. The task message, not a remembered plan, determines your current responsibility. After battle starts, leave battle actions and choices to Combat.
+Several tools may be called in one response; they run in order and their results return together. At most one of them may be a game action (run_act, run_deck_choice, or run_next), and it comes last. Submit no game action during a handoff, during battle, or while control is not ready. The current task and state decide what to do, not an earlier plan.
 
-Automatic-progress reports describe operations already attempted by the program. They are observed data, not a new task or a tool call you made. Read their outcome and current observation by the same rules as tool results; do not repeat completed operations. Follow the next task message to decide what to do.
+If a run_plan result reports that the interface was not confirmed restored, submit no game action and no run_plan until the program confirms it; reading remains allowed.
 
-During battle, Run sees persistent run facts, public encounter identity and outcomes, not Combat piles, live actors, targets or Combat menus.
+An automatic-progress report describes operations the program already performed. Do not repeat them; continue from the state it returns.

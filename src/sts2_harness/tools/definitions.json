@@ -1,7 +1,7 @@
 [
   {
     "name": "run_inspect",
-    "description": "Read public current details or hypothetical next-upgrade previews relevant to your decision. Supply an area and, where supported, distinct current public references; omit refs to read the whole area. Empty refs are invalid. state, map, combat_history, and powers do not accept refs. state refreshes the observation without separate data. Invalid references reject the whole detail query and identify the invalid refs; a read that spans a changing public state fails rather than mixing observations. The result includes the current role observation when trustworthy. The permitted areas are state, map, combat_history, hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, and enemies; availability follows the current game state and role. combat_history covers the current battle's public card history. Use powers without refs for all relevant holders, and enemies with enemy refs for particular enemies. Upgrade previews are available for card-containing areas. This is read-only and reveals neither hidden order nor hidden values.",
+    "description": "Read current public details of one area, optionally limited to specific refs. Areas: state (refresh the whole view), map, combat_history (cards played this battle), hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, enemies; which are available depends on the current state. Set upgrade=true on a card area to preview each card's next upgrade. Read-only: hidden order and hidden values stay hidden.",
     "input_schema": {
       "oneOf": [
         {
@@ -43,7 +43,8 @@
                 "minLength": 1
               },
               "minItems": 1,
-              "uniqueItems": true
+              "uniqueItems": true,
+              "description": "Refs of every chosen candidate; empty declines when min is 0."
             },
             "upgrade": {
               "type": "boolean",
@@ -72,7 +73,8 @@
                 "minLength": 1
               },
               "minItems": 1,
-              "uniqueItems": true
+              "uniqueItems": true,
+              "description": "Refs of every chosen candidate; empty declines when min is 0."
             }
           },
           "required": [
@@ -97,7 +99,7 @@
   },
   {
     "name": "run_knowledge",
-    "description": "Look up native game definitions and any configured supplementary knowledge relevant to run planning, including objects not currently owned. Use this for rules and explanations; use run_inspect for current offers, instances, or upgrade previews. Generic definitions do not override live prices, eligibility, or instance effects. This is a read-only query. The result includes the current role observation and requested knowledge in data. Use mode=catalog to discover supported categories and filter values, mode=search for concise matches, and mode=lookup for full entries. Search filters apply to base definitions, not live objects. An empty matches list means no match; missing lookup IDs are reported individually. Explicit lookups always return their text. Query pagination does not preserve a snapshot across catalog changes. This tool never advances the game. Search uses case-insensitive substring matching of whitespace-separated terms against native IDs, localized names, and base definition text; every term must match. Without spaces, a phrase is one substring. Exact ID or name matches rank first, then matches whose terms all occur in the ID or name, then text matches; ties use native ID order. Filters are not relaxed, and supplementary text does not select native matches. Search defaults to 5 results and accepts at most 20; use a larger limit for broad screening. total reports the match count; next_offset is null when no next page exists. Each search match includes the native definition ID, localized name, and complete native base description. Card matches also include confirmed base type, rarity, and cost. Search does not add private strategy text or generated summaries; use lookup for complete entries and configured supplements. Search category is optional: omit it to search all supported categories, or supply it to restrict results strictly. Each match includes its category. Card filters require category=card. Card filters use pools, types, rarities, and energy_costs. Pool, type, and rarity values come from catalog; they are not assumed to be native definition IDs. Catalog identifies each character's own card pool; this does not mean every card that character could obtain. energy_costs matches unupgraded base energy costs, using non-negative integers or \"X\", never current combat costs. Different dimensions combine with AND; alternatives within a dimension combine with OR. Omit a dimension to leave it unconstrained. Empty lists, duplicates, and unknown filter values are input errors, not empty matches. lookup accepts 1 to 20 distinct native IDs. entries contains found full entries in request order; missing_ids lists IDs absent from the native catalog in request order. Missing supplementary knowledge does not make a native definition missing. Catalog or enabled-extension failures are reported as failures, not missing IDs or empty supplements. A card lookup includes its complete base definition after the next upgrade, without recursively expanding further upgrades. Search still returns the base version. These encyclopedia values exclude live instance modifiers; inspect supplies actual instance values. Non-card entries have no upgrade version. A native definition that cannot upgrade is distinguished from an unavailable preview; actual read failures remain failures.",
+    "description": "Look up game definitions, including objects you do not have. mode=lookup returns the full entries for up to 20 native IDs; a card entry includes its next upgrade. mode=search finds definitions whose ID, name, or text contains every term in text; narrow it with category and, for cards, with filters (pools, types, rarities, energy_costs: values inside one filter are alternatives, different filters combine). It returns 5 matches unless limit is set (up to 20); continue with offset=next_offset. mode=catalog lists the categories and filter values. Results are base definitions; current prices, costs, and instance values come from the state. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -121,11 +123,11 @@
             "category": {
               "type": "string",
               "minLength": 1,
-              "description": "Supported category from catalog; omitted searches all categories."
+              "description": "A category from mode=catalog; omit to search all."
             },
             "text": {
               "type": "string",
-              "description": "Whitespace-separated, case-insensitive substring terms; all terms must match."
+              "description": "Terms that must all appear."
             },
             "filters": {
               "type": "object",
@@ -240,7 +242,7 @@
   },
   {
     "name": "combat_inspect",
-    "description": "Read public current details or hypothetical next-upgrade previews relevant to your decision. Supply an area and, where supported, distinct current public references; omit refs to read the whole area. Empty refs are invalid. state, map, combat_history, and powers do not accept refs. state refreshes the observation without separate data. Invalid references reject the whole detail query and identify the invalid refs; a read that spans a changing public state fails rather than mixing observations. The result includes the current role observation when trustworthy. The permitted areas are state, map, combat_history, hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, and enemies; availability follows the current game state and role. combat_history covers the current battle's public card history. Use powers without refs for all relevant holders, and enemies with enemy refs for particular enemies. Upgrade previews are available for card-containing areas. This is read-only and reveals neither hidden order nor hidden values.",
+    "description": "Read current public details of one area, optionally limited to specific refs. Areas: state (refresh the whole view), map, combat_history (cards played this battle), hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, enemies; which are available depends on the current state. Set upgrade=true on a card area to preview each card's next upgrade. Read-only: hidden order and hidden values stay hidden.",
     "input_schema": {
       "oneOf": [
         {
@@ -282,7 +284,8 @@
                 "minLength": 1
               },
               "minItems": 1,
-              "uniqueItems": true
+              "uniqueItems": true,
+              "description": "Refs of every chosen candidate; empty declines when min is 0."
             },
             "upgrade": {
               "type": "boolean",
@@ -311,7 +314,8 @@
                 "minLength": 1
               },
               "minItems": 1,
-              "uniqueItems": true
+              "uniqueItems": true,
+              "description": "Refs of every chosen candidate; empty declines when min is 0."
             }
           },
           "required": [
@@ -336,7 +340,7 @@
   },
   {
     "name": "combat_knowledge",
-    "description": "Look up native game definitions and any configured supplementary knowledge relevant to battle, including objects not currently owned. Use this for rules and explanations; use combat_inspect for live objects and previews. Definition values do not override current live costs or effects. This is a read-only query. The result includes the current role observation and requested knowledge in data. Use mode=catalog to discover supported categories and filter values, mode=search for concise matches, and mode=lookup for full entries. Search filters apply to base definitions, not live objects. An empty matches list means no match; missing lookup IDs are reported individually. Explicit lookups always return their text. Query pagination does not preserve a snapshot across catalog changes. This tool never advances the game. Search uses case-insensitive substring matching of whitespace-separated terms against native IDs, localized names, and base definition text; every term must match. Without spaces, a phrase is one substring. Exact ID or name matches rank first, then matches whose terms all occur in the ID or name, then text matches; ties use native ID order. Filters are not relaxed, and supplementary text does not select native matches. Search defaults to 5 results and accepts at most 20; use a larger limit for broad screening. total reports the match count; next_offset is null when no next page exists. Each search match includes the native definition ID, localized name, and complete native base description. Card matches also include confirmed base type, rarity, and cost. Search does not add private strategy text or generated summaries; use lookup for complete entries and configured supplements. Search category is optional: omit it to search all supported categories, or supply it to restrict results strictly. Each match includes its category. Card filters require category=card. Card filters use pools, types, rarities, and energy_costs. Pool, type, and rarity values come from catalog; they are not assumed to be native definition IDs. Catalog identifies each character's own card pool; this does not mean every card that character could obtain. energy_costs matches unupgraded base energy costs, using non-negative integers or \"X\", never current combat costs. Different dimensions combine with AND; alternatives within a dimension combine with OR. Omit a dimension to leave it unconstrained. Empty lists, duplicates, and unknown filter values are input errors, not empty matches. lookup accepts 1 to 20 distinct native IDs. entries contains found full entries in request order; missing_ids lists IDs absent from the native catalog in request order. Missing supplementary knowledge does not make a native definition missing. Catalog or enabled-extension failures are reported as failures, not missing IDs or empty supplements. A card lookup includes its complete base definition after the next upgrade, without recursively expanding further upgrades. Search still returns the base version. These encyclopedia values exclude live instance modifiers; inspect supplies actual instance values. Non-card entries have no upgrade version. A native definition that cannot upgrade is distinguished from an unavailable preview; actual read failures remain failures.",
+    "description": "Look up game definitions, including objects you do not have. mode=lookup returns the full entries for up to 20 native IDs; a card entry includes its next upgrade. mode=search finds definitions whose ID, name, or text contains every term in text; narrow it with category and, for cards, with filters (pools, types, rarities, energy_costs: values inside one filter are alternatives, different filters combine). It returns 5 matches unless limit is set (up to 20); continue with offset=next_offset. mode=catalog lists the categories and filter values. Results are base definitions; current prices, costs, and instance values come from the state. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -360,11 +364,11 @@
             "category": {
               "type": "string",
               "minLength": 1,
-              "description": "Supported category from catalog; omitted searches all categories."
+              "description": "A category from mode=catalog; omit to search all."
             },
             "text": {
               "type": "string",
-              "description": "Whitespace-separated, case-insensitive substring terms; all terms must match."
+              "description": "Terms that must all appear."
             },
             "filters": {
               "type": "object",
@@ -479,7 +483,7 @@
   },
   {
     "name": "run_skill",
-    "description": "Read task guidance and associated resources relevant to non-combat decisions and run planning. Request guidance when needed and reuse already available guidance while it remains applicable. Reading guidance does not select a route, execute game actions, or start another agent. The result includes the current role observation and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. For discovery, narrow with text when you know a topic or stable ID: it matches a case-insensitive substring in the public id, name, or description, not the full text. Results are ordered by id and limited to 20 entries by default. Set limit from 1 to 20 and offset from 0; continue with next_offset and the same text filter until next_offset is null. total counts all matching entries, not just this page. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
+    "description": "Read configured guidance documents. mode=list shows what exists (id, name, description), filtered by text and paged with offset and limit. mode=read returns one document by id, or one of its listed resources when resource is given. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -490,7 +494,7 @@
             },
             "text": {
               "type": "string",
-              "description": "Case-insensitive substring in id, name, or description; surrounding whitespace is ignored."
+              "description": "Terms that must all appear."
             },
             "offset": {
               "type": "integer",
@@ -522,7 +526,7 @@
             "resource": {
               "type": "string",
               "minLength": 1,
-              "description": "Resource key advertised by this skill; never a filesystem path."
+              "description": "A resource key listed by that document."
             }
           },
           "required": [
@@ -536,7 +540,7 @@
   },
   {
     "name": "combat_skill",
-    "description": "Read battle-related task guidance and associated resources. Request guidance when it is needed for the current decision and reuse already available guidance while it remains applicable. Reading guidance does not execute actions or start another agent. The result includes the current role observation and requested guidance in data. Use mode=list to discover configured guidance and mode=read with its exact id to read it. For discovery, narrow with text when you know a topic or stable ID: it matches a case-insensitive substring in the public id, name, or description, not the full text. Results are ordered by id and limited to 20 entries by default. Set limit from 1 to 20 and offset from 0; continue with next_offset and the same text filter until next_offset is null. total counts all matching entries, not just this page. To read an associated resource, also supply a resource key advertised by that guidance. Do not construct filesystem paths. No configured guidance yields an empty list; a load failure is an error, not an empty result. An unknown id or resource returns rejected; a real read failure returns failed. Explicit reads return the requested text even if it was read before. Guidance does not override tool contracts or authorize hidden information. List entries contain id, name, and a short description. Read returns the requested full text and advertised resource keys with short descriptions; an entry with no associated resources has an empty resource list. The list does not expand full texts or expose filesystem paths.",
+    "description": "Read configured guidance documents. mode=list shows what exists (id, name, description), filtered by text and paged with offset and limit. mode=read returns one document by id, or one of its listed resources when resource is given. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -547,7 +551,7 @@
             },
             "text": {
               "type": "string",
-              "description": "Case-insensitive substring in id, name, or description; surrounding whitespace is ignored."
+              "description": "Terms that must all appear."
             },
             "offset": {
               "type": "integer",
@@ -579,7 +583,7 @@
             "resource": {
               "type": "string",
               "minLength": 1,
-              "description": "Resource key advertised by this skill; never a filesystem path."
+              "description": "A resource key listed by that document."
             }
           },
           "required": [
@@ -593,7 +597,7 @@
   },
   {
     "name": "combat_act",
-    "description": "Submit ordered steps in battle: play_card with card and target when required; use_potion with potion and target when required; discard_potion; end_turn; select with refs; or interact with a listed special-interface operation. Direct actions are not duplicated as interact choices. This tool performs those steps; it does not delegate the battle. Prefer combining planned actions, anticipated selections, and follow-up plays when public information supports them. Use actual references, not list positions or invented IDs. Current costs and previews apply before the first step; predict later costs and effects from earlier steps, triggers, counters, and consumed bonuses.\n\nEach step is checked against the native state when reached; an earlier step can make a later one legal. Use actual candidates and the displayed native count bounds. A mandatory single-candidate choice may be resolved automatically; include select only when it actually opens. A selection submits the complete final set of distinct candidates. A later action may reuse a card ref only if that actual card is still present and legal. If an unknown result changes your choice, submit through the revealing action and decide again; a draw need not stop a sequence whose remaining steps are appropriate for every result. For targeted actions, omit target only if required and exactly one legal target exists at execution; an explicit invalid target is not redirected. Omit target when the action does not use one.\n\nThe result reports outcome and the current role observation when trustworthy. If execution is unknown, submit no game actions until a fresh state reports control=ready; read-only queries remain available. Plan from that fresh state without replaying an uncertain submission. A role transition can stop the unexecuted tail. An optional reason briefly explains the batch using names rather than temporary references; do not provide a step-by-step reasoning transcript. This tool does not echo the reason.",
+    "description": "Play the battle. Steps run in order: play_card (with target when the card needs one), use_potion, discard_potion, end_turn, select (the complete final choice for an open selection), interact (a listed special operation). Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run and the result says which steps ran. Queue the whole line when no later step depends on something still unrevealed; otherwise end at the revealing step and decide again. A forced single-candidate selection resolves itself. Omit target only when exactly one legal target exists.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -609,8 +613,8 @@
                   },
                   "card": {
                     "type": "string",
-                    "description": "Observed card instance reference; an earlier step may move this card into hand.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Card ref; it may be a card an earlier step brings into hand."
                   },
                   "target": {
                     "type": "string",
@@ -631,8 +635,8 @@
                   },
                   "potion": {
                     "type": "string",
-                    "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Potion ref."
                   },
                   "target": {
                     "type": "string",
@@ -653,8 +657,8 @@
                   },
                   "potion": {
                     "type": "string",
-                    "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Potion ref."
                   }
                 },
                 "required": [
@@ -683,8 +687,8 @@
                   },
                   "action": {
                     "type": "string",
-                    "description": "Reference of a Mod-provided combat operation, including special game interfaces. It is bound to its semantic operation, not a changing menu position.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Operation ref from the current choice."
                   }
                 },
                 "required": [
@@ -703,12 +707,11 @@
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "description": "Use an exact supplied public reference, never a list index or an invented identifier.",
                       "minLength": 1
                     },
                     "minItems": 0,
                     "uniqueItems": true,
-                    "description": "The complete final selection, not additions to the existing selection. Card, option, target, and bundle references are allowed when actual candidates allow them. Empty only when minimum is zero. A bundle reference selects that bundle as one option."
+                    "description": "Refs of every chosen candidate; empty declines when min is 0."
                   }
                 },
                 "required": [
@@ -719,12 +722,11 @@
               }
             ]
           },
-          "minItems": 1,
-          "description": "Steps execute in array order. Structural validation occurs before any step; state-dependent legality is checked only when each step is reached."
+          "minItems": 1
         },
         "reason": {
           "type": "string",
-          "description": "Optional short explanation of the game choice for this batch. Use object names, not temporary references; no step-by-step reasoning is needed."
+          "description": "One or two short lines: the chosen line with the HP expected to be lost through the next enemy attack, the main alternative with its loss, and any chance of death. Use names, not refs."
         }
       },
       "required": [
@@ -735,7 +737,7 @@
   },
   {
     "name": "run_act",
-    "description": "Submit ordered steps for non-combat decisions: interact with a listed reward, shop, event, rest-site, or special-interface operation; select with refs; or use_potion and discard_potion. Potion actions are not duplicated as interact choices. The tool executes these operations; it does not delegate the run. Prefer combining planned actions, anticipated selections, and follow-ups when public information supports them. Use the current operation and object references, not positions or invented IDs. Earlier steps can change resources, eligibility, options, prices, and effects.\n\nEach step is checked against the native state when reached, so an earlier step can make a later one legal. Submit through a reveal and decide again if its unknown result would change your choice; do not queue an operation whose required reference is not yet known. Event or reward screens can close automatically after the last reward, so do not queue a skip or close unless the screen will remain open. A selection submits the complete final set of distinct candidates; follow the displayed min and max. A card ref can be reused by a later action only if that actual card is still present and legal. For targeted actions, omit target only if the action requires a target and exactly one legal target exists at execution; an explicit invalid target is not redirected. Omit it when the action does not use one.\n\nThe result reports outcome and the current role observation when trustworthy. If execution is unknown, submit no game actions until a fresh state reports control=ready; read-only queries remain available. Plan from that fresh state without replaying an uncertain submission. A role transition can stop the unexecuted tail. An optional reason briefly explains the batch using names rather than temporary references; do not provide a step-by-step reasoning transcript. This tool does not echo the reason.\n\nMap destination interactions are not accepted here. Use run_plan and run_next for model-directed travel.",
+    "description": "Perform non-combat operations other than card offers and travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Card offers go through run_deck_choice, travel through run_plan and run_next.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -751,8 +753,8 @@
                   },
                   "action": {
                     "type": "string",
-                    "description": "Reference of a Mod-provided operation, including reward, shop, event, or special-interface operations. It is bound to its semantic operation, not a changing menu position.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Operation ref from the current choice."
                   }
                 },
                 "required": [
@@ -769,8 +771,8 @@
                   },
                   "potion": {
                     "type": "string",
-                    "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Potion ref."
                   },
                   "target": {
                     "type": "string",
@@ -791,8 +793,8 @@
                   },
                   "potion": {
                     "type": "string",
-                    "description": "Reference of the actual potion bottle in this node, not its slot or native definition ID.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Potion ref."
                   }
                 },
                 "required": [
@@ -811,12 +813,11 @@
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "description": "Use an exact supplied public reference, never a list index or an invented identifier.",
                       "minLength": 1
                     },
                     "minItems": 0,
                     "uniqueItems": true,
-                    "description": "The complete final selection, not additions to the existing selection. Card, option, target, and bundle references are allowed when actual candidates allow them. Empty only when minimum is zero. A bundle reference selects that bundle as one option."
+                    "description": "Refs of every chosen candidate; empty declines when min is 0."
                   }
                 },
                 "required": [
@@ -827,12 +828,11 @@
               }
             ]
           },
-          "minItems": 1,
-          "description": "Steps execute in array order. Structural validation occurs before any step; state-dependent legality is checked only when each step is reached."
+          "minItems": 1
         },
         "reason": {
           "type": "string",
-          "description": "Optional short explanation of the game choice for this batch. Use object names, not temporary references; no step-by-step reasoning is needed."
+          "description": "One short line: what was chosen and why, using names, not refs."
         }
       },
       "required": [
@@ -842,8 +842,87 @@
     }
   },
   {
+    "name": "run_deck_choice",
+    "description": "Resolve one card offer: take one of its cards or skip it. Call once per offer and decide a later offer after the earlier one has changed the deck. class says what the card is to this deck: engine (adds a link, more triggers, or earlier assembly to its strongest turn), pivot (forms a stronger turn with owned cards), answer (closes a named shortfall), or filler (contributes only its own numbers). links names the owned cards and relics it works with.",
+    "input_schema": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "offer": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Ref of the card offer."
+            },
+            "choice": {
+              "const": "take"
+            },
+            "card": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Ref of the card taken."
+            },
+            "class": {
+              "enum": [
+                "engine",
+                "pivot",
+                "answer",
+                "filler"
+              ]
+            },
+            "links": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true,
+              "description": "Native definition IDs of the owned cards and relics it works with; empty for filler."
+            },
+            "reason": {
+              "type": "string",
+              "description": "One short line: the turn this card changes and by how much, using names."
+            }
+          },
+          "required": [
+            "offer",
+            "choice",
+            "card",
+            "class",
+            "links",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offer": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Ref of the card offer."
+            },
+            "choice": {
+              "const": "skip"
+            },
+            "reason": {
+              "type": "string",
+              "description": "One short line: why no candidate beats the deck's average draw."
+            }
+          },
+          "required": [
+            "offer",
+            "choice",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  {
     "name": "run_notes",
-    "description": "Read or maintain this run's shared decision memo. Run writes it; Combat receives an opening copy and can recommend changes. Begin with the current binding constraint: the play this deck most often cannot both reach and pay for, its cost at ordinary energy, and the affordable turn or sequence it needs. Keep the next priority, execution conditions, revisable resource reservations, and what would change the plan. Separate recurring resources from finite bursts and available capability from unowned support. Distinguish observed battle outcomes from explanations; mark a cause as a hypothesis unless recorded state supports that causal link. Replace the memo when the plan changes; use edit to correct a fact. Remove obsolete conclusions and encounter narratives. Avoid duplicating state or rules still supplied in current inputs. Preserve a query-only or one-time-revealed fact needed later, with its conditions and stable game ID, unless another persistent current source retains it. Being queryable does not mean it is retained. When no decision changes, leave notes unchanged. A local edit must identify an unambiguous existing fragment and its replacement; a missing or ambiguous match leaves the notes unchanged. Use full replacement to initialize or reorganize the memo. Updating notes does not perform a game action. The result includes the current state and the edit outcome; a read returns the requested note content in data. Use mode=read to get the full notes; replace with text to initialize, reorganize, or clear them; edit with old_text and new_text for one exact unique replacement. Empty new_text deletes the matching fragment. Missing or ambiguous old_text returns rejected and changes nothing. Successful writes return a compact confirmation, not the whole notes. If a write result is unknown, read the notes before deciding whether another edit is necessary; never blindly replay a write. Identify game objects in notes by localized name and native definition ID, adding distinguishing properties when relevant; do not include temporary action or card references. When revising a card or relic claim, match the complete old proposition including its name and native ID, and keep that identity in the complete replacement. Delete obsolete claims in full. Preserve other subjects rather than replacing an isolated clause such as \"after upgrading\".",
+    "description": "Read or rewrite the run's strategy memo, which Combat receives at the start of each battle. Keep four sections in this order. ENGINE: its kind (growth, cycle, or burst), its cards, the engine turn in play order, and the turn by which it is normally ready. WANTS: at most three effects that would make the engine ready sooner or keep the deck alive until then, each with the fights it is for; delete a want once a card answers it. FILLER: owned cards outside ENGINE and WANTS, in removal order. EVIDENCE: measured results for or against the sections above: the fight, the turn the engine was ready, and what limited it. Below them keep resource reservations and one-time facts needed later that no current state shows. Name objects by localized name and native definition ID, never by refs. Keep the memo short: delete what is obsolete, do not restate current state, and leave it unchanged when no decision changes. mode=read returns the memo; replace rewrites it; edit swaps one exact, unique old_text for new_text. A rejected edit changed nothing.",
     "input_schema": {
       "oneOf": [
         {
@@ -865,7 +944,8 @@
               "const": "replace"
             },
             "text": {
-              "type": "string"
+              "type": "string",
+              "description": "Terms that must all appear."
             }
           },
           "required": [
@@ -886,7 +966,7 @@
             },
             "new_text": {
               "type": "string",
-              "description": "Replacement text; empty deletes the uniquely matching old text."
+              "description": "Replacement; empty deletes old_text."
             }
           },
           "required": [
@@ -901,13 +981,14 @@
   },
   {
     "name": "run_plan",
-    "description": "Replace the remaining route plan with a partial directed graph rooted at the current map node. Supply edges and a short reason. The graph may branch later but must have exactly one immediate next destination. The tool attempts to display the submitted plan with native map ink and restore the previous interface without moving or resolving a pending choice; its result reports presentation and restoration separately. Previous ink may remain; only the latest accepted plan controls model-directed movement. Use current native reachability for special movement rather than ordinary map connections alone. Use only current-act node IDs. Every submitted edge must be reachable from the current node; self-loops and cycles are rejected. Later edges may include possible special moves even when they are not ordinary connections; their future legality is not guaranteed.",
+    "description": "Set the remaining route as directed edges between current-act map node IDs, starting at the current node with exactly one next destination; later branches are allowed. It replaces the previous plan and does not move. The result reports acceptance, map drawing, and interface restoration separately.",
     "input_schema": {
       "type": "object",
       "properties": {
         "reason": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "One short line: what this route is for."
         },
         "edges": {
           "type": "array",
@@ -942,13 +1023,14 @@
   },
   {
     "name": "run_next",
-    "description": "Enter the unique next destination in the active plan. Supply a short reason for continuing with that plan. The tool checks current native travel legality and does not resolve pending rewards or choices for you. If travel cannot proceed, use the returned reason and current state to decide whether to resolve the pending choice or replace the plan. Automatic progression is independent of the plan; read the actual position and remaining plan after movement. If map restoration is unconfirmed, wait for the program to confirm restoration before submitting game actions; a fresh ready observation alone does not clear that condition.",
+    "description": "Enter the next node of the current plan. It fails without moving when a pending choice or the game blocks travel; resolve the choice or replace the plan.",
     "input_schema": {
       "type": "object",
       "properties": {
         "reason": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "One short line."
         }
       },
       "required": [
