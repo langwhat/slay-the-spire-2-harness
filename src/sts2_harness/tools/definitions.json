@@ -1,7 +1,7 @@
 [
   {
     "name": "run_inspect",
-    "description": "Read current public details of one area, optionally limited to specific refs. Areas: state (refresh the whole view), map, combat_history (cards played this battle), hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, enemies; which are available depends on the current state. Set upgrade=true on a card area to preview each card's next upgrade. Read-only: hidden order and hidden values stay hidden.",
+    "description": "Read public information missing from the current sections: state refreshes the view, map reads the act map, combat_history reads this battle's card history, and upgrades previews next upgrades. With upgrades, omit refs for the owned deck or supply card refs from one current area. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -24,17 +24,7 @@
           "type": "object",
           "properties": {
             "area": {
-              "enum": [
-                "hand",
-                "draw",
-                "discard",
-                "exhaust",
-                "other",
-                "deck",
-                "options",
-                "rewards",
-                "shop"
-              ]
+              "const": "upgrades"
             },
             "refs": {
               "type": "array",
@@ -44,49 +34,7 @@
               },
               "minItems": 1,
               "uniqueItems": true,
-              "description": "Refs of every chosen candidate; empty declines when min is 0."
-            },
-            "upgrade": {
-              "type": "boolean",
-              "default": false
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "enum": [
-                "relics",
-                "potions",
-                "enemies"
-              ]
-            },
-            "refs": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "minItems": 1,
-              "uniqueItems": true,
-              "description": "Refs of every chosen candidate; empty declines when min is 0."
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "const": "powers"
+              "description": "Current card refs from one area; omit to preview the owned deck."
             }
           },
           "required": [
@@ -242,7 +190,7 @@
   },
   {
     "name": "combat_inspect",
-    "description": "Read current public details of one area, optionally limited to specific refs. Areas: state (refresh the whole view), map, combat_history (cards played this battle), hand, draw, discard, exhaust, other, deck, options, rewards, shop, relics, potions, powers, enemies; which are available depends on the current state. Set upgrade=true on a card area to preview each card's next upgrade. Read-only: hidden order and hidden values stay hidden.",
+    "description": "Read public information missing from the current sections: state refreshes the view, map reads the act map, combat_history reads this battle's card history, and upgrades previews next upgrades. With upgrades, omit refs for the owned deck or supply card refs from one current area. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -265,17 +213,7 @@
           "type": "object",
           "properties": {
             "area": {
-              "enum": [
-                "hand",
-                "draw",
-                "discard",
-                "exhaust",
-                "other",
-                "deck",
-                "options",
-                "rewards",
-                "shop"
-              ]
+              "const": "upgrades"
             },
             "refs": {
               "type": "array",
@@ -285,49 +223,7 @@
               },
               "minItems": 1,
               "uniqueItems": true,
-              "description": "Refs of every chosen candidate; empty declines when min is 0."
-            },
-            "upgrade": {
-              "type": "boolean",
-              "default": false
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "enum": [
-                "relics",
-                "potions",
-                "enemies"
-              ]
-            },
-            "refs": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "minItems": 1,
-              "uniqueItems": true,
-              "description": "Refs of every chosen candidate; empty declines when min is 0."
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "const": "powers"
+              "description": "Current card refs from one area; omit to preview the owned deck."
             }
           },
           "required": [
@@ -494,7 +390,7 @@
             },
             "text": {
               "type": "string",
-              "description": "Terms that must all appear."
+              "description": "Case-insensitive substring in the document id, name, or description."
             },
             "offset": {
               "type": "integer",
@@ -551,7 +447,7 @@
             },
             "text": {
               "type": "string",
-              "description": "Terms that must all appear."
+              "description": "Case-insensitive substring in the document id, name, or description."
             },
             "offset": {
               "type": "integer",
@@ -945,7 +841,7 @@
             },
             "text": {
               "type": "string",
-              "description": "Terms that must all appear."
+              "description": "Complete replacement strategy notes."
             }
           },
           "required": [

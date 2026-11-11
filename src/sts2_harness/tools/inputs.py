@@ -4,7 +4,15 @@ from enum import StrEnum
 from importlib.resources import files
 from typing import Annotated, Literal
 
-from pydantic import MISSING, Field, GetJsonSchemaHandler, JsonValue, RootModel, TypeAdapter
+from pydantic import (
+    MISSING,
+    Field,
+    GetJsonSchemaHandler,
+    JsonValue,
+    RootModel,
+    TypeAdapter,
+    field_validator,
+)
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
@@ -26,7 +34,12 @@ class StateQuery(native.WireModel):
     area: Literal["state"]
 
 
-class InspectInput(RootModel[StateQuery | native.InspectQuery]):
+class UpgradeQuery(native.WireModel):
+    area: Literal["upgrades"]
+    refs: Annotated[tuple[native.Nonempty, ...], Field(min_length=1)] | MISSING = MISSING
+
+
+class InspectInput(RootModel[StateQuery | native.MapQuery | UpgradeQuery]):
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
@@ -106,6 +119,50 @@ class RunActInput(RootModel[RunAct]):
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
         return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_act"))
+
+
+class DeckChoice(StrEnum):
+    TAKE = "take"
+    SKIP = "skip"
+
+
+class DeckClass(StrEnum):
+    ENGINE = "engine"
+    PIVOT = "pivot"
+    ANSWER = "answer"
+    FILLER = "filler"
+
+
+class TakeCard(native.WireModel):
+    offer: native.Nonempty
+    choice: Literal[DeckChoice.TAKE]
+    card: native.Nonempty
+    classification: DeckClass = Field(alias="class")
+    links: tuple[native.Nonempty, ...]
+    reason: str
+
+    @field_validator("links")
+    @classmethod
+    def distinct_links(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(value)) != len(value):
+            raise ValueError("Links must be distinct native IDs.")
+        return value
+
+
+class SkipCard(native.WireModel):
+    offer: native.Nonempty
+    choice: Literal[DeckChoice.SKIP]
+    reason: str
+
+
+class RunDeckChoice(RootModel[TakeCard | SkipCard]):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return dict(
+            next(item.input_schema for item in DEFINITIONS if item.name == "run_deck_choice")
+        )
 
 
 class RouteEdge(native.WireModel):

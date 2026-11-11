@@ -3,6 +3,7 @@
 import json
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import MISSING, BaseModel, ValidationError
 
@@ -17,6 +18,7 @@ from sts2_harness.decisions import (
     DecisionTask,
     SelectStep,
 )
+from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.game import GameReadError, Presented
 from sts2_harness.knowledge import (
     DocumentView,
@@ -52,11 +54,13 @@ from sts2_harness.tools.inputs import (
     NotesReadInput,
     NotesReplaceInput,
     RunActInput,
+    RunDeckChoice,
     RunNext,
     RunPlan,
     SkillInput,
     SkillListInput,
     StateQuery,
+    UpgradeQuery,
 )
 
 
@@ -68,6 +72,7 @@ class QueryView(StrEnum):
 class ToolName(StrEnum):
     COMBAT_ACT = "combat_act"
     RUN_ACT = "run_act"
+    RUN_DECK_CHOICE = "run_deck_choice"
     RUN_PLAN = "run_plan"
     RUN_NEXT = "run_next"
     RUN_NOTES = "run_notes"
@@ -127,11 +132,13 @@ class ToolCatalog:
         notes_write_guard: Callable[[native.Observation | None], Awaitable[QueryToolResult | None]]
         | None = None,
         minimal: bool = False,
+        deck_stats: DeckStatistics | None = None,
     ) -> None:
         if role is native.DecisionOwner.RUN and notes is None:
             raise ValueError("Run tools require the run's notes owner.")
         self._notes_owner = notes
         self.minimal = minimal
+        self.deck_stats = deck_stats
         self._query_view = query_view
         self._notes_write_guard = notes_write_guard
         self.action_name = (
@@ -146,6 +153,7 @@ class ToolCatalog:
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
             ToolName.RUN_ACT: RunActInput,
+            ToolName.RUN_DECK_CHOICE: RunDeckChoice,
             ToolName.RUN_PLAN: RunPlan,
             ToolName.RUN_NEXT: RunNext,
             ToolName.COMBAT_ACT: CombatActInput,
@@ -170,6 +178,7 @@ class ToolCatalog:
                 or ToolName(item.name)
                 in {
                     ToolName.RUN_ACT,
+                    ToolName.RUN_DECK_CHOICE,
                     ToolName.RUN_PLAN,
                     ToolName.RUN_NEXT,
                     ToolName.RUN_INSPECT,
@@ -342,6 +351,17 @@ class ToolCatalog:
     async def current(self) -> native.Observation | None:
         return await self._current()
 
+    async def capture_history(self, observation: native.Observation) -> None:
+        if self.deck_stats is None:
+            return
+        result = await self._inspect(native.MapQuery(area=native.InspectArea.COMBAT_HISTORY))
+        if (
+            isinstance(result, native.InspectCompleted)
+            and isinstance(result.data, native.HistoryData)
+            and result.observation.location == observation.location
+        ):
+            self.deck_stats.capture(result.observation, result.data)
+
     async def present(
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
     ) -> Presented | None:
@@ -428,11 +448,66 @@ class ToolCatalog:
             entries.append(KnowledgeEntry(definition=definition, supplements=tuple(views.values())))
         return KnowledgeLookup(entries=tuple(entries), missing_ids=data.missing_ids)
 
-    async def _read_details(self, query: StateQuery | native.InspectQuery) -> QueryToolResult:
+    async def _read_details(
+        self, query: StateQuery | native.MapQuery | UpgradeQuery
+    ) -> QueryToolResult:
         if isinstance(query, StateQuery):
             return QueryToolResult(ReadCompleted(), await self._observe())
+        native_query: native.InspectQuery
+        if isinstance(query, UpgradeQuery):
+            current = await self._observe()
+            state = current.state
+            refs = query.refs
+            if refs is MISSING:
+                native_query = native.CardQuery(area=native.InspectArea.DECK, upgrade=True)
+            else:
+                areas: list[
+                    tuple[
+                        Literal[
+                            native.InspectArea.DECK,
+                            native.InspectArea.OPTIONS,
+                            native.InspectArea.SHOP,
+                            native.InspectArea.REWARDS,
+                            native.InspectArea.HAND,
+                        ],
+                        tuple[str, ...],
+                    ]
+                ] = [
+                    (native.InspectArea.DECK, state.deck),
+                ]
+                if state.selection is not None:
+                    areas.append((native.InspectArea.OPTIONS, state.selection.candidates))
+                if isinstance(state, native.RunState):
+                    areas.append(
+                        (
+                            native.InspectArea.SHOP
+                            if state.screen is native.RunScreen.SHOP
+                            else native.InspectArea.REWARDS,
+                            tuple(ref for offer in state.offers for ref in offer.contents),
+                        )
+                    )
+                if isinstance(state, native.CombatState):
+                    areas.append((native.InspectArea.HAND, state.piles.hand))
+                matched_query = next(
+                    (
+                        native.CardQuery(area=card_area, refs=refs, upgrade=True)
+                        for card_area, members in areas
+                        if set(refs) <= set(members)
+                    ),
+                    None,
+                )
+                if matched_query is None or len(set(refs)) != len(refs):
+                    return QueryToolResult(
+                        _problem(
+                            ReasonCode.INVALID_ARGUMENTS, "Use card refs from one current area."
+                        ),
+                        current,
+                    )
+                native_query = matched_query
+        else:
+            native_query = query
         try:
-            result = await self._inspect(query)
+            result = await self._inspect(native_query)
         except ClientUnavailable as error:
             return QueryToolResult(
                 _problem(ReasonCode.QUERY_FAILED, str(error), failed=True), await self._current()
@@ -448,7 +523,7 @@ class ToolCatalog:
             observation = await self._current()
         if (
             self._query_view is QueryView.ROLE
-            and query.area
+            and native_query.area
             in (native.InspectArea.OPTIONS, native.InspectArea.REWARDS, native.InspectArea.SHOP)
             and observation is not None
             and observation.location.owner is not self._role

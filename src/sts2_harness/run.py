@@ -24,12 +24,13 @@ from sts2_harness.decisions import (
     DecisionSource,
     DecisionTask,
     HandoffTask,
+    SelectStep,
     TaskComplete,
 )
 from sts2_harness.diagnostics import AutoFinished, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.game import GameReadError
-from sts2_harness.knowledge import DocumentView, GuidanceContent
+from sts2_harness.knowledge import CandidateLinks, DocumentView, GuidanceContent
 from sts2_harness.llm.messages import (
     ModelClient,
     TextMessage,
@@ -57,7 +58,7 @@ from sts2_harness.results import (
 )
 from sts2_harness.route_plan import Edge, MovementStatus, RoutePlan, reconcile_plan, replace_plan
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
-from sts2_harness.tools.inputs import RunNext, RunPlan
+from sts2_harness.tools.inputs import RunDeckChoice, RunNext, RunPlan, TakeCard
 from sts2_harness.user_input_values import UserInputSource
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -83,6 +84,7 @@ class RunAgent(Agent):
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
         user_input: UserInputSource | None = None,
+        candidate_links: CandidateLinks | None = None,
     ) -> None:
         if tools.notes is None:
             raise ValueError("Run requires the run's notes owner.")
@@ -105,6 +107,54 @@ class RunAgent(Agent):
         self._shop_strategy_node: native.Location | None = None
         self._plan: RoutePlan | None = None
         self._plan_identity: tuple[str, str | None, int | None] | None = None
+        self._candidate_links = candidate_links
+
+    async def _enrich(self, context: Context, observation: native.Observation) -> None:
+        if self._tools.deck_stats is not None:
+            stats, use = self._tools.deck_stats.view(len(observation.state.deck))
+            context.set_deck_stats(stats, use)
+        if self._candidate_links is None or self._tools.minimal:
+            return
+        state = observation.state
+        if not isinstance(state, native.RunState):
+            context.set_candidate_links({})
+            return
+        owned_ids = tuple(
+            sorted(
+                {
+                    entry.definition_id
+                    for ref in (*state.deck, *state.relics)
+                    if (entry := observation.objects.get(ref)) is not None
+                    and entry.definition_id is not MISSING
+                }
+            )
+        )
+        candidate_ids = tuple(
+            sorted(
+                {
+                    entry.definition_id
+                    for offer in state.offers
+                    for ref in offer.contents
+                    if isinstance(entry := observation.objects.get(ref), native.CardEntry)
+                }
+            )
+        )
+        if not candidate_ids:
+            context.set_candidate_links({})
+            return
+        try:
+            links = await self._candidate_links.links(candidate_ids, owned_ids)
+        except MaterialUnavailable as error:
+            raise DecisionInterrupted(
+                Reason(code=ReasonCode.CONTENT_UNAVAILABLE, message=str(error)),
+                self._recovery.record_failure(),
+            ) from error
+        context.set_candidate_links(
+            {
+                key: tuple(_JSON_OBJECT.validate_json(link.to_json()) for link in values)
+                for key, values in links.items()
+            }
+        )
 
     def _sync_plan(self, observation: native.Observation) -> MovementStatus:
         identity = (
@@ -169,8 +219,29 @@ class RunAgent(Agent):
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
     ) -> ActionProposal | QueryToolResult:
+        if call.name == ToolName.RUN_DECK_CHOICE:
+            return await self._deck_choice(call, task)
         if call.name == ToolName.RUN_ACT:
             result = self._tools.dispatch_action(call, task)
+            if isinstance(result, ActionProposal):
+                state = observation.state
+                if isinstance(state, native.RunState) and state.screen is native.RunScreen.REWARDS:
+                    card_offers = tuple(o for o in state.offers if o.kind is native.OfferKind.CARD)
+                    card_actions = {ref for offer in card_offers for ref in offer.actions}
+                    candidates = {ref for offer in card_offers for ref in offer.contents}
+                    if any(
+                        isinstance(step, ActionStep)
+                        and step.ref in card_actions
+                        or isinstance(step, SelectStep)
+                        and state.selection is not None
+                        and bool(candidates.intersection(state.selection.candidates))
+                        for step in result.steps
+                    ):
+                        return self._route_rejected(
+                            ReasonCode.INVALID_ARGUMENTS,
+                            "Resolve each card reward with run_deck_choice.",
+                            observation,
+                        )
             return (
                 replace(result, allow_map_travel=False)
                 if isinstance(result, ActionProposal)
@@ -344,6 +415,81 @@ class RunAgent(Agent):
         assert next_call is not None
         return ActionProposal((ActionStep(ActionKind.INTERACT, action.ref),), next_call.reason)
 
+    async def _deck_choice(
+        self, call: ToolCall, task: DecisionTask
+    ) -> ActionProposal | QueryToolResult:
+        current = await self._tools.current()
+        if current is None:
+            return self._route_rejected(
+                ReasonCode.QUERY_FAILED, "The current reward is unavailable.", None
+            )
+        if not isinstance(task, ActTask):
+            return self._route_rejected(
+                ReasonCode.WRONG_ROLE, "This task cannot take card rewards.", current
+            )
+        if current.location != native.Location.model_validate(task.expected_route.model_dump()):
+            return self._route_rejected(
+                ReasonCode.ROLE_CHANGED, "The action route changed.", current
+            )
+        try:
+            json.loads(call.arguments, object_pairs_hook=unique_fields)
+            query = RunDeckChoice.model_validate_json(call.arguments, strict=True).root
+        except (ValueError, ValidationError):
+            return self._route_rejected(
+                ReasonCode.INVALID_ARGUMENTS, "The deck choice does not match its schema.", current
+            )
+        state = current.state
+        offer = (
+            next((o for o in state.offers if o.ref == query.offer), None)
+            if isinstance(state, native.RunState) and state.screen is native.RunScreen.REWARDS
+            else None
+        )
+        if offer is None or offer.kind is not native.OfferKind.CARD:
+            return self._route_rejected(
+                ReasonCode.INVALID_ARGUMENTS, "The offer is not a current card reward.", current
+            )
+        assert isinstance(state, native.RunState)
+        if isinstance(query, TakeCard):
+            owned = {
+                obj.definition_id
+                for ref in (*state.deck, *state.relics)
+                if (obj := current.objects.get(ref)) is not None
+                and obj.definition_id is not MISSING
+            }
+            if query.card not in offer.contents or not set(query.links) <= owned:
+                return self._route_rejected(
+                    ReasonCode.INVALID_ARGUMENTS,
+                    "The card must belong to this offer and links must name owned cards or relics.",
+                    current,
+                )
+        chosen = (query.card,) if isinstance(query, TakeCard) else ()
+        selection = state.selection
+        if selection is not None:
+            if not set(offer.contents) <= set(selection.candidates):
+                return self._route_rejected(
+                    ReasonCode.PENDING_CHOICE, "Another selection is open.", current
+                )
+            if not selection.min <= len(chosen) <= selection.max:
+                return self._route_rejected(
+                    ReasonCode.INVALID_ARGUMENTS,
+                    "This reward does not permit that choice.",
+                    current,
+                )
+            return ActionProposal((SelectStep(chosen),), query.reason, allow_map_travel=False)
+        opening = next(
+            (action for action in state.actions if action.ref in offer.actions and action.enabled),
+            None,
+        )
+        if opening is None:
+            return self._route_rejected(
+                ReasonCode.ILLEGAL_ACTION, "The card reward cannot be opened now.", current
+            )
+        return ActionProposal(
+            (ActionStep(ActionKind.INTERACT, opening.ref), SelectStep(chosen)),
+            query.reason,
+            allow_map_travel=False,
+        )
+
     def _close_query(
         self,
         context: Context,
@@ -484,8 +630,11 @@ class RunAgent(Agent):
         if self._context is None:
             await self.enter_act(ActStart(observation))
             assert self._context is not None
-            return self._context
-        return await super()._prepare(observation)
+            context = self._context
+        else:
+            context = await super()._prepare(observation)
+        await self._enrich(context, observation)
+        return context
 
     def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
         blocks = (
@@ -493,7 +642,7 @@ class RunAgent(Agent):
             self._prompts.read("run-report-reader"),
             self._prompts.read("run-task-rules"),
             "\n",
-            self._prompts.read("run-projected-reader"),
+            self._prompts.read("state-format"),
             "\n",
             self._prompts.read("run-observations"),
         )

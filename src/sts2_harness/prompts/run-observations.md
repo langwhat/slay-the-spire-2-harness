@@ -24,7 +24,7 @@ Judge every optional deck change by how often cards are drawn and played, not by
 - The average rises as the deck's strongest combination forms, so a card worth taking early can be a loss later.
 - A power, or a card that exhausts when played, costs one draw and its energy once per fight rather than every cycle.
 - Removing, transforming, or exhausting a below-average card raises the frequency of every other card.
-- When N <= D the whole deck is drawn every turn; each added circulating card ends that.
+- When N <= D, the draw budget can cover one full cycle per turn; additions above D break that budget. Recheck draw, energy, retention, and reshuffle rules before claiming a repeatable cycle.
 - Assess an offered card at its base version unless an upgrade opportunity is actually reserved for it; several cards cannot claim the same opportunity.
 
 Take an offered card when this comparison favors it over adding nothing, and choose the strongest such card. When no candidate passes, skip where skipping is offered. Card offers are separate decisions: decide each after the earlier ones have changed the deck.

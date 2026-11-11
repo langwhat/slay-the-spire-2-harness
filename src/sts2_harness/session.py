@@ -9,13 +9,14 @@ from sts2_harness.agent import MaterialReader
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent
 from sts2_harness.decisions import DecisionSource
+from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import GameIO, GameLifetimeEnded, RunEnded
 from sts2_harness.journal import Manifest
-from sts2_harness.knowledge import Documents, DocumentView
+from sts2_harness.knowledge import CandidateLinks, Documents, DocumentView
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.loop import CombatFactory, DefaultFlow, RunFlow
 from sts2_harness.notes import Notes
@@ -41,6 +42,7 @@ class SessionDependencies:
     prompts: PromptReader
     documents: Documents
     model: ModelFactory
+    candidate_links: CandidateLinks | None = None
 
 
 class RunSession:
@@ -58,6 +60,7 @@ class RunSession:
         if manifest.initial_notes is None:
             raise ValueError("A run session requires explicit initial notes in its manifest.")
         self.notes = Notes(manifest.initial_notes)
+        self.deck_stats = DeckStatistics()
         self.recovery = ToolRecoveryBudget(on_exhausted=self._recovery_exhausted)
         self._dependencies = dependencies
         self._manifest = manifest
@@ -111,6 +114,7 @@ class RunSession:
                 materials=self._materials(native.DecisionOwner.RUN),
                 diagnostics=self._diagnostics,
                 user_input=self._user_input,
+                candidate_links=self._dependencies.candidate_links,
             )
         )
 
@@ -144,6 +148,7 @@ class RunSession:
             skills=self._dependencies.documents,
             supplements=self._dependencies.documents,
             minimal=self._manifest.minimal,
+            deck_stats=self.deck_stats,
         )
 
     async def _notes_write_guard(

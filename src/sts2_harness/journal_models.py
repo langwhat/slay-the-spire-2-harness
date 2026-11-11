@@ -44,6 +44,7 @@ from sts2_harness.context.models import (
     TaskMessage,
 )
 from sts2_harness.knowledge import (
+    CandidateLink,
     Document,
     DocumentView,
     GuidanceContent,
@@ -812,6 +813,7 @@ class MaterialKind(StrEnum):
     LIST = "list"
     READ = "read"
     LOOKUP = "lookup"
+    LINKS = "links"
 
 
 class MaterialFailure(StrEnum):
@@ -840,7 +842,15 @@ class DocumentLookup(native.WireModel):
     subjects: tuple[SubjectId, ...]
 
 
-type MaterialRequest = PromptRead | SkillListing | DocumentRead | DocumentLookup
+class CandidateLinkLookup(native.WireModel):
+    kind: Literal[MaterialKind.LINKS] = MaterialKind.LINKS
+    candidate_ids: tuple[str, ...]
+    owned_ids: tuple[str, ...]
+
+
+type MaterialRequest = (
+    PromptRead | SkillListing | DocumentRead | DocumentLookup | CandidateLinkLookup
+)
 MATERIAL_REQUEST = TypeAdapter(MaterialRequest)
 
 
@@ -873,6 +883,12 @@ class DocumentLookupResult(native.WireModel):
     documents: tuple[DocumentSnapshot, ...]
 
 
+class CandidateLinkResult(native.WireModel):
+    status: Literal[MaterialStatus.COMPLETED] = MaterialStatus.COMPLETED
+    kind: Literal[MaterialKind.LINKS] = MaterialKind.LINKS
+    links: dict[str, tuple[CandidateLink, ...]]
+
+
 class MaterialFailed(native.WireModel):
     status: Literal[MaterialStatus.FAILED] = MaterialStatus.FAILED
     failure: MaterialFailure
@@ -884,6 +900,7 @@ type MaterialReply = (
     | SkillListingResult
     | DocumentReadResult
     | DocumentLookupResult
+    | CandidateLinkResult
     | MaterialFailed
 )
 MATERIAL_REPLY = TypeAdapter(MaterialReply)

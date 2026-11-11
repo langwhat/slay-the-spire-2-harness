@@ -103,9 +103,7 @@ class Agent(ABC):
                 reason=Reason(code=ReasonCode.INVALID_ARGUMENTS, message=message),
                 suggested_actions=(
                     Suggestion(
-                        message=(
-                            "Resubmit with at most one game-action tool, placed last."
-                        )
+                        message=("Resubmit with at most one game-action tool, placed last.")
                     ),
                 ),
             ),
@@ -282,7 +280,13 @@ class Agent(ABC):
                         Reason(code=ReasonCode.INVALID_ARGUMENTS, message=message), True
                     )
             elif any(
-                call.name in (ToolName.RUN_ACT, ToolName.COMBAT_ACT, ToolName.RUN_NEXT)
+                call.name
+                in (
+                    ToolName.RUN_ACT,
+                    ToolName.RUN_DECK_CHOICE,
+                    ToolName.COMBAT_ACT,
+                    ToolName.RUN_NEXT,
+                )
                 for call in calls[:-1]
             ):
                 self._reject_action_layout(context, calls, observation)

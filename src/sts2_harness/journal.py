@@ -142,10 +142,11 @@ class SessionMaterials(native.WireModel):
     entry_documents_enabled: bool
     act_guidance: dict[int, tuple[str, ...]]
     battle_guidance: tuple[str, ...]
+    candidate_links_enabled: bool = False
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[15] = 15
+    schema_version: Literal[16] = 16
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -157,6 +158,7 @@ class Manifest(native.WireModel):
     capacity_policy: CapacityPolicy = CapacityPolicy()
     minimal: bool = False
     run_context_policy: Literal["node_local_v1"] = "node_local_v1"
+    state_format: Literal["sections_v2"] = "sections_v2"
     seed: str | None = None
     template: str | None = None
     initial_notes: str | None = None

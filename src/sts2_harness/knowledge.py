@@ -1,9 +1,10 @@
 """Supplementary documents keep their identity separate from native subjects."""
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Annotated, Protocol
 
-from pydantic import MISSING, Field, JsonValue, TypeAdapter, model_serializer
+from pydantic import MISSING, ConfigDict, Field, JsonValue, TypeAdapter, model_serializer
 
 from sts2_harness.client import models as native
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
@@ -101,3 +102,22 @@ class SkillProvider(Protocol):
 
 class Documents(SkillProvider, SupplementProvider, Protocol):
     """The document capabilities shared by tools and entry guidance."""
+
+
+class LinkDirection(StrEnum):
+    OWNED_TRIGGERS_CANDIDATE = "owned_triggers_candidate"
+    CANDIDATE_TRIGGERS_OWNED = "candidate_triggers_owned"
+
+
+class CandidateLink(native.WireModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    with_: native.Nonempty = Field(alias="with")
+    event: native.Nonempty
+    direction: LinkDirection
+
+
+class CandidateLinks(Protocol):
+    async def links(
+        self, candidate_ids: tuple[str, ...], owned_ids: tuple[str, ...]
+    ) -> dict[str, tuple[CandidateLink, ...]]: ...

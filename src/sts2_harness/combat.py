@@ -5,6 +5,7 @@ import logging
 from pydantic import MISSING
 
 from sts2_harness.agent import Agent, MaterialReader
+from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.models import CombatActInput, CombatReviewInput
@@ -23,7 +24,7 @@ from sts2_harness.decisions import (
 from sts2_harness.diagnostics import BattleEnd, BattleFinished, BattleStarted, Diagnostics
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import Interrupted, ModelFailure, ToolRecoveryBudget
-from sts2_harness.game import GameLifetimeEnded, RunEnded, SessionStopped
+from sts2_harness.game import GameLifetimeEnded, GameReadError, RunEnded, SessionStopped
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
@@ -35,16 +36,20 @@ from sts2_harness.user_input_values import UserInputSource
 _LOG = logging.getLogger(__name__)
 
 
-def _system(prompts: PromptReader, *, viewer_input: bool) -> MaterialParts:
+def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool = False) -> MaterialParts:
     blocks: list[MaterialText | str] = []
     names = (
         "combat-tasks",
         "report-reader",
         "combat-task-rules",
-        "projected-reader",
+        "state-format",
         "combat-observations",
     )
-    for name in (*names, *(("viewer-input",) if viewer_input else ())):
+    for name in (
+        *names,
+        *(("combat-review",) if not minimal else ()),
+        *(("viewer-input",) if viewer_input else ()),
+    ):
         if blocks:
             blocks.append("\n")
         blocks.append(prompts.read(name))
@@ -83,12 +88,22 @@ class CombatAgent(Agent):
                 _system(
                     self._prompts,
                     viewer_input=self._user_input is not None,
+                    minimal=self._tools.minimal,
                 ),
             ),
         )
         if documents:
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
         return Context(native.DecisionOwner.COMBAT, system=system, minimal=self._tools.minimal)
+
+    async def _prepare(self, observation: native.Observation) -> Context:
+        context = await super()._prepare(observation)
+        if isinstance(observation.state, native.CombatState):
+            try:
+                await self._tools.capture_history(observation)
+            except (ClientUnavailable, GameReadError) as error:
+                _LOG.warning("Battle-history sample unavailable: %s", error)
+        return context
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         decision = await super().decide(task, observation)

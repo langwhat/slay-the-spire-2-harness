@@ -42,6 +42,8 @@ from sts2_harness.journal import (
 )
 from sts2_harness.journal_models import (
     AttemptCause,
+    CandidateLinkLookup,
+    CandidateLinkResult,
     ConfigurationSnapshot,
     DocumentLookup,
     DocumentLookupResult,
@@ -69,6 +71,7 @@ from sts2_harness.journal_models import (
     archive_input,
 )
 from sts2_harness.knowledge import (
+    CandidateLink,
     Document,
     DocumentView,
     Resource,
@@ -409,6 +412,18 @@ class ReplayPrompts:
 class ReplayDocuments:
     def __init__(self, timeline: Timeline) -> None:
         self._timeline = timeline
+
+    async def links(
+        self, candidate_ids: tuple[str, ...], owned_ids: tuple[str, ...]
+    ) -> dict[str, tuple[CandidateLink, ...]]:
+        reply = self._timeline.material(
+            CandidateLinkLookup(candidate_ids=candidate_ids, owned_ids=owned_ids)
+        )
+        if isinstance(reply, MaterialFailed):
+            raise MaterialUnavailable(reply.message)
+        if not isinstance(reply, CandidateLinkResult):
+            _different(self._timeline.sequence, InputComponent.REQUEST)
+        return reply.links
 
     async def list(self, role: native.DecisionOwner) -> tuple[SkillSummary, ...]:
         reply = self._timeline.material(SkillListing(role=role))
@@ -802,6 +817,7 @@ async def _run(
         ReplayPrompts(timeline),
         ReplayDocuments(timeline),
         model,
+        ReplayDocuments(timeline) if journal.manifest.materials.candidate_links_enabled else None,
     )
     try:
         async with RunSession(journal.manifest, dependencies) as session:

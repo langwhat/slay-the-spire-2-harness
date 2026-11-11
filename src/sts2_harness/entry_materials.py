@@ -11,7 +11,14 @@ from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import DecisionInterrupted
 from sts2_harness.game import GameLifetimeEnded, GameReadError
 from sts2_harness.journal import SessionMaterials
-from sts2_harness.knowledge import Documents, DocumentView, SkillRead, SubjectId, UnknownDocument
+from sts2_harness.knowledge import (
+    CandidateLinks,
+    Documents,
+    DocumentView,
+    SkillRead,
+    SubjectId,
+    UnknownDocument,
+)
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import Reason, ReasonCode
 
@@ -25,6 +32,7 @@ class MaterialContext:
 class EntryMaterials:
     documents: Callable[[MaterialContext], Documents]
     settings: SessionMaterials
+    candidate_links: Callable[[MaterialContext], CandidateLinks] | None = None
 
 
 async def entry_materials(
