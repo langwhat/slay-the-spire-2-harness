@@ -72,9 +72,8 @@ def test_inspection_and_final_action_execute_without_an_intermediate_request(
     ]
 
 
-@pytest.mark.parametrize("minimal", [False, True])
 def test_failed_query_cancels_remaining_queries_and_action_without_extra_recovery(
-    tmp_path: Path, minimal: bool
+    tmp_path: Path,
 ) -> None:
     battle = InspectBattle(
         [
@@ -88,7 +87,7 @@ def test_failed_query_cancels_remaining_queries_and_action_without_extra_recover
             reply(text="Reviewed."),
         ]
     )
-    assert isinstance(asyncio.run(battle.run(tmp_path, minimal=minimal)), CombatHandoff)
+    assert isinstance(asyncio.run(battle.run(tmp_path)), CombatHandoff)
     assert [query.area for query in battle.queries] == [native.InspectArea.DECK]
     assert len(battle.actions) == 1
     assert battle.model_budget[:2] == [0, 1]
