@@ -43,6 +43,7 @@ from sts2_harness.llm.messages import (
     ToolCall,
     ToolResultMessage,
 )
+from sts2_harness.note_values import NotesView
 from sts2_harness.results import (
     ActionToolResult,
     QueryToolResult,
@@ -61,7 +62,7 @@ class _Group:
     id: int
     start: int
     observation: dict[str, JsonValue]
-    notes: str
+    notes: NotesView
     guidance: tuple[DocumentView, ...]
     route_plan: JsonValue
 
@@ -174,6 +175,13 @@ class Context:
     def set_candidate_links(self, links: dict[str, tuple[dict[str, JsonValue], ...]]) -> None:
         self._run_delivery.candidate_links = links
 
+    def set_notes(self, notes: NotesView) -> None:
+        if not self._minimal:
+            self._run_delivery.notes = notes
+
+    def set_usable_wants(self, wants: dict[str, tuple[int, ...]]) -> None:
+        self._run_delivery.usable_wants = wants
+
     @property
     def group_ids(self) -> tuple[int | None, int | None]:
         return (
@@ -182,7 +190,7 @@ class Context:
         )
 
     def begin_group(
-        self, observation: native.Observation, notes: str, route_plan: JsonValue = None
+        self, observation: native.Observation, notes: NotesView, route_plan: JsonValue = None
     ) -> None:
         if self._active_group is not None:
             return
@@ -232,8 +240,6 @@ class Context:
         observation["defs"] = list(definitions.values())
         values: dict[str, JsonValue] = {"observation": observation}
         if self._role is native.DecisionOwner.RUN:
-            if not self._minimal:
-                values["strategy_notes"] = group.notes
             if self._previous_battle is not None:
                 battle = PreviousBattle(
                     battle_report=self._previous_battle.report,
@@ -256,7 +262,13 @@ class Context:
             if not isinstance(dynamic, dict):
                 values["route_plan"] = group.route_plan
         elif not self._minimal:
-            values["opening_notes"] = group.notes
+            if not any(
+                isinstance(message, TaskMessage)
+                and isinstance(message.content, ActContent)
+                and message.content.opening_notes is not MISSING
+                for message in retained
+            ):
+                values["opening_notes"] = _JSON_OBJECT.validate_json(group.notes.to_json())
         baseline: dict[str, JsonValue] = {"context_baseline": values}
         system_guidance = {
             (document.id, None if document.resource is MISSING else document.resource): document
@@ -407,7 +419,7 @@ class Context:
                 else HandoffContent(
                     battle_report=task.handoff.report,
                     combat_review=task.handoff.review,
-                    strategy_notes=task.strategy_notes,
+                    notes=task.strategy_notes,
                 )
             )
             if isinstance(task, RunHandoffInput):
@@ -428,6 +440,8 @@ class Context:
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
                 if same_observation(self._role, last.observation, observation):
                     return
+        if isinstance(task, RunActInput) and task.strategy_notes is not MISSING:
+            self.set_notes(task.strategy_notes)
         projected = self._delivery.project(
             visible_observation(observation, self._role), observation
         )
@@ -437,7 +451,6 @@ class Context:
             if task.handoff is not None and task.handoff != self._previous_battle:
                 content = RunActHandoffContent(
                     observation=projected,
-                    strategy_notes=task.strategy_notes,
                     battle_report=task.handoff.report,
                     combat_review=task.handoff.review,
                 )
@@ -445,7 +458,6 @@ class Context:
                 previous = task.previous_battle
                 content = RunActContent(
                     observation=projected,
-                    strategy_notes=task.strategy_notes,
                     previous_battle=(
                         PreviousBattle(battle_report=previous.report, combat_review=previous.review)
                         if previous is not None and previous != self._previous_battle

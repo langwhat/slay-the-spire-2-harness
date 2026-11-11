@@ -24,6 +24,7 @@ from sts2_harness.journal_models import (
 )
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import DocumentSource, FileDocuments
+from sts2_harness.note_values import NotesState, NotesView
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness_eval import ModelAnchor, Reached, Rejected, reach, take_over
 from sts2_harness_eval.results import InputComponent, InputDifference
@@ -174,7 +175,7 @@ def test_scene_starts_fresh_and_reopens_actual_requests(tmp_path: Path, candidat
                 PackagedPrompts(),
                 FileDocuments(),
                 SampleBudget(3, 30),
-                variant=MaterialVariant(SceneStart("Fresh plan."), declared),
+                variant=MaterialVariant(SceneStart(NotesState(other="Fresh plan.")), declared),
                 stop_requested=lambda: False,
             )
         assert isinstance(result, TakeoverCompleted)
@@ -183,7 +184,7 @@ def test_scene_starts_fresh_and_reopens_actual_requests(tmp_path: Path, candidat
             assert journal.manifest.parent is None
             assert journal.manifest.headless is None
             assert journal.manifest.game_instance_id == "B"
-            assert journal.manifest.initial_notes == "Fresh plan."
+            assert journal.manifest.initial_notes == NotesState(other="Fresh plan.")
             assert journal.manifest.template == "fresh-template"
             assert journal.manifest.game_version == "fresh-version"
             assert isinstance(journal.manifest.variant, SceneVariant)
@@ -213,7 +214,8 @@ def test_scene_starts_fresh_and_reopens_actual_requests(tmp_path: Path, candidat
             assert rules.body == ("Act carefully." if candidate else prompt.body)
             task = next(item for item in first.input if isinstance(item, TaskSnapshot))
             assert isinstance(task.content, ActContent)
-            assert task.content.opening_notes == "Fresh plan."
+            assert isinstance(task.content.opening_notes, NotesView)
+            assert task.content.opening_notes.other == "Fresh plan."
             assert result.anchor.anchor == ModelAnchor(
                 journal.manifest.recording_id, first.sequence
             )
@@ -287,7 +289,7 @@ def test_scene_continues_through_normal_combat_review_and_run_handoff(tmp_path: 
                 PackagedPrompts(),
                 FileDocuments(),
                 SampleBudget(4, 30),
-                variant=MaterialVariant(SceneStart(""), ()),
+                variant=MaterialVariant(SceneStart(NotesState(other="")), ()),
                 stop_requested=lambda: False,
             )
         assert isinstance(result, TakeoverCompleted)
@@ -301,7 +303,8 @@ def test_scene_continues_through_normal_combat_review_and_run_handoff(tmp_path: 
             ]
             task = next(item for item in requests[-1].input if isinstance(item, RunTaskSnapshot))
             assert isinstance(task.content, RunActHandoffContent)
-            assert task.content.strategy_notes == ""
+            assert isinstance(task.content.observation.notes, NotesView)
+            assert task.content.observation.notes.other == ""
             assert task.content.combat_review == "Preserve resources after this battle."
             assert [action.expected_route.owner for action in restorer.actions] == [
                 native.DecisionOwner.COMBAT,

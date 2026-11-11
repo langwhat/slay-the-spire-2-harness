@@ -13,6 +13,7 @@ from sts2_harness.journal import Journal
 from sts2_harness.journal_models import MessageSnapshot, ToolSnapshot
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import FileDocuments
+from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness_eval.annotations import (
     AnnotationStore,
@@ -71,8 +72,12 @@ def specification(case: Case, *, pairs: int = 2, requests: int = 2) -> SuiteCase
         case_id=case.id,
         partition=Partition.DEVELOPMENT,
         pairs=pairs,
-        baseline=SuiteVariant(name="baseline", material=MaterialVariant(SceneStart("Plan."), ())),
-        candidate=SuiteVariant(name="candidate", material=MaterialVariant(SceneStart("Plan."), ())),
+        baseline=SuiteVariant(
+            name="baseline", material=MaterialVariant(SceneStart(NotesState(other="Plan.")), ())
+        ),
+        candidate=SuiteVariant(
+            name="candidate", material=MaterialVariant(SceneStart(NotesState(other="Plan.")), ())
+        ),
         budget=SampleBudget(requests, 30),
         standards=AssessmentSelection(),
     )

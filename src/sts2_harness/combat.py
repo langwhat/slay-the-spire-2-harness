@@ -28,6 +28,7 @@ from sts2_harness.game import GameLifetimeEnded, GameReadError, RunEnded, Sessio
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
+from sts2_harness.note_values import NotesView
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.tools import ToolCatalog
@@ -63,7 +64,7 @@ class CombatAgent(Agent):
         tools: ToolCatalog,
         recovery: ToolRecoveryBudget,
         *,
-        opening_notes: str,
+        opening_notes: NotesView,
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
@@ -115,7 +116,9 @@ class CombatAgent(Agent):
     def _append_task(
         self, context: Context, task: DecisionTask, observation: native.Observation
     ) -> None:
-        context.begin_group(observation, "" if self._tools.minimal else self._opening_notes)
+        context.begin_group(
+            observation, NotesView() if self._tools.minimal else self._opening_notes
+        )
         if isinstance(task, ReviewTask):
             context.append_task(CombatReviewInput(task.report))
             return

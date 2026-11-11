@@ -34,6 +34,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval import ModelAnchor, Reached, reach, take_over
@@ -163,7 +164,7 @@ async def source_case(
         core_version="test",
         game_instance_id="game",
         run_id="run",
-        initial_notes="A plan.",
+        initial_notes=NotesState(other="A plan."),
         seed="SEED",
         template=template,
         headless=HeadlessInitialConditions(
@@ -725,7 +726,9 @@ def test_stop_waits_for_submitted_batch_feedback_before_closing_b(
                     FileDocuments(),
                     SampleBudget(5, 30),
                     stop_requested=stop.is_set,
-                    variant=MaterialVariant(SceneStart(""), ()) if scene else None,
+                    variant=MaterialVariant(SceneStart(NotesState(other="")), ())
+                    if scene
+                    else None,
                 )
             )
             await submitted.wait()

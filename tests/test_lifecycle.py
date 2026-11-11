@@ -25,6 +25,7 @@ from sts2_harness.game import RunEndReason
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
+from sts2_harness.note_values import NotesState, NotesView
 from sts2_harness.results import ActionToolResult
 
 
@@ -146,7 +147,7 @@ class Campaign:
                 ),
                 reply(("travel", "run_next", '{"reason":"Enter combat."}')),
                 *([] if code_combat else first),
-                reply(("notes", "run_notes", '{"mode":"replace","text":"Reserve for act two."}')),
+                reply(("notes", "run_notes", '{"mode":"write","other":"Reserve for act two."}')),
                 reply(("advance", "run_act", '{"steps":[{"kind":"interact","action":"advance"}]}')),
                 reply(
                     (
@@ -290,9 +291,9 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             execution: Execution,
             recovery: ToolRecoveryBudget,
             observation: native.Observation,
-            notes: str,
+            notes: NotesView,
         ) -> CodeCombat:
-            openings.append(notes)
+            openings.append(notes.other)
             return CodeCombat()
 
         async with live_session(
@@ -305,7 +306,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes="Initial strategy.",
+                initial_notes=NotesState(other="Initial strategy."),
             ),
             tmp_path / "archive.sqlite",
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
@@ -315,7 +316,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         ) as session:
             ended = await session.run()
             assert ended.reason is RunEndReason.TERMINAL
-            assert session.notes.read() == "Reserve for act two."
+            assert session.notes.read().other == "Reserve for act two."
         assert [action.expected_route.node_id for action in campaign.actions] == [
             "start",
             "battle1",
@@ -338,7 +339,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             item.reply is not None and isinstance(item.reply.outcome, Presented)
             for item in presentations
         )
-        assert archive.manifest.initial_notes == "Initial strategy."
+        assert archive.manifest.initial_notes == NotesState(other="Initial strategy.")
         requests = archive.requests()
         plan_results = [
             message.data.value
@@ -353,12 +354,15 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             {"run:1", "run:2"} if code_combat else {"run:1", "run:2", "combat:1", "combat:2"}
         )
         first_run = next(request for request in requests if request.stream == "run:2")
+        from sts2_harness.context.models import RunActContent
         from sts2_harness.journal_models import GuidanceText, RunTaskSnapshot, TextSnapshot
 
         assert len(first_run.input) == 3
         task = first_run.input[-1]
         assert isinstance(task, RunTaskSnapshot)
-        assert task.content.strategy_notes == "Reserve for act two."
+        assert isinstance(task.content, RunActContent)
+        assert isinstance(task.content.observation.notes, NotesView)
+        assert task.content.observation.notes.other == "Reserve for act two."
         system_guidance = first_run.input[1]
         assert isinstance(system_guidance, TextSnapshot)
         assert isinstance(system_guidance.value, GuidanceText)
@@ -456,7 +460,7 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
                 )
             if self.handoffs == 2:
                 return proposal
-            self.notes.replace("Handoff assessed before opening.")
+            self.notes.write(NotesState(other="Handoff assessed before opening."), {"other"})
             return TaskComplete()
 
         async def accept(self, outcome: ActionToolResult) -> None:
@@ -467,11 +471,11 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
         execution: Execution,
         recovery: ToolRecoveryBudget,
         observation: native.Observation,
-        notes: str,
+        notes: NotesView,
     ) -> CodeCombat:
         if openings:
             assert recovery.failures == 0
-        openings.append(notes)
+        openings.append(notes.other)
         return CodeCombat()
 
     async def scenario() -> None:
@@ -485,7 +489,7 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes="Opening strategy.",
+                initial_notes=NotesState(other="Opening strategy."),
             ),
             tmp_path / "archive.sqlite",
             run_factory=lambda execution, notes, recovery: Run(notes, recovery),
@@ -530,7 +534,7 @@ def test_unknown_act_does_not_start_a_new_run_context(tmp_path: Path) -> None:
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes="Initial strategy.",
+                initial_notes=NotesState(other="Initial strategy."),
             ),
             tmp_path / "archive.sqlite",
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),

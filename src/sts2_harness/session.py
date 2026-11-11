@@ -19,6 +19,7 @@ from sts2_harness.journal import Manifest
 from sts2_harness.knowledge import CandidateLinks, Documents, DocumentView
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.loop import CombatFactory, DefaultFlow, RunFlow
+from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PromptReader
 from sts2_harness.results import QueryToolResult
@@ -28,7 +29,7 @@ from sts2_harness.user_input_values import UserInputSource
 
 type RunFactory = Callable[[Execution, Notes, ToolRecoveryBudget], RunRole]
 type RoleFactory = Callable[
-    [Execution, ToolRecoveryBudget, native.Observation, str], DecisionSource
+    [Execution, ToolRecoveryBudget, native.Observation, NotesView], DecisionSource
 ]
 type FlowFactory = Callable[[Execution, ToolRecoveryBudget, Notes, RunRole, CombatFactory], RunFlow]
 
@@ -187,7 +188,7 @@ class RunSession:
 
         return read
 
-    def _combat(self, opening: native.Observation, notes: str) -> DecisionSource:
+    def _combat(self, opening: native.Observation, notes: NotesView) -> DecisionSource:
         if self._combat_factory is not None:
             return self._combat_factory(self.execution, self.recovery, opening, notes)
         self._combat_stream += 1

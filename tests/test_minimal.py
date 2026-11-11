@@ -14,6 +14,7 @@ from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import DocumentSource, FileDocuments
+from sts2_harness.note_values import NotesState
 from sts2_harness_eval import ModelAnchor, Reached, reach
 
 
@@ -79,14 +80,14 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes="Hidden initial strategy.",
+                initial_notes=NotesState(other="Hidden initial strategy."),
             ),
             path,
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
             documents=documents,
         ) as session:
             assert (await session.run()).reason is RunEndReason.TERMINAL
-            assert session.notes.read() == "Hidden initial strategy."
+            assert session.notes.read().other == "Hidden initial strategy."
 
         assert len(campaign.actions) == (7 if consecutive else 6)
         assert len(campaign.inputs) == (9 if consecutive else 8)

@@ -8,6 +8,7 @@ from pydantic import MISSING, Field
 
 from sts2_harness.client import models as native
 from sts2_harness.knowledge import DocumentView, KnowledgeLookup, SkillList
+from sts2_harness.note_values import NotesView
 from sts2_harness.route_plan import PlanStatus
 
 
@@ -115,7 +116,7 @@ type Outcome = ActionOutcome | QueryOutcome
 
 
 class NotesText(SemanticValue):
-    text: str
+    notes: NotesView
 
 
 class NotesUpdated(SemanticValue):

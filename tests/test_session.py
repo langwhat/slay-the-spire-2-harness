@@ -14,21 +14,17 @@ from sts2_harness.journal import Manifest, SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
+from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
 
 
 @pytest.mark.parametrize("change", ["terminal", "run", "instance"])
-@pytest.mark.parametrize("mode", ["replace", "edit"])
 def test_session_preserves_notes_when_query_observes_ended_lifetime(
-    tmp_path: Path, change: str, mode: str
+    tmp_path: Path, change: str
 ) -> None:
     campaign = Campaign()
-    arguments = (
-        '{"mode":"replace","text":"Changed."}'
-        if mode == "replace"
-        else '{"mode":"edit","old_text":"Original.","new_text":"Changed."}'
-    )
+    arguments = '{"mode":"write","other":"Changed."}'
     campaign.responses = iter([reply(("notes", "run_notes", arguments))])
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -69,7 +65,7 @@ def test_session_preserves_notes_when_query_observes_ended_lifetime(
                     core_version="test",
                     game_instance_id="game",
                     run_id="run",
-                    initial_notes="Original.",
+                    initial_notes=NotesState(other="Original."),
                 ),
                 dependencies,
             ) as session:
@@ -77,7 +73,7 @@ def test_session_preserves_notes_when_query_observes_ended_lifetime(
                 assert ended.reason is (
                     RunEndReason.TERMINAL if change == "terminal" else RunEndReason.RUN_CHANGED
                 )
-                assert session.notes.read() == "Original."
+                assert session.notes.read().other == "Original."
         assert len(campaign.inputs) == 1
         assert campaign.actions == []
 
@@ -118,13 +114,13 @@ def test_session_runs_injected_dependencies_without_closing_them(tmp_path: Path)
                     core_version="test",
                     game_instance_id="game",
                     run_id="run",
-                    initial_notes="Opening plan.",
+                    initial_notes=NotesState(other="Opening plan."),
                 ),
                 dependencies,
             ) as session:
                 ended = await session.run()
                 assert ended.reason is RunEndReason.TERMINAL
-                assert session.notes.read() == "Reserve for act two."
+                assert session.notes.read().other == "Reserve for act two."
             observed = await game.observe()
             assert observed.observations[-1].state.phase is native.Phase.TERMINAL
             assert not game_transport.closed and not model_transport.closed

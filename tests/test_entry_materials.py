@@ -20,6 +20,7 @@ from sts2_harness.knowledge import DocumentView, SkillSummary, SubjectId
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.materials import DocumentSource, FileDocuments
+from sts2_harness.note_values import NotesView
 from sts2_harness.tools import ToolCatalog
 
 
@@ -245,11 +246,19 @@ def test_combat_appends_new_or_changed_knowledge_before_the_next_request(tmp_pat
             task = ActTask(native.RouteKey.model_validate(opening.location.model_dump()))
             async with Llm(configuration(tmp_path), transport=httpx.MockTransport(model)) as llm:
                 role = CombatAgent(
-                    llm, tools, ToolRecoveryBudget(), opening_notes="", materials=materials
+                    llm,
+                    tools,
+                    ToolRecoveryBudget(),
+                    opening_notes=NotesView(other=""),
+                    materials=materials,
                 )
                 assert isinstance(await role.decide(task, opening), ActionDecision)
                 fresh = CombatAgent(
-                    llm, tools, ToolRecoveryBudget(), opening_notes="", materials=materials
+                    llm,
+                    tools,
+                    ToolRecoveryBudget(),
+                    opening_notes=NotesView(other=""),
+                    materials=materials,
                 )
                 assert isinstance(await fresh.decide(task, later), ActionDecision)
 

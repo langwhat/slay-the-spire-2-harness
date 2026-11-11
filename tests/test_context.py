@@ -15,6 +15,7 @@ from sts2_harness.client.models import (
 from sts2_harness.context import CombatActInput, Context, QueryToolResult, ReadCompleted
 from sts2_harness.context.models import RunActInput
 from sts2_harness.llm.messages import AssistantMessage, ResponsesReply, ToolCall
+from sts2_harness.note_values import NotesView
 
 
 def test_changed_hand_is_complete_and_original_history_stays_unchanged() -> None:
@@ -78,13 +79,13 @@ def test_pile_membership_aggregates_without_order_or_instance_refs() -> None:
 def test_compaction_restores_defs_sections_and_opening_notes() -> None:
     observation = Observation.model_validate_json(COMBAT)
     context = Context(DecisionOwner.COMBAT)
-    context.begin_group(observation, "ENGINE test")
-    context.append_task(CombatActInput("ENGINE test"), observation)
+    context.begin_group(observation, NotesView(other="ENGINE test"))
+    context.append_task(CombatActInput(NotesView(other="ENGINE test")), observation)
     context.finish_group()
     candidate = context.compaction_candidate()
     context.validate_compaction(candidate)
     context.install_compaction(candidate)
-    context.begin_group(observation, "ENGINE test")
+    context.begin_group(observation, NotesView(other="ENGINE test"))
     context.append_reply(
         AssistantMessage(
             ResponsesReply.from_json(
@@ -101,7 +102,7 @@ def test_compaction_restores_defs_sections_and_opening_notes() -> None:
     baseline = json.loads(context.model_input()[0].text)["context_baseline"]
     assert baseline["observation"]["baseline"] is True
     assert baseline["observation"]["defs"][0]["id"] == "CARD.ONE"
-    assert baseline["opening_notes"] == "ENGINE test"
+    assert baseline["opening_notes"]["other"] == "ENGINE test"
     assert baseline["observation"]["hand"][0]["ref"] == "c2"
 
 
@@ -146,19 +147,19 @@ def test_automatic_upgrade_previews_remain_beside_candidates_and_update() -> Non
         context.append_task(task, current)
         initial = json.loads(context.model_input()[-1].text)["observation"]
         candidates = (
-            initial["hand"] if role is DecisionOwner.COMBAT
+            initial["hand"]
+            if role is DecisionOwner.COMBAT
             else initial["choice"]["selection"]["candidates"]
         )
-        assert candidates[1]["upgrade"] == {
-            "status": "available", "text": "造成3点伤害。"
-        }
+        assert candidates[1]["upgrade"] == {"status": "available", "text": "造成3点伤害。"}
         assert candidates[0]["upgrade"] == {"status": "not_upgradable"}
 
         changed = current.model_copy(update={"upgrades": {}})
         context.append_task(task, changed)
         update = json.loads(context.model_input()[-1].text)["observation"]
         updated = (
-            update["hand"] if role is DecisionOwner.COMBAT
+            update["hand"]
+            if role is DecisionOwner.COMBAT
             else update["choice"]["selection"]["candidates"]
         )
         assert all("upgrade" not in row for row in updated)
@@ -199,32 +200,44 @@ def test_mechanisms_are_once_delivered_without_owners_and_restore_after_compacti
         owner="c1",
         text="Native rule",
     )
-    observation = observation.model_copy(update={"mechanisms": (
-        mechanism, mechanism.model_copy(update={"owner": "c2"}),
-    )})
+    observation = observation.model_copy(
+        update={
+            "mechanisms": (
+                mechanism,
+                mechanism.model_copy(update={"owner": "c2"}),
+            )
+        }
+    )
     context = Context(DecisionOwner.COMBAT)
     context.append_task(CombatActInput(), observation)
     first = json.loads(context.model_input()[-1].text)["observation"]
-    assert first["mechanisms"] == [{
-        "kind": "power", "definition_id": "POWER.ONE", "name": "Power", "text": "Native rule",
-    }]
+    assert first["mechanisms"] == [
+        {
+            "kind": "power",
+            "definition_id": "POWER.ONE",
+            "name": "Power",
+            "text": "Native rule",
+        }
+    ]
     assert "deck" not in first
-    context.begin_group(observation, "")
+    context.begin_group(observation, NotesView(other=""))
     state = observation.state
     assert isinstance(state, CombatState)
-    changed = observation.model_copy(update={
-        "state": state.model_copy(update={"turn": 2}),
-        "mechanisms": (mechanism.model_copy(update={"owner": "c2"}),),
-    })
+    changed = observation.model_copy(
+        update={
+            "state": state.model_copy(update={"turn": 2}),
+            "mechanisms": (mechanism.model_copy(update={"owner": "c2"}),),
+        }
+    )
     context.append_task(CombatActInput(), changed)
     assert "mechanisms" not in json.loads(context.model_input()[-1].text)["observation"]
     context.finish_group()
     context.install_compaction(context.compaction_candidate())
     baseline = json.loads(context.model_input()[0].text)["context_baseline"]["observation"]
     assert baseline["mechanisms"] == first["mechanisms"]
-    changed = changed.model_copy(update={"mechanisms": (
-        mechanism.model_copy(update={"text": "Changed native rule"}),
-    )})
+    changed = changed.model_copy(
+        update={"mechanisms": (mechanism.model_copy(update={"text": "Changed native rule"}),)}
+    )
     context.append_task(CombatActInput(), changed)
     update = json.loads(context.model_input()[-1].text)["observation"]
     assert update["mechanisms"][0]["text"] == "Changed native rule"
@@ -235,16 +248,19 @@ def test_current_unknown_values_override_known_card_text_and_cost() -> None:
     card = observation.objects["c1"]
     assert isinstance(card, CardEntry)
     context = Context(DecisionOwner.COMBAT)
-    known = observation.model_copy(update={
-        "descriptions": {"c1": "Known current effect", "c2": "Known current effect"}
-    })
+    known = observation.model_copy(
+        update={"descriptions": {"c1": "Known current effect", "c2": "Known current effect"}}
+    )
     context.append_task(CombatActInput(), known)
-    unknown = known.model_copy(update={
-        "objects": {
-            **known.objects, "c1": card.model_copy(update={"cost": ResourceCosts(energy=None)})
-        },
-        "descriptions": {"c1": None},
-    })
+    unknown = known.model_copy(
+        update={
+            "objects": {
+                **known.objects,
+                "c1": card.model_copy(update={"cost": ResourceCosts(energy=None)}),
+            },
+            "descriptions": {"c1": None},
+        }
+    )
     context.append_task(CombatActInput(), unknown)
     row = json.loads(context.model_input()[-1].text)["observation"]["hand"][1]
     assert row["text"] is None

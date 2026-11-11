@@ -1,30 +1,96 @@
-"""The run's strategy notes are authoritative in memory."""
+"""Own strategy fields and the identities of wants available before each offer."""
 
-from sts2_harness.results import NotesUpdated, Reason, ReasonCode, Rejected, Suggestion
+from dataclasses import dataclass
+
+from sts2_harness.client import models as native
+from sts2_harness.note_values import Engine, InitialNotes, NotesState, NotesView, NumberedWant
+
+
+@dataclass(frozen=True, slots=True)
+class WantIdentity:
+    text: str
+    recorded_at: int
 
 
 class Notes:
-    def __init__(self, initial: str) -> None:
-        self._text = initial
+    def __init__(self, initial: InitialNotes) -> None:
+        if isinstance(initial, str) and initial != "":
+            raise ValueError("Legacy text notes are unsupported; supply structured notes.")
+        self._state = NotesState() if initial == "" else initial
+        self._clock = 0
+        self._wants: tuple[WantIdentity, ...] = ()
+        self._offer_wants: dict[
+            tuple[str, str | None, str | None, tuple[str, ...]], frozenset[WantIdentity]
+        ] = {}
+        self._offer_keys: dict[
+            tuple[str, str | None, str | None, str],
+            tuple[str, str | None, str | None, tuple[str, ...]],
+        ] = {}
+        self._set_wants(self._state.wants)
 
-    def read(self) -> str:
-        return self._text
+    def _set_wants(self, sentences: tuple[str, ...]) -> None:
+        previous = {want.text: want for want in self._wants}
+        identities: list[WantIdentity] = []
+        for text in sentences:
+            identity = previous.get(text)
+            if identity is None:
+                self._clock += 1
+                identity = WantIdentity(text, self._clock)
+            identities.append(identity)
+        self._wants = tuple(identities)
 
-    def replace(self, text: str) -> NotesUpdated:
-        self._text = text
-        return NotesUpdated()
+    def read(self) -> NotesView:
+        return NotesView(
+            engine=self._state.engine,
+            wants=tuple(
+                NumberedWant(number=number, text=want.text)
+                for number, want in enumerate(self._wants, 1)
+            ),
+            filler=self._state.filler,
+            evidence=self._state.evidence,
+            other=self._state.other,
+        )
 
-    def edit(self, old_text: str, new_text: str) -> NotesUpdated | Rejected:
-        position = self._text.find(old_text)
-        if position < 0 or self._text.find(old_text, position + 1) >= 0:
-            return Rejected(
-                reason=Reason(
-                    code=ReasonCode.NOTES_CONFLICT,
-                    message="The existing fragment must match exactly once; notes are unchanged.",
-                ),
-                suggested_actions=(
-                    Suggestion(message="Read the notes and choose one unique fragment."),
-                ),
-            )
-        self._text = self._text[:position] + new_text + self._text[position + len(old_text) :]
-        return NotesUpdated()
+    def write(self, fields: NotesState, supplied: set[str]) -> None:
+        if "wants" in supplied:
+            self._set_wants(fields.wants)
+        self._state = self._state.model_copy(
+            update={name: getattr(fields, name) for name in supplied}
+        )
+
+    def observe(self, observation: native.Observation) -> None:
+        state = observation.state
+        if not isinstance(state, native.RunState):
+            return
+        location = observation.location
+        node = (location.game_instance_id, location.run_id, location.node_id)
+        for offer in state.offers:
+            if offer.kind is not native.OfferKind.CARD:
+                continue
+            # Opening an ordinary reward publishes another offer for the same
+            # candidates. Keep its original pre-offer commitment boundary.
+            key = (*node, tuple(sorted(offer.contents)))
+            self._offer_wants.setdefault(key, frozenset(self._wants))
+            self._offer_keys[(*node, offer.ref)] = key
+
+    def usable_wants(self, observation: native.Observation, offer: str) -> tuple[int, ...]:
+        location = observation.location
+        key = self._offer_keys.get(
+            (location.game_instance_id, location.run_id, location.node_id, offer)
+        )
+        available = (
+            self._offer_wants.get(key, frozenset[WantIdentity]())
+            if key is not None
+            else frozenset[WantIdentity]()
+        )
+        return tuple(number for number, want in enumerate(self._wants, 1) if want in available)
+
+    def want(self, number: int) -> WantIdentity | None:
+        return self._wants[number - 1] if 1 <= number <= len(self._wants) else None
+
+    def consume(self, want: WantIdentity) -> None:
+        self._wants = tuple(value for value in self._wants if value != want)
+        self._state = self._state.model_copy(update={"wants": tuple(w.text for w in self._wants)})
+
+    def pivot(self, engine: Engine) -> None:
+        self._state = self._state.model_copy(update={"engine": engine})

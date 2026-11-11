@@ -472,15 +472,24 @@ archives; this does not establish complete real-game acceptance.
 
 `RunAgent` uses the shared `Agent` loop and `Execution.run_unit` for explicitly supplied
 `ActTask` and `HandoffTask` values. Its tools are `run_act`, `run_deck_choice`, `run_plan`,
-`run_next`, `run_inspect`, `run_knowledge`, `run_skill`, and `run_notes`. Construct one `Notes(initial_text)` per run
-and pass it to the Run `ToolCatalog`; the agent reads the same owner. Card rewards are
-resolved one offer at a time through `run_deck_choice`, with a recorded take/skip decision
-and owned-card links. The Mod distinguishes rewards that open a selector from immediate
+`run_next`, `run_inspect`, `run_knowledge`, `run_skill`, and `run_notes`. Construct one
+`Notes(NotesState(...))` per run and pass it to the Run `ToolCatalog`; the agent reads the
+same owner. An empty initial string creates empty structured notes; nonempty legacy text
+is rejected. Structured initial notes contain `engine`, at most three `wants` sentences,
+`filler` card IDs, `evidence`, and `other`. `run_notes(mode="write", ...)` replaces only
+supplied fields; reads number the current wants. Each offer freezes the wants that existed
+when it first appeared. A normal-mode take supplies one usable want number or a pivot
+engine; only a native-confirmed take consumes that want or replaces the engine. Shop
+card purchases use the same tool; `run_act` cannot bypass it. Minimal mode has no notes
+and takes use only offer, card, and reason. The Mod distinguishes rewards that open a selector from immediate
 card grants; declined immediate grants stay unclaimed until the reward screen is left.
 
 State delivery replaces complete named sections and sends stable-ID definitions once per
 context. Run deck rows aggregate identical native instances with their actual card text.
-`deck_stats` and `use.observed_plays` describe the last five sampled battle-history prefixes;
+`deck_stats` describes the current deck using native base draw and energy; its baseline
+cycle, hand-cost, and unplayed-card estimates exclude conditional combat and relic effects.
+Reward takes and skips are counted per act; shop purchases do not change those counters.
+`use.observed_plays` describes the last five sampled battle-history prefixes;
 they omit unmeasured draw, damage, block, and energy statistics. Optional private candidate
 links describe potential event connections whose conditions still require the native rules.
 

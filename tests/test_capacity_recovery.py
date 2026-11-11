@@ -42,6 +42,7 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.model_journal import RecordedLlm
+from sts2_harness.note_values import NotesState, NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.run import ActStart, RunAgent
 from sts2_harness.tools import ToolCatalog
@@ -95,7 +96,7 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
 
         tools = ToolCatalog(
             role,
-            notes=Notes("notes"),
+            notes=Notes(NotesState(other="notes")),
             observe=observe,
             inspect=unused,
             catalog=unused,
@@ -104,28 +105,28 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
         def make_context() -> Context:
             context = Context(role)
             if mode != "minimal":
-                context.begin_group(obs, "old")
+                context.begin_group(obs, NotesView(other="old"))
                 context.append_task(
-                    RunActInput(strategy_notes="old")
+                    RunActInput(strategy_notes=NotesView(other="old"))
                     if role is native.DecisionOwner.RUN
-                    else CombatActInput("old"),
+                    else CombatActInput(NotesView(other="old")),
                     obs,
                 )
                 context.append_correction(" ".join(f"old{i}" for i in range(1000)))
                 context.finish_group()
-                context.begin_group(obs, "retained")
+                context.begin_group(obs, NotesView(other="retained"))
                 context.append_task(
-                    RunActInput(strategy_notes="retained")
+                    RunActInput(strategy_notes=NotesView(other="retained"))
                     if role is native.DecisionOwner.RUN
-                    else CombatActInput("retained"),
+                    else CombatActInput(NotesView(other="retained")),
                     obs,
                 )
                 context.finish_group()
-            context.begin_group(obs, "active")
+            context.begin_group(obs, NotesView(other="active"))
             context.append_task(
-                RunActInput(strategy_notes="active")
+                RunActInput(strategy_notes=NotesView(other="active"))
                 if role is native.DecisionOwner.RUN
-                else CombatActInput("active"),
+                else CombatActInput(NotesView(other="active")),
                 obs,
             )
             if mode == "invalid":
@@ -190,7 +191,7 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
                 run = Run(lambda: model, tools, ToolRecoveryBudget())
                 await run.enter_act(ActStart(obs))
                 return run
-            return Combat(model, tools, ToolRecoveryBudget(), opening_notes="old")
+            return Combat(model, tools, ToolRecoveryBudget(), opening_notes=NotesView(other="old"))
 
         config = replace(configuration(tmp_path), protocol=protocol)
 

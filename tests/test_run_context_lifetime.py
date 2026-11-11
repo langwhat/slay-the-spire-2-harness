@@ -17,6 +17,7 @@ from sts2_harness.game import LiveGame
 from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialText
+from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog
@@ -36,7 +37,7 @@ def test_run_keeps_local_exchanges_and_rebuilds_current_node_input(
     http.observation = http.observation.model_copy(
         update={"map": native.PublicMap(bosses=(), nodes=(), legal_destinations=None)}
     )
-    notes = Notes("Old decision memo.")
+    notes = Notes(NotesState(other="Old decision memo."))
 
     async def materials(observation: native.Observation) -> tuple[DocumentView, ...]:
         node = observation.location.node_id
@@ -72,7 +73,7 @@ def test_run_keeps_local_exchanges_and_rebuilds_current_node_input(
                 agent = RunAgent(lambda: llm, tools, budget, materials=materials)
                 for index in range(3):
                     if index == 2:
-                        notes.replace("Current decision memo.")
+                        notes.write(NotesState(other="Current decision memo."), {"other"})
                         http.observation = http.observation.model_copy(
                             update={
                                 "location": http.observation.location.model_copy(

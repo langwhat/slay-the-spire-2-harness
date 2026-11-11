@@ -103,10 +103,10 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
         [
             response(
                 protocol,
-                ("long-note", "run_notes", json.dumps({"mode": "replace", "text": random_text})),
+                ("long-note", "run_notes", json.dumps({"mode": "write", "other": random_text})),
             ),
             response(
-                protocol, ("restore-note", "run_notes", '{"mode":"replace","text":"Opening plan."}')
+                protocol, ("restore-note", "run_notes", '{"mode":"write","other":"Opening plan."}')
             ),
             response(
                 protocol,
@@ -126,9 +126,8 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
                     "run_notes",
                     json.dumps(
                         {
-                            "mode": "edit",
-                            "old_text": "Opening plan.",
-                            "new_text": "Opening plan. Updated once.",
+                            "mode": "write",
+                            "other": "Opening plan. Updated once.",
                         }
                     ),
                 ),

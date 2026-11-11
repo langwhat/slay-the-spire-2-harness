@@ -29,6 +29,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval import ModelAnchor, Reached, Rejected, RejectReason, reach
@@ -55,7 +56,7 @@ async def record_campaign(
         core_version="historical-software",
         game_instance_id="game",
         run_id="run",
-        initial_notes="Opening plan.",
+        initial_notes=NotesState(other="Opening plan."),
     )
     journal = Journal.create(path, manifest)
     async with (
@@ -100,7 +101,7 @@ def test_reach_rebuilds_notes_and_inspection_at_distinct_same_cursor_anchors(
         campaign = Campaign()
         campaign.responses = iter(
             [
-                reply(("edit", "run_notes", '{"mode":"replace","text":"Updated plan."}')),
+                reply(("edit", "run_notes", '{"mode":"write","other":"Updated plan."}')),
                 reply(("map", "run_inspect", '{"area":"map"}')),
                 *campaign.responses,
             ]

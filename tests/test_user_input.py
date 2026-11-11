@@ -17,6 +17,7 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.llm.client import Llm
+from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input import UserInputQueue, create_input_app
@@ -101,7 +102,9 @@ def test_input_enters_at_each_logical_request_and_retries_reuse_the_frozen_reque
     async def scenario() -> None:
         llm, tools, budget = agent_with_model(tmp_path, httpx.MockTransport(model))
         async with llm:
-            role = CombatAgent(llm, tools, budget, opening_notes="", user_input=queue)
+            role = CombatAgent(
+                llm, tools, budget, opening_notes=NotesView(other=""), user_input=queue
+            )
             decision = await role.decide(
                 ActTask(native.RouteKey.model_validate(opening.location.model_dump())), opening
             )

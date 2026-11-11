@@ -36,6 +36,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import FailureKind, ModelUnavailable, TextMessage, TextRole
 from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.note_values import NotesView
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.results import ActionUnknown
 from sts2_harness.tools import ToolCatalog
@@ -146,7 +147,7 @@ def test_combat_requests_keep_retry_query_and_native_continuation(
                     RecordedLlm(llm, journal, role=native.DecisionOwner.COMBAT, stream="combat:1"),
                     tools,
                     battle.budget,
-                    opening_notes=notes,
+                    opening_notes=NotesView(other=notes),
                     materials=materials,
                     prompts=RecordedPrompts(PackagedPrompts(), journal),
                 )

@@ -9,6 +9,7 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.external import ExternalBackend
 from sts2_harness.external_http import create_app
+from sts2_harness.note_values import NotesView
 
 
 class FakeMod:
@@ -132,16 +133,18 @@ def test_writes_require_exposed_route_start_and_named_role_and_finish_batch() ->
                 mod.observation = native.Observation.model_validate_json(COMBAT)
                 await caller.post("/tools/run_inspect", json={"area": "state"})
                 written = await caller.post(
-                    "/tools/run_notes", json={"mode": "replace", "text": "Plan"}
+                    "/tools/run_notes", json={"mode": "write", "other": "Plan"}
                 )
                 assert json.loads(written.content)["data"] == {"updated": True}
                 mod.control = native.ControlIntent.PAUSED
                 denied = await caller.post(
-                    "/tools/run_notes", json={"mode": "replace", "text": "Wrong"}
+                    "/tools/run_notes", json={"mode": "write", "other": "Wrong"}
                 )
                 assert json.loads(denied.content)["outcome"]["status"] == "rejected"
                 notes = await caller.post("/tools/run_notes", json={"mode": "read"})
-                assert json.loads(notes.content)["data"] == {"text": "Plan"}
+                assert json.loads(notes.content)["data"] == {
+                    "notes": NotesView(other="Plan").model_dump(mode="json")
+                }
 
     asyncio.run(run())
 
@@ -155,7 +158,7 @@ def test_new_run_never_receives_old_notes_or_old_write() -> None:
             ) as caller:
                 await caller.post("/tools/run_inspect", json={"area": "state"})
                 mod.control = native.ControlIntent.RUNNING
-                await caller.post("/tools/run_notes", json={"mode": "replace", "text": "Old plan"})
+                await caller.post("/tools/run_notes", json={"mode": "write", "other": "Old plan"})
                 mod.observation = mod.observation.model_copy(
                     update={
                         "location": mod.observation.location.model_copy(
@@ -164,14 +167,16 @@ def test_new_run_never_receives_old_notes_or_old_write() -> None:
                     }
                 )
                 old_write = await caller.post(
-                    "/tools/run_notes", json={"mode": "replace", "text": "Stale"}
+                    "/tools/run_notes", json={"mode": "write", "other": "Stale"}
                 )
                 assert (
                     json.loads(old_write.content)["outcome"]["reason"]["code"]
                     == "reference_expired"
                 )
                 notes = await caller.post("/tools/run_notes", json={"mode": "read"})
-                assert json.loads(notes.content)["data"] == {"text": ""}
+                assert json.loads(notes.content)["data"] == {
+                    "notes": NotesView().model_dump(mode="json")
+                }
                 read_gate = asyncio.Event()
                 release = asyncio.Event()
                 mod.state_entered, mod.state_release = read_gate, release
@@ -191,7 +196,9 @@ def test_new_run_never_receives_old_notes_or_old_write() -> None:
                 assert value["outcome"]["status"] == "rejected"
                 assert "data" not in value
                 fresh = await caller.post("/tools/run_notes", json={"mode": "read"})
-                assert json.loads(fresh.content)["data"] == {"text": ""}
+                assert json.loads(fresh.content)["data"] == {
+                    "notes": NotesView().model_dump(mode="json")
+                }
         assert mod.actions == []
 
     asyncio.run(run())

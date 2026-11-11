@@ -12,6 +12,7 @@ from test_takeover import FakeRestorer, retain_case, source_case
 from sts2_harness.journal import ArchiveError, Journal, SceneVariant
 from sts2_harness.llm.messages import ModelInput, ToolDefinition
 from sts2_harness.materials import FileDocuments
+from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness_eval import take_over
 from sts2_harness_eval.annotations import (
@@ -81,7 +82,7 @@ def test_scene_assessment_binds_fresh_initial_archive_and_anchor_then_reopens(
                     PackagedPrompts(),
                     FileDocuments(),
                     SampleBudget(3, 30),
-                    variant=MaterialVariant(SceneStart("Fresh plan."), ()),
+                    variant=MaterialVariant(SceneStart(NotesState(other="Fresh plan.")), ()),
                     stop_requested=lambda: False,
                 )
             assert isinstance(result, TakeoverCompleted)

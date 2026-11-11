@@ -25,6 +25,7 @@ from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
 from sts2_harness.journal import SessionMaterials
 from sts2_harness.llm.client import Llm
+from sts2_harness.note_values import NotesState, NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog
@@ -113,7 +114,7 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
     http = RunHTTP(
         [
             reply(("read", "run_notes", '{"mode":"read"}')),
-            reply(("edit", "run_notes", '{"mode":"edit","old_text":"potion","new_text":"Boss"}')),
+            reply(("edit", "run_notes", '{"mode":"write","other":"Reserve Boss."}')),
             reply(
                 (
                     "act",
@@ -127,7 +128,7 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
         ]
     )
     http.fail_second = True
-    notes = Notes("Reserve potion.")
+    notes = Notes(NotesState(other="Reserve potion."))
 
     async def scenario() -> None:
         from sts2_harness.context.models import HandoffContent, RunActContent, RunActHandoffContent
@@ -155,7 +156,7 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes=notes.read(),
+                initial_notes=NotesState(other=notes.read().other),
             ),
         )
         guide = tmp_path / "guide.txt"
@@ -212,7 +213,7 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
                 assert result.outcome.outcome.completed_steps == 1
                 assert result.outcome.outcome.next_step == 2
                 assert not result.handoff_processed
-                assert notes.read() == "Reserve Boss."
+                assert notes.read().other == "Reserve Boss."
                 combined = await execution.run_unit(
                     agent, ActTask(route, handoff("Prepare for the next Boss."))
                 )
@@ -247,7 +248,10 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
             if isinstance(item, dict) and item.get("type") == "function_call_output"
         ]
         assert [item["call_id"] for item in outputs] == ["read", "edit", "act", "next"]
-        expected = [{"text": "Reserve potion."}, {"updated": True}]
+        expected = [
+            {"notes": NotesView(other="Reserve potion.").model_dump(mode="json")},
+            {"updated": True},
+        ]
         for output, data in zip(outputs[:2], expected, strict=True):
             assert isinstance(output["output"], str)
             assert json.loads(output["output"])["data"] == data
@@ -262,17 +266,20 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
         }
         journal.close()
         guide.write_text("Future source, not historical guidance.")
-        notes.replace("Future notes.")
+        notes.write(NotesState(other="Future notes."), {"other"})
         archive = Journal.open(journal.path)
         requests = archive.requests()
         assert len(requests) == 5
-        assert archive.manifest.initial_notes == "Reserve potion."
+        assert archive.manifest.initial_notes == NotesState(other="Reserve potion.")
         initial = requests[0].input[-1]
         assert isinstance(initial, RunTaskSnapshot) and isinstance(initial.content, RunActContent)
-        assert initial.content.strategy_notes == "Reserve potion."
+        assert isinstance(initial.content.observation.notes, NotesView)
+        assert initial.content.observation.notes.other == "Reserve potion."
         read = requests[1].input[-2]
         assert isinstance(read, ResultSnapshot) and isinstance(read.data, NotesData)
-        assert read.data.value.model_dump() == {"text": "Reserve potion."}
+        assert read.data.value.model_dump() == {
+            "notes": NotesView(other="Reserve potion.").model_dump()
+        }
         edit = requests[2].input[-2]
         assert isinstance(edit, ResultSnapshot) and isinstance(edit.data, NotesData)
         assert edit.data.value.model_dump() == {"updated": True}
@@ -303,12 +310,30 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
     asyncio.run(scenario())
 
 
-def test_notes_edits_reject_missing_ambiguous_and_overlapping_fragments(tmp_path: Path) -> None:
+def test_notes_replace_fields_and_preserve_pre_offer_want_identity(tmp_path: Path) -> None:
     from sts2_harness.llm.messages import ToolCall
-    from sts2_harness.results import NotesText, NotesUpdated, ReadCompleted, ReasonCode, Rejected
+    from sts2_harness.results import NotesText, NotesUpdated, ReadCompleted
 
     http = RunHTTP([])
-    notes = Notes("aaa / alpha / alpha")
+    notes = Notes(NotesState(wants=("Draw before turn three.",), other="Reserve potion."))
+    assert isinstance(http.observation.state, native.RunState)
+    http.observation = http.observation.model_copy(
+        update={
+            "state": http.observation.state.model_copy(
+                update={
+                    "offers": (
+                        native.Offer(
+                            ref="offer",
+                            kind=native.OfferKind.CARD,
+                            contents=("card",),
+                            actions=(),
+                            requires_selection=True,
+                        ),
+                    )
+                }
+            )
+        }
+    )
 
     async def scenario() -> None:
         async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
@@ -324,28 +349,24 @@ def test_notes_edits_reject_missing_ambiguous_and_overlapping_fragments(tmp_path
                 inspect=client.inspect,
                 catalog=client.catalog,
             )
-            for old in ("aa", "absent", "alpha"):
-                call = ToolCall(
-                    "conflict",
-                    "run_notes",
-                    json.dumps({"mode": "edit", "old_text": old, "new_text": "changed"}),
-                )
-                result = await tools.dispatch(call)
-                assert isinstance(result.outcome, Rejected)
-                assert result.outcome.reason.code is ReasonCode.NOTES_CONFLICT
-                assert notes.read() == "aaa / alpha / alpha"
-            for arguments, expected in (
-                ('{"mode":"replace","text":"first second"}', "first second"),
-                ('{"mode":"edit","old_text":" second","new_text":""}', "first"),
-                ('{"mode":"replace","text":""}', ""),
+            for wants, usable in (
+                (["Block by turn two.", "Draw before turn three."], (2,)),
+                (["Draw before turn three."], (1,)),
+                ([], ()),
+                (["Draw before turn three."], ()),
             ):
-                result = await tools.dispatch(ToolCall("write", "run_notes", arguments))
-                assert isinstance(result.outcome, ReadCompleted)
-                assert isinstance(result.data, NotesUpdated)
-                assert result.data.to_json() == '{"updated":true}'
-                assert notes.read() == expected
+                result = await tools.dispatch(
+                    ToolCall("write", "run_notes", json.dumps({"mode": "write", "wants": wants}))
+                )
+                assert isinstance(result.outcome, ReadCompleted) and isinstance(
+                    result.data, NotesUpdated
+                )
+                assert notes.usable_wants(http.observation, "offer") == usable
+                assert notes.read().other == "Reserve potion."
             result = await tools.dispatch(ToolCall("read", "run_notes", '{"mode":"read"}'))
-            assert isinstance(result.data, NotesText) and result.data.text == ""
+            assert isinstance(result.data, NotesText)
+            assert result.data.notes.wants[0].number == 1
+            assert result.data.notes.wants[0].text == "Draw before turn three."
             assert http.actions == []
 
     asyncio.run(scenario())
@@ -356,10 +377,10 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
         [
             reply(
                 ("game", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}'),
-                ("write", "run_notes", '{"mode":"replace","text":"must not write"}'),
+                ("write", "run_notes", '{"mode":"write","other":"must not write"}'),
             ),
             reply(
-                ("invalid", "run_notes", '{"mode":"replace","text":"must not write","extra":true}')
+                ("invalid", "run_notes", '{"mode":"write","other":"must not write","extra":true}')
             ),
             reply(("read", "run_notes", '{"mode":"read"}')),
             reply(("forbidden", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
@@ -367,7 +388,7 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
                 (
                     "update",
                     "run_notes",
-                    '{"mode":"replace","text":"Use the next shop deliberately."}',
+                    '{"mode":"write","other":"Use the next shop deliberately."}',
                 )
             ),
             reply(text="Report assessed without acting."),
@@ -398,7 +419,7 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
                     RunAgent(lambda: llm, tools, budget), HandoffTask(handoff())
                 )
         assert isinstance(result, TaskComplete)
-        assert notes.read() == "Use the next shop deliberately."
+        assert notes.read().other == "Use the next shop deliberately."
         assert http.actions == [] and budget.failures == 0
         wire = http.inputs[-1]["input"]
         assert isinstance(wire, list)
@@ -419,7 +440,9 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
             assert isinstance(output["output"], str)
             assert json.loads(output["output"])["outcome"]["status"] == "rejected"
         assert isinstance(outputs[3]["output"], str)
-        assert json.loads(outputs[3]["output"])["data"] == {"text": ""}
+        assert json.loads(outputs[3]["output"])["data"] == {
+            "notes": NotesView().model_dump(mode="json")
+        }
         first = http.inputs[0]["input"]
         assert isinstance(first, list) and isinstance(first[-1], dict)
         assert isinstance(first[-1]["content"], str)
@@ -428,7 +451,7 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
             "task": "handoff",
             "battle_report": handoff().report.model_dump(mode="json"),
             "combat_review": None,
-            "strategy_notes": "",
+            "notes": NotesView().model_dump(mode="json"),
         }
 
     asyncio.run(scenario())
@@ -445,7 +468,7 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
     from sts2_harness.run import ActStart
 
     http = RunHTTP([reply(text="Old act handoff."), reply(text="New act handoff.")])
-    notes = Notes("Initial notes.")
+    notes = Notes(NotesState(other="Initial notes."))
     path = tmp_path / "guide.txt"
     path.write_text("Old act guidance.")
     documents = FileDocuments(
@@ -477,7 +500,7 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
                 agent = RunAgent(lambda: llm, tools, budget, materials=materials)
                 first = await execution.run_unit(agent, HandoffTask(handoff()))
                 assert isinstance(first, TaskComplete)
-                notes.replace("Notes persist across acts.")
+                notes.write(NotesState(other="Notes persist across acts."), {"other"})
                 agent = RunAgent(lambda: llm, tools, budget, materials=materials)
                 path.unlink()
                 next_act = ActStart(http.observation)
@@ -487,18 +510,18 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
                 assert isinstance(caught.value.reason, Reason)
                 assert caught.value.reason.code is ReasonCode.CONTENT_UNAVAILABLE
                 assert len(http.inputs) == 1 and budget.failures == 0
-                assert notes.read() == "Notes persist across acts."
+                assert notes.read().other == "Notes persist across acts."
                 path.write_text("New act guidance.")
                 await agent.enter_act(next_act)
                 assert len(http.inputs) == 1
-                notes.replace("Updated after initialization.")
+                notes.write(NotesState(other="Updated after initialization."), {"other"})
                 second = await execution.run_unit(agent, HandoffTask(handoff()))
                 assert isinstance(second, TaskComplete)
         latest = http.inputs[-1]["input"]
         assert isinstance(latest, list) and len(latest) == 3
         task = latest[-1]
         assert isinstance(task, dict) and isinstance(task["content"], str)
-        assert json.loads(task["content"])["strategy_notes"] == "Updated after initialization."
+        assert json.loads(task["content"])["notes"]["other"] == "Updated after initialization."
         guide = latest[1]
         assert isinstance(guide, dict) and isinstance(guide["content"], str)
         assert json.loads(guide["content"])["guidance"][0]["text"] == "New act guidance."

@@ -14,6 +14,7 @@ from sts2_harness.journal import (
     SceneVariant,
     SessionMaterials,
 )
+from sts2_harness.note_values import NotesState
 
 
 @pytest.mark.parametrize("observation_json", [RUN, COMBAT], ids=["run", "combat"])
@@ -55,7 +56,7 @@ def test_restored_scene_records_a_run_or_combat_start(
         materials=SessionMaterials(
             entry_documents_enabled=False, act_guidance={}, battle_guidance=()
         ),
-        initial_notes="Existing build plan.",
+        initial_notes=NotesState(other="Existing build plan."),
         seed="SEED",
         template="template",
         game_version="version",
@@ -76,4 +77,4 @@ def test_restored_scene_records_a_run_or_combat_start(
     Journal.create(archive, manifest).close()
     with closing(Journal.open(archive)) as reopened:
         assert reopened.manifest == manifest
-        assert reopened.manifest.initial_notes == "Existing build plan."
+        assert reopened.manifest.initial_notes == NotesState(other="Existing build plan.")

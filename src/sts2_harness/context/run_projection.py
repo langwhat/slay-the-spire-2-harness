@@ -11,6 +11,7 @@ from sts2_harness.client import models as native
 from sts2_harness.context.map_projection import project_map
 from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
 from sts2_harness.context.run_models import RunObservation
+from sts2_harness.note_values import NotesView
 from sts2_harness.route_plan import RoutePlan
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -35,6 +36,9 @@ def _slim(
     known = inherited if isinstance(inherited, dict) else {}
     result: dict[str, JsonValue] = {}
     for name, child in value.items():
+        if name == "usable_wants":
+            result[name] = child
+            continue
         if name in ("card_pool", "is_removable", "is_upgradable", "hp_display"):
             continue
         if name == "display_amount" and child == value.get("amount"):
@@ -123,13 +127,20 @@ class RunDelivery:
         default_factory=lambda: dict[str, tuple[dict[str, JsonValue], ...]]()
     )
 
+    notes: NotesView | None = None
+    usable_wants: dict[str, tuple[int, ...]] = field(
+        default_factory=lambda: dict[str, tuple[int, ...]]()
+    )
+
     def snapshot(self) -> dict[str, JsonValue]:
         needed = definition_references(self.sections)
         definitions: list[JsonValue] = [
             value for key, value in self.definitions.items() if key in needed
         ]
         return {
-            "baseline": True, "defs": [_slim(value) for value in definitions], **self.sections,
+            "baseline": True,
+            "defs": [_slim(value) for value in definitions],
+            **self.sections,
             **({"mechanisms": self.mechanisms} if self.mechanisms else {}),
         }
 
@@ -269,11 +280,14 @@ class RunDelivery:
                 row["upgrade"] = {"status": upgrade.status}
                 if isinstance(upgrade, native.UpgradeAvailable):
                     base = {**raw, "text": observation.descriptions.get(ref)}
-                    row["upgrade"].update({
-                        name: value
-                        for name, value in _json(upgrade.card).items()
-                        if name not in ("definition_id", "upgrades") and base.get(name) != value
-                    })
+                    row["upgrade"].update(
+                        {
+                            name: value
+                            for name, value in _json(upgrade.card).items()
+                            if name not in ("definition_id", "upgrades", "rarity")
+                            and base.get(name) != value
+                        }
+                    )
             if actionable and obj.previews is not MISSING:
                 row["previews"] = [
                     {"target": identity(preview.target), "text": preview.text}
@@ -300,6 +314,8 @@ class RunDelivery:
             "relics": [object_row(ref, actionable=False) for ref in state.relics],
             "potions": [object_row(ref) for ref in state.potions],
         }
+        if self.role is native.DecisionOwner.RUN and self.notes is not None:
+            sections["notes"] = _json(self.notes)
         if self.role is native.DecisionOwner.RUN:
             sections["deck"] = counts(state.deck, text=True)
         if self.role is native.DecisionOwner.RUN and self.deck_stats is not None:
@@ -376,7 +392,11 @@ class RunDelivery:
                 selection["candidates"] = [
                     identity(ref)
                     if isinstance(state, native.CombatState) and ref in state.piles.hand
-                    else object_row(ref, text=self.role is native.DecisionOwner.RUN, candidate=True)
+                    else object_row(
+                        ref,
+                        text=self.role is native.DecisionOwner.RUN,
+                        candidate=state.screen in (native.RunScreen.REWARDS, native.RunScreen.SHOP),
+                    )
                     for ref in state.selection.candidates
                 ]
                 selection["selected"] = list(state.selection.selected)
@@ -389,6 +409,8 @@ class RunDelivery:
                         object_row(ref, text=True, candidate=True) for ref in offer.contents
                     ]
                     row.pop("contents")
+                    if self.notes is not None and offer.kind is native.OfferKind.CARD:
+                        row["usable_wants"] = list(self.usable_wants.get(offer.ref, ()))
                     offer_entry = observation.objects.get(offer.ref)
                     if offer_entry is not None:
                         row["name"] = offer_entry.name
@@ -403,7 +425,9 @@ class RunDelivery:
         sections["generated"] = [
             {
                 "source": object_row(ref, actionable=False),
-                "previews": [_json(card) for card in cards],
+                "previews": [
+                    {k: v for k, v in _json(card).items() if k != "rarity"} for card in cards
+                ],
             }
             for ref, cards in observation.generated.items()
             if cards
@@ -411,7 +435,8 @@ class RunDelivery:
         mechanisms: dict[tuple[str, str, str | None], dict[str, JsonValue]] = {}
         for mechanism in observation.mechanisms:
             body: dict[str, JsonValue] = {
-                name: value for name, value in _json(mechanism).items()
+                name: value
+                for name, value in _json(mechanism).items()
                 if name != "owner" and value is not None
             }
             mechanisms.setdefault(mechanism_key(body), body)
@@ -421,7 +446,10 @@ class RunDelivery:
         ]
         self.delivered_mechanisms.update(mechanisms)
         # Each ordinary section replaces its predecessor, including empty sections.
-        sections = {name: _slim(value, self.definitions) for name, value in sections.items()}
+        sections = {
+            name: value if name == "notes" else _slim(value, self.definitions)
+            for name, value in sections.items()
+        }
         baseline = not self.sections
         changed = {
             name: content

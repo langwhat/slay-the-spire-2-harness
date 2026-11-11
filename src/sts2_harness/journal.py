@@ -92,6 +92,7 @@ from sts2_harness.journal_models import (
     VariantPrefixPreparation,
 )
 from sts2_harness.llm.messages import FailureKind
+from sts2_harness.note_values import InitialNotes
 from sts2_harness.results import Reason
 
 _WRITE_TIMEOUT_SECONDS = 0.1
@@ -146,7 +147,7 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[16] = 16
+    schema_version: Literal[17] = 17
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -161,7 +162,7 @@ class Manifest(native.WireModel):
     state_format: Literal["sections_v2"] = "sections_v2"
     seed: str | None = None
     template: str | None = None
-    initial_notes: str | None = None
+    initial_notes: InitialNotes | None = None
     game_version: str | None = None
     headless: HeadlessInitialConditions | None = None
     parent: ParentPrefix | None = None

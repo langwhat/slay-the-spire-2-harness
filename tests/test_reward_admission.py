@@ -18,6 +18,7 @@ from sts2_harness.journal import (
     StandardCharacter,
 )
 from sts2_harness.journal_models import ConfigurationSnapshot, ToolSet
+from sts2_harness.note_values import NotesState
 from sts2_harness_eval.cases import (
     AdmissionFailure,
     AdmissionRequest,
@@ -171,7 +172,7 @@ def reward_source(
     )
     archive = directory / "source.sqlite"
     manifest = Manifest(
-        initial_notes=initial_notes,
+        initial_notes=NotesState(other=initial_notes) if initial_notes is not None else None,
         materials=SessionMaterials(
             entry_documents_enabled=False, act_guidance={}, battle_guidance=()
         ),

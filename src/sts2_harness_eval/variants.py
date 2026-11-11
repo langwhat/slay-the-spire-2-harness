@@ -49,6 +49,7 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.llm.messages import TextRole, ToolDefinition
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
+from sts2_harness.note_values import InitialNotes
 from sts2_harness.prompts import PromptReader
 from sts2_harness.results import QueryData
 from sts2_harness_eval.results import MaterialDifference, Rejected, RejectReason
@@ -61,7 +62,7 @@ class HistoricalStart:
 
 @dataclass(frozen=True, slots=True)
 class SceneStart:
-    initial_notes: str
+    initial_notes: InitialNotes
 
 
 @dataclass(frozen=True, slots=True)

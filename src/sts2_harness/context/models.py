@@ -10,6 +10,7 @@ from sts2_harness.client import models as native
 from sts2_harness.context.run_models import RunObservation
 from sts2_harness.decisions import BattleReport, CombatHandoff
 from sts2_harness.llm.messages import TextMessage, ToolResultMessage
+from sts2_harness.note_values import NotesView
 from sts2_harness.results import (
     ActionOutcome,
     ActionToolResult,
@@ -29,7 +30,7 @@ class TaskKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class CombatActInput:
-    opening_notes: str | MISSING = MISSING
+    opening_notes: NotesView | MISSING = MISSING
 
 
 class ForeignState(SemanticValue):
@@ -93,7 +94,7 @@ class VisibleObservation(SemanticValue):
 class ActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     observation: RunObservation
-    opening_notes: str | MISSING = MISSING
+    opening_notes: NotesView | MISSING = MISSING
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +109,7 @@ class ReviewContent(SemanticValue):
 
 @dataclass(frozen=True, slots=True)
 class RunActInput:
-    strategy_notes: str | MISSING = MISSING
+    strategy_notes: NotesView | MISSING = MISSING
     handoff: CombatHandoff | None = None
     previous_battle: CombatHandoff | None = None
 
@@ -116,7 +117,7 @@ class RunActInput:
 @dataclass(frozen=True, slots=True)
 class RunHandoffInput:
     handoff: CombatHandoff
-    strategy_notes: str | MISSING = MISSING
+    strategy_notes: NotesView | MISSING = MISSING
 
 
 class PreviousBattle(SemanticValue):
@@ -127,7 +128,6 @@ class PreviousBattle(SemanticValue):
 class RunActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     observation: RunObservation
-    strategy_notes: str | MISSING = MISSING
     previous_battle: PreviousBattle | MISSING = MISSING
 
 
@@ -140,7 +140,7 @@ class HandoffContent(SemanticValue):
     task: Literal[TaskKind.HANDOFF] = TaskKind.HANDOFF
     battle_report: BattleReport
     combat_review: str | None
-    strategy_notes: str | MISSING = MISSING
+    notes: NotesView | MISSING = MISSING
 
 
 type TaskInput = CombatActInput | CombatReviewInput | RunActInput | RunHandoffInput

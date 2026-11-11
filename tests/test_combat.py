@@ -29,6 +29,7 @@ from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame, RunEnded
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import DocumentSource, FileDocuments
+from sts2_harness.note_values import NotesView
 from sts2_harness.results import ActionToolResult
 from sts2_harness.tools import ToolCatalog
 
@@ -178,7 +179,9 @@ def test_combat_task_queries_executes_ordered_batch_and_reviews_in_same_context(
                 skills=files,
             )
             async with Llm(configuration(tmp_path), transport=httpx.MockTransport(model)) as llm:
-                role = CombatAgent(llm, tools, budget, opening_notes="Fixed opening strategy.")
+                role = CombatAgent(
+                    llm, tools, budget, opening_notes=NotesView(other="Fixed opening strategy.")
+                )
                 result = await CombatTask(execution, role, opening, budget).run()
         assert isinstance(result, CombatHandoff)
         assert result.review == "Observed loss and useful preparation for the next battle."
@@ -385,7 +388,11 @@ class BattleHTTP:
                 transport=httpx.MockTransport(self.model),
             ) as llm:
                 role = source or CombatAgent(
-                    llm, tools, self.budget, opening_notes="Opening notes.", materials=materials
+                    llm,
+                    tools,
+                    self.budget,
+                    opening_notes=NotesView(other="Opening notes."),
+                    materials=materials,
                 )
                 return await CombatTask(
                     execution, role, self.opening, self.budget, minimal=minimal

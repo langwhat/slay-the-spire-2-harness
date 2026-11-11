@@ -19,6 +19,7 @@ from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.journal import Journal, Manifest
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
+from sts2_harness.note_values import NotesState, NotesView
 from sts2_harness.session import RunSession
 
 
@@ -171,7 +172,7 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(
             wait=wait,
         ) as current:
             sessions.append(current)
-            assert current.notes.read() == "" and current.recovery.failures == 0
+            assert current.notes.read().other == "" and current.recovery.failures == 0
             yield current
 
     asyncio.run(
@@ -194,7 +195,7 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(
     for path in archives:
         archive = Journal.open(path)
         assert archive.manifest.initial_notes == ""
-        assert archive.manifest.schema_version == 16
+        assert archive.manifest.schema_version == 17
         assert archive.manifest.minimal is minimal
         assert archive.operations()[0].request.kind.value == "pause"
         assert archive.gaps == ()
@@ -236,7 +237,7 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
 
     class CodeRun:
         async def enter_act(self, start: ActStart) -> None:
-            assert sessions[0].notes.read() == "Retain this session."
+            assert sessions[0].notes.read().other == "Retain this session."
 
         async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
             return ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "travel"),)))
@@ -309,7 +310,10 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
         return CodeRun()
 
     def combat_factory(
-        execution: Execution, recovery: ToolRecoveryBudget, opening: native.Observation, notes: str
+        execution: Execution,
+        recovery: ToolRecoveryBudget,
+        opening: native.Observation,
+        notes: NotesView,
     ) -> CodeRun:
         return CodeRun()
 
@@ -327,7 +331,7 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
             stop_requested=stop.is_set,
             wait=wait,
         ) as session:
-            session.notes.replace("Retain this session.")
+            session.notes.write(NotesState(other="Retain this session."), {"other"})
             sessions.append(session)
             paths.append(path)
             yield session

@@ -2,7 +2,7 @@
 
 from enum import StrEnum
 from importlib.resources import files
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     MISSING,
@@ -11,12 +11,13 @@ from pydantic import (
     JsonValue,
     RootModel,
     TypeAdapter,
-    field_validator,
+    model_validator,
 )
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
 from sts2_harness.client import models as native
+from sts2_harness.note_values import CardId, Engine
 
 
 class Definition(native.WireModel):
@@ -126,27 +127,19 @@ class DeckChoice(StrEnum):
     SKIP = "skip"
 
 
-class DeckClass(StrEnum):
-    ENGINE = "engine"
-    PIVOT = "pivot"
-    ANSWER = "answer"
-    FILLER = "filler"
-
-
 class TakeCard(native.WireModel):
     offer: native.Nonempty
     choice: Literal[DeckChoice.TAKE]
     card: native.Nonempty
-    classification: DeckClass = Field(alias="class")
-    links: tuple[native.Nonempty, ...]
     reason: str
 
-    @field_validator("links")
-    @classmethod
-    def distinct_links(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if len(set(value)) != len(value):
-            raise ValueError("Links must be distinct native IDs.")
-        return value
+
+class WantCard(TakeCard):
+    want: Annotated[int, Field(ge=1, le=3)]
+
+
+class PivotCard(TakeCard):
+    pivot: Engine
 
 
 class SkipCard(native.WireModel):
@@ -155,7 +148,7 @@ class SkipCard(native.WireModel):
     reason: str
 
 
-class RunDeckChoice(RootModel[TakeCard | SkipCard]):
+class RunDeckChoice(RootModel[WantCard | PivotCard | SkipCard]):
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
@@ -163,6 +156,36 @@ class RunDeckChoice(RootModel[TakeCard | SkipCard]):
         return dict(
             next(item.input_schema for item in DEFINITIONS if item.name == "run_deck_choice")
         )
+
+
+class MinimalDeckChoice(RootModel[TakeCard | SkipCard]):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        original = next(d.input_schema for d in DEFINITIONS if d.name == "run_deck_choice")
+        alternatives = original["oneOf"]
+        assert isinstance(alternatives, list)
+        take = alternatives[0]
+        assert isinstance(take, dict) and isinstance(take["properties"], dict)
+        properties = {k: v for k, v in take["properties"].items() if k != "want"}
+        properties["reason"] = {
+            "type": "string",
+            "description": (
+                "One short line: the play this card replaces in an average hand and the difference."
+            ),
+        }
+        return {
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["offer", "choice", "card", "reason"],
+                    "additionalProperties": False,
+                },
+                alternatives[2],
+            ]
+        }
 
 
 class RouteEdge(native.WireModel):
@@ -193,26 +216,29 @@ class RunNext(native.WireModel):
 
 class NotesMode(StrEnum):
     READ = "read"
-    REPLACE = "replace"
-    EDIT = "edit"
+    WRITE = "write"
 
 
 class NotesReadInput(native.WireModel):
     mode: Literal[NotesMode.READ]
 
 
-class NotesReplaceInput(native.WireModel):
-    mode: Literal[NotesMode.REPLACE]
-    text: str
+class NotesWriteInput(native.WireModel):
+    mode: Literal[NotesMode.WRITE]
+    engine: Engine | MISSING = MISSING
+    wants: Annotated[tuple[native.Nonempty, ...], Field(max_length=3)] | MISSING = MISSING
+    filler: tuple[CardId, ...] | MISSING = MISSING
+    evidence: str | MISSING = MISSING
+    other: str | MISSING = MISSING
+
+    @model_validator(mode="after")
+    def supplied_fields(self) -> Self:
+        if self.model_fields_set == {"mode"}:
+            raise ValueError("Supply at least one strategy field to replace.")
+        return self
 
 
-class NotesEditInput(native.WireModel):
-    mode: Literal[NotesMode.EDIT]
-    old_text: native.Nonempty
-    new_text: str
-
-
-class NotesInput(RootModel[NotesReadInput | NotesReplaceInput | NotesEditInput]):
+class NotesInput(RootModel[NotesReadInput | NotesWriteInput]):
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler

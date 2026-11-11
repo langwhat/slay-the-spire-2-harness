@@ -16,6 +16,7 @@ from sts2_harness.context.models import RunAutomaticContent
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
+from sts2_harness.note_values import NotesState, NotesView
 
 
 def shop(*, opened: bool, potion: bool) -> native.Observation:
@@ -184,7 +185,7 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes="Current plan.",
+                initial_notes=NotesState(other="Current plan."),
             ),
             tmp_path / "archive.sqlite",
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(http.model)),
@@ -200,7 +201,8 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
         task = first.input[-1]
         assert isinstance(task, RunTaskSnapshot)
         assert isinstance(task.content, RunActContent)
-        assert task.content.strategy_notes == "Current plan."
+        assert isinstance(task.content.observation.notes, NotesView)
+        assert task.content.observation.notes.other == "Current plan."
         assert "updates" not in task.content.observation.model_dump(mode="json")
         assert all(
             isinstance(message.content, RunAutomaticContent)

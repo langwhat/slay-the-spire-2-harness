@@ -30,6 +30,7 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.note_values import InitialNotes
 from sts2_harness.prompts import PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval.cases import AfterDecisionsSpec, TargetBattle
@@ -58,7 +59,7 @@ class LaboratorySource(native.WireModel):
     construction: LaboratoryReply
     start: ControlResult | None
     opening: native.Observation | None
-    initial_notes: str
+    initial_notes: InitialNotes
     materials: SessionMaterials
     budget: SampleBudget
     endpoint: AfterDecisionsSpec | TargetBattle
@@ -202,7 +203,7 @@ async def run_laboratory_sample(
     prompts: PromptReader,
     documents: Documents,
     materials: SessionMaterials,
-    initial_notes: str,
+    initial_notes: InitialNotes,
     budget: SampleBudget,
     endpoint: AfterDecisionsSpec | TargetBattle,
     *,

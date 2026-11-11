@@ -27,6 +27,7 @@ from sts2_harness.llm.messages import (
     TextRole,
 )
 from sts2_harness.model_journal import RecordedLlm
+from sts2_harness.note_values import NotesState, NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.run import ActStart, RunAgent
 from sts2_harness.tools import ToolCatalog
@@ -100,8 +101,8 @@ def test_verified_recovery_reopens_and_replays_with_its_recorded_policy(tmp_path
     def context() -> Context:
         value = Context(role)
         for label in ("old", "retained", "active"):
-            value.begin_group(observation, label)
-            value.append_task(RunActInput(strategy_notes=label), observation)
+            value.begin_group(observation, NotesView(other=label))
+            value.append_task(RunActInput(strategy_notes=NotesView(other=label)), observation)
             if label == "old":
                 value.append_correction(" ".join(f"old{i}" for i in range(1000)))
             if label != "active":
@@ -114,7 +115,13 @@ def test_verified_recovery_reopens_and_replays_with_its_recorded_policy(tmp_path
     async def unused(*args: object) -> Never:
         raise AssertionError("Capacity recovery must not perform game IO")
 
-    tools = ToolCatalog(role, notes=Notes("notes"), observe=observe, inspect=unused, catalog=unused)
+    tools = ToolCatalog(
+        role,
+        notes=Notes(NotesState(other="notes")),
+        observe=observe,
+        inspect=unused,
+        catalog=unused,
+    )
 
     class Run(RunAgent):
         async def request(self, value: Context) -> None:

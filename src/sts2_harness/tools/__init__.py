@@ -33,6 +33,7 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.llm.messages import ToolCall, ToolDefinition
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
+from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
 from sts2_harness.results import (
     Failed,
@@ -50,9 +51,9 @@ from sts2_harness.tools.inputs import (
     CombatActInput,
     InspectInput,
     KnowledgeInput,
+    MinimalDeckChoice,
     NotesInput,
     NotesReadInput,
-    NotesReplaceInput,
     RunActInput,
     RunDeckChoice,
     RunNext,
@@ -153,7 +154,7 @@ class ToolCatalog:
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
             ToolName.RUN_ACT: RunActInput,
-            ToolName.RUN_DECK_CHOICE: RunDeckChoice,
+            ToolName.RUN_DECK_CHOICE: MinimalDeckChoice if minimal else RunDeckChoice,
             ToolName.RUN_PLAN: RunPlan,
             ToolName.RUN_NEXT: RunNext,
             ToolName.COMBAT_ACT: CombatActInput,
@@ -168,7 +169,14 @@ class ToolCatalog:
         self.definitions = tuple(
             ToolDefinition(
                 item.name,
-                MaterialText.create(f"tool:{item.name}:description", item.description),
+                MaterialText.create(
+                    f"tool:{item.name}:description",
+                    "Resolve one card offer: take one of its cards or skip it. Call once per "
+                    "reward offer, and for a card on sale only to buy it. Decide a later offer "
+                    "after the earlier one has changed the deck."
+                    if minimal and item.name == ToolName.RUN_DECK_CHOICE
+                    else item.description,
+                ),
                 inputs[ToolName(item.name)],
             )
             for item in DEFINITIONS
@@ -269,20 +277,21 @@ class ToolCatalog:
                 observation,
             )
         assert self.notes is not None
+        if observation is not None:
+            self.notes.observe(observation)
         if isinstance(query, NotesReadInput):
-            return QueryToolResult(ReadCompleted(), observation, NotesText(text=self.notes.read()))
+            return QueryToolResult(ReadCompleted(), observation, NotesText(notes=self.notes.read()))
+        if observation is None or observation.state.control is not native.StateControl.READY:
+            return QueryToolResult(
+                _problem(ReasonCode.BUSY, "Current writable run state is unavailable."), observation
+            )
         if self._notes_write_guard is not None:
             refused = await self._notes_write_guard(observation)
             if refused is not None:
                 return refused
-        result = (
-            self.notes.replace(query.text)
-            if isinstance(query, NotesReplaceInput)
-            else self.notes.edit(query.old_text, query.new_text)
-        )
-        if isinstance(result, NotesUpdated):
-            return QueryToolResult(ReadCompleted(), observation, result)
-        return QueryToolResult(result, observation)
+        fields = NotesState.model_validate_json(query.model_dump_json(exclude={"mode"}))
+        self.notes.write(fields, query.model_fields_set - {"mode"})
+        return QueryToolResult(ReadCompleted(), observation, NotesUpdated())
 
     async def _read_skill(self, call: ToolCall) -> QueryToolResult:
         observation = await self._current()
