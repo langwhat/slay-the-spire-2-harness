@@ -312,6 +312,8 @@ class PublicIntent(WireModel):
 
 
 class Player(WireModel):
+    base_draw: Annotated[int, Field(ge=0)] | MISSING = MISSING
+    base_energy: Annotated[int, Field(ge=0)] | MISSING = MISSING
     name: Nonempty
     definition_id: Nonempty
     hp: Annotated[int, Field(ge=0)]
@@ -338,6 +340,8 @@ class CombatPlayer(WireModel):
 
 
 class RunPlayer(WireModel):
+    base_draw: Annotated[int, Field(ge=0)] | MISSING = MISSING
+    base_energy: Annotated[int, Field(ge=0)] | MISSING = MISSING
     name: Nonempty
     definition_id: Nonempty
     hp: Annotated[int, Field(ge=0)]

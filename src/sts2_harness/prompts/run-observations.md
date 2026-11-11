@@ -14,7 +14,7 @@ A connection or old ink does not make travel legal now; a pending choice can blo
 
 # Deck arithmetic
 
-Judge every optional deck change by how often cards are drawn and played, not by a card's printed numbers alone. Let N be the cards that keep circulating in a fight and D the cards drawn per turn. `deck_stats` gives these numbers for the current deck: `cycle_turns` is N/D, `hand_cost` is the energy an average hand would need to play every card in it, `unplayed_per_hand` is the number of cards an average hand cannot pay for, and `added` and `skipped` count this act's card offers.
+Judge every optional deck change by how often cards are drawn and played, not by a card's printed numbers alone. Let N be the cards that keep circulating in a fight and D the native base draw per turn. `deck_stats` reports native `base_draw` and `base_energy`, without conditional relic or combat modifiers. Under those base assumptions, `baseline_cycle_turns` is N/base_draw, `baseline_hand_cost` is the energy an average hand of base_draw cards would need to play its playable cards (X costs base_energy), and `baseline_unplayed_per_hand` counts cards that hand cannot play within base_energy, paying cheaper cards first. These are deck comparisons, not predictions of a modified combat turn. `added` and `skipped` count this act's completed card reward choices.
 
 - A given card is in hand by turn t with a chance of about min(1, t*D/N). A combination of k cards is assembled by turn t with about that chance raised to the power k.
 - Adding one circulating card makes every owned card arrive N/(N+1) as often, and a k-card combination assemble (N/(N+1))^k as often. With N=25 and k=3 that is 11% less often per added card and 42% less often after five.

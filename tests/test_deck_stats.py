@@ -1,79 +1,135 @@
-from pydantic import MISSING
-from test_mod_client import COMBAT, RUN
+from test_mod_client import CARD, COMBAT, RUN
 
 from sts2_harness.client import models as native
 from sts2_harness.deck_stats import DeckStatistics
 
 
-def combat(node: str, turn: int | None, *, run: str = "run") -> native.Observation:
-    observation = native.Observation.model_validate_json(COMBAT)
-    state = observation.state
-    assert isinstance(state, native.CombatState)
-    return observation.model_copy(
+def observation(*costs: int | native.CostSymbol) -> native.Observation:
+    result = native.Observation.model_validate_json(RUN)
+    assert isinstance(result.state, native.RunState)
+    card = native.CardEntry.model_validate_json(CARD)
+    return result.model_copy(
         update={
-            "location": observation.location.model_copy(update={"node_id": node, "run_id": run}),
-            "state": state.model_copy(update={"turn": turn}),
+            "state": result.state.model_copy(
+                update={
+                    "deck": tuple(f"c{i}" for i in range(len(costs))),
+                    "player": result.state.player.model_copy(
+                        update={"base_draw": 2, "base_energy": 3}
+                    ),
+                }
+            ),
+            "objects": {
+                f"c{i}": card.model_copy(
+                    update={
+                        "definition_id": f"CARD.{i}",
+                        "cost": native.ResourceCosts(energy=cost),
+                    }
+                )
+                for i, cost in enumerate(costs)
+            },
         }
     )
 
 
-def history(*cards: str | None) -> native.HistoryData:
+def history(*cards: str) -> native.HistoryData:
     return native.HistoryData(
         cards_played_this_combat=tuple(
-            native.NamedDefinition(name=card or "Unknown card", definition_id=card or MISSING)
-            for card in cards
+            native.NamedDefinition(name=card, definition_id=card) for card in cards
         ),
         cards_played_this_turn=(),
         cards_exhausted_this_turn=(),
     )
 
 
-def test_history_snapshots_replace_the_battle_prefix_without_double_counting() -> None:
+def test_current_deck_baseline_arithmetic_is_stable_and_independent_of_battle_history() -> None:
+    current = observation(0, 1, 3, native.CostSymbol.X)
     statistics = DeckStatistics()
-    empty, uses = statistics.view(12)
-    assert "observed_plays" not in empty and "observed_turns" not in empty
-    assert uses == {}
-    statistics.capture(combat("first", 1), history("CARD.A"))
-    statistics.capture(combat("first", 1), history("CARD.A"))
-    statistics.capture(combat("first", 2), history("CARD.A", "CARD.B", "CARD.A", None))
-    statistics.capture(native.Observation.model_validate_json(RUN), history("CARD.IGNORED"))
-
-    stats, uses = statistics.view(13)
+    stats, uses = statistics.view(current)
+    # Six equiprobable two-card hands: one card is unaffordable in (1,3), (1,X), (3,X).
     assert stats == {
-        "cards": 13,
-        "fights": 1,
-        "observed_turns": 2,
-        "observed_plays": 4,
-        "history_complete": False,
-        "metric_scope": "observed_history_prefix",
+        "cards": 4,
+        "attacks": 4,
+        "skills": 0,
+        "powers": 0,
+        "unplayable": 0,
+        "circulating": 4,
+        "base_draw": 2,
+        "base_energy": 3,
+        "baseline_cycle_turns": 2.0,
+        "baseline_hand_cost": 3.5,
+        "baseline_unplayed_per_hand": 0.5,
+        "added": 0,
+        "skipped": 0,
     }
-    assert uses == {"CARD.A": 2, "CARD.B": 1}
+    assert uses == {}
+    battle = native.Observation.model_validate_json(COMBAT)
+    statistics.capture(battle, history("CARD.0", "CARD.0", "CARD.1"))
+    statistics.capture(battle, history("CARD.0", "CARD.0", "CARD.1"))
+    after, uses = statistics.view(current)
+    assert after == stats
+    assert uses == {"CARD.0": 2, "CARD.1": 1}
+    assert DeckStatistics().view(current)[0] == stats
 
 
-def test_statistics_keep_only_the_five_latest_sampled_battles() -> None:
+def test_circulating_excludes_each_one_shot_card_once_and_choices_reset_each_act() -> None:
+    current = observation(1, 2, 0, native.CostSymbol.NONE)
+    objects = dict(current.objects)
+    for ref, updates in {
+        "c0": {"card_type": "power", "keywords": ("exhaust",)},
+        "c1": {"keywords": ("exhaust",)},
+        "c2": {"keywords": ("unplayable", "ethereal")},
+    }.items():
+        card = objects[ref]
+        assert isinstance(card, native.CardEntry)
+        objects[ref] = card.model_copy(update=updates)
+    assert isinstance(current.state, native.RunState)
+    current = current.model_copy(
+        update={
+            "objects": objects,
+            "state": current.state.model_copy(
+                update={
+                    "player": current.state.player.model_copy(update={"base_draw": 4}),
+                }
+            ),
+        }
+    )
     statistics = DeckStatistics()
-    for number in range(1, 8):
-        statistics.capture(
-            combat(f"battle-{number}", number),
-            history(*([f"CARD.{number}"] * number)),
-        )
-    stats, uses = statistics.view(30)
-    assert stats["fights"] == 5
-    assert stats["observed_plays"] == 25
-    assert stats["observed_turns"] == 25
-    assert uses == {"CARD.3": 3, "CARD.4": 4, "CARD.5": 5, "CARD.6": 6, "CARD.7": 7}
+    statistics.record_choice(current, True)
+    statistics.record_choice(current, False)
+    stats, _ = statistics.view(current)
+    assert stats["circulating"] == 1
+    assert stats["unplayable"] == 1
+    assert stats["baseline_hand_cost"] == 3.0
+    assert stats["baseline_unplayed_per_hand"] == 1.0
+    assert (stats["added"], stats["skipped"]) == (1, 1)
+    next_act = current.model_copy(
+        update={
+            "state": current.state.model_copy(
+                update={
+                    "progress": current.state.progress.model_copy(update={"act": 2}),
+                }
+            )
+        }
+    )
+    next_stats, _ = statistics.view(next_act)
+    assert (next_stats["added"], next_stats["skipped"]) == (0, 0)
 
 
-def test_unknown_turns_stay_absent_and_new_runs_reset_the_window() -> None:
-    statistics = DeckStatistics()
-    statistics.capture(combat("first", 2), history("CARD.A"))
-    statistics.capture(combat("second", None), history("CARD.B", None))
-    stats, uses = statistics.view(20)
-    assert stats["observed_plays"] == 3 and "observed_turns" not in stats
-    assert uses == {"CARD.A": 1, "CARD.B": 1}
-
-    statistics.capture(combat("first", 3, run="new-run"), history("CARD.C"))
-    stats, uses = statistics.view(10)
-    assert stats["fights"] == 1 and stats["observed_turns"] == 3
-    assert stats["observed_plays"] == 1
-    assert uses == {"CARD.C": 1}
+def test_unknown_printed_cost_does_not_claim_a_known_hand_budget() -> None:
+    current = observation(1)
+    card = current.objects["c0"]
+    assert isinstance(card, native.CardEntry)
+    current = current.model_copy(
+        update={
+            "objects": {
+                "c0": card.model_copy(
+                    update={
+                        "cost": native.ResourceCosts(energy=None),
+                    }
+                )
+            }
+        }
+    )
+    stats, _ = DeckStatistics().view(current)
+    assert "baseline_hand_cost" not in stats
+    assert "baseline_unplayed_per_hand" not in stats
