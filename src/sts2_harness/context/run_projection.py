@@ -1,4 +1,4 @@
-"""Role-local catalogs and current non-map observations."""
+"""Native facts become complete sections and once-delivered stable definitions."""
 
 from __future__ import annotations
 
@@ -8,14 +8,9 @@ from dataclasses import dataclass, field
 from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
-from sts2_harness.context.entries import Collection, difference, ordered
 from sts2_harness.context.map_projection import project_map
-from sts2_harness.context.models import (
-    FinishedState,
-    RunFinishedState,
-    VisibleObservation,
-)
-from sts2_harness.context.run_models import ProfileKind, RunObservation
+from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
+from sts2_harness.context.run_models import RunObservation
 from sts2_harness.route_plan import RoutePlan
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -25,362 +20,264 @@ def _json(value: native.WireModel) -> dict[str, JsonValue]:
     return _JSON_OBJECT.validate_json(value.to_json())
 
 
-def _card_defaults(raw: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    result = dict(raw)
-    if result.get("local_keywords") == result["keywords"]:
-        result.pop("local_keywords", None)
-    for key in ("should_retain_this_turn", "exhaust_on_next_play", "has_turn_end_in_hand_effect"):
-        if result.get(key) is False:
-            result.pop(key)
-    for key in ("enchantment", "affliction"):
-        if key in result and result[key] is None:
-            result.pop(key)
-    return result
+def _key(obj: native.ObjectEntry) -> str | None:
+    if obj.definition_id is MISSING:
+        return None
+    if isinstance(obj, native.CardEntry) and obj.upgrades:
+        return f"{obj.definition_id}+{obj.upgrades}"
+    return obj.definition_id
 
 
-def _identity(observation: VisibleObservation, ref: str) -> dict[str, JsonValue]:
-    result: dict[str, JsonValue] = {"ref": ref}
-    obj = observation.objects.get(ref)
-    if obj is not None:
-        result["name"] = obj.name
-        if obj.definition_id is not MISSING:
-            result["definition_id"] = obj.definition_id
-    elif (
-        isinstance(observation.state, native.CombatState)
-        and (
-            actor := next(
-                (
-                    a
-                    for a in (
-                        *observation.state.enemies,
-                        *observation.state.inactive_enemies,
-                        *(
-                            observation.state.allies
-                            if observation.state.allies is not MISSING
-                            else ()
-                        ),
-                    )
-                    if a.ref == ref
-                ),
-                None,
-            )
-        )
-        is not None
-    ):
-        result["name"] = actor.name
-        if actor.definition_id is not MISSING:
-            result["definition_id"] = actor.definition_id
-    elif ref == "player":
-        result["name"] = observation.state.player.name
-        result["definition_id"] = observation.state.player.definition_id
-    return result
+def definition_references(value: JsonValue) -> set[str]:
+    references: set[str] = set()
+    if isinstance(value, list):
+        for child in value:
+            references.update(definition_references(child))
+        return references
+    if not isinstance(value, dict):
+        return references
+    identity = value.get("id")
+    if isinstance(identity, str) and "name" in value:
+        references.add(identity)
+    for name, child in value.items():
+        if name != "defs":
+            references.update(definition_references(child))
+    return references
 
 
-def _refs(observation: VisibleObservation, refs: tuple[str, ...]) -> list[JsonValue]:
-    return [_identity(observation, ref) for ref in refs]
+def _card_definition(obj: native.CardEntry, text: str | None) -> dict[str, JsonValue]:
+    raw = _json(obj)
+    definition: dict[str, JsonValue] = {
+        "id": _key(obj),
+        "name": obj.name,
+        "type": obj.card_type,
+        "cost": _json(obj.cost),
+        "text": text,
+    }
+    for key in ("card_pool", "rarity", "keywords", "is_upgradable", "is_removable"):
+        if raw.get(key) not in (None, []):
+            definition[key] = raw[key]
+    return definition
 
 
 @dataclass
 class RunDelivery:
-    catalog: dict[str, str] = field(default_factory=lambda: dict[str, str]())
-    scene: dict[str, JsonValue] | None = None
-    current: dict[str, JsonValue] = field(default_factory=lambda: dict[str, JsonValue]())
-    phase: native.Phase | None = None
-    next_profile: int = 1
     role: native.DecisionOwner = native.DecisionOwner.RUN
     route_plan: RoutePlan | None = None
-    actions: list[JsonValue] | None = None
-    decision: dict[str, JsonValue] | None = None
+    definitions: dict[str, dict[str, JsonValue]] = field(
+        default_factory=lambda: dict[str, dict[str, JsonValue]]()
+    )
+    delivered_defs: set[str] = field(default_factory=lambda: set[str]())
+    sections: dict[str, JsonValue] = field(default_factory=lambda: dict[str, JsonValue]())
+
+    deck_stats: dict[str, JsonValue] | None = None
+    deck_use: dict[str, int] = field(default_factory=lambda: dict[str, int]())
+    candidate_links: dict[str, tuple[dict[str, JsonValue], ...]] = field(
+        default_factory=lambda: dict[str, tuple[dict[str, JsonValue], ...]]()
+    )
+
+    def snapshot(self) -> dict[str, JsonValue]:
+        needed = definition_references(self.sections)
+        definitions: list[JsonValue] = [
+            value for key, value in self.definitions.items() if key in needed
+        ]
+        return {"baseline": True, "defs": definitions, **self.sections}
 
     def project(
         self, observation: VisibleObservation, source: native.Observation
     ) -> RunObservation:
         state = observation.state
-        location = source.location
-        additions: dict[str, JsonValue] = {}
-        hand_refs = (
-            set(state.piles.hand)
-            if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState)
-            else set[str]()
-        )
+        referenced: set[str] = set()
 
-        hand_affliction_refs = {
-            ref
-            for ref in hand_refs
-            if isinstance(obj := observation.objects.get(ref), native.CardEntry)
-            and obj.affliction is not None
-        }
-
-        def intern(kind: str, content: dict[str, JsonValue]) -> str:
-            profile: dict[str, JsonValue] = {
-                "kind": kind,
-                "language": source.game_language,
-                "schema": f"{kind}/1",
-                "content": content,
-            }
-            key = json.dumps(profile, sort_keys=True, ensure_ascii=False)
-            if key not in self.catalog:
-                ident = f"p{self.next_profile}"
-                self.next_profile += 1
-                self.catalog[key] = ident
-                additions[ident] = profile
-            return self.catalog[key]
-
-        bindings: list[JsonValue] = []
-        cards: list[JsonValue] = []
-        noncards: list[JsonValue] = []
-        descriptions: dict[str, dict[str, JsonValue]] = {}
-        object_descriptions: list[JsonValue] = []
-        for ref, obj in observation.objects.items():
-            raw = _json(obj)
-            identity = _identity(observation, ref)
-            content = {
-                k: raw[k]
-                for k in ("name", "definition_id", "upgrades", "card_type", "card_pool", "rarity")
-                if k in raw
-            }
-            for key in ("enchantment", "affliction"):
-                modifier = raw.get(key)
-                if isinstance(modifier, dict):
-                    content[key] = {k: modifier[k] for k in ("definition_id", "name")}
-            if ref in hand_refs:
-                content.pop("affliction", None)
-            profile = intern(obj.kind, content)
-            bindings.append({**identity, "kind": obj.kind, "profile": profile})
-            if isinstance(obj, native.CardEntry):
-                keys = (
-                    "keywords",
-                    "local_keywords",
-                    "is_upgradable",
-                    "is_removable",
-                    "cost",
-                    "cost_without_global_effects",
-                    "playable",
-                    "should_retain_this_turn",
-                    "exhaust_on_next_play",
-                    "has_turn_end_in_hand_effect",
-                    "enchantment",
-                    "affliction",
+        def identity(ref: str) -> dict[str, JsonValue]:
+            row: dict[str, JsonValue] = {"ref": ref}
+            obj = observation.objects.get(ref)
+            if obj is not None:
+                row["name"] = obj.name
+                if (key := _key(obj)) is not None:
+                    row["id"] = key
+                    referenced.add(key)
+                    definition = (
+                        _card_definition(obj, observation.descriptions.get(ref))
+                        if isinstance(obj, native.CardEntry)
+                        else {
+                            "id": key,
+                            "name": obj.name,
+                            "type": obj.kind,
+                            "text": observation.descriptions.get(ref),
+                        }
+                    )
+                    self.definitions.setdefault(key, definition)
+                return row
+            if ref == "player":
+                key = state.player.definition_id
+                referenced.add(key)
+                self.definitions.setdefault(key, {"id": key, "name": state.player.name})
+                return {**row, "name": state.player.name, "id": key}
+            if isinstance(state, native.CombatState):
+                actors = (
+                    *state.enemies,
+                    *state.inactive_enemies,
+                    *(state.allies if state.allies is not MISSING else ()),
                 )
-                live = {k: raw[k] for k in keys if k in raw}
-                if ref in hand_refs:
-                    live.pop("playable", None)
-                    live.pop("affliction", None)
-                live = _card_defaults({**live, "keywords": raw["keywords"]})
-                cards.append({**identity, **live})
-                if ref in observation.descriptions:
-                    descriptions[ref] = {**identity, "text": observation.descriptions[ref]}
-            else:
-                if ref in observation.descriptions:
-                    object_descriptions.append({**identity, "text": observation.descriptions[ref]})
-                if isinstance(obj, (native.EnemyEntry, native.AllyEntry)):
-                    continue
+                for actor in actors:
+                    if actor.ref == ref:
+                        row["name"] = actor.name
+                        if actor.definition_id is not MISSING:
+                            key = actor.definition_id
+                            row["id"] = key
+                            referenced.add(key)
+                            self.definitions.setdefault(key, {"id": key, "name": actor.name})
+                        return row
+            return row
+
+        def object_row(
+            ref: str, *, actionable: bool = True, text: bool = False
+        ) -> dict[str, JsonValue]:
+            obj = observation.objects.get(ref)
+            row = identity(ref)
+            if not actionable:
+                row.pop("ref", None)
+            if obj is None:
+                return row
+            key = _key(obj)
+            if key is not None:
+                row["id"] = key
+                referenced.add(key)
+            row["name"] = obj.name
+            raw = _json(obj)
+            if not isinstance(obj, native.CardEntry):
+                row.update(
+                    {k: v for k, v in raw.items() if k not in ("definition_id", "kind", "members")}
+                )
                 if isinstance(obj, native.BundleEntry):
-                    raw["members"] = _refs(observation, obj.members)
-                noncards.append({"ref": ref, **raw})
-        scene: dict[str, JsonValue] = {
-            "game_instance_id": location.game_instance_id,
-            "run_id": location.run_id,
-            "node_id": location.node_id,
-            "bindings": ordered(Collection.BINDINGS, bindings),
-        }
-        node_changed = self.scene is None or any(
-            scene[k] != self.scene[k] for k in ("game_instance_id", "run_id", "node_id")
-        )
-        reset = node_changed
-        mechanisms: list[JsonValue] = []
-        for mechanism in observation.mechanisms:
-            owner = (
-                observation.objects.get(mechanism.owner) if mechanism.owner is not MISSING else None
-            )
-            full_object_rule = (
-                mechanism.kind is native.MechanismKind.RELIC
-                and isinstance(owner, native.RelicEntry)
-            ) or (
-                mechanism.kind is native.MechanismKind.POTION
-                and isinstance(owner, native.PotionEntry)
-            )
-            if (
-                full_object_rule
-                and owner is not None
-                and mechanism.definition_id == owner.definition_id
-                and mechanism.name == owner.name
-                and mechanism.text is not None
-                and mechanism.owner is not MISSING
-                and observation.descriptions.get(mechanism.owner) == mechanism.text
+                    row["members"] = [object_row(member, text=text) for member in obj.members]
+                if ref in observation.descriptions:
+                    row["text"] = observation.descriptions[ref]
+                if key is not None and key not in self.definitions:
+                    self.definitions[key] = {
+                        "id": key,
+                        "name": obj.name,
+                        "type": obj.kind,
+                        "text": observation.descriptions.get(ref),
+                    }
+                return row
+            definition = _card_definition(obj, observation.descriptions.get(ref))
+            if key is not None:
+                self.definitions.setdefault(key, definition)
+                known = self.definitions[key]
+            else:
+                known = definition
+            if text:
+                row.update(definition)
+                if obj.definition_id in self.deck_use and not actionable:
+                    row["use"] = {"observed_plays": self.deck_use[obj.definition_id]}
+                if actionable and obj.definition_id in self.candidate_links:
+                    row["links"] = list(self.candidate_links[obj.definition_id])
+            else:
+                for field_name, value in definition.items():
+                    if field_name not in ("id", "name") and known.get(field_name) != value:
+                        row[field_name] = value
+            if obj.upgrades is None:
+                row["upgrades"] = None
+            # Current cost and playability can change without changing the definition.
+            if actionable:
+                row["cost"] = _json(obj.cost)
+            if obj.playable is not MISSING and actionable:
+                row["playable"] = obj.playable
+            for field_name in (
+                "local_keywords",
+                "cost_without_global_effects",
+                "should_retain_this_turn",
+                "exhaust_on_next_play",
+                "has_turn_end_in_hand_effect",
+                "enchantment",
+                "affliction",
             ):
-                continue
-            body = _json(mechanism)
-            body.pop("owner", None)
-            profile = intern("mechanism", body)
-            mechanisms.append(
-                {
-                    "owner": _identity(observation, mechanism.owner)
-                    if mechanism.owner is not MISSING
-                    else None,
-                    "profile": profile,
-                    "definition_id": mechanism.definition_id,
-                    "name": mechanism.name,
-                }
-            )
-        current: dict[str, JsonValue] = {
+                value = raw.get(field_name)
+                if field_name == "local_keywords" and value == raw.get("keywords"):
+                    continue
+                if value is not None and value is not False and value != []:
+                    row[field_name] = value
+            modifier_text = observation.modifier_descriptions.get(ref)
+            if modifier_text is not None:
+                row["modifier_text"] = _json(modifier_text)
+            if actionable and obj.previews is not MISSING:
+                row["previews"] = [
+                    {"target": identity(preview.target), "text": preview.text}
+                    for preview in obj.previews
+                ]
+            return row
+
+        def counts(refs: tuple[str, ...], *, text: bool = False) -> list[JsonValue]:
+            groups: dict[str, dict[str, JsonValue]] = {}
+            for ref in refs:
+                row = object_row(ref, actionable=False, text=text)
+                key = json.dumps(row, ensure_ascii=False, sort_keys=True)
+                if key not in groups:
+                    groups[key] = {**row, "n": 0}
+                count = groups[key]["n"]
+                assert isinstance(count, int)
+                groups[key]["n"] = count + 1
+            return [groups[key] for key in sorted(groups)]
+
+        sections: dict[str, JsonValue] = {
+            "location": _json(source.location),
             "progress": _json(state.progress),
             "player": _json(state.player),
-            "inventory": {
-                "relics": _refs(observation, state.relics),
-                "potions": _refs(observation, state.potions),
-            },
-            "deck": _refs(observation, state.deck),
-            "cards": cards,
-            "card_descriptions": list(descriptions.values()),
-            "noncard_objects": noncards,
-            "object_descriptions": object_descriptions,
-            "modifier_descriptions": [
-                {**_identity(observation, ref), **modifier_texts}
-                for ref, value in observation.modifier_descriptions.items()
-                if (
-                    modifier_texts := {
-                        key: text
-                        for key, text in _json(value).items()
-                        if not (key == "affliction" and ref in hand_affliction_refs)
-                        and not (
-                            isinstance(observation.objects.get(ref), native.CardEntry)
-                            and getattr(observation.objects[ref], key) is None
-                            and text is None
-                        )
-                    }
-                )
-            ],
-            "mechanisms": mechanisms,
-            "upgrades": [
-                {
-                    "source": _identity(observation, ref),
-                    **(
-                        {**_json(value), "card": _card_defaults(_json(value.card))}
-                        if isinstance(value, native.UpgradeAvailable)
-                        else _json(value)
-                    ),
-                }
-                for ref, value in observation.upgrades.items()
-            ],
-            "generated": [
-                {
-                    "source": _identity(observation, ref),
-                    "previews": [
-                        {**_json(value), "card": _card_defaults(_json(value.card))}
-                        for value in values
-                    ],
-                }
-                for ref, values in sorted(observation.generated.items())
-                if values
-            ],
+            "deck": counts(state.deck, text=self.role is native.DecisionOwner.RUN),
+            "relics": [object_row(ref, actionable=False) for ref in state.relics],
+            "potions": [object_row(ref) for ref in state.potions],
         }
+        if self.role is native.DecisionOwner.RUN and self.deck_stats is not None:
+            sections["deck_stats"] = self.deck_stats
         if self.role is native.DecisionOwner.RUN and source.map is not MISSING:
-            topology, dynamic, unknown_odds = project_map(
-                source.map, state.progress, self.route_plan
+            topology, dynamic, odds = project_map(source.map, state.progress, self.route_plan)
+            sections.update(
+                map_topology=_json(topology),
+                dynamic_map=_json(dynamic),
+                unknown_odds={ref: _json(value) for ref, value in odds.items()},
             )
-            current["map_topology"] = _json(topology)
-            current["dynamic_map"] = _json(dynamic)
-            current["unknown_odds"] = {ref: _json(odds) for ref, odds in unknown_odds.items()}
         if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState):
-            current["turn"] = state.turn
-            hand: list[JsonValue] = []
-            for ref in state.piles.hand:
-                entry = _identity(observation, ref)
-                obj = observation.objects.get(ref)
-                if isinstance(obj, native.CardEntry):
-                    entry["cost"] = _json(obj.cost)
-                    if obj.playable is not MISSING:
-                        entry["playable"] = obj.playable
-                    if obj.affliction is not None:
-                        affliction = _json(obj.affliction)
-                        if ref in observation.modifier_descriptions:
-                            affliction["profile"] = intern(
-                                ProfileKind.MECHANISM,
-                                {
-                                    "kind": native.MechanismKind.AFFLICTION,
-                                    "definition_id": obj.affliction.definition_id,
-                                    "name": obj.affliction.name,
-                                    "text": observation.modifier_descriptions[ref].affliction,
-                                },
-                            )
-                        entry["affliction"] = affliction
-                    if location.owner is self.role and obj.previews is not MISSING:
-                        entry["previews"] = [
-                            {"target": _identity(observation, preview.target), "text": preview.text}
-                            for preview in obj.previews
-                        ]
-                hand.append(entry)
-            current["hand"] = hand
-            for key in ("draw", "discard", "exhaust", "other"):
-                current[key] = _refs(observation, getattr(state.piles, key))
-            actors: dict[str, JsonValue] = {
-                "enemies": [_json(actor) for actor in state.enemies],
-                "inactive_enemies": [_json(actor) for actor in state.inactive_enemies],
-            }
+            sections.update(
+                turn=state.turn,
+                hand=[object_row(ref) for ref in state.piles.hand],
+                enemies=[_json(enemy) for enemy in state.enemies],
+                inactive_enemies=[_json(enemy) for enemy in state.inactive_enemies],
+            )
+            for name in ("draw", "discard", "exhaust", "other"):
+                sections[name] = counts(getattr(state.piles, name))
             if state.allies is not MISSING:
-                actors["allies"] = [_json(actor) for actor in state.allies]
-            current["actors"] = actors
+                sections["allies"] = [_json(ally) for ally in state.allies]
             if state.orbs is not MISSING:
-                current["orbs"] = _json(state.orbs)
-            elif not node_changed and self.phase is native.Phase.COMBAT and "orbs" in self.current:
-                current["orbs"] = self.current["orbs"]
+                sections["orbs"] = _json(state.orbs)
         if isinstance(state, (native.TerminalState, FinishedState, RunFinishedState)):
-            current["result"] = state.result
+            sections["result"] = state.result
             if state.last_observed_turn is not MISSING:
-                current["last_observed_turn"] = state.last_observed_turn
-        if source.encounter is not MISSING and state.phase is native.Phase.COMBAT:
-            current["encounter"] = _json(source.encounter)
-        elif (
-            not node_changed
-            and self.phase is native.Phase.COMBAT
-            and state.phase is native.Phase.COMBAT
-            and "encounter" in self.current
-        ):
-            current["encounter"] = self.current["encounter"]
-        for collection in Collection:
-            if collection is not Collection.BINDINGS:
-                current[collection] = ordered(collection, current[collection])
-        changed = {k: v for k, v in current.items() if reset or self.current.get(k, MISSING) != v}
-        previous_progress = self.current.get("progress")
-        same_act = (
-            self.scene is not None
-            and all(scene[k] == self.scene[k] for k in ("game_instance_id", "run_id"))
-            and isinstance(previous_progress, dict)
-            and previous_progress.get("act") == state.progress.act
-        )
-        for section in ("map_topology", "dynamic_map", "unknown_odds"):
-            if section not in current:
-                continue
-            if same_act and current[section] == self.current.get(section):
-                changed.pop(section, None)
-            else:
-                changed[section] = current[section]
-        changed.update({k: None for k in self.current if k not in current})
-        if not reset:
-            removals: dict[str, JsonValue] = {}
-            for collection in Collection:
-                if collection is Collection.BINDINGS:
-                    continue
-                updates, removed = difference(
-                    collection, self.current[collection], current[collection]
-                )
-                changed.pop(collection, None)
-                if updates:
-                    changed[collection] = updates
-                if removed:
-                    removals[collection] = removed
-            if removals:
-                changed["removed"] = removals
-        actions: list[JsonValue] = []
-        decision: dict[str, JsonValue] = {
+                sections["last_observed_turn"] = state.last_observed_turn
+            if (
+                isinstance(state, (native.TerminalState, FinishedState))
+                and state.enemies is not MISSING
+            ):
+                sections["enemies"] = [_json(enemy) for enemy in state.enemies]
+        if state.phase is native.Phase.COMBAT and source.encounter is not MISSING:
+            sections["encounter"] = _json(source.encounter)
+        same_node = self.sections.get("location") == _json(source.location)
+        if same_node and state.phase is native.Phase.COMBAT:
+            for name in ("encounter", "orbs"):
+                if name not in sections and name in self.sections:
+                    sections[name] = self.sections[name]
+        choice: dict[str, JsonValue] = {
             "phase": state.phase,
             "screen": state.screen,
             "control": state.control,
-            "actions": actions,
+            "actions": [],
             "selection": None,
         }
-        if location.owner is self.role and isinstance(state, (native.RunState, native.CombatState)):
+        if source.location.owner is self.role and isinstance(
+            state, (native.RunState, native.CombatState)
+        ):
+            actions: list[JsonValue] = []
             for action in state.actions:
                 if (
                     state.screen is native.RunScreen.MAP
@@ -389,53 +286,93 @@ class RunDelivery:
                     and action.reason is MISSING
                 ):
                     continue
-                value = _json(action)
+                row = _json(action)
                 if action.subject is not MISSING:
-                    subject = _identity(observation, action.subject)
-                    if "name" in subject:
-                        value["subject"] = subject
+                    obj = observation.objects.get(action.subject)
+                    row["subject"] = (
+                        identity(action.subject)
+                        if isinstance(obj, native.CardEntry)
+                        else object_row(action.subject)
+                    )
                 if action.targets is not MISSING:
-                    value["targets"] = _refs(observation, action.targets)
-                actions.append(value)
+                    row["targets"] = [identity(ref) for ref in action.targets]
+                actions.append(row)
+            choice["actions"] = actions
             if state.selection is not None:
                 selection = _json(state.selection)
-                selection["candidates"] = _refs(observation, state.selection.candidates)
-                selection["selected"] = _refs(observation, state.selection.selected)
-                decision["selection"] = selection
+                selection["candidates"] = [
+                    object_row(ref, text=self.role is native.DecisionOwner.RUN)
+                    for ref in state.selection.candidates
+                ]
+                selection["selected"] = list(state.selection.selected)
+                choice["selection"] = selection
             if isinstance(state, native.RunState):
                 offers: list[JsonValue] = []
                 for offer in state.offers:
-                    value = _json(offer)
-                    value["ref"] = _identity(observation, offer.ref)
-                    value["contents"] = _refs(observation, offer.contents)
-                    offers.append(value)
-                decision["offers"] = offers
-                decision["event"] = _json(state.event) if state.event is not None else None
-        complete_decision = dict(decision)
-        if self.role is native.DecisionOwner.RUN and not reset and actions == self.actions:
-            decision.pop("actions")
-        wire: dict[str, JsonValue] = {"decision": decision}
-        if additions:
-            wire["catalog_additions"] = additions
-        if reset or scene != self.scene:
-            scene_update = dict(scene)
-            if reset:
-                scene_update["reset"] = True
-            else:
-                assert self.scene is not None
-                updates, removed = difference(
-                    Collection.BINDINGS, self.scene["bindings"], scene["bindings"]
+                    row = _json(offer)
+                    row["candidates"] = [object_row(ref, text=True) for ref in offer.contents]
+                    row.pop("contents")
+                    offer_entry = observation.objects.get(offer.ref)
+                    if offer_entry is not None:
+                        row["name"] = offer_entry.name
+                    offers.append(row)
+                choice["offers"] = offers
+                choice["event"] = (
+                    {**_json(state.event), **object_row(state.event.ref)}
+                    if state.event is not None
+                    else None
                 )
-                scene_update["bindings"] = updates
-                if removed:
-                    scene_update["removed"] = removed
-            wire["scene"] = scene_update
-        if changed:
-            wire["current"] = changed
-        result = RunObservation.model_validate_json(json.dumps(wire, ensure_ascii=False))
-        self.scene = scene
-        self.current = current
-        self.phase = state.phase
-        self.actions = actions
-        self.decision = complete_decision
-        return result
+        sections["choice"] = choice
+        sections["generated"] = [
+            {
+                "source": object_row(ref, actionable=False),
+                "previews": [_json(card) for card in cards],
+            }
+            for ref, cards in observation.generated.items()
+            if cards
+        ]
+        mechanisms: list[JsonValue] = []
+        for mechanism in observation.mechanisms:
+            body: dict[str, JsonValue] = _json(mechanism)
+            key = mechanism.definition_id
+            if key is not None:
+                referenced.add(key)
+                definition: dict[str, JsonValue] = {
+                    "id": key,
+                    "name": mechanism.name,
+                    "type": mechanism.kind,
+                    "text": mechanism.text,
+                }
+                self.definitions.setdefault(key, definition)
+                body = {
+                    "id": key,
+                    "name": mechanism.name,
+                    **(
+                        {"text": mechanism.text}
+                        if self.definitions[key].get("text") != mechanism.text
+                        else {}
+                    ),
+                }
+                if mechanism.owner is not MISSING:
+                    body["owner"] = mechanism.owner
+            mechanisms.append(body)
+        sections["mechanisms"] = mechanisms
+        baseline = not self.sections
+        changed = {
+            name: content
+            for name, content in sections.items()
+            if baseline or self.sections.get(name, MISSING) != content
+        }
+        changed.update({name: None for name in self.sections if name not in sections})
+        additions: list[JsonValue] = [
+            value
+            for key, value in self.definitions.items()
+            if key in referenced and key not in self.delivered_defs
+        ]
+        if additions:
+            changed["defs"] = additions
+        if baseline:
+            changed["baseline"] = True
+        self.delivered_defs.update(referenced)
+        self.sections = sections
+        return RunObservation.model_validate_json(json.dumps(changed, ensure_ascii=False))

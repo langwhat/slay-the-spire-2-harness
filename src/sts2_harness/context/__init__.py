@@ -8,7 +8,6 @@ from typing import overload
 from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
-from sts2_harness.context.entries import Collection, apply_entries, ordered
 from sts2_harness.context.models import (
     ActContent,
     AutomaticProgress,
@@ -32,7 +31,7 @@ from sts2_harness.context.models import (
 )
 from sts2_harness.context.rendering import render
 from sts2_harness.context.run_models import RunObservation
-from sts2_harness.context.run_projection import RunDelivery
+from sts2_harness.context.run_projection import RunDelivery, definition_references
 from sts2_harness.context.view import visible_observation
 from sts2_harness.decisions import CombatHandoff
 from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
@@ -55,13 +54,6 @@ from sts2_harness.user_input_values import UserInput
 
 _VIEWER_PREFIX = "[viewer] "
 _VIEWER_TEXT_LIMIT = 50_000
-_CARD_OFFER_CHECK = (
-    "Skipping is a complete answer when offered. Use strategy_notes or the current state to "
-    "identify the binding constraint and the turn it requires at ordinary energy. After paying "
-    "this card's cost, can that turn still be played? Choose the card only if that turn becomes "
-    "more reachable, or identify a different gain larger than the play its cost displaces. "
-    "A stronger attainable new line can replace the current plan."
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,39 +61,9 @@ class _Group:
     id: int
     start: int
     observation: dict[str, JsonValue]
-    catalog: dict[str, JsonValue]
     notes: str
     guidance: tuple[DocumentView, ...]
     route_plan: JsonValue
-
-
-def _profile_references(value: JsonValue) -> set[str]:
-    references: set[str] = set()
-    if isinstance(value, list):
-        for item in value:
-            references.update(_profile_references(item))
-        return references
-    if not isinstance(value, dict):
-        return references
-    profile = value.get("profile")
-    if isinstance(profile, str):
-        references.add(profile)
-    for child in value.values():
-        references.update(_profile_references(child))
-    return references
-
-
-def _rename_profiles(value: JsonValue, names: dict[str, str]) -> JsonValue:
-    if isinstance(value, list):
-        return [_rename_profiles(item, names) for item in value]
-    if not isinstance(value, dict):
-        return value
-    return {
-        key: names.get(child, child)
-        if key == "profile" and isinstance(child, str)
-        else _rename_profiles(child, names)
-        for key, child in value.items()
-    }
 
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
@@ -205,6 +167,13 @@ class Context:
     def set_route_plan(self, plan: RoutePlan | None) -> None:
         self._run_delivery.route_plan = plan
 
+    def set_deck_stats(self, stats: dict[str, JsonValue], use: dict[str, int]) -> None:
+        self._run_delivery.deck_stats = stats
+        self._run_delivery.deck_use = use
+
+    def set_candidate_links(self, links: dict[str, tuple[dict[str, JsonValue], ...]]) -> None:
+        self._run_delivery.candidate_links = links
+
     @property
     def group_ids(self) -> tuple[int | None, int | None]:
         return (
@@ -219,39 +188,12 @@ class Context:
             return
         self._group_number += 1
         delivery = deepcopy(self._delivery)
-        known = set(delivery.catalog.values())
-        if delivery.scene is not None:
-            assert delivery.decision is not None
-            wire: dict[str, JsonValue] = {"decision": delivery.decision}
-        else:
-            projected = delivery.project(visible_observation(observation, self._role), observation)
-            wire = _JSON_OBJECT.validate_json(projected.to_json())
-        names = {
-            ident: f"baseline{self._group_number}.{ident}"
-            for ident in delivery.catalog.values()
-            if ident not in known
-        }
-        wire.pop("catalog_additions", None)
-        decision = wire["decision"]
-        assert isinstance(decision, dict)
-        decision["actions"] = delivery.actions
-        if delivery.scene is not None:
-            wire["scene"] = {**delivery.scene, "reset": True}
-        if delivery.current:
-            wire["current"] = dict(delivery.current)
-        renamed = _rename_profiles(wire, names)
-        assert isinstance(renamed, dict)
-        baseline_references = _profile_references(renamed)
-        catalog: dict[str, JsonValue] = {
-            names.get(ident, ident): _JSON_OBJECT.validate_json(key)
-            for key, ident in delivery.catalog.items()
-            if names.get(ident, ident) in baseline_references
-        }
+        if not delivery.sections:
+            delivery.project(visible_observation(observation, self._role), observation)
         self._active_group = _Group(
             self._group_number,
             len(self._history),
-            renamed,
-            catalog,
+            deepcopy(delivery.snapshot()),
             notes,
             tuple(self._guidance.values()),
             {"edges": deepcopy(route_plan["edges"])} if isinstance(route_plan, dict) else None,
@@ -271,30 +213,23 @@ class Context:
         if group is None:
             raise RuntimeError("No interaction group exists.")
         retained = tuple(self._history[group.start :])
-        references = _profile_references(group.observation)
-        additions: set[str] = set()
+        observation = deepcopy(group.observation)
+        # Definitions needed by retained changes may predate this group's baseline.
+        definitions: dict[str, JsonValue] = {}
+        initial = observation.get("defs", [])
+        assert isinstance(initial, list)
+        for definition in initial:
+            assert isinstance(definition, dict) and isinstance(definition["id"], str)
+            definitions[definition["id"]] = definition
         for message in retained:
             projected = _message_observation(message)
             if projected is None:
                 continue
-            content = _JSON_OBJECT.validate_json(projected.to_json())
-            references.update(_profile_references(content))
-            entries = content.get("catalog_additions")
-            if isinstance(entries, dict):
-                additions.update(entries)
-        needed = _profile_references(group.observation) | (references - additions)
-        catalog: dict[str, JsonValue] = {
-            ident: _JSON_OBJECT.validate_json(key)
-            for key, ident in self._delivery.catalog.items()
-            if ident in needed
-        }
-        catalog.update(group.catalog)
-        profiles: dict[str, JsonValue] = {
-            key: value for key, value in catalog.items() if key in needed
-        }
-        observation = dict(group.observation)
-        if profiles:
-            observation["catalog_additions"] = profiles
+            wire = _JSON_OBJECT.validate_json(projected.to_json())
+            for key in definition_references(wire):
+                if key in self._delivery.definitions:
+                    definitions.setdefault(key, self._delivery.definitions[key])
+        observation["defs"] = list(definitions.values())
         values: dict[str, JsonValue] = {"observation": observation}
         if self._role is native.DecisionOwner.RUN:
             if not self._minimal:
@@ -317,8 +252,7 @@ class Context:
                 )
                 if battle not in retained_battles:
                     values["previous_battle"] = _JSON_OBJECT.validate_json(battle.to_json())
-            current = observation.get("current")
-            dynamic = current.get("dynamic_map") if isinstance(current, dict) else None
+            dynamic = observation.get("dynamic_map")
             if not isinstance(dynamic, dict):
                 values["route_plan"] = group.route_plan
         elif not self._minimal:
@@ -369,102 +303,26 @@ class Context:
         if not isinstance(initial, dict):
             raise ValueError("The compaction observation is invalid.")
         RunObservation.model_validate_json(json.dumps(initial, ensure_ascii=False))
-        catalog: dict[str, str] = {}
-        known: set[str] = set()
-
-        def receive(observation: dict[str, JsonValue]) -> None:
-            entries = observation.get("catalog_additions")
-            if isinstance(entries, dict):
-                for ident, profile in entries.items():
-                    key = json.dumps(profile, sort_keys=True, ensure_ascii=False)
-                    catalog[key] = ident
-                    known.add(ident)
-            if not _profile_references(observation) <= known:
-                raise ValueError("A retained profile reference has no definition.")
-
-        reconstructed_scene: dict[str, JsonValue] | None = None
-        reconstructed_current: dict[str, JsonValue] = {}
-        reconstructed_actions: list[JsonValue] | None = None
-        reconstructed_decision: dict[str, JsonValue] | None = None
+        definitions: dict[str, dict[str, JsonValue]] = {}
+        sections: dict[str, JsonValue] = {}
 
         def apply(observation: dict[str, JsonValue]) -> None:
-            nonlocal reconstructed_scene, reconstructed_current, reconstructed_actions
-            nonlocal reconstructed_decision
-            receive(observation)
-            decision = observation.get("decision")
-            assert isinstance(decision, dict)
-            actions = decision.get("actions")
-            if isinstance(actions, list):
-                reconstructed_actions = actions
-            reconstructed_decision = {**decision, "actions": reconstructed_actions}
-            new_scene = observation.get("scene")
-            if isinstance(new_scene, dict):
-                reset = (
-                    new_scene.get("reset") is True
-                    or reconstructed_scene is None
-                    or any(
-                        new_scene.get(key) != reconstructed_scene.get(key)
-                        for key in ("game_instance_id", "run_id", "node_id")
-                    )
-                )
-                if reset:
-                    if not isinstance(actions, list):
-                        raise ValueError("A complete observation requires its action menu.")
-                    updates = observation.get("current")
-                    old_progress = reconstructed_current.get("progress")
-                    new_progress = updates.get("progress") if isinstance(updates, dict) else None
-                    same_act = (
-                        reconstructed_scene is not None
-                        and all(
-                            new_scene.get(key) == reconstructed_scene.get(key)
-                            for key in ("game_instance_id", "run_id")
-                        )
-                        and isinstance(old_progress, dict)
-                        and isinstance(new_progress, dict)
-                        and old_progress.get("act") == new_progress.get("act")
-                    )
-                    reconstructed_current = {
-                        key: value
-                        for key, value in reconstructed_current.items()
-                        if key in ("map_topology", "dynamic_map", "unknown_odds") and same_act
-                    }
-                previous = (
-                    reconstructed_scene["bindings"]
-                    if not reset and reconstructed_scene is not None
-                    else []
-                )
-                reconstructed_scene = {
-                    key: value
-                    for key, value in new_scene.items()
-                    if key not in ("removed", "reset")
-                }
-                reconstructed_scene["bindings"] = apply_entries(
-                    Collection.BINDINGS,
-                    previous,
-                    new_scene["bindings"],
-                    new_scene.get("removed", []),
-                )
-            updates = observation.get("current")
-            if not isinstance(updates, dict):
-                return
-            combat = decision.get("phase") == native.Phase.COMBAT
-            for key, value in updates.items():
-                if key == "removed" or key in Collection:
-                    continue
-                if value is None and not (key == "turn" and combat):
-                    reconstructed_current.pop(key, None)
-                else:
-                    reconstructed_current[key] = value
-            removals = updates.get("removed", {})
-            assert isinstance(removals, dict)
-            for collection in Collection:
-                if collection in updates or collection in removals:
-                    reconstructed_current[collection] = apply_entries(
-                        collection,
-                        reconstructed_current.get(collection, []),
-                        updates.get(collection, []),
-                        removals.get(collection, []),
-                    )
+            if observation.get("baseline") is True:
+                sections.clear()
+            entries = observation.get("defs", [])
+            assert isinstance(entries, list)
+            for entry in entries:
+                assert isinstance(entry, dict) and isinstance(entry["id"], str)
+                definitions[entry["id"]] = entry
+            for name, value in observation.items():
+                if name not in ("baseline", "defs"):
+                    if value is None:
+                        sections.pop(name, None)
+                    else:
+                        sections[name] = value
+            missing = definition_references(observation) - definitions.keys()
+            if missing:
+                raise ValueError("A retained definition reference has no definition.")
 
         apply(initial)
         pending: list[str] = []
@@ -483,40 +341,16 @@ class Context:
                 apply(_JSON_OBJECT.validate_json(observation.to_json()))
         if pending:
             raise ValueError("A retained tool call has no result.")
-        renamed = {
-            old: catalog[key] for key, old in self._delivery.catalog.items() if key in catalog
+        expected = {
+            name: value for name, value in self._delivery.sections.items() if value is not None
         }
-        scene = _rename_profiles(self._delivery.scene, renamed)
-        current = _rename_profiles(self._delivery.current, renamed)
-        if scene is not None and not isinstance(scene, dict):
-            raise ValueError("The current scene is invalid.")
-        if not isinstance(current, dict):
-            raise ValueError("The current state is invalid.")
-        for collection in Collection:
-            if collection in current:
-                current[collection] = ordered(collection, current[collection])
-        if (
-            has_retained_observation
-            and not (_profile_references(scene) | _profile_references(current)) <= known
-        ):
-            raise ValueError("The current state has an undelivered profile.")
-        if has_retained_observation and (
-            reconstructed_scene != scene
-            or reconstructed_current != current
-            or reconstructed_actions != self._delivery.actions
-        ):
-            raise ValueError("The retained observations do not reproduce the current state.")
+        if has_retained_observation and sections != expected:
+            raise ValueError("The retained sections do not reproduce the current state.")
         if not install:
             return
-        self._delivery.catalog = catalog
-        self._delivery.scene = reconstructed_scene
-        self._delivery.current = reconstructed_current
-        self._delivery.actions = reconstructed_actions
-        self._delivery.decision = reconstructed_decision
-        if not has_retained_observation:
-            decision = initial.get("decision")
-            if isinstance(decision, dict) and isinstance(decision.get("phase"), str):
-                self._delivery.phase = native.Phase(decision["phase"])
+        self._delivery.definitions = definitions
+        self._delivery.delivered_defs = set(definitions)
+        self._delivery.sections = self._delivery.sections if has_retained_observation else sections
         self._history = list(candidate)
         if self._last_group is not None:
             self._last_group = replace(
@@ -588,18 +422,9 @@ class Context:
         if isinstance(task, CombatActInput):
             content = ActContent(observation=projected, opening_notes=task.opening_notes)
         else:
-            state = observation.state
-            card_offer_check = (
-                _CARD_OFFER_CHECK
-                if isinstance(state, native.RunState)
-                and state.screen in (native.RunScreen.REWARDS, native.RunScreen.SELECTION)
-                and any(offer.kind is native.OfferKind.CARD for offer in state.offers)
-                else MISSING
-            )
             if task.handoff is not None and task.handoff != self._previous_battle:
                 content = RunActHandoffContent(
                     observation=projected,
-                    card_offer_check=card_offer_check,
                     strategy_notes=task.strategy_notes,
                     battle_report=task.handoff.report,
                     combat_review=task.handoff.review,
@@ -608,7 +433,6 @@ class Context:
                 previous = task.previous_battle
                 content = RunActContent(
                     observation=projected,
-                    card_offer_check=card_offer_check,
                     strategy_notes=task.strategy_notes,
                     previous_battle=(
                         PreviousBattle(battle_report=previous.report, combat_review=previous.review)

@@ -103,10 +103,6 @@ class CombatReviewInput:
 
 class ReviewContent(SemanticValue):
     task: Literal[TaskKind.REVIEW] = TaskKind.REVIEW
-    instruction: str = (
-        "Review this battle for Run using its retained history and the supplied report. "
-        "Do not perform game actions."
-    )
     battle_report: BattleReport
 
 
@@ -131,7 +127,6 @@ class PreviousBattle(SemanticValue):
 class RunActContent(SemanticValue):
     task: Literal[TaskKind.ACT] = TaskKind.ACT
     observation: RunObservation
-    card_offer_check: str | MISSING = MISSING
     strategy_notes: str | MISSING = MISSING
     previous_battle: PreviousBattle | MISSING = MISSING
 
@@ -143,11 +138,6 @@ class RunActHandoffContent(RunActContent):
 
 class HandoffContent(SemanticValue):
     task: Literal[TaskKind.HANDOFF] = TaskKind.HANDOFF
-    instruction: str = (
-        "Assess the battle report and any Combat review using available evidence. "
-        "Update strategy notes if useful, then finish with a concise response. "
-        "Do not perform game actions."
-    )
     battle_report: BattleReport
     combat_review: str | None
     strategy_notes: str | MISSING = MISSING
