@@ -406,7 +406,13 @@ class RunDelivery:
                 for offer in state.offers:
                     row = _json(offer)
                     row["candidates"] = [
-                        object_row(ref, text=True, candidate=True) for ref in offer.contents
+                        object_row(
+                            ref,
+                            text=True,
+                            candidate=state.screen
+                            in (native.RunScreen.REWARDS, native.RunScreen.SHOP),
+                        )
+                        for ref in offer.contents
                     ]
                     row.pop("contents")
                     if self.notes is not None and offer.kind is native.OfferKind.CARD:

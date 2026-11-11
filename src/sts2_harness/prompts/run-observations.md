@@ -19,7 +19,7 @@ Judge every optional deck change by how often cards are drawn and played, not by
 - A given card is in hand by turn t with a chance of about min(1, t*D/N). A combination of k cards is assembled by turn t with about that chance raised to the power k.
 - Adding one circulating card makes every owned card arrive N/(N+1) as often, and a k-card combination assemble (N/(N+1))^k as often. With N=25 and k=3 that is 11% less often per added card and 42% less often after five.
 - The added card raises the deck's output only if its value when drawn exceeds the average value of a card drawn from the current deck. Its value includes the extra output it gives other owned cards through their rules, and counts only the draws on which it is actually played.
-- When hands already hold more playable cards than energy (`unplayed_per_hand` above zero), the added card is played only instead of another card. Its value is then the difference between the two, not its printed number.
+- When hands already hold more playable cards than energy (`baseline_unplayed_per_hand` above zero), the added card is played only instead of another card. Its value is then the difference between the two, not its printed number.
 - An added card does not replace the deck's worst card. The worst card stays and is still drawn; the new card takes the place of an average draw. Being better than a starter card is not a reason to take it.
 - Measure value in the fights that threaten the run: output that ends them sooner or prevents HP loss there.
 - The average rises as the deck's strongest combination forms, so a card worth taking early can be a loss later.
