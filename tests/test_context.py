@@ -6,8 +6,11 @@ from sts2_harness.client.models import (
     CardEntry,
     CombatState,
     DecisionOwner,
+    MechanismKind,
+    MechanismView,
     Observation,
     ResourceCosts,
+    RunState,
 )
 from sts2_harness.context import CombatActInput, Context, QueryToolResult, ReadCompleted
 from sts2_harness.context.models import RunActInput
@@ -116,3 +119,97 @@ def test_role_boundary_hides_combat_menu_and_aggregates_native_deck_text() -> No
     update = json.loads(context.model_input()[-1].text)["observation"]
     assert update["deck"] == []
     assert update["choice"]["actions"][0]["ref"] == "travel"
+
+
+def test_automatic_upgrade_previews_remain_beside_candidates_and_update() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    combat_state = observation.state
+    assert isinstance(combat_state, CombatState)
+    run = Observation.model_validate_json(RUN)
+    assert isinstance(run.state, RunState)
+    for role, state, task in (
+        (DecisionOwner.COMBAT, combat_state, CombatActInput()),
+        (
+            DecisionOwner.RUN,
+            run.state.model_copy(update={"selection": combat_state.selection}),
+            RunActInput(),
+        ),
+    ):
+        current = observation.model_copy(
+            update={
+                "state": state,
+                "location": observation.location.model_copy(update={"owner": role}),
+            }
+        )
+        context = Context(role)
+        context.append_task(task, current)
+        initial = json.loads(context.model_input()[-1].text)["observation"]
+        candidates = initial["choice"]["selection"]["candidates"]
+        assert candidates[1]["upgrade"] == json.loads(observation.upgrades["c1"].to_json())
+        assert candidates[0]["upgrade"] == {"status": "not_upgradable"}
+
+        changed = current.model_copy(update={"upgrades": {}})
+        context.append_task(task, changed)
+        update = json.loads(context.model_input()[-1].text)["observation"]
+        assert all("upgrade" not in row for row in update["choice"]["selection"]["candidates"])
+
+
+def test_history_use_names_its_base_definition_scope_across_upgrade_rows() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    original = observation.objects["c1"]
+    assert isinstance(original, CardEntry)
+    state = observation.state
+    assert isinstance(state, CombatState)
+    observation = observation.model_copy(
+        update={
+            "state": state.model_copy(update={"deck": ("c1", "c2")}),
+            "objects": {
+                **observation.objects,
+                "c2": original.model_copy(update={"upgrades": 1}),
+            },
+        }
+    )
+    context = Context(DecisionOwner.RUN)
+    context.set_deck_stats({"observed_plays": 3}, {"CARD.ONE": 3})
+    context.append_task(RunActInput(), observation)
+    deck = json.loads(context.model_input()[-1].text)["observation"]["deck"]
+    assert {row["id"] for row in deck} == {"CARD.ONE", "CARD.ONE+1"}
+    assert all(
+        row["use"]
+        == {"scope": "base_definition", "definition_id": "CARD.ONE", "observed_plays": 3}
+        for row in deck
+    )
+
+
+def test_mechanism_owners_bind_to_aggregated_deck_definitions() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    original = observation.objects["c1"]
+    assert isinstance(original, CardEntry)
+    state = observation.state
+    assert isinstance(state, CombatState)
+    observation = observation.model_copy(
+        update={
+            "state": state.model_copy(update={"deck": ("c1", "c2")}),
+            "objects": {
+                **observation.objects,
+                "c2": original.model_copy(update={"definition_id": "CARD.TWO", "name": "Other"}),
+            },
+            "mechanisms": tuple(
+                MechanismView(
+                    kind=MechanismKind.POWER,
+                    definition_id=f"POWER.{index}",
+                    name=f"Power {index}",
+                    owner=ref,
+                    text=f"Native rule {index}",
+                )
+                for index, ref in enumerate(("c1", "c2"))
+            ),
+        }
+    )
+    context = Context(DecisionOwner.RUN)
+    context.append_task(RunActInput(), observation)
+    current = json.loads(context.model_input()[-1].text)["observation"]
+    assert [entry["owner"] for entry in current["mechanisms"]] == [
+        {"id": "CARD.ONE", "name": original.name},
+        {"id": "CARD.TWO", "name": "Other"},
+    ]

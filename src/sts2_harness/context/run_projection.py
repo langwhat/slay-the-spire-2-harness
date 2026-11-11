@@ -171,7 +171,11 @@ class RunDelivery:
             if text:
                 row.update(definition)
                 if obj.definition_id in self.deck_use and not actionable:
-                    row["use"] = {"observed_plays": self.deck_use[obj.definition_id]}
+                    row["use"] = {
+                        "scope": "base_definition",
+                        "definition_id": obj.definition_id,
+                        "observed_plays": self.deck_use[obj.definition_id],
+                    }
                 if actionable and obj.definition_id in self.candidate_links:
                     row["links"] = list(self.candidate_links[obj.definition_id])
             else:
@@ -202,6 +206,8 @@ class RunDelivery:
             modifier_text = observation.modifier_descriptions.get(ref)
             if modifier_text is not None:
                 row["modifier_text"] = _json(modifier_text)
+            if actionable and ref in observation.upgrades:
+                row["upgrade"] = _json(observation.upgrades[ref])
             if actionable and obj.previews is not MISSING:
                 row["previews"] = [
                     {"target": identity(preview.target), "text": preview.text}
@@ -353,8 +359,11 @@ class RunDelivery:
                         else {}
                     ),
                 }
-                if mechanism.owner is not MISSING:
-                    body["owner"] = mechanism.owner
+            if mechanism.owner is not MISSING:
+                owner = identity(mechanism.owner)
+                if mechanism.owner in (*state.deck, *state.relics):
+                    owner.pop("ref", None)
+                body["owner"] = owner
             mechanisms.append(body)
         sections["mechanisms"] = mechanisms
         baseline = not self.sections
