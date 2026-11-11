@@ -31,7 +31,7 @@ from sts2_harness.context.models import (
 )
 from sts2_harness.context.rendering import render
 from sts2_harness.context.run_models import RunObservation
-from sts2_harness.context.run_projection import RunDelivery, definition_references
+from sts2_harness.context.run_projection import RunDelivery, definition_references, mechanism_key
 from sts2_harness.context.view import visible_observation
 from sts2_harness.decisions import CombatHandoff
 from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
@@ -305,22 +305,33 @@ class Context:
         RunObservation.model_validate_json(json.dumps(initial, ensure_ascii=False))
         definitions: dict[str, dict[str, JsonValue]] = {}
         sections: dict[str, JsonValue] = {}
+        mechanisms: set[tuple[str, str, str | None]] = set()
 
         def apply(observation: dict[str, JsonValue]) -> None:
             if observation.get("baseline") is True:
                 sections.clear()
+                mechanisms.clear()
+            rules = observation.get("mechanisms", [])
+            assert isinstance(rules, list)
+            for rule in rules:
+                assert isinstance(rule, dict)
+                mechanisms.add(mechanism_key(rule))
             entries = observation.get("defs", [])
             assert isinstance(entries, list)
             for entry in entries:
                 assert isinstance(entry, dict) and isinstance(entry["id"], str)
                 definitions[entry["id"]] = entry
             for name, value in observation.items():
-                if name not in ("baseline", "defs"):
+                if name not in ("baseline", "defs", "mechanisms"):
                     if value is None:
                         sections.pop(name, None)
                     else:
                         sections[name] = value
-            missing = definition_references(observation) - definitions.keys()
+            missing = (
+                definition_references(observation)
+                - definitions.keys()
+                - self._delivery.inline_card_ids
+            )
             if missing:
                 raise ValueError("A retained definition reference has no definition.")
 
@@ -350,6 +361,7 @@ class Context:
             return
         self._delivery.definitions = definitions
         self._delivery.delivered_defs = set(definitions)
+        self._delivery.delivered_mechanisms = mechanisms
         self._delivery.sections = self._delivery.sections if has_retained_observation else sections
         self._history = list(candidate)
         if self._last_group is not None:

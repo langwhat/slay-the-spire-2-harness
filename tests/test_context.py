@@ -111,9 +111,10 @@ def test_role_boundary_hides_combat_menu_and_aggregates_native_deck_text() -> No
     context.append_task(RunActInput(), observation)
     state = json.loads(context.model_input()[0].text)["observation"]
     assert "hand" not in state
-    assert state["choice"]["actions"] == []
+    assert "actions" not in state["choice"]
     assert state["deck"][0]["id"] == "CARD.ONE"
-    assert state["deck"][0]["text"] is None
+    assert "text" not in state["deck"][0]
+    assert not any(row["id"].startswith("CARD.") for row in state.get("defs", []))
     assert "ref" not in state["deck"][0]
     context.append_task(RunActInput(), Observation.model_validate_json(RUN))
     update = json.loads(context.model_input()[-1].text)["observation"]
@@ -144,14 +145,23 @@ def test_automatic_upgrade_previews_remain_beside_candidates_and_update() -> Non
         context = Context(role)
         context.append_task(task, current)
         initial = json.loads(context.model_input()[-1].text)["observation"]
-        candidates = initial["choice"]["selection"]["candidates"]
-        assert candidates[1]["upgrade"] == json.loads(observation.upgrades["c1"].to_json())
+        candidates = (
+            initial["hand"] if role is DecisionOwner.COMBAT
+            else initial["choice"]["selection"]["candidates"]
+        )
+        assert candidates[1]["upgrade"] == {
+            "status": "available", "text": "造成3点伤害。"
+        }
         assert candidates[0]["upgrade"] == {"status": "not_upgradable"}
 
         changed = current.model_copy(update={"upgrades": {}})
         context.append_task(task, changed)
         update = json.loads(context.model_input()[-1].text)["observation"]
-        assert all("upgrade" not in row for row in update["choice"]["selection"]["candidates"])
+        updated = (
+            update["hand"] if role is DecisionOwner.COMBAT
+            else update["choice"]["selection"]["candidates"]
+        )
+        assert all("upgrade" not in row for row in updated)
 
 
 def test_history_use_names_its_base_definition_scope_across_upgrade_rows() -> None:
@@ -180,35 +190,62 @@ def test_history_use_names_its_base_definition_scope_across_upgrade_rows() -> No
     )
 
 
-def test_mechanism_owners_bind_to_aggregated_deck_definitions() -> None:
+def test_mechanisms_are_once_delivered_without_owners_and_restore_after_compaction() -> None:
     observation = Observation.model_validate_json(COMBAT)
-    original = observation.objects["c1"]
-    assert isinstance(original, CardEntry)
+    mechanism = MechanismView(
+        kind=MechanismKind.POWER,
+        definition_id="POWER.ONE",
+        name="Power",
+        owner="c1",
+        text="Native rule",
+    )
+    observation = observation.model_copy(update={"mechanisms": (
+        mechanism, mechanism.model_copy(update={"owner": "c2"}),
+    )})
+    context = Context(DecisionOwner.COMBAT)
+    context.append_task(CombatActInput(), observation)
+    first = json.loads(context.model_input()[-1].text)["observation"]
+    assert first["mechanisms"] == [{
+        "kind": "power", "definition_id": "POWER.ONE", "name": "Power", "text": "Native rule",
+    }]
+    assert "deck" not in first
+    context.begin_group(observation, "")
     state = observation.state
     assert isinstance(state, CombatState)
-    observation = observation.model_copy(
-        update={
-            "state": state.model_copy(update={"deck": ("c1", "c2")}),
-            "objects": {
-                **observation.objects,
-                "c2": original.model_copy(update={"definition_id": "CARD.TWO", "name": "Other"}),
-            },
-            "mechanisms": tuple(
-                MechanismView(
-                    kind=MechanismKind.POWER,
-                    definition_id=f"POWER.{index}",
-                    name=f"Power {index}",
-                    owner=ref,
-                    text=f"Native rule {index}",
-                )
-                for index, ref in enumerate(("c1", "c2"))
-            ),
-        }
-    )
-    context = Context(DecisionOwner.RUN)
-    context.append_task(RunActInput(), observation)
-    current = json.loads(context.model_input()[-1].text)["observation"]
-    assert [entry["owner"] for entry in current["mechanisms"]] == [
-        {"id": "CARD.ONE", "name": original.name},
-        {"id": "CARD.TWO", "name": "Other"},
-    ]
+    changed = observation.model_copy(update={
+        "state": state.model_copy(update={"turn": 2}),
+        "mechanisms": (mechanism.model_copy(update={"owner": "c2"}),),
+    })
+    context.append_task(CombatActInput(), changed)
+    assert "mechanisms" not in json.loads(context.model_input()[-1].text)["observation"]
+    context.finish_group()
+    context.install_compaction(context.compaction_candidate())
+    baseline = json.loads(context.model_input()[0].text)["context_baseline"]["observation"]
+    assert baseline["mechanisms"] == first["mechanisms"]
+    changed = changed.model_copy(update={"mechanisms": (
+        mechanism.model_copy(update={"text": "Changed native rule"}),
+    )})
+    context.append_task(CombatActInput(), changed)
+    update = json.loads(context.model_input()[-1].text)["observation"]
+    assert update["mechanisms"][0]["text"] == "Changed native rule"
+
+
+def test_current_unknown_values_override_known_card_text_and_cost() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    card = observation.objects["c1"]
+    assert isinstance(card, CardEntry)
+    context = Context(DecisionOwner.COMBAT)
+    known = observation.model_copy(update={
+        "descriptions": {"c1": "Known current effect", "c2": "Known current effect"}
+    })
+    context.append_task(CombatActInput(), known)
+    unknown = known.model_copy(update={
+        "objects": {
+            **known.objects, "c1": card.model_copy(update={"cost": ResourceCosts(energy=None)})
+        },
+        "descriptions": {"c1": None},
+    })
+    context.append_task(CombatActInput(), unknown)
+    row = json.loads(context.model_input()[-1].text)["observation"]["hand"][1]
+    assert row["text"] is None
+    assert row["cost"]["energy"] is None

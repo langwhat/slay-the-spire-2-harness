@@ -20,6 +20,49 @@ def _json(value: native.WireModel) -> dict[str, JsonValue]:
     return _JSON_OBJECT.validate_json(value.to_json())
 
 
+def _slim(
+    value: JsonValue,
+    definitions: dict[str, dict[str, JsonValue]] | None = None,
+    inherited: JsonValue = None,
+) -> JsonValue:
+    if isinstance(value, list):
+        return [_slim(child, definitions) for child in value]
+    if not isinstance(value, dict):
+        return value
+    identity = value.get("id")
+    if definitions is not None and isinstance(identity, str):
+        inherited = definitions.get(identity)
+    known = inherited if isinstance(inherited, dict) else {}
+    result: dict[str, JsonValue] = {}
+    for name, child in value.items():
+        if name in ("card_pool", "is_removable", "is_upgradable", "hp_display"):
+            continue
+        if name == "display_amount" and child == value.get("amount"):
+            continue
+        if name == "enabled" and child is True:
+            continue
+        if name in ("is_used_up", "is_melted") and child is False:
+            continue
+        if name == "status" and child == "normal":
+            continue
+        if name == "stack_count" and child == 1:
+            continue
+        previous = {**known, **value} if name == "upgrade" else known.get(name)
+        compact = _slim(child, definitions, previous)
+        if compact is None or compact == [] or compact == {}:
+            if previous is None or previous == [] or previous == {}:
+                continue
+        result[name] = compact
+    return result
+
+
+def mechanism_key(value: dict[str, JsonValue]) -> tuple[str, str, str | None]:
+    kind, name, text = value.get("kind"), value.get("name"), value.get("text")
+    assert isinstance(kind, str) and isinstance(name, str)
+    assert text is None or isinstance(text, str)
+    return kind, name, text
+
+
 def _key(obj: native.ObjectEntry) -> str | None:
     if obj.definition_id is MISSING:
         return None
@@ -54,9 +97,7 @@ def _card_definition(obj: native.CardEntry, text: str | None) -> dict[str, JsonV
         "cost": _json(obj.cost),
         "text": text,
     }
-    for key in ("card_pool", "rarity", "keywords", "is_upgradable", "is_removable"):
-        if raw.get(key) not in (None, []):
-            definition[key] = raw[key]
+    definition["keywords"] = raw["keywords"]
     return definition
 
 
@@ -70,6 +111,12 @@ class RunDelivery:
     delivered_defs: set[str] = field(default_factory=lambda: set[str]())
     sections: dict[str, JsonValue] = field(default_factory=lambda: dict[str, JsonValue]())
 
+    mechanisms: list[JsonValue] = field(default_factory=lambda: list[JsonValue]())
+    delivered_mechanisms: set[tuple[str, str, str | None]] = field(
+        default_factory=lambda: set[tuple[str, str, str | None]]()
+    )
+    inline_card_ids: set[str] = field(default_factory=lambda: set[str]())
+
     deck_stats: dict[str, JsonValue] | None = None
     deck_use: dict[str, int] = field(default_factory=lambda: dict[str, int]())
     candidate_links: dict[str, tuple[dict[str, JsonValue], ...]] = field(
@@ -81,7 +128,10 @@ class RunDelivery:
         definitions: list[JsonValue] = [
             value for key, value in self.definitions.items() if key in needed
         ]
-        return {"baseline": True, "defs": definitions, **self.sections}
+        return {
+            "baseline": True, "defs": [_slim(value) for value in definitions], **self.sections,
+            **({"mechanisms": self.mechanisms} if self.mechanisms else {}),
+        }
 
     def project(
         self, observation: VisibleObservation, source: native.Observation
@@ -96,6 +146,9 @@ class RunDelivery:
                 row["name"] = obj.name
                 if (key := _key(obj)) is not None:
                     row["id"] = key
+                    if isinstance(obj, native.CardEntry) and self.role is native.DecisionOwner.RUN:
+                        self.inline_card_ids.add(key)
+                        return row
                     referenced.add(key)
                     definition = (
                         _card_definition(obj, observation.descriptions.get(ref))
@@ -132,7 +185,7 @@ class RunDelivery:
             return row
 
         def object_row(
-            ref: str, *, actionable: bool = True, text: bool = False
+            ref: str, *, actionable: bool = True, text: bool = False, candidate: bool = False
         ) -> dict[str, JsonValue]:
             obj = observation.objects.get(ref)
             row = identity(ref)
@@ -152,8 +205,10 @@ class RunDelivery:
                 )
                 if isinstance(obj, native.BundleEntry):
                     row["members"] = [object_row(member, text=text) for member in obj.members]
-                if ref in observation.descriptions:
-                    row["text"] = observation.descriptions[ref]
+                current_text = observation.descriptions.get(ref)
+                known_text = self.definitions.get(key or "", {}).get("text")
+                if current_text != known_text:
+                    row["text"] = current_text
                 if key is not None and key not in self.definitions:
                     self.definitions[key] = {
                         "id": key,
@@ -163,13 +218,15 @@ class RunDelivery:
                     }
                 return row
             definition = _card_definition(obj, observation.descriptions.get(ref))
-            if key is not None:
+            if key is not None and self.role is native.DecisionOwner.COMBAT:
                 self.definitions.setdefault(key, definition)
                 known = self.definitions[key]
             else:
                 known = definition
             if text:
                 row.update(definition)
+                if candidate and obj.rarity is not None:
+                    row["rarity"] = obj.rarity
                 if obj.definition_id in self.deck_use and not actionable:
                     row["use"] = {
                         "scope": "base_definition",
@@ -182,11 +239,10 @@ class RunDelivery:
                 for field_name, value in definition.items():
                     if field_name not in ("id", "name") and known.get(field_name) != value:
                         row[field_name] = value
-            if obj.upgrades is None:
-                row["upgrades"] = None
             # Current cost and playability can change without changing the definition.
             if actionable:
-                row["cost"] = _json(obj.cost)
+                if text or known.get("cost") != _json(obj.cost):
+                    row["cost"] = _json(obj.cost)
             if obj.playable is not MISSING and actionable:
                 row["playable"] = obj.playable
             for field_name in (
@@ -201,13 +257,23 @@ class RunDelivery:
                 value = raw.get(field_name)
                 if field_name == "local_keywords" and value == raw.get("keywords"):
                     continue
+                if field_name == "cost_without_global_effects" and value == raw.get("cost"):
+                    continue
                 if value is not None and value is not False and value != []:
                     row[field_name] = value
             modifier_text = observation.modifier_descriptions.get(ref)
             if modifier_text is not None:
                 row["modifier_text"] = _json(modifier_text)
             if actionable and ref in observation.upgrades:
-                row["upgrade"] = _json(observation.upgrades[ref])
+                upgrade = observation.upgrades[ref]
+                row["upgrade"] = {"status": upgrade.status}
+                if isinstance(upgrade, native.UpgradeAvailable):
+                    base = {**raw, "text": observation.descriptions.get(ref)}
+                    row["upgrade"].update({
+                        name: value
+                        for name, value in _json(upgrade.card).items()
+                        if name not in ("definition_id", "upgrades") and base.get(name) != value
+                    })
             if actionable and obj.previews is not MISSING:
                 row["previews"] = [
                     {"target": identity(preview.target), "text": preview.text}
@@ -231,10 +297,11 @@ class RunDelivery:
             "location": _json(source.location),
             "progress": _json(state.progress),
             "player": _json(state.player),
-            "deck": counts(state.deck, text=self.role is native.DecisionOwner.RUN),
             "relics": [object_row(ref, actionable=False) for ref in state.relics],
             "potions": [object_row(ref) for ref in state.potions],
         }
+        if self.role is native.DecisionOwner.RUN:
+            sections["deck"] = counts(state.deck, text=True)
         if self.role is native.DecisionOwner.RUN and self.deck_stats is not None:
             sections["deck_stats"] = self.deck_stats
         if self.role is native.DecisionOwner.RUN and source.map is not MISSING:
@@ -307,7 +374,9 @@ class RunDelivery:
             if state.selection is not None:
                 selection = _json(state.selection)
                 selection["candidates"] = [
-                    object_row(ref, text=self.role is native.DecisionOwner.RUN)
+                    identity(ref)
+                    if isinstance(state, native.CombatState) and ref in state.piles.hand
+                    else object_row(ref, text=self.role is native.DecisionOwner.RUN, candidate=True)
                     for ref in state.selection.candidates
                 ]
                 selection["selected"] = list(state.selection.selected)
@@ -316,7 +385,9 @@ class RunDelivery:
                 offers: list[JsonValue] = []
                 for offer in state.offers:
                     row = _json(offer)
-                    row["candidates"] = [object_row(ref, text=True) for ref in offer.contents]
+                    row["candidates"] = [
+                        object_row(ref, text=True, candidate=True) for ref in offer.contents
+                    ]
                     row.pop("contents")
                     offer_entry = observation.objects.get(offer.ref)
                     if offer_entry is not None:
@@ -337,35 +408,20 @@ class RunDelivery:
             for ref, cards in observation.generated.items()
             if cards
         ]
-        mechanisms: list[JsonValue] = []
+        mechanisms: dict[tuple[str, str, str | None], dict[str, JsonValue]] = {}
         for mechanism in observation.mechanisms:
-            body: dict[str, JsonValue] = _json(mechanism)
-            key = mechanism.definition_id
-            if key is not None:
-                referenced.add(key)
-                definition: dict[str, JsonValue] = {
-                    "id": key,
-                    "name": mechanism.name,
-                    "type": mechanism.kind,
-                    "text": mechanism.text,
-                }
-                self.definitions.setdefault(key, definition)
-                body = {
-                    "id": key,
-                    "name": mechanism.name,
-                    **(
-                        {"text": mechanism.text}
-                        if self.definitions[key].get("text") != mechanism.text
-                        else {}
-                    ),
-                }
-            if mechanism.owner is not MISSING:
-                owner = identity(mechanism.owner)
-                if mechanism.owner in (*state.deck, *state.relics):
-                    owner.pop("ref", None)
-                body["owner"] = owner
-            mechanisms.append(body)
-        sections["mechanisms"] = mechanisms
+            body: dict[str, JsonValue] = {
+                name: value for name, value in _json(mechanism).items()
+                if name != "owner" and value is not None
+            }
+            mechanisms.setdefault(mechanism_key(body), body)
+        self.mechanisms = list(mechanisms.values())
+        mechanism_additions: list[JsonValue] = [
+            body for key, body in mechanisms.items() if key not in self.delivered_mechanisms
+        ]
+        self.delivered_mechanisms.update(mechanisms)
+        # Each ordinary section replaces its predecessor, including empty sections.
+        sections = {name: _slim(value, self.definitions) for name, value in sections.items()}
         baseline = not self.sections
         changed = {
             name: content
@@ -379,7 +435,9 @@ class RunDelivery:
             if key in referenced and key not in self.delivered_defs
         ]
         if additions:
-            changed["defs"] = additions
+            changed["defs"] = [_slim(value) for value in additions]
+        if mechanism_additions:
+            changed["mechanisms"] = [_slim(value) for value in mechanism_additions]
         if baseline:
             changed["baseline"] = True
         self.delivered_defs.update(referenced)
