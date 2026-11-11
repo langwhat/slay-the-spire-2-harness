@@ -82,6 +82,20 @@ def terminal(observation: native.Observation) -> native.Observation:
     return native.Observation.model_validate_json(json.dumps(data))
 
 
+def unavailable_history(observation: native.Observation) -> httpx.Response:
+    return httpx.Response(
+        200,
+        content=native.InspectRejected(
+            status=native.ResultStatus.REJECTED,
+            error=native.AreaUnavailable(
+                code=native.ErrorCode.AREA_UNAVAILABLE,
+                message="This fixture does not supply battle history.",
+            ),
+            observation=observation,
+        ).to_json(),
+    )
+
+
 class Campaign:
     def __init__(self, *, code_combat: bool = False) -> None:
         self.states = [
@@ -171,6 +185,8 @@ class Campaign:
             )
         if request.url.path == "/inspect":
             query = native.InspectRequest.model_validate_json(request.content)
+            if query.query.area is native.InspectArea.COMBAT_HISTORY:
+                return unavailable_history(self.current)
             assert query.query.area is native.InspectArea.MAP
             if self.current.map is MISSING:
                 self.states[self.index] = self.current.model_copy(update={"map": self.map})

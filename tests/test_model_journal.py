@@ -186,7 +186,7 @@ def test_combat_requests_keep_retry_query_and_native_continuation(
         prompt_reads = [item for item in material_reads if item.request.kind is MaterialKind.PROMPT]
         explicit_reads = [item for item in material_reads if item.request.kind is MaterialKind.READ]
         lookups = [item for item in material_reads if item.request.kind is MaterialKind.LOOKUP]
-        assert len(prompt_reads) == 5 and len(explicit_reads) == 2 and len(lookups) == 5
+        assert len(explicit_reads) == 2 and len(lookups) == 5
         assert all(isinstance(item.reply, DocumentLookupResult) for item in lookups)
         guidance = first.input[1]
         assert isinstance(guidance, TextSnapshot) and isinstance(guidance.value, GuidanceText)

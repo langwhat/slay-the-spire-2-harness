@@ -231,6 +231,7 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
             t["name"] for t in tools_wire if isinstance(t, dict) and isinstance(t["name"], str)
         } == {
             "run_act",
+            "run_deck_choice",
             "run_inspect",
             "run_knowledge",
             "run_skill",

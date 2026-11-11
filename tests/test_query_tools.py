@@ -257,7 +257,9 @@ def test_failed_reads_preserve_trustworthy_state_without_reusing_old_observation
                 inspect=execution.inspect,
                 catalog=execution.catalog,
             )
-            failed = await tools.dispatch(ToolCall("detail", "combat_inspect", '{"area":"hand"}'))
+            failed = await tools.dispatch(
+                ToolCall("detail", "combat_inspect", '{"area":"combat_history"}')
+            )
             assert isinstance(failed.outcome, Failed)
             assert failed.observation is not None and failed.data is MISSING
             failed = await tools.dispatch(

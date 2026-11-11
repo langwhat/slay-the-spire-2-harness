@@ -42,6 +42,7 @@ class InspectBattle(BattleHTTP):
                     "modifier_descriptions": {},
                     "generated": {},
                     "mechanisms": [],
+                    "upgrades": {},
                 },
             },
         )
@@ -53,7 +54,7 @@ def test_inspection_and_final_action_execute_without_an_intermediate_request(
     battle = InspectBattle(
         [
             reply(
-                ("inspect", "combat_inspect", '{"area":"enemies"}'),
+                ("inspect", "combat_inspect", '{"area":"upgrades"}'),
                 ("act", "combat_act", '{"steps":[{"kind":"end_turn"}]}'),
             ),
             reply(text="Reviewed."),
@@ -78,9 +79,9 @@ def test_failed_query_cancels_remaining_queries_and_action_without_extra_recover
     battle = InspectBattle(
         [
             reply(
-                ("completed-query", "combat_inspect", '{"area":"enemies"}'),
+                ("completed-query", "combat_inspect", '{"area":"upgrades"}'),
                 ("bad", "combat_skill", '{"mode":"read","id":"missing"}'),
-                ("cancelled-query", "combat_inspect", '{"area":"powers"}'),
+                ("cancelled-query", "combat_inspect", '{"area":"upgrades"}'),
                 ("cancelled-action", "combat_act", '{"steps":[{"kind":"end_turn"}]}'),
             ),
             reply(("retry", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
@@ -88,7 +89,7 @@ def test_failed_query_cancels_remaining_queries_and_action_without_extra_recover
         ]
     )
     assert isinstance(asyncio.run(battle.run(tmp_path, minimal=minimal)), CombatHandoff)
-    assert [query.area for query in battle.queries] == [native.InspectArea.ENEMIES]
+    assert [query.area for query in battle.queries] == [native.InspectArea.DECK]
     assert len(battle.actions) == 1
     assert battle.model_budget[:2] == [0, 1]
     items = battle.inputs[1]["input"]
@@ -128,9 +129,9 @@ def test_nonfinal_action_rejects_the_whole_reply_before_any_inspection(
     battle = InspectBattle(
         [
             reply(
-                ("before", "combat_inspect", '{"area":"enemies"}'),
+                ("before", "combat_inspect", '{"area":"upgrades"}'),
                 ("nonfinal", action_name, '{"steps":[{"kind":"end_turn"}]}'),
-                ("after", "combat_inspect", '{"area":"powers"}'),
+                ("after", "combat_inspect", '{"area":"upgrades"}'),
             ),
             reply(("retry", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
             reply(text="Reviewed."),

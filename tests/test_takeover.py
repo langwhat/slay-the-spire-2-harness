@@ -9,7 +9,7 @@ from typing import Literal
 import httpx2 as httpx
 import pytest
 from test_combat import reply
-from test_lifecycle import Campaign, battle_state, run_state, terminal
+from test_lifecycle import Campaign, battle_state, run_state, terminal, unavailable_history
 from test_responses import configuration
 
 from sts2_harness.capacity import CapacityPolicy
@@ -19,6 +19,7 @@ from sts2_harness.config import ModelConfiguration
 from sts2_harness.game import LiveGame, Settlement
 from sts2_harness.journal import (
     HeadlessInitialConditions,
+    Inspect,
     Journal,
     Manifest,
     NativeStartReceipt,
@@ -99,7 +100,7 @@ class Source(Campaign):
         self.responses = iter(
             [
                 reply(("travel", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
-                reply(("inspect", "combat_inspect", '{"area":"hand"}')),
+                reply(("inspect", "combat_inspect", '{"area":"upgrades"}')),
                 reply(
                     (
                         "play",
@@ -116,6 +117,9 @@ class Source(Campaign):
         if request.url.path == "/control":
             return httpx.Response(200, json=json.loads(request.content))
         if request.url.path == "/inspect":
+            query = native.InspectRequest.model_validate_json(request.content).query
+            if query.area is native.InspectArea.COMBAT_HISTORY:
+                return unavailable_history(self.current)
             return httpx.Response(
                 200,
                 content=native.InspectCompleted(
@@ -127,6 +131,7 @@ class Source(Campaign):
                         modifier_descriptions=self.current.modifier_descriptions,
                         generated=self.current.generated,
                         mechanisms=self.current.mechanisms,
+                        upgrades=self.current.upgrades,
                     ),
                 ).to_json(),
             )
@@ -334,6 +339,8 @@ class FakeRestorer(NativeRestorer):
             )
         if request.url.path == "/inspect":
             query = native.InspectRequest.model_validate_json(request.content).query
+            if query.area is native.InspectArea.COMBAT_HISTORY:
+                return unavailable_history(self.observation)
             self.inspections.append(query)
             assert isinstance(query, native.CardQuery)
             assert query.refs == ("eval-stale:card:7:1",)
@@ -498,7 +505,7 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
                         '{"steps":[{"kind":"play_card","card":"card:1:1","target":"enemy:1:1"}]}',
                     )
                 ),
-                reply(("stale", "combat_inspect", '{"area":"deck","refs":["card:7:1"]}')),
+                reply(("stale", "combat_inspect", '{"area":"upgrades","refs":["card:7:1"]}')),
                 reply(
                     (
                         "live-turn",
@@ -568,7 +575,7 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
         second = restorer.actions[1].step
         assert isinstance(second, native.PlayCard)
         assert second.card == "card:9:3"
-        assert len(restorer.inspections) == 1
+        assert restorer.inspections == []
         with (
             closing(Journal.open(branch)) as journal,
             closing(Journal.open(case.source.archive)) as parent,
@@ -578,6 +585,8 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
                 record
                 for record in parent.operations(stop=target.sequence)
                 if record.request.kind.value == "inspect"
+                and isinstance(record.request, Inspect)
+                and record.request.query.area is not native.InspectArea.COMBAT_HISTORY
             ]
             assert len(inspections) == 1
             assert inspections[0].reply is not None
