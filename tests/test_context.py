@@ -175,8 +175,7 @@ def test_history_use_names_its_base_definition_scope_across_upgrade_rows() -> No
     deck = json.loads(context.model_input()[-1].text)["observation"]["deck"]
     assert {row["id"] for row in deck} == {"CARD.ONE", "CARD.ONE+1"}
     assert all(
-        row["use"]
-        == {"scope": "base_definition", "definition_id": "CARD.ONE", "observed_plays": 3}
+        row["use"] == {"scope": "base_definition", "definition_id": "CARD.ONE", "observed_plays": 3}
         for row in deck
     )
 

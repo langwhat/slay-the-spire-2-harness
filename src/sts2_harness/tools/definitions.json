@@ -739,7 +739,7 @@
   },
   {
     "name": "run_deck_choice",
-    "description": "Resolve one card offer: take one of its cards or skip it. Call once per offer and decide a later offer after the earlier one has changed the deck. class says what the card is to this deck: engine (adds a link, more triggers, or earlier assembly to its strongest turn), pivot (forms a stronger turn with owned cards), answer (closes a named shortfall), or filler (contributes only its own numbers). links names the owned cards and relics it works with.",
+    "description": "Resolve one card offer: take one of its cards or skip it. Call once per offer and decide a later offer after the earlier one has changed the deck. class says what the card is to this deck: engine (adds a link, more triggers, or earlier assembly to its strongest turn), pivot (forms a stronger turn with owned cards), answer (closes a named shortfall), or filler (contributes only its own numbers). links lists the native definition IDs of the owned cards and relics it works with; omit the +N upgrade suffix shown in state view keys.",
     "input_schema": {
       "oneOf": [
         {

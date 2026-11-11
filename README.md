@@ -248,7 +248,7 @@ manifest and gaps. Use `--around` with the timeline to inspect neighboring actio
 receipts, queries, and material reads. Sequence and confirmed game cursor express ordering;
 they do not imply that an adjacent action was caused by a particular model request.
 
-The current archive schema is version 8 and records each native reply's protocol explicitly.
+The current archive schema is version 16 and records each native reply's protocol explicitly.
 `Journal.open()` provides read-only inspection. Schema versions are validated without archive
 migration. Read older archives with the revision that recorded them. Native restoration
 and live evaluation remain unsupported; the manifest does not claim exact native replay.
@@ -295,10 +295,11 @@ Add `--minimal` to `start` or `headless` for minimal gameplay, or set
 `STS2_MINIMAL=true` in `.env` or the process environment. As with other settings, `--set`
 overrides the process environment, which overrides `.env`; explicit `--minimal` takes
 precedence over all three. Use `--set STS2_MINIMAL=false` to disable an environment default.
-`check-config` reports the resolved mode. Both modes use the same full gameplay prompts.
-Minimal gameplay removes knowledge/skill query and notes tools, and skips model
-battle reviews and standalone report-processing calls. Automatic knowledge injection,
-public inspections, route planning, and automatic progression remain available.
+`check-config` reports the resolved mode. Both modes share gameplay and state-reading rules.
+Ordinary mode adds deck construction and battle review instructions, notes, and query tools.
+Minimal gameplay exposes only actions and route planning, skips model battle reviews and
+standalone report-processing calls, and supplies no notes or candidate event links. Automatic
+knowledge injection, measured deck statistics, and automatic progression remain available.
 Minimal gameplay targets lower total usage cost; fewer input tokens alone do not establish
 savings when cached input is discounted. The archive records the mode so offline replay
 uses the same behavior. Ordinary gameplay is the default.
@@ -313,7 +314,7 @@ The Run agent and route plan still last one act; Combat context lasts one battle
 Capacity-triggered compaction remains available for long local interactions. Failed or
 uncertain actions retain the feedback needed for recovery. Full history stays in the
 archive even when earlier nodes leave the model input. New archives record
-`run_context_policy=node_local_v1` in schema 14; earlier schemas require their matching
+`run_context_policy=node_local_v1` and `state_format=sections_v2` in schema 16; earlier schemas require their matching
 core version for inspection and replay.
 
 In both modes, an ongoing role receives action receipts and query data in tool results,
@@ -470,9 +471,20 @@ archives; this does not establish complete real-game acceptance.
 ## Run decisions and strategy notes
 
 `RunAgent` uses the shared `Agent` loop and `Execution.run_unit` for explicitly supplied
-`ActTask` and `HandoffTask` values. Its fixed tools are `run_act`, `run_inspect`,
-`run_knowledge`, `run_skill`, and `run_notes`. Construct one `Notes(initial_text)` per run
-and pass it to the Run `ToolCatalog`; the agent reads the same owner. Notes are authoritative
+`ActTask` and `HandoffTask` values. Its tools are `run_act`, `run_deck_choice`, `run_plan`,
+`run_next`, `run_inspect`, `run_knowledge`, `run_skill`, and `run_notes`. Construct one `Notes(initial_text)` per run
+and pass it to the Run `ToolCatalog`; the agent reads the same owner. Card rewards are
+resolved one offer at a time through `run_deck_choice`, with a recorded take/skip decision
+and owned-card links. The Mod distinguishes rewards that open a selector from immediate
+card grants; declined immediate grants stay unclaimed until the reward screen is left.
+
+State delivery replaces complete named sections and sends stable-ID definitions once per
+context. Run deck rows aggregate identical native instances with their actual card text.
+`deck_stats` and `use.observed_plays` describe the last five sampled battle-history prefixes;
+they omit unmeasured draw, damage, block, and energy statistics. Optional private candidate
+links describe potential event connections whose conditions still require the native rules.
+
+Notes are authoritative
 in memory. Reads return the full text; replacement permits clearing; an edit requires one
 exact unique match, including overlapping occurrences, and permits deletion. Failed edits
 leave notes unchanged, while successful writes return only `{"updated":true}`.

@@ -416,6 +416,7 @@ class Offer(WireModel):
     stocked: bool | None | MISSING = MISSING
     on_sale: bool | None | MISSING = MISSING
     amount: Number | None | MISSING = MISSING
+    requires_selection: bool | MISSING = MISSING
 
 
 class EventState(WireModel):

@@ -181,9 +181,7 @@ class ToolCatalog:
                     ToolName.RUN_DECK_CHOICE,
                     ToolName.RUN_PLAN,
                     ToolName.RUN_NEXT,
-                    ToolName.RUN_INSPECT,
                     ToolName.COMBAT_ACT,
-                    ToolName.COMBAT_INSPECT,
                 }
             )
         )
