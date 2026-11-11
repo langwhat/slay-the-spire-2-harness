@@ -17,11 +17,11 @@ Read every value from the current state; these rules cover what the state does n
 
 At each decision, work in this order.
 
-1. Threat. From the intents, add up the HP that would be lost at the next enemy action after current block, enemy by enemy and hit by hit. Note the enemy actions that grow, debuff, or add cards instead of attacking.
+1. Threat. From the intents, add up the HP that would be lost at the next enemy action after current block, enemy by enemy and hit by hit. Note the enemy actions that grow, debuff, or add cards instead of attacking. Then read every enemy power and supplied rule for a deadline: a countdown, a defeat or escape condition, or growth the deck cannot outlast. Work out the turn it lands and exactly which cards or effects delay or cancel it, and where those cards are now.
 2. Kill check. In play order, with energy gains, debuffs, and bonuses applied as they resolve, compute whether the hand and potions can kill an enemy before it acts. A kill cancels that enemy's action. So can a stun or a phase change; use the enemy's supplied rules for what it does afterward.
-3. Candidate lines. Write out two or three materially different complete lines: remove the most dangerous attacker, prevent the damage, or set up the ENGINE turn. For each, list the plays in order with energy left after each, then enemy HP, own block, and HP lost when the enemies act.
+3. Candidate lines. Write out two or three materially different complete lines: remove the most dangerous attacker, prevent the damage, or set up the engine turn. For each, list the plays in order with energy left after each, then enemy HP, own block, and HP lost when the enemies act.
 4. Same horizon. Compare the lines through the same later enemy action, including the next hand each one leaves. Use known pile membership, draw count, and shuffle timing for the chance that needed cards arrive, and name the affordable fallback if they do not. Extend the horizon when a line's payoff or cost lands later.
-5. Choose the line that loses the least HP and resources over the rest of the fight. State any chance of death separately and weigh it before average HP.
+5. Choose. A line that meets every deadline beats any line that does not, whatever HP it saves; never discard, exhaust, or leave unplayed a card that answers a deadline unless another answer is certain to arrive in time. Among lines that keep the fight won, choose the one that loses the least HP and resources over the rest of the fight. State any chance of death separately and weigh it before average HP.
 
 These settle close cases:
 
@@ -29,7 +29,7 @@ These settle close cases:
 - Setup, growth, and clearing bad cards pay back over the remaining turns. Do them on quiet or already covered turns. Under attack, weigh the HP lost while setting up against the attacks the setup later prevents. Once output is enough to finish, finish.
 - Order plays so each one sees the most. Reveal draws and random results before committing choices that depend on them, while the energy to act on them remains. Apply debuffs and buffs before the hits they scale. A draw that costs the energy needed to play what it finds is not access.
 - Choose targets by the action their death prevents, not by HP. Crossing a threshold (a kill, a broken shield, a stun, a phase change) matters; damage short of it or beyond it matters only through later turns. Before triggering a phase change, compare the first turns of the next phase.
-- Before exhausting, discarding, or transforming, check which attacks, defenses, and connectors remain through the kill. Spend FILLER and negative cards first. Keep the only copy of something the line needs unless spending it ends the fight.
+- Before exhausting, discarding, or transforming, check which attacks, defenses, and connectors remain through the kill. Spend `filler` and negative cards first. Keep the only copy of something the line needs unless spending it ends the fight.
 - Limited triggers, counters, and stored resources are worth their later use, not their scarcity. Check how many remain and which play, including an automatic copy, would consume them.
 - Use a potion where it changes the outcome most: a kill that cancels an attack, a turn that would cost much HP, a setup turn made safe, or a risk of death. Run's potion reservations are plans, not rules.
 - Do not assume the best next hand, and do not demand certainty. A line that is better on average and survives its bad draws beats a safer line that loses more.
