@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import MISSING, Field
 
 from sts2_harness.client import models as native
 
@@ -34,6 +34,7 @@ class NotesState(native.WireModel):
 class NumberedWant(native.WireModel):
     number: Annotated[int, Field(ge=1, le=3)]
     text: native.Nonempty
+    expired: Literal[True] | MISSING = MISSING
 
 
 class NotesView(native.WireModel):

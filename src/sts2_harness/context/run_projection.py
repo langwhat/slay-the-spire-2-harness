@@ -41,6 +41,8 @@ def _slim(
             continue
         if name in ("card_pool", "is_removable", "is_upgradable", "hp_display"):
             continue
+        if name == "stars" and child == "none":
+            continue
         if name == "display_amount" and child == value.get("amount"):
             continue
         if name == "enabled" and child is True:
@@ -239,11 +241,7 @@ class RunDelivery:
                 if candidate and obj.rarity is not None:
                     row["rarity"] = obj.rarity
                 if obj.definition_id in self.deck_use and not actionable:
-                    row["use"] = {
-                        "scope": "base_definition",
-                        "definition_id": obj.definition_id,
-                        "observed_plays": self.deck_use[obj.definition_id],
-                    }
+                    row["use"] = {"observed_plays": self.deck_use[obj.definition_id]}
                 if actionable and obj.definition_id in self.candidate_links:
                     row["links"] = list(self.candidate_links[obj.definition_id])
             else:
@@ -298,7 +296,11 @@ class RunDelivery:
         def counts(refs: tuple[str, ...], *, text: bool = False) -> list[JsonValue]:
             groups: dict[str, dict[str, JsonValue]] = {}
             for ref in refs:
-                row = object_row(ref, actionable=False, text=text)
+                row = (
+                    object_row(ref, actionable=False, text=True)
+                    if text
+                    else {name: value for name, value in identity(ref).items() if name != "ref"}
+                )
                 key = json.dumps(row, ensure_ascii=False, sort_keys=True)
                 if key not in groups:
                     groups[key] = {**row, "n": 0}
@@ -320,17 +322,32 @@ class RunDelivery:
             sections["deck"] = counts(state.deck, text=True)
         if self.role is native.DecisionOwner.RUN and self.deck_stats is not None:
             sections["deck_stats"] = self.deck_stats
-        if self.role is native.DecisionOwner.RUN and source.map is not MISSING:
+        post_boss = (
+            isinstance(state, native.RunState)
+            and state.progress.room_type == "boss"
+            and source.map is not MISSING
+            and not source.map.legal_destinations
+            and any(
+                node.position == state.progress.position and not node.children
+                for node in source.map.nodes
+            )
+        )
+        if self.role is native.DecisionOwner.RUN and source.map is not MISSING and not post_boss:
             topology, dynamic, odds = project_map(source.map, state.progress, self.route_plan)
             sections.update(
                 map_topology=_json(topology),
                 dynamic_map=_json(dynamic),
                 unknown_odds={ref: _json(value) for ref, value in odds.items()},
             )
+        if self.role is native.DecisionOwner.COMBAT:
+            player = sections["player"]
+            assert isinstance(player, dict)
+            for name in ("gold", "potion_slot_count", "empty_potion_slot_count"):
+                player.pop(name, None)
         if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState):
             sections.update(
                 turn=state.turn,
-                hand=[object_row(ref) for ref in state.piles.hand],
+                hand=[object_row(ref, text=True) for ref in state.piles.hand],
                 enemies=[_json(enemy) for enemy in state.enemies],
                 inactive_enemies=[_json(enemy) for enemy in state.inactive_enemies],
             )

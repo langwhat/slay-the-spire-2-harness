@@ -26,6 +26,10 @@ def test_changed_hand_is_complete_and_original_history_stays_unchanged() -> None
     initial = json.loads(original)["observation"]
     assert [row["ref"] for row in initial["hand"]] == ["c2", "c1"]
     assert initial["enemies"][0]["intents"][1]["hits"] == 2
+    assert initial["hand"][1]["cost"]["energy"] == "X"
+    assert "stars" not in initial["hand"][1]["cost"]
+    assert initial["hand"][0]["text"] == "造成3点伤害。"
+    assert not {"gold", "potion_slot_count", "empty_potion_slot_count"} & initial["player"].keys()
     card = observation.objects["c1"]
     assert isinstance(card, CardEntry)
     changed = observation.model_copy(
@@ -185,10 +189,7 @@ def test_history_use_names_its_base_definition_scope_across_upgrade_rows() -> No
     context.append_task(RunActInput(), observation)
     deck = json.loads(context.model_input()[-1].text)["observation"]["deck"]
     assert {row["id"] for row in deck} == {"CARD.ONE", "CARD.ONE+1"}
-    assert all(
-        row["use"] == {"scope": "base_definition", "definition_id": "CARD.ONE", "observed_plays": 3}
-        for row in deck
-    )
+    assert all(row["use"] == {"observed_plays": 3} for row in deck)
 
 
 def test_mechanisms_are_once_delivered_without_owners_and_restore_after_compaction() -> None:

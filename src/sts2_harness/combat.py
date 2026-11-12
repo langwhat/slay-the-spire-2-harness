@@ -13,6 +13,7 @@ from sts2_harness.decisions import (
     ActTask,
     BattleLocation,
     BattleReport,
+    BattleResult,
     BoundaryValues,
     CombatHandoff,
     Decision,
@@ -192,7 +193,10 @@ class CombatTask:
             location=BattleLocation(
                 act=progress.act, floor=progress.floor, room_type=progress.room_type
             ),
-            result=native.TerminalResult.UNKNOWN,
+            result=BattleResult.WON
+            if isinstance(self._last.state, native.RunState)
+            and self._last.state.screen is native.RunScreen.REWARDS
+            else BattleResult.UNKNOWN,
             last_observed_turn=self._last_turn,
             before=BoundaryValues(hp=before.hp, max_hp=before.max_hp, gold=before.gold),
             after=BoundaryValues(hp=after.hp, max_hp=after.max_hp, gold=after.gold),

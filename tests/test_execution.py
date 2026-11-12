@@ -316,6 +316,7 @@ def test_route_and_task_permissions_are_checked_before_actions() -> None:
         from sts2_harness.decisions import (
             BattleLocation,
             BattleReport,
+            BattleResult,
             BoundaryValues,
             ReviewTask,
             TaskComplete,
@@ -326,7 +327,7 @@ def test_route_and_task_permissions_are_checked_before_actions() -> None:
         route = native.RouteKey.model_validate(observation.location.model_dump())
         report = BattleReport(
             location=BattleLocation(act=1, floor=1, room_type="monster"),
-            result=native.TerminalResult.VICTORY,
+            result=BattleResult.WON,
             last_observed_turn=1,
             before=BoundaryValues(hp=10, max_hp=10, gold=0),
             after=BoundaryValues(hp=8, max_hp=10, gold=1),

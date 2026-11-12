@@ -15,6 +15,7 @@ from sts2_harness.decisions import (
     ActTask,
     BattleLocation,
     BattleReport,
+    BattleResult,
     BoundaryValues,
     CombatHandoff,
     HandoffTask,
@@ -35,7 +36,7 @@ def handoff(review: str | None = None) -> CombatHandoff:
     return CombatHandoff(
         BattleReport(
             location=BattleLocation(act=1, floor=1, room_type="monster"),
-            result=native.TerminalResult.UNKNOWN,
+            result=BattleResult.UNKNOWN,
             last_observed_turn=2,
             before=BoundaryValues(hp=10, max_hp=10, gold=0),
             after=BoundaryValues(hp=8, max_hp=10, gold=5),
@@ -367,6 +368,19 @@ def test_notes_replace_fields_and_preserve_pre_offer_want_identity(tmp_path: Pat
             assert isinstance(result.data, NotesText)
             assert result.data.notes.wants[0].number == 1
             assert result.data.notes.wants[0].text == "Draw before turn three."
+            notes.write(NotesState(wants=("Block for ENCOUNTER.BOSS.",)), {"wants"})
+            new_offer = http.observation.model_copy(
+                update={
+                    "location": http.observation.location.model_copy(update={"node_id": "boss"})
+                }
+            )
+            notes.observe(new_offer)
+            assert notes.usable_wants(new_offer, "offer") == (1,)
+            notes.finish_encounter("ENCOUNTER.BOSS")
+            assert notes.usable_wants(new_offer, "offer") == ()
+            result = await tools.dispatch(ToolCall("expired", "run_notes", '{"mode":"read"}'))
+            assert isinstance(result.data, NotesText)
+            assert result.data.notes.wants[0].expired is True
             assert http.actions == []
 
     asyncio.run(scenario())

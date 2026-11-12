@@ -3,9 +3,17 @@
 from collections.abc import Callable
 from typing import Protocol, assert_never
 
+from pydantic import MISSING
+
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatTask
-from sts2_harness.decisions import ActTask, CombatHandoff, DecisionSource, HandoffTask, TaskComplete
+from sts2_harness.decisions import (
+    ActTask,
+    CombatHandoff,
+    DecisionSource,
+    HandoffTask,
+    TaskComplete,
+)
 from sts2_harness.diagnostics import ActEntered, Diagnostics, RoleChanged
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import (
@@ -129,6 +137,10 @@ class DefaultFlow:
                         ).run()
                         if isinstance(result, RunEnded):
                             return result
+                        if result.report.encounter is not MISSING:
+                            encounter_id = result.report.encounter.definition_id
+                            if isinstance(encounter_id, str):
+                                self._notes.finish_encounter(encounter_id)
                         self._pending = self._latest_handoff = result
                         observation = None
                         continue

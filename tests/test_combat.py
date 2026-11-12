@@ -18,6 +18,7 @@ from sts2_harness.decisions import (
     ActionProposal,
     ActionStep,
     ActTask,
+    BattleResult,
     CombatHandoff,
     Decision,
     DecisionSource,
@@ -78,6 +79,7 @@ def test_combat_task_queries_executes_ordered_batch_and_reviews_in_same_context(
     ending = native.Observation.model_validate_json(RUN)
     ending = ending.model_copy(
         update={
+            "state": ending.state.model_copy(update={"screen": native.RunScreen.REWARDS}),
             "location": ending.location.model_copy(
                 update={
                     "game_instance_id": opening.location.game_instance_id,
@@ -185,7 +187,7 @@ def test_combat_task_queries_executes_ordered_batch_and_reviews_in_same_context(
                 result = await CombatTask(execution, role, opening, budget).run()
         assert isinstance(result, CombatHandoff)
         assert result.review == "Observed loss and useful preparation for the next battle."
-        assert result.report.result is native.TerminalResult.UNKNOWN
+        assert result.report.result is BattleResult.WON
         assert result.report.before.hp == opening.state.player.hp
         assert result.report.after.hp == ending.state.player.hp
         assert [step.kind for step in actions] == [

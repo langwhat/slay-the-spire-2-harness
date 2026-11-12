@@ -1,6 +1,9 @@
 """Own strategy fields and the identities of wants available before each offer."""
 
+import re
 from dataclasses import dataclass
+
+from pydantic import MISSING
 
 from sts2_harness.client import models as native
 from sts2_harness.note_values import Engine, InitialNotes, NotesState, NotesView, NumberedWant
@@ -18,6 +21,7 @@ class Notes:
             raise ValueError("Legacy text notes are unsupported; supply structured notes.")
         self._state = NotesState() if initial == "" else initial
         self._clock = 0
+        self._expired: set[WantIdentity] = set()
         self._wants: tuple[WantIdentity, ...] = ()
         self._offer_wants: dict[
             tuple[str, str | None, str | None, tuple[str, ...]], frozenset[WantIdentity]
@@ -43,7 +47,11 @@ class Notes:
         return NotesView(
             engine=self._state.engine,
             wants=tuple(
-                NumberedWant(number=number, text=want.text)
+                NumberedWant(
+                    number=number,
+                    text=want.text,
+                    expired=True if want in self._expired else MISSING,
+                )
                 for number, want in enumerate(self._wants, 1)
             ),
             filler=self._state.filler,
@@ -56,6 +64,13 @@ class Notes:
             self._set_wants(fields.wants)
         self._state = self._state.model_copy(
             update={name: getattr(fields, name) for name in supplied}
+        )
+
+    def finish_encounter(self, definition_id: str) -> None:
+        self._expired.update(
+            want
+            for want in self._wants
+            if definition_id in re.findall(r"ENCOUNTER\.[A-Z0-9_]+", want.text)
         )
 
     def observe(self, observation: native.Observation) -> None:
@@ -83,7 +98,11 @@ class Notes:
             if key is not None
             else frozenset[WantIdentity]()
         )
-        return tuple(number for number, want in enumerate(self._wants, 1) if want in available)
+        return tuple(
+            number
+            for number, want in enumerate(self._wants, 1)
+            if want in available and want not in self._expired
+        )
 
     def want(self, number: int) -> WantIdentity | None:
         return self._wants[number - 1] if 1 <= number <= len(self._wants) else None

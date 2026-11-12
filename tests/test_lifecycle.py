@@ -306,7 +306,10 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes=NotesState(other="Initial strategy."),
+                initial_notes=NotesState(
+                    wants=("Block for ENCOUNTER.BOSS.", "Block for ENCOUNTER.BOSS_EXTRA."),
+                    other="Initial strategy.",
+                ),
             ),
             tmp_path / "archive.sqlite",
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
@@ -339,7 +342,10 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             item.reply is not None and isinstance(item.reply.outcome, Presented)
             for item in presentations
         )
-        assert archive.manifest.initial_notes == NotesState(other="Initial strategy.")
+        assert archive.manifest.initial_notes == NotesState(
+            wants=("Block for ENCOUNTER.BOSS.", "Block for ENCOUNTER.BOSS_EXTRA."),
+            other="Initial strategy.",
+        )
         requests = archive.requests()
         plan_results = [
             message.data.value
@@ -391,6 +397,13 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             and isinstance(message.content, RunActHandoffContent)
         )
         assert isinstance(handoff_task.content, RunActHandoffContent)
+        from sts2_harness.decisions import BattleResult
+
+        assert handoff_task.content.battle_report.result is BattleResult.UNKNOWN
+        visible_notes = handoff_task.content.observation.notes
+        assert isinstance(visible_notes, NotesView)
+        assert visible_notes.wants[0].expired is True
+        assert visible_notes.wants[1].expired is MISSING
         assert handoff_task.content.battle_report.encounter == native.NamedDefinition(
             name="Boss", definition_id="ENCOUNTER.BOSS"
         )

@@ -66,9 +66,15 @@ class BoundaryValues(SemanticValue):
     gold: Annotated[int, Field(ge=0)]
 
 
+class BattleResult(StrEnum):
+    WON = "won"
+    LOST = "lost"
+    UNKNOWN = "unknown"
+
+
 class BattleReport(SemanticValue):
     location: BattleLocation
-    result: native.TerminalResult
+    result: BattleResult
     last_observed_turn: Annotated[int, Field(ge=0)] | None
     before: BoundaryValues
     after: BoundaryValues
