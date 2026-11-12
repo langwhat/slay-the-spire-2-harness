@@ -310,6 +310,8 @@ class RunDelivery:
             "relics": [object_row(ref, actionable=False) for ref in state.relics],
             "potions": [object_row(ref) for ref in state.potions],
         }
+        if isinstance(state, native.RunState):
+            sections["card_rarity_offset"] = state.card_rarity_offset
         if self.role is native.DecisionOwner.RUN and self.notes is not None:
             sections["notes"] = _json(self.notes)
         if self.role is native.DecisionOwner.RUN:

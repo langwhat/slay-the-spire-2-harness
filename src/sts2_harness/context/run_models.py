@@ -13,6 +13,7 @@ class RunObservation(SemanticValue):
     defs: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
     location: dict[str, JsonValue] | MISSING = MISSING
     progress: dict[str, JsonValue] | MISSING = MISSING
+    card_rarity_offset: float | None | MISSING = MISSING
     player: dict[str, JsonValue] | MISSING = MISSING
     deck: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
     notes: NotesView | MISSING = MISSING

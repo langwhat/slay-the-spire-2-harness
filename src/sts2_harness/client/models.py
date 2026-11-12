@@ -282,12 +282,24 @@ class ActionCost(WireModel):
 
 
 class Progress(WireModel):
+    acts: Annotated[int, Field(ge=1)]
     act: Annotated[int, Field(ge=0)] | None
     floor: Annotated[int, Field(ge=0)] | None
     position: Nonempty | None
     room_type: Nonempty | None
     name: Nonempty | MISSING = MISSING
     definition_id: Nonempty | MISSING = MISSING
+
+
+class AscensionRule(WireModel):
+    level: Annotated[int, Field(ge=1)]
+    name: Nonempty
+    text: Nonempty
+
+
+class RunRules(WireModel):
+    ascension: Annotated[int, Field(ge=0)]
+    rules: tuple[AscensionRule, ...]
 
 
 class Power(WireModel):
@@ -431,6 +443,7 @@ class EventState(WireModel):
 
 
 class RunState(WireModel):
+    card_rarity_offset: float
     control: StateControl
     progress: Progress
     player: RunPlayer
@@ -717,6 +730,7 @@ class Stamp(WireModel):
 
 
 class Observation(WireModel):
+    run_rules: RunRules
     game_language: str
     objects: Directory[ObjectEntry]
     descriptions: Directory[str | None]

@@ -33,12 +33,13 @@ from sts2_harness.client.models import (
 
 RUN = """{
   "game_language":"zhs",
+  "run_rules":{"ascension":0,"rules":[]},
   "stamp":{"game_instance_id":"game","observation_sequence":1},
   "location":{"game_instance_id":"game","run_id":"run","node_id":"node","owner":"run"},
   "input_readiness":"ready",
   "state":{
-    "phase":"run","screen":"map","control":"ready",
-    "progress":{"act":1,"floor":0,"position":null,"room_type":null},
+    "phase":"run","screen":"map","control":"ready","card_rarity_offset":-0.05,
+    "progress":{"acts":3,"act":1,"floor":0,"position":null,"room_type":null},
     "player":{"name":"角色","definition_id":"CHARACTER.TEST","hp":10,"max_hp":10,
       "gold":0,"potion_slot_count":1,"empty_potion_slot_count":1},
     "relics":[],"potions":[],
@@ -64,12 +65,13 @@ CARD = (
 )
 COMBAT = """{
   "game_language":"zhs",
+  "run_rules":{"ascension":0,"rules":[]},
   "stamp":{"game_instance_id":"game","observation_sequence":2},
   "location":{"game_instance_id":"game","run_id":"run","node_id":"node","owner":"combat"},
   "input_readiness":"selection",
   "state":{
     "phase":"combat","screen":"card_selection","control":"ready",
-    "progress":{"act":1,"floor":1,"position":"0:0","room_type":"monster"},
+    "progress":{"acts":3,"act":1,"floor":1,"position":"0:0","room_type":"monster"},
     "player":{"name":"角色","definition_id":"CHARACTER.TEST","hp":10,"max_hp":10,
       "gold":0,"potion_slot_count":1,"empty_potion_slot_count":1,"block":0,
       "resources":{"energy":0,"stars":null},
@@ -145,6 +147,7 @@ def test_terminal_is_a_complete_observation_not_no_run() -> None:
         .replace('"input_readiness":"ready"', '"input_readiness":"terminal"')
         .replace('[{"ref":"travel","label":"前进","enabled":false,"reason":"等待"}]', "[]")
         .replace('"offers":[],"event":null', '"result":"victory"')
+        .replace(',"card_rarity_offset":-0.05', "")
     )
 
     async def read() -> None:
@@ -349,3 +352,29 @@ def test_observation_requires_native_language_and_preserves_optional_operation()
     del payload["game_language"]
     with pytest.raises(ValidationError):
         Observation.model_validate_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("act", [1, 3])
+def test_native_run_length_and_rules_survive_http_decoding(act: int) -> None:
+    payload = json.loads(RUN)
+    payload["state"]["progress"]["act"] = act
+    payload["run_rules"] = {
+        "ascension": 10,
+        "rules": [{"level": 10, "name": "Final rule", "text": "Native final boss rule."}],
+    }
+
+    async def read() -> None:
+        async with ModClient(
+            "http://mod.test",
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json={"status": "completed", "observation": payload})
+            ),
+        ) as client:
+            reply = await client.state()
+        assert isinstance(reply, StateCompleted)
+        assert reply.observation.state.progress.acts == 3
+        assert reply.observation.state.progress.act == act
+        assert reply.observation.run_rules.rules[0].text == "Native final boss rule."
+        assert reply.observation.run_rules.ascension == 10
+
+    asyncio.run(read())

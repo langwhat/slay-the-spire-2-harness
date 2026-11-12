@@ -140,6 +140,12 @@ def test_planning_keeps_previous_route_after_rejection_and_travels_to_unique_nex
         planned = http.inputs[1]["input"]
         assert isinstance(planned, list) and isinstance(task := planned[-1], dict)
         assert isinstance(content := task["content"], str)
+        initial = http.inputs[0]["input"]
+        assert isinstance(initial, list) and isinstance(initial_task := initial[-1], dict)
+        initial_content = initial_task["content"]
+        assert isinstance(initial_content, str)
+        assert json.loads(initial_content)["observation"]["card_rarity_offset"] == -0.05
+        assert json.loads(initial_content)["observation"]["progress"]["acts"] == 3
         assert json.loads(content)["observation"]["dynamic_map"]["plan"] == {
             "edges": [{"from": "map:0:0", "to": "map:1:0"}]
         }
