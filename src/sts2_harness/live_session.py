@@ -90,7 +90,7 @@ async def live_session(
 
         dependencies = SessionDependencies(
             game,
-            RecordedPrompts(PackagedPrompts(minimal=manifest.minimal), journal),
+            RecordedPrompts(PackagedPrompts(), journal),
             RecordedDocuments(documents if documents is not None else FileDocuments(), journal),
             model_client,
             RecordedCandidateLinks(candidate_links, journal)

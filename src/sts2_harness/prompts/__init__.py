@@ -11,20 +11,9 @@ class PromptReader(Protocol):
 
 
 class PackagedPrompts:
-    def __init__(self, *, minimal: bool = False) -> None:
-        self._minimal = minimal
-
     def read(self, name: str) -> MaterialText:
-        path = name + ".md"
-        if self._minimal and name in {
-            "combat-tasks",
-            "combat-observations",
-            "run-observations",
-            "state-format",
-        }:
-            path = "minimal/" + path
         try:
-            body = files("sts2_harness.prompts").joinpath(path).read_text(encoding="utf-8")
+            body = files("sts2_harness.prompts").joinpath(name + ".md").read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             raise MaterialUnavailable(
                 "The required gameplay instructions could not be read."

@@ -115,7 +115,7 @@ class RunAgent(Agent):
         )
         self._client = client
         self._notes = tools.notes
-        self._prompts = prompts if prompts is not None else PackagedPrompts(minimal=tools.minimal)
+        self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._notes_delivered = False
         self._context_location: native.Location | None = None
         self._context_settled = True
