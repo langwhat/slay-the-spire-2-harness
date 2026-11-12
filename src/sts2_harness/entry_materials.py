@@ -90,6 +90,8 @@ async def entry_materials(
         unique = {(subject.category, subject.definition_id): subject for subject in subjects}
         matches = await documents.lookup(tuple(unique.values()))
         for document in matches:
+            if role not in document.auto_roles:
+                continue
             selected[document.id] = document.view()
     except UnknownDocument as error:
         raise MaterialUnavailable(str(error)) from error

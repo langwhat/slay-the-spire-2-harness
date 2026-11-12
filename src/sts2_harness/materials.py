@@ -34,6 +34,7 @@ class DocumentSource:
     path: Path
     resources: tuple[ResourceSource, ...] = ()
     subjects: tuple[SubjectId, ...] = ()
+    auto_roles: tuple[DecisionOwner, ...] = (DecisionOwner.RUN, DecisionOwner.COMBAT)
 
 
 class FileDocuments:
@@ -113,6 +114,7 @@ class FileDocuments:
                     text=view.text,
                     resources=view.resources,
                     subjects=source.subjects,
+                    auto_roles=source.auto_roles,
                 )
             )
         return tuple(documents)

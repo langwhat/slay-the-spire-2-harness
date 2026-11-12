@@ -40,6 +40,10 @@ class SubjectId(native.WireModel):
 
 class Document(DocumentView):
     subjects: tuple[SubjectId, ...]
+    auto_roles: tuple[native.DecisionOwner, ...] = (
+        native.DecisionOwner.RUN,
+        native.DecisionOwner.COMBAT,
+    )
 
     def view(self) -> DocumentView:
         return DocumentView(id=self.id, name=self.name, text=self.text, resources=self.resources)

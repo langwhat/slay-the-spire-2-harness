@@ -16,7 +16,7 @@ from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
-from sts2_harness.knowledge import DocumentView, SkillSummary, SubjectId
+from sts2_harness.knowledge import DocumentView, SkillRead, SkillSummary, SubjectId
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.materials import DocumentSource, FileDocuments
@@ -108,6 +108,19 @@ def test_combat_guidance_uses_current_public_objects_without_skill_navigation(
             )
         )
 
+    run_only = tmp_path / "run-only.txt"
+    run_only.write_text("Non-combat mechanics.")
+    sources.append(
+        DocumentSource(
+            "run-only",
+            "Run rules",
+            "Non-combat rules",
+            run_only,
+            subjects=(SubjectId(category="encounter", definition_id="ENCOUNTER.TEST"),),
+            auto_roles=(native.DecisionOwner.RUN,),
+        )
+    )
+
     def unexpected(request: httpx.Request) -> httpx.Response:
         raise AssertionError("Combat guidance must use the current publication.")
 
@@ -123,6 +136,13 @@ def test_combat_guidance_uses_current_public_objects_without_skill_navigation(
                 execution, documents, native.DecisionOwner.COMBAT, observation, ()
             )
             assert tuple(document.id for document in found) == expected
+            assert (await documents.read(SkillRead("run-only"))).text.body == run_only.read_text()
+            assert "run-only" in {
+                document.id
+                for document in await documents.lookup(
+                    (SubjectId(category="encounter", definition_id="ENCOUNTER.TEST"),)
+                )
+            }
             run = native.Observation.model_validate_json(RUN).model_copy(
                 update={"map": observation.map}
             )
