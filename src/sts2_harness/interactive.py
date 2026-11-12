@@ -203,10 +203,14 @@ async def run_interactive(
                         manifest,
                         archive,
                         model=Llm(model),
-                        documents=materials.documents(MaterialContext(status.ascension))
+                        documents=materials.documents(
+                            MaterialContext(status.ascension, configuration.minimal)
+                        )
                         if materials is not None
                         else None,
-                        candidate_links=materials.candidate_links(MaterialContext(status.ascension))
+                        candidate_links=materials.candidate_links(
+                            MaterialContext(status.ascension, configuration.minimal)
+                        )
                         if materials is not None and materials.candidate_links is not None
                         else None,
                         diagnostics=diagnostics,

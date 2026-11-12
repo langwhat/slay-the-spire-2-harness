@@ -671,11 +671,13 @@ async def run_headless(
                     manifest,
                     archive,
                     model=Llm(model),
-                    documents=materials.documents(MaterialContext(options.recipe.ascension))
+                    documents=materials.documents(
+                        MaterialContext(options.recipe.ascension, configuration.minimal)
+                    )
                     if materials is not None
                     else None,
                     candidate_links=materials.candidate_links(
-                        MaterialContext(options.recipe.ascension)
+                        MaterialContext(options.recipe.ascension, configuration.minimal)
                     )
                     if materials is not None and materials.candidate_links is not None
                     else None,

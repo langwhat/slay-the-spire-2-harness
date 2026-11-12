@@ -26,6 +26,7 @@ from sts2_harness.results import Reason, ReasonCode
 @dataclass(frozen=True, slots=True)
 class MaterialContext:
     ascension: int | None
+    minimal: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,12 @@ async def entry_materials(
         subjects: list[SubjectId] = []
         progress = observation.state.progress
         if role is native.DecisionOwner.RUN:
+            subjects.append(
+                SubjectId(
+                    category=native.NativeCategory.CHARACTER,
+                    definition_id=observation.state.player.definition_id,
+                )
+            )
             if progress.definition_id is not MISSING:
                 subjects.append(SubjectId(category="act", definition_id=progress.definition_id))
             map_ = observation.map
