@@ -26,11 +26,3 @@ class NotesView(NotesState):
 
 
 type InitialNotes = NotesState | Literal[""]
-
-
-def owned_definition_ids(observation: native.Observation) -> frozenset[str]:
-    return frozenset(
-        entry.definition_id
-        for ref in (*observation.state.deck, *observation.state.relics)
-        if isinstance(entry := observation.objects.get(ref), (native.CardEntry, native.RelicEntry))
-    )

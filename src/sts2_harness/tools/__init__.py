@@ -33,7 +33,7 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.llm.messages import ToolCall, ToolDefinition
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
-from sts2_harness.note_values import NotesState, owned_definition_ids
+from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
 from sts2_harness.results import (
     Failed,
@@ -51,7 +51,6 @@ from sts2_harness.tools.inputs import (
     CombatActInput,
     InspectInput,
     KnowledgeInput,
-    MinimalRunDeckChoice,
     NotesInput,
     NotesReadInput,
     RunActInput,
@@ -154,7 +153,7 @@ class ToolCatalog:
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
             ToolName.RUN_ACT: RunActInput,
-            ToolName.RUN_DECK_CHOICE: MinimalRunDeckChoice if minimal else RunDeckChoice,
+            ToolName.RUN_DECK_CHOICE: RunDeckChoice,
             ToolName.RUN_PLAN: RunPlan,
             ToolName.RUN_NEXT: RunNext,
             ToolName.COMBAT_ACT: CombatActInput,
@@ -274,9 +273,7 @@ class ToolCatalog:
             )
         assert self.notes is not None
         if isinstance(query, NotesReadInput):
-            return QueryToolResult(
-                ReadCompleted(), observation, NotesText(notes=self.notes.read(observation))
-            )
+            return QueryToolResult(ReadCompleted(), observation, NotesText(notes=self.notes.read()))
         if observation is None or observation.state.control is not native.StateControl.READY:
             return QueryToolResult(
                 _problem(ReasonCode.BUSY, "Current writable run state is unavailable."), observation
@@ -286,13 +283,6 @@ class ToolCatalog:
             if refused is not None:
                 return refused
         fields = NotesState.model_validate_json(query.model_dump_json(exclude={"mode"}))
-        owned = owned_definition_ids(observation)
-        for identity in fields.core:
-            if identity not in owned:
-                return QueryToolResult(
-                    _problem(ReasonCode.INVALID_ARGUMENTS, f"{identity} is not owned."), observation
-                )
-        self.notes.read(observation)
         self.notes.write(fields, query.model_fields_set - {"mode"})
         return QueryToolResult(ReadCompleted(), observation, NotesUpdated())
 

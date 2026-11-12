@@ -43,6 +43,7 @@ from sts2_harness.tools import ToolCatalog
         ("take", True, False, "outside-core"),
         ("take", True, False, "late-transition"),
         ("take", True, False, "first-core"),
+        ("take", True, False, "core-no-partner"),
     ],
 )
 def test_reward_choice_opens_one_group_then_uses_native_selection(
@@ -141,23 +142,16 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
         }
         if choice == "take":
             arguments["card"] = "c1"
-            if scenario_kind != "minimal":
-                arguments["for"] = "draw"
-        invalid = {**arguments, "offer": "missing"}
-        expected_rejection = None
+            arguments["for"] = "draw"
         if scenario_kind == "unowned-partner":
-            invalid = {**arguments, "for": "core", "with": "CARD.NOT_OWNED"}
-            expected_rejection = "`with` is not owned."
-        if scenario_kind == "outside-core":
-            invalid = {**arguments, "for": "core", "with": card.definition_id}
-            expected_rejection = "`with` is not an entry of `core`."
-        if scenario_kind == "late-transition":
-            invalid = {**arguments, "for": "transition"}
-            expected_rejection = (
-                "for=transition is not available after Act 1 once a core is recorded."
-            )
-        if scenario_kind == "first-core":
+            arguments.update({"for": "core", "with": "CARD.NOT_OWNED"})
+        if scenario_kind in {"outside-core", "first-core"}:
             arguments.update({"for": "core", "with": card.definition_id})
+        if scenario_kind == "late-transition":
+            arguments["for"] = "transition"
+        if scenario_kind == "core-no-partner":
+            arguments["for"] = "core"
+        invalid = {**arguments, "offer": "missing"}
         responses = iter(
             [
                 reply(
@@ -377,12 +371,8 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
             else ActionCompleted,
         )
         assert notes.read() == initial_notes
-        if expected_rejection is not None:
-            assert expected_rejection in json.dumps(inputs, ensure_ascii=False)
         if scenario_kind == "minimal":
             assert link_owners == []
-        elif scenario_kind == "late-transition":
-            assert link_owners and all(owners == (card.definition_id,) for owners in link_owners)
         else:
             assert link_owners and all(
                 set(owners) == {card.definition_id, "RELIC.OTHER"} for owners in link_owners

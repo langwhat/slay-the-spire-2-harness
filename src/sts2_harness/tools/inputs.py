@@ -127,13 +127,6 @@ class DeckChoice(StrEnum):
     SKIP = "skip"
 
 
-class MinimalTakeCard(native.WireModel):
-    offer: native.Nonempty
-    choice: Literal[DeckChoice.TAKE]
-    card: native.Nonempty
-    reason: str
-
-
 class CardPurpose(StrEnum):
     CORE = "core"
     ENERGY = "energy"
@@ -142,15 +135,13 @@ class CardPurpose(StrEnum):
     TRANSITION = "transition"
 
 
-class TakeCard(MinimalTakeCard):
+class TakeCard(native.WireModel):
+    offer: native.Nonempty
+    choice: Literal[DeckChoice.TAKE]
+    card: native.Nonempty
+    reason: str
     purpose: CardPurpose = Field(alias="for")
     with_: native.Nonempty | MISSING = Field(default=MISSING, alias="with")
-
-    @model_validator(mode="after")
-    def core_partner(self) -> Self:
-        if self.purpose is CardPurpose.CORE and self.with_ is MISSING:
-            raise ValueError("`with` is required when for=core.")
-        return self
 
 
 class SkipCard(native.WireModel):
@@ -166,16 +157,6 @@ class RunDeckChoice(RootModel[TakeCard | SkipCard]):
     ) -> JsonSchemaValue:
         return dict(
             next(item.input_schema for item in DEFINITIONS if item.name == "run_deck_choice")
-        )
-
-
-class MinimalRunDeckChoice(RootModel[MinimalTakeCard | SkipCard]):
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
-    ) -> JsonSchemaValue:
-        return TypeAdapter(dict[str, JsonValue]).validate_json(
-            files(__package__).joinpath("minimal-deck-choice.json").read_text()
         )
 
 
