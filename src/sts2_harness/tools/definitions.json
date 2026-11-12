@@ -739,7 +739,7 @@
   },
   {
     "name": "run_deck_choice",
-    "description": "Resolve one card offer: take one of its cards or skip it. Call once per reward offer, and for a card on sale only to buy it. Decide a later offer after the earlier one has changed the deck. A take states its basis. want: the number of the recorded want this card supplies; the want must have been recorded before the offer appeared, and taking the card deletes it. pivot: the engine this card forms with owned cards; it replaces the recorded engine and must play the taken card. A card with neither basis is skipped.",
+    "description": "Resolve one card offer: take one of its cards or skip it. Call once per reward offer, and for a card on sale only to buy it. Decide a later offer after the earlier one has changed the deck. A take states its basis. want: the number of the recorded want this card supplies; the want must have been recorded before the offer appeared, and taking the card deletes it. pivot: the engine this card forms with owned cards; it replaces the recorded engine and must play the taken card. support: the card gives energy, draw, or block for the recorded engine or an owned growth source; it needs no recorded want. A card with none of these is skipped.",
     "input_schema": {
       "oneOf": [
         {
@@ -855,6 +855,43 @@
               "description": "Ref of the card offer."
             },
             "choice": {
+              "const": "take"
+            },
+            "card": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Ref of the card taken."
+            },
+            "reason": {
+              "type": "string",
+              "description": "One short line: the turns it buys against the listed intents, or the plays it adds to a turn, and the engine card that brings into play sooner."
+            },
+            "support": {
+              "enum": [
+                "energy",
+                "draw",
+                "block"
+              ]
+            }
+          },
+          "required": [
+            "offer",
+            "choice",
+            "card",
+            "support",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "offer": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Ref of the card offer."
+            },
+            "choice": {
               "const": "skip"
             },
             "reason": {
@@ -874,7 +911,7 @@
   },
   {
     "name": "run_notes",
-    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each field it supplies and keeps the others. engine: the one turn the deck is built to reach. wants: at most three concrete effects the engine lacks, one sentence each, naming the fight or card each is for; a want recorded while a card offer is open cannot be used for that offer. filler: owned cards outside the engine turn, in removal order. evidence: measured results for or against the fields above: the fight, the turn the engine was ready, and what limited it. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Keep every field short: delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
+    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each field it supplies and keeps the others. engine: the one turn the deck is built to reach. wants: at most three concrete effects the engine lacks, one sentence each, naming the fight or card each is for; a want recorded while a card offer is open cannot be used for that offer. filler: owned cards that neither play nor support the engine turn, in removal order. evidence: measured results for or against the fields above: the fight, the turn the engine was ready, and what limited it. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Keep every field short: delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
     "input_schema": {
       "oneOf": [
         {

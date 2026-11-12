@@ -480,9 +480,10 @@ same owner. An empty initial string creates empty structured notes; nonempty leg
 is rejected. Structured initial notes contain `engine`, at most three `wants` sentences,
 `filler` card IDs, `evidence`, and `other`. `run_notes(mode="write", ...)` replaces only
 supplied fields; reads number the current wants. Each offer freezes the wants that existed
-when it first appeared. A normal-mode take supplies one usable want number or a pivot
-engine; only a native-confirmed take consumes that want or replaces the engine. Shop
-card purchases use the same tool; `run_act` cannot bypass it. Minimal mode has no notes
+when it first appeared. A normal-mode take supplies one usable want number, a pivot
+engine, or a support kind (`energy`, `draw`, or `block`). Support needs no recorded want
+and preserves the wants and engine; only a native-confirmed want or pivot take consumes
+that want or replaces the engine. Shop card purchases use the same tool; `run_act` cannot bypass it. Minimal mode has no notes
 and takes use only offer, card, and reason. The Mod distinguishes rewards that open a selector from immediate
 card grants; declined immediate grants stay unclaimed until the reward screen is left.
 

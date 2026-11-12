@@ -17,7 +17,7 @@ from sts2_harness.execution import Executed, Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
 from sts2_harness.llm.client import Llm
-from sts2_harness.note_values import NotesState
+from sts2_harness.note_values import Engine, EngineKind, NotesState
 from sts2_harness.notes import Notes
 from sts2_harness.results import ActionCompleted, ActionStopped, ActionUnknown
 from sts2_harness.run import RunAgent
@@ -35,6 +35,9 @@ from sts2_harness.tools import ToolCatalog
         ("take", True, False, "want"),
         ("take", True, False, "late-want"),
         ("take", True, False, "minimal"),
+        ("take", True, False, "support-draw"),
+        ("take", False, False, "support-energy"),
+        ("take", True, False, "support-block"),
         ("take", False, False, "shop"),
         ("take", True, False, "unknown"),
         ("take", True, False, "stopped"),
@@ -150,6 +153,15 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                 "reason": "Supply the earlier want.",
             }
             invalid = {**arguments, "want": 3}
+        if basis.startswith("support-"):
+            arguments = {
+                "offer": "o1",
+                "choice": "take",
+                "card": "c1",
+                "support": basis.removeprefix("support-"),
+                "reason": "Find CARD.ONE earlier and survive its setup.",
+            }
+            invalid = {**arguments, "support": "damage"}
         if basis == "minimal":
             arguments = {
                 "offer": "o1",
@@ -338,6 +350,16 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
             if basis in {"want", "shop", "unknown", "stopped", "read-failed"}
             else ""
         )
+        if basis.startswith("support-"):
+            notes = Notes(
+                NotesState(
+                    engine=Engine(
+                        kind=EngineKind.CYCLE, cards=("CARD.ONE",), turn="Play it.", ready_by=2
+                    ),
+                    wants=() if basis == "support-draw" else ("Find CARD.ONE sooner.",),
+                )
+            )
+        initial_notes = notes.read()
         statistics = DeckStatistics()
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
             execution = Execution(
@@ -382,6 +404,8 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
         if choice == "take" and basis in {"pivot", "late-want"}:
             engine = notes.read().engine
             assert engine is not None and engine.cards == ("CARD.ONE",)
+        if basis.startswith("support-"):
+            assert notes.read() == initial_notes
         if basis == "minimal":
             assert notes.read().engine is None
             for body in inputs:
@@ -392,7 +416,10 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                     for tool in tools_sent
                 )
                 encoded_tools = json.dumps(tools_sent)
-                assert '"want"' not in encoded_tools and '"pivot"' not in encoded_tools
+                assert all(
+                    f'"{basis_field}"' not in encoded_tools
+                    for basis_field in ("want", "pivot", "support")
+                )
                 messages = body["input"]
                 assert isinstance(messages, list)
                 for message in messages:

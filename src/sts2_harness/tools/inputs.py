@@ -142,13 +142,23 @@ class PivotCard(TakeCard):
     pivot: Engine
 
 
+class SupportKind(StrEnum):
+    ENERGY = "energy"
+    DRAW = "draw"
+    BLOCK = "block"
+
+
+class SupportCard(TakeCard):
+    support: SupportKind
+
+
 class SkipCard(native.WireModel):
     offer: native.Nonempty
     choice: Literal[DeckChoice.SKIP]
     reason: str
 
 
-class RunDeckChoice(RootModel[WantCard | PivotCard | SkipCard]):
+class RunDeckChoice(RootModel[WantCard | PivotCard | SupportCard | SkipCard]):
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
@@ -183,7 +193,7 @@ class MinimalDeckChoice(RootModel[TakeCard | SkipCard]):
                     "required": ["offer", "choice", "card", "reason"],
                     "additionalProperties": False,
                 },
-                alternatives[2],
+                alternatives[-1],
             ]
         }
 
