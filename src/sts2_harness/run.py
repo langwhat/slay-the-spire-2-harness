@@ -688,7 +688,7 @@ class RunAgent(Agent):
                     Reason(code=ReasonCode.CONTENT_UNAVAILABLE, message=str(error)),
                     self._recovery.record_failure(),
                 ) from error
-            context = self._initial_context(documents)
+            context = self._initial_context(documents, observation)
             context.set_route_plan(self._plan)
             context.begin_group(observation, self._notes.read(), self._plan_value())
             self._context = context
@@ -763,7 +763,7 @@ class RunAgent(Agent):
             documents = (
                 await self._materials(start.observation) if self._materials is not None else ()
             )
-            context = self._initial_context(documents)
+            context = self._initial_context(documents, start.observation)
         except MaterialUnavailable as error:
             raise DecisionInterrupted(
                 Reason(code=ReasonCode.CONTENT_UNAVAILABLE, message=str(error)), True
@@ -784,7 +784,9 @@ class RunAgent(Agent):
         await self._enrich(context, observation)
         return context
 
-    def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
+    def _initial_context(
+        self, documents: tuple[DocumentView, ...], observation: native.Observation
+    ) -> Context:
         blocks = (
             self._prompts.read("run-tasks"),
             self._prompts.read("run-report-reader"),
@@ -798,7 +800,17 @@ class RunAgent(Agent):
             blocks += ("\n", self._prompts.read("run-deck-construction"))
         if self._user_input is not None:
             blocks += ("\n", self._prompts.read("viewer-input"))
-        system = (TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),)
+        system = (
+            TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),
+            TextMessage(
+                TextRole.SYSTEM,
+                json.dumps(
+                    {"run_rules": observation.run_rules.model_dump(mode="json")},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
         if documents:
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
         return Context(native.DecisionOwner.RUN, system=system, minimal=self._tools.minimal)

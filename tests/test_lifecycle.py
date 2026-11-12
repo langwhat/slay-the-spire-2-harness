@@ -363,17 +363,17 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         from sts2_harness.context.models import RunActContent
         from sts2_harness.journal_models import GuidanceText, RunTaskSnapshot, TextSnapshot
 
-        assert len(first_run.input) == 3
+        assert len(first_run.input) == 4
         task = first_run.input[-1]
         assert isinstance(task, RunTaskSnapshot)
         assert isinstance(task.content, RunActContent)
         assert isinstance(task.content.observation.notes, NotesView)
         assert task.content.observation.notes.other == "Reserve for act two."
-        system_guidance = first_run.input[1]
+        system_guidance = first_run.input[2]
         assert isinstance(system_guidance, TextSnapshot)
         assert isinstance(system_guidance.value, GuidanceText)
         assert [doc.id for doc in system_guidance.value.documents] == ["act-two"]
-        first_guidance = requests[0].input[1]
+        first_guidance = requests[0].input[2]
         assert isinstance(first_guidance, TextSnapshot)
         assert isinstance(first_guidance.value, GuidanceText)
         assert {doc.id for doc in first_guidance.value.documents} == {

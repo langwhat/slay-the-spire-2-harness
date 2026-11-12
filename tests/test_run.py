@@ -293,7 +293,15 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
             handoff_task.content, HandoffContent
         )
         assert handoff_task.content.combat_review is None
-        guidance = requests[0].input[1]
+        rules = requests[0].input[1]
+        assert isinstance(rules, TextSnapshot)
+        from sts2_harness.journal_models import LiteralText
+
+        assert isinstance(rules.value, LiteralText)
+        assert json.loads(rules.value.body)["run_rules"] == http.observation.run_rules.model_dump(
+            mode="json"
+        )
+        guidance = requests[0].input[2]
         assert isinstance(guidance, TextSnapshot) and isinstance(guidance.value, GuidanceText)
         assert guidance.value.documents[0].text.body == "Recorded Run guidance."
         assert archive.gaps == ()
@@ -501,11 +509,11 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
                 second = await execution.run_unit(agent, HandoffTask(handoff()))
                 assert isinstance(second, TaskComplete)
         latest = http.inputs[-1]["input"]
-        assert isinstance(latest, list) and len(latest) == 3
+        assert isinstance(latest, list) and len(latest) == 4
         task = latest[-1]
         assert isinstance(task, dict) and isinstance(task["content"], str)
         assert json.loads(task["content"])["notes"]["other"] == "Updated after initialization."
-        guide = latest[1]
+        guide = latest[2]
         assert isinstance(guide, dict) and isinstance(guide["content"], str)
         assert json.loads(guide["content"])["guidance"][0]["text"] == "New act guidance."
         assert http.actions == []

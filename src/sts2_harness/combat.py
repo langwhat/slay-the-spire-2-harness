@@ -83,7 +83,9 @@ class CombatAgent(Agent):
         self._opening_notes = opening_notes
         self._opening_delivered = False
 
-    def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context:
+    def _initial_context(
+        self, documents: tuple[DocumentView, ...], observation: native.Observation
+    ) -> Context:
         system = (
             TextMessage(
                 TextRole.SYSTEM,

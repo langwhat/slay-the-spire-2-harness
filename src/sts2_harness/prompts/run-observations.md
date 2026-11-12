@@ -14,7 +14,7 @@ A connection or old ink does not make travel legal now; a pending choice can blo
 
 # Run length
 
-`progress` gives the current act, the number of acts, and the floor; supplied knowledge lists the ascension rules in force. The run is won when the last act's Boss fight is won, and nothing has value after it. `ahead` counts what the remaining plan holds before this act's Boss; later acts' maps are not shown, so expect about as many of each node kind in every remaining act. `card_odds` gives the per-card rarity and upgrade chances of the next reward of each fight kind. A deck change is worth the fights left in which it is drawn, and a plan that still needs cards is worth starting only while enough rewards remain to find them.
+`progress` gives the current act, the number of acts, and the floor; supplied knowledge lists the ascension rules in force. The run is won after every required Boss fight in the last act is won, including its second Boss when the ascension rules require one; nothing has value after the final fight. `ahead` counts the remaining planned node kinds before this act's Boss when the accepted route is one chain reaching it; otherwise it is omitted. Later acts' maps are not shown, so their node counts are unknown. Supplied knowledge explains card reward rarity and upgrade rolls; `card_rarity_offset` is the current native rarity adjustment, which changes after generated encounter-reward candidates. A deck change is worth the fights left in which it is drawn, and a plan that still needs cards is worth starting only while enough rewards remain to find them.
 
 # Deck
 

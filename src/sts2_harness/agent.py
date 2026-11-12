@@ -75,7 +75,9 @@ class Agent(ABC):
         self._pending_call: ToolCall | None = None
 
     @abstractmethod
-    def _initial_context(self, documents: tuple[DocumentView, ...]) -> Context: ...
+    def _initial_context(
+        self, documents: tuple[DocumentView, ...], observation: native.Observation
+    ) -> Context: ...
 
     @abstractmethod
     def _append_task(
@@ -87,7 +89,7 @@ class Agent(ABC):
         try:
             documents = await self._materials(observation) if self._materials is not None else ()
             if self._context is None:
-                self._context = self._initial_context(documents)
+                self._context = self._initial_context(documents, observation)
             else:
                 self._context.append_materials(documents)
         except MaterialUnavailable as error:
