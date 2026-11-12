@@ -455,6 +455,8 @@ The live context releases the supplied client and optional model and closes its 
 `RunSession(manifest, dependencies)` borrows typed game, prompt, document, and model-factory
 dependencies and owns one Notes instance, recovery budget, and role flow. It does not close
 injected dependencies. Automatic entry guidance is enabled separately from tool documents.
+`DocumentSource.auto_roles` limits automatic subject-matched guidance to the listed roles;
+explicit document reads and knowledge lookups still return the complete document.
 `DefaultFlow` waits for Start,
 schedules Run and Combat, completes pending battle handoffs before creating the next
 Combat, and replaces the Run role and its context when the native act changes. An unknown
