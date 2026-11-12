@@ -311,30 +311,12 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
     asyncio.run(scenario())
 
 
-def test_notes_replace_fields_and_preserve_pre_offer_want_identity(tmp_path: Path) -> None:
+def test_notes_replace_plan_and_preserve_other_fields(tmp_path: Path) -> None:
     from sts2_harness.llm.messages import ToolCall
     from sts2_harness.results import NotesText, NotesUpdated, ReadCompleted
 
     http = RunHTTP([])
-    notes = Notes(NotesState(wants=("Draw before turn three.",), other="Reserve potion."))
-    assert isinstance(http.observation.state, native.RunState)
-    http.observation = http.observation.model_copy(
-        update={
-            "state": http.observation.state.model_copy(
-                update={
-                    "offers": (
-                        native.Offer(
-                            ref="offer",
-                            kind=native.OfferKind.CARD,
-                            contents=("card",),
-                            actions=(),
-                            requires_selection=True,
-                        ),
-                    )
-                }
-            )
-        }
-    )
+    notes = Notes(NotesState(plan="Initial plan.", other="Reserve potion."))
 
     async def scenario() -> None:
         async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
@@ -350,37 +332,24 @@ def test_notes_replace_fields_and_preserve_pre_offer_want_identity(tmp_path: Pat
                 inspect=client.inspect,
                 catalog=client.catalog,
             )
-            for wants, usable in (
-                (["Block by turn two.", "Draw before turn three."], (2,)),
-                (["Draw before turn three."], (1,)),
-                ([], ()),
-                (["Draw before turn three."], ()),
-            ):
+            for plan in ("Block until CARD.ONE arrives.", ""):
                 result = await tools.dispatch(
-                    ToolCall("write", "run_notes", json.dumps({"mode": "write", "wants": wants}))
+                    ToolCall("write", "run_notes", json.dumps({"mode": "write", "plan": plan}))
                 )
-                assert isinstance(result.outcome, ReadCompleted) and isinstance(
-                    result.data, NotesUpdated
+                assert isinstance(result.outcome, ReadCompleted)
+                assert isinstance(result.data, NotesUpdated)
+                assert notes.read().plan == plan
+                assert notes.read().other == "Reserve potion."
+            for fields in ({"plan": "x" * 801}, {"wants": ["Old format."]}):
+                result = await tools.dispatch(
+                    ToolCall("invalid", "run_notes", json.dumps({"mode": "write", **fields}))
                 )
-                assert notes.usable_wants(http.observation, "offer") == usable
+                assert not isinstance(result.outcome, ReadCompleted)
+                assert notes.read().plan == ""
                 assert notes.read().other == "Reserve potion."
             result = await tools.dispatch(ToolCall("read", "run_notes", '{"mode":"read"}'))
             assert isinstance(result.data, NotesText)
-            assert result.data.notes.wants[0].number == 1
-            assert result.data.notes.wants[0].text == "Draw before turn three."
-            notes.write(NotesState(wants=("Block for ENCOUNTER.BOSS.",)), {"wants"})
-            new_offer = http.observation.model_copy(
-                update={
-                    "location": http.observation.location.model_copy(update={"node_id": "boss"})
-                }
-            )
-            notes.observe(new_offer)
-            assert notes.usable_wants(new_offer, "offer") == (1,)
-            notes.finish_encounter("ENCOUNTER.BOSS")
-            assert notes.usable_wants(new_offer, "offer") == ()
-            result = await tools.dispatch(ToolCall("expired", "run_notes", '{"mode":"read"}'))
-            assert isinstance(result.data, NotesText)
-            assert result.data.notes.wants[0].expired is True
+            assert result.data.notes.plan == ""
             assert http.actions == []
 
     asyncio.run(scenario())

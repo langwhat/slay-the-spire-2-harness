@@ -17,7 +17,7 @@ from sts2_harness.execution import Executed, Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
 from sts2_harness.llm.client import Llm
-from sts2_harness.note_values import Engine, EngineKind, NotesState
+from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
 from sts2_harness.results import ActionCompleted, ActionStopped, ActionUnknown
 from sts2_harness.run import RunAgent
@@ -25,19 +25,15 @@ from sts2_harness.tools import ToolCatalog
 
 
 @pytest.mark.parametrize(
-    ("choice", "requires_selection", "mixed_rewards", "basis"),
+    ("choice", "requires_selection", "mixed_rewards", "scenario_kind"),
     [
-        ("take", True, False, "pivot"),
-        ("skip", True, False, "pivot"),
-        ("take", False, False, "pivot"),
-        ("skip", False, False, "pivot"),
-        pytest.param("take", True, True, "pivot", id="decline-special-before-normal"),
-        ("take", True, False, "want"),
-        ("take", True, False, "late-want"),
+        ("take", True, False, "plain"),
+        ("skip", True, False, "plain"),
+        ("take", False, False, "plain"),
+        ("skip", False, False, "plain"),
+        pytest.param("take", True, True, "plain", id="decline-special-before-normal"),
+        ("take", True, False, "notes"),
         ("take", True, False, "minimal"),
-        ("take", True, False, "support-draw"),
-        ("take", False, False, "support-energy"),
-        ("take", True, False, "support-block"),
         ("take", False, False, "shop"),
         ("take", True, False, "unknown"),
         ("take", True, False, "stopped"),
@@ -45,7 +41,7 @@ from sts2_harness.tools import ToolCatalog
     ],
 )
 def test_reward_choice_opens_one_group_then_uses_native_selection(
-    choice: str, requires_selection: bool, mixed_rewards: bool, basis: str, tmp_path: Path
+    choice: str, requires_selection: bool, mixed_rewards: bool, scenario_kind: str, tmp_path: Path
 ) -> None:
     async def scenario() -> None:
         observation = native.Observation.model_validate_json(RUN)
@@ -54,7 +50,9 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
         reward_numbers = (1, 2) if requires_selection and not mixed_rewards else (1,)
         state = observation.state.model_copy(
             update={
-                "screen": native.RunScreen.SHOP if basis == "shop" else native.RunScreen.REWARDS,
+                "screen": native.RunScreen.SHOP
+                if scenario_kind == "shop"
+                else native.RunScreen.REWARDS,
                 "deck": ("owned",),
                 "offers": tuple(
                     native.Offer(
@@ -129,70 +127,10 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
             "reason": "A measured change.",
         }
         if choice == "take":
-            arguments.update(
-                card="c1",
-                pivot={"kind": "cycle", "cards": ["CARD.ONE"], "turn": "Play it.", "ready_by": 1},
-            )
+            arguments["card"] = "c1"
         invalid = {**arguments, "offer": "missing"}
-        if choice == "take":
-            invalid = {
-                **arguments,
-                "pivot": {
-                    "kind": "cycle",
-                    "cards": ["CARD.NOT_OWNED"],
-                    "turn": "Invalid.",
-                    "ready_by": 1,
-                },
-            }
-        if basis in {"want", "shop", "unknown", "stopped", "read-failed"}:
-            arguments = {
-                "offer": "o1",
-                "choice": "take",
-                "card": "c1",
-                "want": 1,
-                "reason": "Supply the earlier want.",
-            }
-            invalid = {**arguments, "want": 3}
-        if basis.startswith("support-"):
-            arguments = {
-                "offer": "o1",
-                "choice": "take",
-                "card": "c1",
-                "support": basis.removeprefix("support-"),
-                "reason": "Find CARD.ONE earlier and survive its setup.",
-            }
-            invalid = {**arguments, "support": "damage"}
-        if basis == "minimal":
-            arguments = {
-                "offer": "o1",
-                "choice": "take",
-                "card": "c1",
-                "reason": "Improve the hand.",
-            }
-            invalid = {**arguments, "want": 1}
-        if basis == "late-want":
-            invalid = {
-                "offer": "o1",
-                "choice": "take",
-                "card": "c1",
-                "want": 1,
-                "reason": "A late want.",
-            }
         responses = iter(
-            (
-                [
-                    reply(
-                        (
-                            "write",
-                            "run_notes",
-                            '{"mode":"write","wants":["Draw before turn three."]}',
-                        )
-                    )
-                ]
-                if basis == "late-want"
-                else []
-            )
-            + [
+            [
                 reply(
                     (
                         "skip-special",
@@ -237,7 +175,7 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                     },
                 )
             if request.url.path == "/state":
-                if basis == "read-failed" and steps:
+                if scenario_kind == "read-failed" and steps:
                     return httpx.Response(503)
                 return httpx.Response(
                     200,
@@ -298,7 +236,7 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                 boundary = native.InputReadiness.SELECTION
             else:
                 assert isinstance(step.step, native.Select)
-                if basis == "stopped":
+                if scenario_kind == "stopped":
                     return httpx.Response(
                         200,
                         json={
@@ -329,7 +267,7 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                 json={
                     "operation_id": step.operation_id,
                     "status": "unknown"
-                    if basis == "unknown" and isinstance(step.step, native.Select)
+                    if scenario_kind == "unknown" and isinstance(step.step, native.Select)
                     else "completed",
                     **(
                         {
@@ -338,27 +276,14 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                                 "message": "Unknown selection effect.",
                             }
                         }
-                        if basis == "unknown" and isinstance(step.step, native.Select)
+                        if scenario_kind == "unknown" and isinstance(step.step, native.Select)
                         else {"boundary": boundary.value}
                     ),
                 },
             )
 
         budget = ToolRecoveryBudget()
-        notes = Notes(
-            NotesState(wants=("Draw before turn three.",))
-            if basis in {"want", "shop", "unknown", "stopped", "read-failed"}
-            else ""
-        )
-        if basis.startswith("support-"):
-            notes = Notes(
-                NotesState(
-                    engine=Engine(
-                        kind=EngineKind.CYCLE, cards=("CARD.ONE",), turn="Play it.", ready_by=2
-                    ),
-                    wants=() if basis == "support-draw" else ("Find CARD.ONE sooner.",),
-                )
-            )
+        notes = Notes(NotesState(plan="Find CARD.ONE sooner.", other="Reserve potion."))
         initial_notes = notes.read()
         statistics = DeckStatistics()
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
@@ -377,7 +302,7 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                     inspect=execution.inspect,
                     catalog=execution.catalog,
                     notes=notes,
-                    minimal=basis == "minimal",
+                    minimal=scenario_kind == "minimal",
                     deck_stats=statistics,
                 )
                 agent = RunAgent(lambda: model, tools, budget)
@@ -390,24 +315,15 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
         assert isinstance(
             result.outcome.outcome,
             ActionUnknown
-            if basis == "unknown"
+            if scenario_kind == "unknown"
             else ActionStopped
-            if basis == "stopped"
+            if scenario_kind == "stopped"
             else ActionCompleted,
         )
-        if basis in {"want", "shop", "read-failed"}:
-            assert notes.read().wants == ()
-        if basis == "read-failed":
+        assert notes.read() == initial_notes
+        if scenario_kind == "read-failed":
             assert result.outcome.observation is None
-        if basis in {"late-want", "unknown", "stopped"}:
-            assert [want.text for want in notes.read().wants] == ["Draw before turn three."]
-        if choice == "take" and basis in {"pivot", "late-want"}:
-            engine = notes.read().engine
-            assert engine is not None and engine.cards == ("CARD.ONE",)
-        if basis.startswith("support-"):
-            assert notes.read() == initial_notes
-        if basis == "minimal":
-            assert notes.read().engine is None
+        if scenario_kind == "minimal":
             for body in inputs:
                 tools_sent = body["tools"]
                 assert isinstance(tools_sent, list)
@@ -417,27 +333,17 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                 )
                 encoded_tools = json.dumps(tools_sent)
                 assert all(
-                    f'"{basis_field}"' not in encoded_tools
-                    for basis_field in ("want", "pivot", "support")
+                    f'"{scenario_kind_field}"' not in encoded_tools
+                    for scenario_kind_field in ("want", "pivot", "support")
                 )
                 messages = body["input"]
                 assert isinstance(messages, list)
                 for message in messages:
                     if isinstance(message, dict) and message.get("role") == "user":
                         assert "usable_wants" not in str(message.get("content"))
-        if basis == "late-want":
-            outputs = [
-                message
-                for item in inputs
-                for message in (item["input"] if isinstance(item["input"], list) else [])
-                if isinstance(message, dict)
-                and message.get("call_id") == "invalid"
-                and message.get("type") == "function_call_output"
-            ]
-            assert outputs and "recorded after this offer appeared" in str(outputs[-1])
         stats, _ = statistics.view(observation)
         assert stats["added"] == (
-            0 if basis in {"shop", "unknown", "stopped"} or choice != "take" else 1
+            0 if scenario_kind in {"shop", "unknown", "stopped"} or choice != "take" else 1
         )
         assert stats["skipped"] == (
             1 + int(mixed_rewards) if choice == "skip" else int(mixed_rewards)
@@ -466,13 +372,13 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
         assert isinstance(observation.state, native.RunState)
         assert [offer.ref for offer in observation.state.offers] == (
             ["o2"]
-            if requires_selection and not mixed_rewards and basis != "stopped"
+            if requires_selection and not mixed_rewards and scenario_kind != "stopped"
             else ["o1", "o2"]
-            if basis == "stopped"
+            if scenario_kind == "stopped"
             else []
         )
         assert observation.state.deck == (
-            ("owned", "c1") if choice == "take" and basis != "stopped" else ("owned",)
+            ("owned", "c1") if choice == "take" and scenario_kind != "stopped" else ("owned",)
         )
 
     asyncio.run(scenario())

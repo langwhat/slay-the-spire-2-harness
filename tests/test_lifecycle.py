@@ -307,7 +307,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
                 game_instance_id="game",
                 run_id="run",
                 initial_notes=NotesState(
-                    wants=("Block for ENCOUNTER.BOSS.", "Block for ENCOUNTER.BOSS_EXTRA."),
+                    plan="Build enough block for both Boss fights.",
                     other="Initial strategy.",
                 ),
             ),
@@ -343,7 +343,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
             for item in presentations
         )
         assert archive.manifest.initial_notes == NotesState(
-            wants=("Block for ENCOUNTER.BOSS.", "Block for ENCOUNTER.BOSS_EXTRA."),
+            plan="Build enough block for both Boss fights.",
             other="Initial strategy.",
         )
         requests = archive.requests()
@@ -402,8 +402,7 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         assert handoff_task.content.battle_report.result is BattleResult.UNKNOWN
         visible_notes = handoff_task.content.observation.notes
         assert isinstance(visible_notes, NotesView)
-        assert visible_notes.wants[0].expired is True
-        assert visible_notes.wants[1].expired is MISSING
+        assert visible_notes.plan == "Build enough block for both Boss fights."
         assert handoff_task.content.battle_report.encounter == native.NamedDefinition(
             name="Boss", definition_id="ENCOUNTER.BOSS"
         )

@@ -17,7 +17,6 @@ from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
 from sts2_harness.client import models as native
-from sts2_harness.note_values import CardId, Engine
 
 
 class Definition(native.WireModel):
@@ -134,31 +133,13 @@ class TakeCard(native.WireModel):
     reason: str
 
 
-class WantCard(TakeCard):
-    want: Annotated[int, Field(ge=1, le=3)]
-
-
-class PivotCard(TakeCard):
-    pivot: Engine
-
-
-class SupportKind(StrEnum):
-    ENERGY = "energy"
-    DRAW = "draw"
-    BLOCK = "block"
-
-
-class SupportCard(TakeCard):
-    support: SupportKind
-
-
 class SkipCard(native.WireModel):
     offer: native.Nonempty
     choice: Literal[DeckChoice.SKIP]
     reason: str
 
 
-class RunDeckChoice(RootModel[WantCard | PivotCard | SupportCard | SkipCard]):
+class RunDeckChoice(RootModel[TakeCard | SkipCard]):
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
@@ -166,36 +147,6 @@ class RunDeckChoice(RootModel[WantCard | PivotCard | SupportCard | SkipCard]):
         return dict(
             next(item.input_schema for item in DEFINITIONS if item.name == "run_deck_choice")
         )
-
-
-class MinimalDeckChoice(RootModel[TakeCard | SkipCard]):
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
-    ) -> JsonSchemaValue:
-        original = next(d.input_schema for d in DEFINITIONS if d.name == "run_deck_choice")
-        alternatives = original["oneOf"]
-        assert isinstance(alternatives, list)
-        take = alternatives[0]
-        assert isinstance(take, dict) and isinstance(take["properties"], dict)
-        properties = {k: v for k, v in take["properties"].items() if k != "want"}
-        properties["reason"] = {
-            "type": "string",
-            "description": (
-                "One short line: the play this card replaces in an average hand and the difference."
-            ),
-        }
-        return {
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": properties,
-                    "required": ["offer", "choice", "card", "reason"],
-                    "additionalProperties": False,
-                },
-                alternatives[-1],
-            ]
-        }
 
 
 class RouteEdge(native.WireModel):
@@ -235,10 +186,7 @@ class NotesReadInput(native.WireModel):
 
 class NotesWriteInput(native.WireModel):
     mode: Literal[NotesMode.WRITE]
-    engine: Engine | MISSING = MISSING
-    wants: Annotated[tuple[native.Nonempty, ...], Field(max_length=3)] | MISSING = MISSING
-    filler: tuple[CardId, ...] | MISSING = MISSING
-    evidence: str | MISSING = MISSING
+    plan: Annotated[str, Field(max_length=800)] | MISSING = MISSING
     other: str | MISSING = MISSING
 
     @model_validator(mode="after")

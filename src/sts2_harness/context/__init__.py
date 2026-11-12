@@ -179,9 +179,6 @@ class Context:
         if not self._minimal:
             self._run_delivery.notes = notes
 
-    def set_usable_wants(self, wants: dict[str, tuple[int, ...]]) -> None:
-        self._run_delivery.usable_wants = wants
-
     @property
     def group_ids(self) -> tuple[int | None, int | None]:
         return (

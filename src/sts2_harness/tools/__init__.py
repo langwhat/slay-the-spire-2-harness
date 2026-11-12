@@ -51,7 +51,6 @@ from sts2_harness.tools.inputs import (
     CombatActInput,
     InspectInput,
     KnowledgeInput,
-    MinimalDeckChoice,
     NotesInput,
     NotesReadInput,
     RunActInput,
@@ -154,7 +153,7 @@ class ToolCatalog:
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
             ToolName.RUN_ACT: RunActInput,
-            ToolName.RUN_DECK_CHOICE: MinimalDeckChoice if minimal else RunDeckChoice,
+            ToolName.RUN_DECK_CHOICE: RunDeckChoice,
             ToolName.RUN_PLAN: RunPlan,
             ToolName.RUN_NEXT: RunNext,
             ToolName.COMBAT_ACT: CombatActInput,
@@ -171,11 +170,7 @@ class ToolCatalog:
                 item.name,
                 MaterialText.create(
                     f"tool:{item.name}:description",
-                    "Resolve one card offer: take one of its cards or skip it. Call once per "
-                    "reward offer, and for a card on sale only to buy it. Decide a later offer "
-                    "after the earlier one has changed the deck."
-                    if minimal and item.name == ToolName.RUN_DECK_CHOICE
-                    else item.description,
+                    item.description,
                 ),
                 inputs[ToolName(item.name)],
             )
@@ -277,8 +272,6 @@ class ToolCatalog:
                 observation,
             )
         assert self.notes is not None
-        if observation is not None:
-            self.notes.observe(observation)
         if isinstance(query, NotesReadInput):
             return QueryToolResult(ReadCompleted(), observation, NotesText(notes=self.notes.read()))
         if observation is None or observation.state.control is not native.StateControl.READY:

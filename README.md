@@ -477,14 +477,12 @@ archives; this does not establish complete real-game acceptance.
 `run_next`, `run_inspect`, `run_knowledge`, `run_skill`, and `run_notes`. Construct one
 `Notes(NotesState(...))` per run and pass it to the Run `ToolCatalog`; the agent reads the
 same owner. An empty initial string creates empty structured notes; nonempty legacy text
-is rejected. Structured initial notes contain `engine`, at most three `wants` sentences,
-`filler` card IDs, `evidence`, and `other`. `run_notes(mode="write", ...)` replaces only
-supplied fields; reads number the current wants. Each offer freezes the wants that existed
-when it first appeared. A normal-mode take supplies one usable want number, a pivot
-engine, or a support kind (`energy`, `draw`, or `block`). Support needs no recorded want
-and preserves the wants and engine; only a native-confirmed want or pivot take consumes
-that want or replaces the engine. Shop card purchases use the same tool; `run_act` cannot bypass it. Minimal mode has no notes
-and takes use only offer, card, and reason. The Mod distinguishes rewards that open a selector from immediate
+is rejected. Structured initial notes contain `plan` (up to 800 characters) and `other`.
+`run_notes(mode="write", ...)` replaces only supplied fields, including clearing a field
+with an empty string. Combat reads the plan at battle entry. Both modes use the same
+`run_deck_choice` schema: a take supplies offer, card, and reason; a skip supplies offer
+and reason. Shop card purchases use the same tool; `run_act` cannot bypass it. Minimal
+mode has no notes tools or injected notes. The Mod distinguishes rewards that open a selector from immediate
 card grants; declined immediate grants stay unclaimed until the reward screen is left.
 
 State delivery replaces complete named sections and sends stable-ID definitions once per

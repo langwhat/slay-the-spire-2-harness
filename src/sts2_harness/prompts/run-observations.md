@@ -12,54 +12,25 @@ A connection or old ink does not make travel legal now; a pending choice can blo
 - Potion slots are limited; a full inventory may require discarding one first.
 - Unrevealed rooms and outcomes are unknown until shown.
 
-# Deck arithmetic
+# Run length
 
-Judge every optional deck change by how often cards are drawn and played, not by a card's printed numbers alone. Let N be the cards that keep circulating in a fight and D the native base draw per turn. `deck_stats` reports native `base_draw` and `base_energy`, without conditional relic or combat modifiers. Under those base assumptions, `baseline_cycle_turns` is N/base_draw, `baseline_hand_cost` is the energy an average hand of base_draw cards would need to play its playable cards (X costs base_energy), and `baseline_unplayed_per_hand` counts cards that hand cannot play within base_energy, paying cheaper cards first. These are deck comparisons, not predictions of a modified combat turn. `added` and `skipped` count this act's completed card reward choices.
+`progress` gives the current act, the number of acts, and the floor; supplied knowledge lists the ascension rules in force. The run is won when the last act's Boss fight is won, and nothing has value after it. `ahead` counts what the remaining plan holds before this act's Boss; later acts' maps are not shown, so expect about as many of each node kind in every remaining act. `card_odds` gives the per-card rarity and upgrade chances of the next reward of each fight kind. A deck change is worth the fights left in which it is drawn, and a plan that still needs cards is worth starting only while enough rewards remain to find them.
 
-- A given card is in hand by turn t with a chance of about min(1, t*D/N). A combination of k cards is assembled by turn t with about that chance raised to the power k.
-- Adding one circulating card makes every owned card arrive N/(N+1) as often, and a k-card combination assemble (N/(N+1))^k as often. With N=25 and k=3 that is 11% less often per added card and 42% less often after five.
-- The added card raises the deck's output only if its value when drawn exceeds the average value of a card drawn from the current deck. Its value includes the extra output it gives other owned cards through their rules, and counts only the draws on which it is actually played.
-- When hands already hold more playable cards than energy (`baseline_unplayed_per_hand` above zero), the added card is played only instead of another card. Its value is then the difference between the two, not its printed number.
-- An added card does not replace the deck's worst card. The worst card stays and is still drawn; the new card takes the place of an average draw. While basic starting cards are most of the deck, they dominate that average, so a card clearly stronger per energy can raise it. As basic cards become a minority, compare the addition with the stronger current average rather than with a basic card.
-- Measure value in the fights that threaten the run: output that ends them sooner or prevents HP loss there.
-- The average rises as the deck's strongest combination forms, so a card worth taking early can be a loss later.
-- A power, or a card that exhausts when played, costs one draw and its energy once per fight rather than every cycle.
-- Removing, transforming, or exhausting a below-average card raises the frequency of every other card.
-- When N <= D, the draw budget can cover one full cycle per turn; additions above D break that budget. Recheck draw, energy, retention, and reshuffle rules before claiming a repeatable cycle.
-- Assess an offered card at its base version unless an upgrade opportunity is actually reserved for it; several cards cannot claim the same opportunity.
+# Deck
 
-Being better than the average draw is necessary, not sufficient. Take a card when this comparison favors it and Deck shape shows the deck is short of what it supplies against the fights ahead; otherwise skip where skipping is offered. A few points of printed value that no coming fight needs are not a reason. Card offers are separate decisions: decide each after the earlier ones have changed the deck.
+Supplied knowledge is the record of how this game's cards, relics, and enemies actually behave: the exact rules of owned and offered objects, and the HP, powers, and intents of every Elite this act can produce and of its Boss. A candidate's `links` name the owned cards and relics it triggers or is triggered by. Decide every deck change from these, not from printed numbers or general habits.
 
-# Deck shape
+Before a deck change, state for each candidate what its rule and its documents say, and what each link does with the linked owned object: what triggers what, how often in a turn, and what grows. Then choose.
 
-Every turn the same energy has to deal damage and prevent it. What the deck is short of is measured against the enemies ahead, not against its own card list. Supplied knowledge gives every Elite this act can produce and the act's Boss: HP, starting powers, and the sequence of intents. The next Elite can be any of them. For each of them, play the fight out against that sequence with the current deck, relics, and potions, and state:
-
-- what wins it: which cards, on which turns, bring its HP to zero, and the kill turn that gives. Use the cards, energy, `baseline_cycle_turns`, and any growth; if nothing owned wins it, say so.
-- the HP lost up to the kill turn: its damage on each turn less the block the same hands can play.
-- the HP lost on turn 1 in the worst case: its first intent against the weakest plausible opening hand.
-
-What these results show the deck to be short of decides every addition:
-
-- Damage is short when nothing owned grows, or when what grows cannot overtake the enemy however long the fight lasts. Add a growth source or a card that multiplies it.
-- Support is short when the owned growth would win given more turns or an earlier start. Add block to buy the turns, and draw and energy to bring the plan's cards together sooner; another attack makes it worse.
-- When neither number is short for the fights ahead, nothing needs adding: skip, remove, or upgrade.
-- An enemy's rule can void a kind of card, such as block gained on every first hit against small attacks. Count only damage and block that work under it.
-- Damage should come from a few cards that grow during the fight: a stat that stacks and is multiplied by several hits, a card that grows each time it is played, or a payoff for a repeated event. One growth source and the two to four cards that turn it into damage are a complete damage plan.
-- A plan is complete only when these numbers say it kills the act's Boss in time. A growth source without cards that multiply it, or a single card that grows, is not yet a plan.
-- Everything else the deck adds is support for those few cards, and support does one of two things. Block, and anything else that prevents damage, buys turns: every turn survived is another hand in which the plan's cards can arrive and another step of growth. Energy and draw put more cards into one turn: the plan's cards are found sooner and several are played together. The fight is won by holding on until the plan's cards have come together and then letting them work.
-- Once a growth source is owned, value an offered energy, draw, or block card by what it buys for the plan: turns survived against the listed intents, or extra plays in a turn. Do not compare its printed numbers with an attack's. Count a card's draw and energy returns after its costs and conditions; drawing can replace its card in hand, and returned energy can free energy for the plan.
-- Support is enough when the plan's cards are normally in play before the listed enemies' damage or growth decides the fight, and the hands before that block most of what is coming. Until then support is the first thing to add; past that point more of it only delays the plan, and removal does more.
-- An attack outside the plan adds no growth. It is drawn in place of block or draw and played in place of a plan card. Take one only when it is better than a plan card and will replace it; the replaced card then becomes a card to remove.
-- A card that grows with each play, and any plan that needs several cards together, is worth only the number of times per fight it is drawn and played. Such a plan needs the smallest deck and the most draw.
-- Many plain attacks are a plan only if they end fights before the enemy's damage matters: check that an average opening hand and its energy kill, or nearly kill, the fights that threaten the run. Otherwise they are dead weight.
-- Before any plan exists, take transitional damage and block only as far as the next Elite's numbers require, including damage to all enemies when it has several. Prefer cards that can later belong to a plan.
-- HP lost because hands held too little block is paid for at rest sites, and every rest is an upgrade not made. A deck that keeps resting is short of block or draw rather than damage, unless its fights run long.
+- Act 1: the starting deck beats neither the act's Elites nor its Boss. Take a card whenever one is clearly stronger than a basic starting card, choosing by what the listed Elites and Boss demand that the deck cannot yet do. That a card does not grow, or belongs to no plan, is not a reason to skip it in this act.
+- Later acts: fights are long and enemies large, so damage has to come from owned cards and relics that feed one another and grow during the fight. Energy, draw, and block keep the deck alive and bring those cards together. Take what joins or serves that group and skip the rest. Read the whole deck again each time; the strongest linked group is the one to build, whether or not it was the earlier plan.
+- Every added card makes every other card arrive later, and every removed card makes the rest arrive sooner.
 
 # Rooms and route
 
-- Shop: compare the affordable combinations of cards, relics, removal, and potions with keeping the gold for a reachable later use. A bought card must pass Deck arithmetic like any added card, and removing a below-average card is often the best purchase. Buy a potion for a specific fight it changes.
-- Rest site: upgrade when HP covers the fights before the next recovery under plausible play; rest when it does not, or when the recovered HP opens a better route. The best upgrade is the one that most raises what the strongest turn grows by each turn or trigger, then the one that removes its bottleneck. Uncertain draws alone are not a reason to rest. When resting keeps displacing upgrades, the deck is short of block or draw; fix that at the next deck change.
-- Route: plan through the next certain recovery, counting the fights and possible unknown-room battles before it. Take the more dangerous branch when its rewards outweigh the HP it is expected to cost and a fallback remains. Elites and Bosses are the fights the deck must be built for. Enter an Elite only when, for every Elite the act can produce, Deck shape names what wins it and the HP lost, worst first turn included, leaves HP to spare; otherwise route around it and build first.
+- Shop: compare the affordable combinations of cards, relics, removal, and potions with keeping the gold for a reachable later use. A bought card is judged like any added card, and removing a weak card is often the best purchase. Buy a potion for a specific fight it changes.
+- Rest site: upgrade when HP covers the fights before the next recovery under plausible play; rest when it does not, or when the recovered HP opens a better route. Upgrade the card whose upgrade most changes the fights ahead; where owned cards grow together, that is usually the one that raises their growth. Uncertain draws alone are not a reason to rest. When resting keeps displacing upgrades, the deck is short of block or draw; fix that at the next deck change.
+- Route: plan through the next certain recovery, counting the fights and possible unknown-room battles before it. Take the more dangerous branch when its rewards outweigh the HP it is expected to cost and a fallback remains. Elites and Bosses are the fights the deck must be built for. Enter an Elite only when the deck has an answer to every Elite the act can produce and HP to spare for its worst opening; otherwise route around it and strengthen the deck first.
 - Events: charge a burden such as a curse, lost HP, or a lost card at its cost until a reachable remedy, and check that the next unavoidable fight stays survivable if a gamble fails.
 
 After a battle report, change only what the evidence changes. One strong or weak fight is one observation, and a cause the report does not show is a hypothesis.

@@ -38,8 +38,6 @@ from sts2_harness.llm.messages import (
     ToolCall,
 )
 from sts2_harness.material_text import MaterialParts, MaterialUnavailable
-from sts2_harness.note_values import Engine
-from sts2_harness.notes import WantIdentity
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import (
     ActionCompleted,
@@ -61,14 +59,11 @@ from sts2_harness.results import (
 from sts2_harness.route_plan import Edge, MovementStatus, RoutePlan, reconcile_plan, replace_plan
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.tools.inputs import (
-    MinimalDeckChoice,
-    PivotCard,
     RunDeckChoice,
     RunNext,
     RunPlan,
     SkipCard,
     TakeCard,
-    WantCard,
 )
 from sts2_harness.user_input_values import UserInputSource
 
@@ -84,8 +79,6 @@ class ActStart:
 class PendingDeckChoice:
     before: native.Observation
     taken: bool
-    want: WantIdentity | None
-    pivot: Engine | None
     reward: bool
 
 
@@ -140,7 +133,6 @@ class RunAgent(Agent):
             self._declined_node = node
             self._declined_offers.clear()
         state = observation.state
-        self._notes.observe(observation)
         if isinstance(state, native.RunState) and state.screen in (
             native.RunScreen.REWARDS,
             native.RunScreen.SHOP,
@@ -173,7 +165,7 @@ class RunAgent(Agent):
         )
 
     async def _enrich(self, context: Context, observation: native.Observation) -> None:
-        self._sync_notes(context, observation)
+        self._sync_notes(context)
         if self._tools.deck_stats is not None and isinstance(observation.state, native.RunState):
             stats, use = self._tools.deck_stats.view(observation)
             context.set_deck_stats(stats, use)
@@ -220,19 +212,10 @@ class RunAgent(Agent):
             }
         )
 
-    def _sync_notes(self, context: Context, observation: native.Observation) -> None:
+    def _sync_notes(self, context: Context) -> None:
         if self._tools.minimal:
             return
-        self._notes.observe(observation)
         context.set_notes(self._notes.read())
-        if isinstance(observation.state, native.RunState):
-            context.set_usable_wants(
-                {
-                    offer.ref: self._notes.usable_wants(observation, offer.ref)
-                    for offer in observation.state.offers
-                    if offer.kind is native.OfferKind.CARD
-                }
-            )
 
     def _sync_plan(self, observation: native.Observation) -> MovementStatus:
         identity = (
@@ -528,11 +511,7 @@ class RunAgent(Agent):
             )
         try:
             json.loads(call.arguments, object_pairs_hook=unique_fields)
-            query = (
-                MinimalDeckChoice.model_validate_json(call.arguments, strict=True).root
-                if self._tools.minimal
-                else RunDeckChoice.model_validate_json(call.arguments, strict=True).root
-            )
+            query = RunDeckChoice.model_validate_json(call.arguments, strict=True).root
         except (ValueError, ValidationError):
             return self._route_rejected(
                 ReasonCode.INVALID_ARGUMENTS, "The deck choice does not match its schema.", current
@@ -578,39 +557,6 @@ class RunAgent(Agent):
                     "The taken card must belong to this offer.",
                     current,
                 )
-            if isinstance(query, WantCard) and query.want not in self._notes.usable_wants(
-                current, offer.ref
-            ):
-                return self._route_rejected(
-                    ReasonCode.INVALID_ARGUMENTS,
-                    "That want was recorded after this offer appeared or is no longer present.",
-                    current,
-                )
-            if isinstance(query, PivotCard):
-                candidate = current.objects.get(query.card)
-                owned = {
-                    obj.definition_id
-                    for ref in state.deck
-                    if isinstance(obj := current.objects.get(ref), native.CardEntry)
-                }
-                if not isinstance(candidate, native.CardEntry):
-                    return self._route_rejected(
-                        ReasonCode.QUERY_FAILED,
-                        "The taken card's native base ID is unavailable.",
-                        current,
-                    )
-                if candidate.definition_id not in query.pivot.cards:
-                    return self._route_rejected(
-                        ReasonCode.INVALID_ARGUMENTS,
-                        "The pivot does not play the taken card's base ID.",
-                        current,
-                    )
-                if not set(query.pivot.cards) <= owned | {candidate.definition_id}:
-                    return self._route_rejected(
-                        ReasonCode.INVALID_ARGUMENTS,
-                        "The pivot contains other card IDs that are not in the owned deck.",
-                        current,
-                    )
         chosen = (query.card,) if isinstance(query, TakeCard) else ()
         if not shop and not offer.requires_selection and not chosen:
             self._declined_offers.add(offer.ref)
@@ -674,8 +620,6 @@ class RunAgent(Agent):
         self._pending_deck_choice = PendingDeckChoice(
             before=before,
             taken=isinstance(query, TakeCard),
-            want=self._notes.want(query.want) if isinstance(query, WantCard) else None,
-            pivot=query.pivot if isinstance(query, PivotCard) else None,
             reward=isinstance(before.state, native.RunState)
             and before.state.screen is native.RunScreen.REWARDS,
         )
@@ -693,7 +637,7 @@ class RunAgent(Agent):
             current = self._reward_view(result.observation)
             result = replace(result, observation=current)
             self._sync_plan(current)
-            self._sync_notes(context, current)
+            self._sync_notes(context)
         return super()._close_query(context, task, bound, call, result)
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
@@ -763,10 +707,6 @@ class RunAgent(Agent):
         pending = self._pending_deck_choice
         self._pending_deck_choice = None
         if pending is not None and isinstance(outcome.outcome, ActionCompleted):
-            if pending.want is not None:
-                self._notes.consume(pending.want)
-            if pending.pivot is not None:
-                self._notes.pivot(pending.pivot)
             if pending.reward and self._tools.deck_stats is not None:
                 self._tools.deck_stats.record_choice(pending.before, taken=pending.taken)
         if outcome.observation is not None:
@@ -782,7 +722,7 @@ class RunAgent(Agent):
         )
         if self._pending_auto is None:
             if self._context is not None and outcome.observation is not None:
-                self._sync_notes(self._context, outcome.observation)
+                self._sync_notes(self._context)
             await super().accept(outcome)
             self._force_strategy = False
             return

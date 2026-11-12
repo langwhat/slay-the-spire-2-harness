@@ -147,7 +147,7 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[18] = 18
+    schema_version: Literal[19] = 19
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True

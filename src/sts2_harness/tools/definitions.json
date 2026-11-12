@@ -739,7 +739,7 @@
   },
   {
     "name": "run_deck_choice",
-    "description": "Resolve one card offer: take one of its cards or skip it. Call once per reward offer, and for a card on sale only to buy it. Decide a later offer after the earlier one has changed the deck. A take states its basis. want: the number of the recorded want this card supplies; the want must have been recorded before the offer appeared, and taking the card deletes it. pivot: the engine this card forms with owned cards; it replaces the recorded engine and must play the taken card. support: the card gives energy, draw, or block for the recorded engine or an owned growth source; it needs no recorded want. A card with none of these is skipped.",
+    "description": "Resolve one card offer: take one of its cards or skip it. Call once per reward offer, and for a card on sale only to buy it. Decide a later offer after the earlier one has changed the deck.",
     "input_schema": {
       "oneOf": [
         {
@@ -758,127 +758,15 @@
               "minLength": 1,
               "description": "Ref of the card taken."
             },
-            "want": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 3,
-              "description": "Position of the want in the strategy notes."
-            },
             "reason": {
               "type": "string",
-              "description": "One short line: how the engine turn changes with this card in hand."
+              "description": "One short line: the rule, document, or link that makes this card work with owned cards, or the enemy fact it answers."
             }
           },
           "required": [
             "offer",
             "choice",
             "card",
-            "want",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "offer": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Ref of the card offer."
-            },
-            "choice": {
-              "const": "take"
-            },
-            "card": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Ref of the card taken."
-            },
-            "pivot": {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "enum": [
-                    "growth",
-                    "cycle",
-                    "burst"
-                  ]
-                },
-                "cards": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "minItems": 1,
-                  "maxItems": 8,
-                  "description": "Native definition IDs of the cards the engine turn plays, in play order."
-                },
-                "turn": {
-                  "type": "string",
-                  "description": "The engine turn in one or two lines: energy after each play, the output that turn, and what is larger next turn."
-                },
-                "ready_by": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "description": "Battle turn by which the engine turn is normally drawn and paid for."
-                }
-              },
-              "required": [
-                "kind",
-                "cards",
-                "turn",
-                "ready_by"
-              ],
-              "additionalProperties": false
-            },
-            "reason": {
-              "type": "string",
-              "description": "One short line: why this turn is stronger than the recorded engine turn."
-            }
-          },
-          "required": [
-            "offer",
-            "choice",
-            "card",
-            "pivot",
-            "reason"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "offer": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Ref of the card offer."
-            },
-            "choice": {
-              "const": "take"
-            },
-            "card": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Ref of the card taken."
-            },
-            "reason": {
-              "type": "string",
-              "description": "One short line: the turns it buys against the listed intents, or the plays it adds to a turn, and the engine card that brings into play sooner."
-            },
-            "support": {
-              "enum": [
-                "energy",
-                "draw",
-                "block"
-              ]
-            }
-          },
-          "required": [
-            "offer",
-            "choice",
-            "card",
-            "support",
             "reason"
           ],
           "additionalProperties": false
@@ -896,7 +784,7 @@
             },
             "reason": {
               "type": "string",
-              "description": "One short line: what the candidates fail to supply."
+              "description": "One short line: why no candidate is taken."
             }
           },
           "required": [
@@ -911,7 +799,7 @@
   },
   {
     "name": "run_notes",
-    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each field it supplies and keeps the others. engine: the one turn the deck is built to reach. wants: at most three concrete effects the engine lacks, one sentence each, naming the fight or card each is for; a want recorded while a card offer is open cannot be used for that offer. filler: owned cards that neither play nor support the engine turn, in removal order. evidence: measured results for or against the fields above: the fight, the turn the engine was ready, and what limited it. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Keep every field short: delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
+    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each field it supplies and keeps the other. plan: the cards and relics the deck is built around, what connects them, what is still missing, and which owned cards it does not use. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Keep both short: delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
     "input_schema": {
       "oneOf": [
         {
@@ -932,62 +820,9 @@
             "mode": {
               "const": "write"
             },
-            "engine": {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "enum": [
-                    "growth",
-                    "cycle",
-                    "burst"
-                  ]
-                },
-                "cards": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  },
-                  "minItems": 1,
-                  "maxItems": 8,
-                  "description": "Native definition IDs of the cards the engine turn plays, in play order."
-                },
-                "turn": {
-                  "type": "string",
-                  "description": "The engine turn in one or two lines: energy after each play, the output that turn, and what is larger next turn."
-                },
-                "ready_by": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "description": "Battle turn by which the engine turn is normally drawn and paid for."
-                }
-              },
-              "required": [
-                "kind",
-                "cards",
-                "turn",
-                "ready_by"
-              ],
-              "additionalProperties": false
-            },
-            "wants": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "maxItems": 3
-            },
-            "filler": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "description": "Native definition IDs, first to remove first."
-            },
-            "evidence": {
-              "type": "string"
+            "plan": {
+              "type": "string",
+              "maxLength": 800
             },
             "other": {
               "type": "string"
@@ -997,7 +832,19 @@
             "mode"
           ],
           "minProperties": 2,
-          "additionalProperties": false
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "plan"
+              ]
+            },
+            {
+              "required": [
+                "other"
+              ]
+            }
+          ]
         }
       ]
     }

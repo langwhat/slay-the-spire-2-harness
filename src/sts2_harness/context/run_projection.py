@@ -36,9 +36,6 @@ def _slim(
     known = inherited if isinstance(inherited, dict) else {}
     result: dict[str, JsonValue] = {}
     for name, child in value.items():
-        if name == "usable_wants":
-            result[name] = child
-            continue
         if name in ("card_pool", "is_removable", "is_upgradable", "hp_display"):
             continue
         if name == "stars" and child == "none":
@@ -130,9 +127,6 @@ class RunDelivery:
     )
 
     notes: NotesView | None = None
-    usable_wants: dict[str, tuple[int, ...]] = field(
-        default_factory=lambda: dict[str, tuple[int, ...]]()
-    )
 
     def snapshot(self) -> dict[str, JsonValue]:
         needed = definition_references(self.sections)
@@ -432,8 +426,6 @@ class RunDelivery:
                         for ref in offer.contents
                     ]
                     row.pop("contents")
-                    if self.notes is not None and offer.kind is native.OfferKind.CARD:
-                        row["usable_wants"] = list(self.usable_wants.get(offer.ref, ()))
                     offer_entry = observation.objects.get(offer.ref)
                     if offer_entry is not None:
                         row["name"] = offer_entry.name
