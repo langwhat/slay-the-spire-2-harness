@@ -79,7 +79,7 @@ class CombatAgent(Agent):
             diagnostics=diagnostics,
             user_input=user_input,
         )
-        self._prompts = prompts if prompts is not None else PackagedPrompts()
+        self._prompts = prompts if prompts is not None else PackagedPrompts(minimal=tools.minimal)
         self._opening_notes = opening_notes
         self._opening_delivered = False
 

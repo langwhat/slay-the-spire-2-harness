@@ -320,10 +320,20 @@ def test_run_queries_notes_executes_batch_and_receives_result_in_same_context(
 
 
 def test_notes_replace_plan_and_preserve_other_fields(tmp_path: Path) -> None:
+    from test_mod_client import CARD
+
     from sts2_harness.llm.messages import ToolCall
     from sts2_harness.results import NotesText, NotesUpdated, ReadCompleted
 
     http = RunHTTP([])
+    assert isinstance(http.observation.state, native.RunState)
+    card = native.CardEntry.model_validate_json(CARD)
+    http.observation = http.observation.model_copy(
+        update={
+            "state": http.observation.state.model_copy(update={"deck": ("owned",)}),
+            "objects": {"owned": card},
+        }
+    )
     notes = Notes(NotesState(plan="Initial plan.", other="Reserve potion."))
 
     async def scenario() -> None:
@@ -348,7 +358,7 @@ def test_notes_replace_plan_and_preserve_other_fields(tmp_path: Path) -> None:
                 assert isinstance(result.data, NotesUpdated)
                 assert notes.read().plan == plan
                 assert notes.read().other == "Reserve potion."
-            for fields in ({"plan": "x" * 801}, {"wants": ["Old format."]}):
+            for fields in ({"plan": "x" * 301}, {"wants": ["Old format."]}):
                 result = await tools.dispatch(
                     ToolCall("invalid", "run_notes", json.dumps({"mode": "write", **fields}))
                 )
@@ -358,6 +368,30 @@ def test_notes_replace_plan_and_preserve_other_fields(tmp_path: Path) -> None:
             result = await tools.dispatch(ToolCall("read", "run_notes", '{"mode":"read"}'))
             assert isinstance(result.data, NotesText)
             assert result.data.notes.plan == ""
+            for core in (["CARD.NOT_OWNED"], [card.definition_id] * 2, ["x"] * 6):
+                result = await tools.dispatch(
+                    ToolCall(
+                        "invalid-core", "run_notes", json.dumps({"mode": "write", "core": core})
+                    )
+                )
+                assert not isinstance(result.outcome, ReadCompleted)
+                assert notes.read().core == ()
+            result = await tools.dispatch(
+                ToolCall(
+                    "core",
+                    "run_notes",
+                    json.dumps({"mode": "write", "core": [card.definition_id]}),
+                )
+            )
+            assert isinstance(result.outcome, ReadCompleted)
+            assert notes.read().core == (card.definition_id,)
+            assert notes.read().other == "Reserve potion."
+            assert isinstance(http.observation.state, native.RunState)
+            http.observation = http.observation.model_copy(
+                update={"state": http.observation.state.model_copy(update={"deck": ()})}
+            )
+            result = await tools.dispatch(ToolCall("pruned", "run_notes", '{"mode":"read"}'))
+            assert isinstance(result.data, NotesText) and result.data.notes.core == ()
             assert http.actions == []
 
     asyncio.run(scenario())

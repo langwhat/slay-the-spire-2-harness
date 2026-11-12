@@ -17,6 +17,7 @@ from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
 
 from sts2_harness.client import models as native
+from sts2_harness.note_values import NotesState
 
 
 class Definition(native.WireModel):
@@ -126,11 +127,30 @@ class DeckChoice(StrEnum):
     SKIP = "skip"
 
 
-class TakeCard(native.WireModel):
+class MinimalTakeCard(native.WireModel):
     offer: native.Nonempty
     choice: Literal[DeckChoice.TAKE]
     card: native.Nonempty
     reason: str
+
+
+class CardPurpose(StrEnum):
+    CORE = "core"
+    ENERGY = "energy"
+    DRAW = "draw"
+    BLOCK = "block"
+    TRANSITION = "transition"
+
+
+class TakeCard(MinimalTakeCard):
+    purpose: CardPurpose = Field(alias="for")
+    with_: native.Nonempty | MISSING = Field(default=MISSING, alias="with")
+
+    @model_validator(mode="after")
+    def core_partner(self) -> Self:
+        if self.purpose is CardPurpose.CORE and self.with_ is MISSING:
+            raise ValueError("`with` is required when for=core.")
+        return self
 
 
 class SkipCard(native.WireModel):
@@ -146,6 +166,16 @@ class RunDeckChoice(RootModel[TakeCard | SkipCard]):
     ) -> JsonSchemaValue:
         return dict(
             next(item.input_schema for item in DEFINITIONS if item.name == "run_deck_choice")
+        )
+
+
+class MinimalRunDeckChoice(RootModel[MinimalTakeCard | SkipCard]):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return TypeAdapter(dict[str, JsonValue]).validate_json(
+            files(__package__).joinpath("minimal-deck-choice.json").read_text()
         )
 
 
@@ -186,8 +216,15 @@ class NotesReadInput(native.WireModel):
 
 class NotesWriteInput(native.WireModel):
     mode: Literal[NotesMode.WRITE]
-    plan: Annotated[str, Field(max_length=800)] | MISSING = MISSING
+    core: Annotated[tuple[native.Nonempty, ...], Field(max_length=5)] | MISSING = MISSING
+    plan: Annotated[str, Field(max_length=300)] | MISSING = MISSING
     other: str | MISSING = MISSING
+
+    @model_validator(mode="after")
+    def valid_core(self) -> Self:
+        if self.core is not MISSING:
+            NotesState(core=self.core)
+        return self
 
     @model_validator(mode="after")
     def supplied_fields(self) -> Self:

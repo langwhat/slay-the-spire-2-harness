@@ -16,6 +16,7 @@ from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.execution import Executed, Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
+from sts2_harness.knowledge import CandidateLink, LinkDirection
 from sts2_harness.llm.client import Llm
 from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
@@ -38,6 +39,10 @@ from sts2_harness.tools import ToolCatalog
         ("take", True, False, "unknown"),
         ("take", True, False, "stopped"),
         ("take", False, False, "read-failed"),
+        ("take", True, False, "unowned-partner"),
+        ("take", True, False, "outside-core"),
+        ("take", True, False, "late-transition"),
+        ("take", True, False, "first-core"),
     ],
 )
 def test_reward_choice_opens_one_group_then_uses_native_selection(
@@ -54,6 +59,7 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                 if scenario_kind == "shop"
                 else native.RunScreen.REWARDS,
                 "deck": ("owned",),
+                "relics": ("relic",),
                 "offers": tuple(
                     native.Offer(
                         ref=f"o{i}",
@@ -70,6 +76,10 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                 ),
             }
         )
+        if scenario_kind in {"outside-core", "late-transition"}:
+            state = state.model_copy(
+                update={"progress": state.progress.model_copy(update={"act": 2})}
+            )
         if mixed_rewards:
             state = state.model_copy(
                 update={
@@ -116,6 +126,9 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                     "c1": card,
                     "c2": card,
                     "special-card": card,
+                    "relic": native.RelicEntry(
+                        kind=native.ObjectKind.RELIC, definition_id="RELIC.OTHER", name="Other"
+                    ),
                 },
                 "descriptions": {"owned": "Draw.", "c1": "Draw.", "c2": "Draw."},
             }
@@ -128,7 +141,23 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
         }
         if choice == "take":
             arguments["card"] = "c1"
+            if scenario_kind != "minimal":
+                arguments["for"] = "draw"
         invalid = {**arguments, "offer": "missing"}
+        expected_rejection = None
+        if scenario_kind == "unowned-partner":
+            invalid = {**arguments, "for": "core", "with": "CARD.NOT_OWNED"}
+            expected_rejection = "`with` is not owned."
+        if scenario_kind == "outside-core":
+            invalid = {**arguments, "for": "core", "with": card.definition_id}
+            expected_rejection = "`with` is not an entry of `core`."
+        if scenario_kind == "late-transition":
+            invalid = {**arguments, "for": "transition"}
+            expected_rejection = (
+                "for=transition is not available after Act 1 once a core is recorded."
+            )
+        if scenario_kind == "first-core":
+            arguments.update({"for": "core", "with": card.definition_id})
         responses = iter(
             [
                 reply(
@@ -283,9 +312,36 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
             )
 
         budget = ToolRecoveryBudget()
-        notes = Notes(NotesState(plan="Find CARD.ONE sooner.", other="Reserve potion."))
+        notes = Notes(
+            NotesState(
+                core=(card.definition_id,) if scenario_kind == "late-transition" else (),
+                plan="Find CARD.ONE sooner.",
+                other="Reserve potion.",
+            )
+        )
         initial_notes = notes.read()
         statistics = DeckStatistics()
+        link_owners: list[tuple[str, ...]] = []
+
+        class Relations:
+            async def links(
+                self, candidate_ids: tuple[str, ...], owned_ids: tuple[str, ...]
+            ) -> dict[str, tuple[CandidateLink, ...]]:
+                link_owners.append(owned_ids)
+                return {
+                    identity: tuple(
+                        CandidateLink.model_validate(
+                            {
+                                "with": owner,
+                                "event": "test_event",
+                                "direction": LinkDirection.OWNED_TRIGGERS_CANDIDATE,
+                            }
+                        )
+                        for owner in owned_ids
+                    )
+                    for identity in candidate_ids
+                }
+
         async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
             execution = Execution(
                 LiveGame(client, namespace="deck", game_instance_id="game", run_id="run"),
@@ -305,7 +361,7 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
                     minimal=scenario_kind == "minimal",
                     deck_stats=statistics,
                 )
-                agent = RunAgent(lambda: model, tools, budget)
+                agent = RunAgent(lambda: model, tools, budget, candidate_links=Relations())
                 task = ActTask(native.RouteKey.model_validate(observation.location.model_dump()))
                 result = await execution.run_unit(agent, task)
                 if mixed_rewards:
@@ -321,6 +377,16 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
             else ActionCompleted,
         )
         assert notes.read() == initial_notes
+        if expected_rejection is not None:
+            assert expected_rejection in json.dumps(inputs, ensure_ascii=False)
+        if scenario_kind == "minimal":
+            assert link_owners == []
+        elif scenario_kind == "late-transition":
+            assert link_owners and all(owners == (card.definition_id,) for owners in link_owners)
+        else:
+            assert link_owners and all(
+                set(owners) == {card.definition_id, "RELIC.OTHER"} for owners in link_owners
+            )
         if scenario_kind == "read-failed":
             assert result.outcome.observation is None
         if scenario_kind == "minimal":

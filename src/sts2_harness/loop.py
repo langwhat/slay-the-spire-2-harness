@@ -123,7 +123,8 @@ class DefaultFlow:
                     if self._pending is None or self._minimal:
                         self._enter_role(native.DecisionOwner.COMBAT)
                         role = self._combat(
-                            observation, NotesView() if self._minimal else self._notes.read()
+                            observation,
+                            NotesView() if self._minimal else self._notes.read(observation),
                         )
                         result = await CombatTask(
                             self._execution,

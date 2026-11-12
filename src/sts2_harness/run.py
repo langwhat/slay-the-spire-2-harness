@@ -38,6 +38,7 @@ from sts2_harness.llm.messages import (
     ToolCall,
 )
 from sts2_harness.material_text import MaterialParts, MaterialUnavailable
+from sts2_harness.note_values import owned_definition_ids
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import (
     ActionCompleted,
@@ -59,6 +60,9 @@ from sts2_harness.results import (
 from sts2_harness.route_plan import Edge, MovementStatus, RoutePlan, reconcile_plan, replace_plan
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.tools.inputs import (
+    CardPurpose,
+    MinimalRunDeckChoice,
+    MinimalTakeCard,
     RunDeckChoice,
     RunNext,
     RunPlan,
@@ -111,7 +115,7 @@ class RunAgent(Agent):
         )
         self._client = client
         self._notes = tools.notes
-        self._prompts = prompts if prompts is not None else PackagedPrompts()
+        self._prompts = prompts if prompts is not None else PackagedPrompts(minimal=tools.minimal)
         self._notes_delivered = False
         self._context_location: native.Location | None = None
         self._context_settled = True
@@ -165,7 +169,7 @@ class RunAgent(Agent):
         )
 
     async def _enrich(self, context: Context, observation: native.Observation) -> None:
-        self._sync_notes(context)
+        self._sync_notes(context, observation)
         if self._tools.deck_stats is not None and isinstance(observation.state, native.RunState):
             stats, use = self._tools.deck_stats.view(observation)
             context.set_deck_stats(stats, use)
@@ -185,6 +189,9 @@ class RunAgent(Agent):
                 }
             )
         )
+        core = self._notes.read(observation).core
+        if state.progress.act is not None and state.progress.act > 1 and core:
+            owned_ids = core
         candidate_ids = tuple(
             sorted(
                 {
@@ -212,10 +219,10 @@ class RunAgent(Agent):
             }
         )
 
-    def _sync_notes(self, context: Context) -> None:
+    def _sync_notes(self, context: Context, observation: native.Observation) -> None:
         if self._tools.minimal:
             return
-        context.set_notes(self._notes.read())
+        context.set_notes(self._notes.read(observation))
 
     def _sync_plan(self, observation: native.Observation) -> MovementStatus:
         identity = (
@@ -511,7 +518,11 @@ class RunAgent(Agent):
             )
         try:
             json.loads(call.arguments, object_pairs_hook=unique_fields)
-            query = RunDeckChoice.model_validate_json(call.arguments, strict=True).root
+            query = (
+                MinimalRunDeckChoice.model_validate_json(call.arguments, strict=True).root
+                if self._tools.minimal
+                else RunDeckChoice.model_validate_json(call.arguments, strict=True).root
+            )
         except (ValueError, ValidationError):
             return self._route_rejected(
                 ReasonCode.INVALID_ARGUMENTS, "The deck choice does not match its schema.", current
@@ -538,7 +549,7 @@ class RunAgent(Agent):
                 ReasonCode.BUSY, "The current card choice is not ready.", current
             )
         shop = state.screen is native.RunScreen.SHOP
-        if shop and not isinstance(query, TakeCard):
+        if shop and not isinstance(query, MinimalTakeCard):
             return self._route_rejected(
                 ReasonCode.INVALID_ARGUMENTS,
                 "Shop cards use run_deck_choice only when buying.",
@@ -551,13 +562,26 @@ class RunAgent(Agent):
                 current,
             )
         if isinstance(query, TakeCard):
+            core = self._notes.read(current).core
+            first_act = state.progress.act == 1
+            problem = None
+            if query.purpose is CardPurpose.TRANSITION and not first_act and core:
+                problem = "for=transition is not available after Act 1 once a core is recorded."
+            if query.purpose is CardPurpose.CORE:
+                if first_act and query.with_ not in owned_definition_ids(current):
+                    problem = "`with` is not owned."
+                if not first_act and query.with_ not in core:
+                    problem = "`with` is not an entry of `core`."
+            if problem is not None:
+                return self._route_rejected(ReasonCode.INVALID_ARGUMENTS, problem, current)
+        if isinstance(query, MinimalTakeCard):
             if query.card not in offer.contents:
                 return self._route_rejected(
                     ReasonCode.INVALID_ARGUMENTS,
                     "The taken card must belong to this offer.",
                     current,
                 )
-        chosen = (query.card,) if isinstance(query, TakeCard) else ()
+        chosen = (query.card,) if isinstance(query, MinimalTakeCard) else ()
         if not shop and not offer.requires_selection and not chosen:
             self._declined_offers.add(offer.ref)
             remaining = self._reward_view(current)
@@ -615,11 +639,14 @@ class RunAgent(Agent):
         )
 
     def _propose_deck_choice(
-        self, proposal: ActionProposal, query: TakeCard | SkipCard, before: native.Observation
+        self,
+        proposal: ActionProposal,
+        query: MinimalTakeCard | SkipCard,
+        before: native.Observation,
     ) -> ActionProposal:
         self._pending_deck_choice = PendingDeckChoice(
             before=before,
-            taken=isinstance(query, TakeCard),
+            taken=isinstance(query, MinimalTakeCard),
             reward=isinstance(before.state, native.RunState)
             and before.state.screen is native.RunScreen.REWARDS,
         )
@@ -637,7 +664,7 @@ class RunAgent(Agent):
             current = self._reward_view(result.observation)
             result = replace(result, observation=current)
             self._sync_plan(current)
-            self._sync_notes(context)
+            self._sync_notes(context, current)
         return super()._close_query(context, task, bound, call, result)
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
@@ -657,7 +684,9 @@ class RunAgent(Agent):
                 observation, shop_strategy=self._shop_strategy_node == observation.location
             )
             if automatic is not None:
-                self._context.begin_group(observation, self._notes.read(), self._plan_value())
+                self._context.begin_group(
+                    observation, self._notes.read(observation), self._plan_value()
+                )
                 proposal, progress = automatic
                 self._pending_auto = progress, observation
                 return ActionDecision(proposal)
@@ -690,13 +719,13 @@ class RunAgent(Agent):
                 ) from error
             context = self._initial_context(documents, observation)
             context.set_route_plan(self._plan)
-            context.begin_group(observation, self._notes.read(), self._plan_value())
+            context.begin_group(observation, self._notes.read(observation), self._plan_value())
             self._context = context
             self._context_location = location
             self._notes_delivered = False
         if isinstance(observation.state, native.RunState) and shop_controls(observation.state):
             self._shop_strategy_node = observation.location
-        self._context.begin_group(observation, self._notes.read(), self._plan_value())
+        self._context.begin_group(observation, self._notes.read(observation), self._plan_value())
         decision = await super().decide(task, observation)
         if isinstance(decision, TaskComplete):
             self._context.finish_group()
@@ -722,7 +751,7 @@ class RunAgent(Agent):
         )
         if self._pending_auto is None:
             if self._context is not None and outcome.observation is not None:
-                self._sync_notes(self._context)
+                self._sync_notes(self._context, outcome.observation)
             await super().accept(outcome)
             self._force_strategy = False
             return
@@ -819,7 +848,9 @@ class RunAgent(Agent):
         self, context: Context, task: DecisionTask, observation: native.Observation
     ) -> None:
         notes = (
-            self._notes.read() if not self._notes_delivered and not self._tools.minimal else MISSING
+            self._notes.read(observation)
+            if not self._notes_delivered and not self._tools.minimal
+            else MISSING
         )
         if isinstance(task, HandoffTask):
             context.append_task(RunHandoffInput(task.handoff, notes))

@@ -760,16 +760,49 @@
             },
             "reason": {
               "type": "string",
-              "description": "One short line: the rule, document, or link that makes this card work with owned cards, or the enemy fact it answers."
+              "description": "One short line: the rule, document, or link behind `for`."
+            },
+            "for": {
+              "type": "string",
+              "enum": [
+                "core",
+                "energy",
+                "draw",
+                "block",
+                "transition"
+              ],
+              "description": "What the card is taken for. core: it triggers, is triggered by, or turns into damage the growth of the owned card or relic named in `with`. energy, draw, block: it supplies that to the deck. transition: its own numbers do something this act's Elites or Boss demand that the deck cannot yet do; available in Act 1, and later only while `core` is empty."
+            },
+            "with": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Native definition ID of an owned card or relic; after Act 1 it must be a `core` entry. Required when for=core."
             }
           },
           "required": [
             "offer",
             "choice",
             "card",
+            "for",
             "reason"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "for": {
+                    "const": "core"
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "with"
+                ]
+              }
+            }
+          ]
         },
         {
           "type": "object",
@@ -799,7 +832,7 @@
   },
   {
     "name": "run_notes",
-    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each field it supplies and keeps the other. plan: the cards and relics the deck is built around, what connects them, what is still missing, and which owned cards it does not use. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Keep both short: delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
+    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each field it supplies and keeps the others. core: native definition IDs of at most five owned cards and relics that the deck is built around. plan: the core's turn in play order, the battle turn by which it is normally ready, its damage then and two turns later, and what it still lacks. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
     "input_schema": {
       "oneOf": [
         {
@@ -822,10 +855,19 @@
             },
             "plan": {
               "type": "string",
-              "maxLength": 800
+              "maxLength": 300
             },
             "other": {
               "type": "string"
+            },
+            "core": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxItems": 5,
+              "uniqueItems": true
             }
           },
           "required": [
@@ -834,6 +876,11 @@
           "minProperties": 2,
           "additionalProperties": false,
           "anyOf": [
+            {
+              "required": [
+                "core"
+              ]
+            },
             {
               "required": [
                 "plan"
