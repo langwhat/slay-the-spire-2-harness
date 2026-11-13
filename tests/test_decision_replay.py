@@ -12,6 +12,7 @@ from test_responses import configuration
 from sts2_harness.capacity import CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.context.models import RunActContent, TaskMessage
+from sts2_harness.deck import deck_observation
 from sts2_harness.game import Inspect, Inspected
 from sts2_harness.journal_models import BaselineSnapshot, NativeSnapshot, PreparationEvidence
 from sts2_harness.llm.client import Llm
@@ -97,6 +98,80 @@ def decision_case(tmp_path: Path, *, multiselect: bool = False) -> DecisionCase:
         recorded_choices=(card.definition_id,),
         recorded_reason="Recorded.",
     )
+
+
+def test_focused_reward_preserves_owned_state_without_other_rewards(tmp_path: Path) -> None:
+    case = decision_case(tmp_path)
+    task = case.events[0]
+    assert isinstance(task, TaskEvent)
+    observation = task.observation
+    state = observation.state
+    assert isinstance(state, native.RunState)
+    other = native.Offer(
+        ref="other-offer",
+        kind=native.OfferKind.CARD,
+        contents=("other-card",),
+        actions=("other-open",),
+        requires_selection=True,
+    )
+    observation = observation.model_copy(
+        update={
+            "state": state.model_copy(
+                update={
+                    "offers": (*state.offers, other),
+                    "actions": (
+                        *state.actions,
+                        native.Action(ref="other-open", label="Other reward", enabled=True),
+                    ),
+                    "selection": native.Selection(
+                        prompt="Another choice",
+                        source=None,
+                        min=0,
+                        max=1,
+                        candidates=("other-card",),
+                        selected=(),
+                    ),
+                }
+            ),
+            "objects": {**observation.objects, "other-card": observation.objects["candidate"]},
+            "descriptions": {**observation.descriptions, "other-card": "Unrelated reward."},
+        }
+    )
+
+    focused = deck_observation(observation, state.offers[0])
+
+    assert isinstance(focused.state, native.RunState)
+    assert focused.state.offers == state.offers
+    assert focused.state.actions == state.actions
+    assert focused.state.selection is None
+    assert focused.state.deck == state.deck
+    assert focused.state.player == state.player
+    assert focused.objects == task.observation.objects
+    assert focused.descriptions == task.observation.descriptions
+    assert focused.map is MISSING
+    assert isinstance(observation.state, native.RunState)
+    assert len(observation.state.offers) == 2
+
+
+@pytest.mark.parametrize("minimal", (False, True))
+def test_focused_reward_exposes_only_its_tools_and_mode_notes(
+    tmp_path: Path, minimal: bool
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path).model_copy(update={"minimal": minimal})
+        async with Llm(configuration(tmp_path)) as client:
+            rebuilt = await rebuild_case(case, client, variant=DecisionVariant.DECK)
+        expected = {"run_deck_choice"} if minimal else {"run_deck_choice", "run_notes"}
+        assert {tool.name for tool in rebuilt.prepared.tools} == expected
+        task = next(
+            message
+            for message in reversed(rebuilt.prepared.input)
+            if isinstance(message, TaskMessage)
+        )
+        assert isinstance(task.content, RunActContent)
+        assert (task.content.observation.notes is MISSING) is minimal
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("variant", tuple(DecisionVariant))

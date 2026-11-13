@@ -24,6 +24,7 @@ from sts2_harness.decisions import (
     HandoffTask,
     SelectStep,
 )
+from sts2_harness.deck import deck_context, deck_observation, deck_tools
 from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.entry_materials import EntryMaterials, MaterialContext, entry_materials
 from sts2_harness.execution import Execution
@@ -62,7 +63,6 @@ from sts2_harness.llm.messages import (
     ToolCall,
     ToolDefinition,
 )
-from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PackagedPrompts, PromptReader
@@ -240,29 +240,7 @@ class DecisionRun(RunAgent):
     ) -> Context:
         if self.variant is DecisionVariant.RUN:
             return super()._initial_context(documents, observation)
-        blocks: tuple[str | MaterialText, ...] = (self._prompts.read("deck"),)
-        if not self._tools.minimal:
-            blocks += ("\n", self._prompts.read("run-notes"))
-        state = self._prompts.read("state-format")
-        # The last paragraph describes map counts; this isolated role receives no map.
-        relevant = "\n\n".join(
-            paragraph for paragraph in state.body.split("\n\n") if "`ahead`" not in paragraph
-        )
-        blocks += ("\n", MaterialText.create(state.id, relevant))
-        system = (
-            TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),
-            TextMessage(
-                TextRole.SYSTEM,
-                json.dumps(
-                    {"run_rules": observation.run_rules.model_dump(mode="json")},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
-            ),
-        )
-        if documents:
-            system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
-        return Context(native.DecisionOwner.RUN, system=system, minimal=self._tools.minimal)
+        return deck_context(self._prompts, documents, observation, minimal=self._tools.minimal)
 
     async def restore(
         self,
@@ -429,48 +407,7 @@ def _deck_case(case: DecisionCase) -> DecisionCase:
     offer = next((offer for offer in state.offers if offer.ref == case.decision_offer), None)
     if offer is None or offer.kind is not native.OfferKind.CARD:
         raise ExtractionError("The source does not identify one native card offer.")
-    actions = tuple(action for action in state.actions if action.ref in offer.actions)
-    selection = state.selection
-    if selection is not None and not set(offer.contents).issubset(selection.candidates):
-        selection = None
-    refs = set((*state.deck, *state.relics, *state.potions, offer.ref, *offer.contents))
-    refs.update(action.subject for action in actions if isinstance(action.subject, str))
-    identities = {
-        entry.definition_id
-        for ref, entry in observation.objects.items()
-        if ref in refs and isinstance(entry.definition_id, str)
-    }
-    filtered = observation.model_copy(
-        update={
-            "state": state.model_copy(
-                update={
-                    "offers": (offer,),
-                    "actions": actions,
-                    "selection": selection,
-                    "event": None,
-                }
-            ),
-            "map": MISSING,
-            "objects": {ref: entry for ref, entry in observation.objects.items() if ref in refs},
-            "descriptions": {
-                ref: text for ref, text in observation.descriptions.items() if ref in refs
-            },
-            "modifier_descriptions": {
-                ref: text for ref, text in observation.modifier_descriptions.items() if ref in refs
-            },
-            "upgrades": {
-                ref: preview for ref, preview in observation.upgrades.items() if ref in refs
-            },
-            "generated": {
-                ref: cards for ref, cards in observation.generated.items() if ref in refs
-            },
-            "mechanisms": tuple(
-                rule
-                for rule in observation.mechanisms
-                if rule.owner in refs or rule.definition_id in identities
-            ),
-        }
-    )
+    filtered = deck_observation(observation, offer)
     previous = event.previous_battle or event.handoff
     if previous is None:
         previous = next(
@@ -539,11 +476,7 @@ async def rebuild_case(
         minimal=case.minimal,
     )
     if variant is DecisionVariant.DECK:
-        tools.definitions = tuple(
-            tool
-            for tool in tools.definitions
-            if tool.name in (ToolName.RUN_DECK_CHOICE, ToolName.RUN_NOTES)
-        )
+        tools.definitions = deck_tools(tools.definitions)
 
     async def selected(observation: native.Observation) -> tuple[DocumentView, ...]:
         if documents is None or not case.entry_documents_enabled:
