@@ -235,6 +235,15 @@ class Context:
                 if key in self._delivery.definitions:
                     definitions.setdefault(key, self._delivery.definitions[key])
         observation["defs"] = list(definitions.values())
+        # A currently visible rule may have last appeared before the retained baseline.
+        rules = observation.get("mechanisms", [])
+        assert isinstance(rules, list)
+        mechanisms: dict[tuple[str, str, str | None], JsonValue] = {}
+        for rule in (*rules, *self._delivery.mechanisms):
+            assert isinstance(rule, dict)
+            mechanisms[mechanism_key(rule)] = rule
+        if mechanisms:
+            observation["mechanisms"] = list(mechanisms.values())
         values: dict[str, JsonValue] = {"observation": observation}
         if self._role is native.DecisionOwner.RUN:
             if self._previous_battle is not None:

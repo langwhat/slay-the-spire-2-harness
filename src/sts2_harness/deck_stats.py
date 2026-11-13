@@ -142,6 +142,6 @@ def _unplayed(costs: list[int | None], draw: int, energy: int) -> float:
                 break
             remaining -= cost
             played += 1
-        total += draw - played
+        total += sum(cost is not None for cost in hand) - played
         samples += 1
     return round(total / samples, 1)

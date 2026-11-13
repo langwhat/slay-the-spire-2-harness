@@ -100,7 +100,7 @@ def test_circulating_excludes_each_one_shot_card_once_and_choices_reset_each_act
     assert stats["circulating"] == 1
     assert stats["unplayable"] == 1
     assert stats["baseline_hand_cost"] == 3.0
-    assert stats["baseline_unplayed_per_hand"] == 1.0
+    assert stats["baseline_unplayed_per_hand"] == 0.0
     assert (stats["added"], stats["skipped"]) == (1, 1)
     next_act = current.model_copy(
         update={
@@ -133,3 +133,38 @@ def test_unknown_printed_cost_does_not_claim_a_known_hand_budget() -> None:
     stats, _ = DeckStatistics().view(current)
     assert "baseline_hand_cost" not in stats
     assert "baseline_unplayed_per_hand" not in stats
+
+
+def test_unplayable_draws_do_not_count_as_unaffordable_cards() -> None:
+    current = observation(1, 1, 1, 1, 1)
+    assert isinstance(current.state, native.RunState)
+    wound = current.objects["c4"]
+    assert isinstance(wound, native.CardEntry)
+    current = current.model_copy(
+        update={
+            "state": current.state.model_copy(
+                update={
+                    "player": current.state.player.model_copy(
+                        update={"base_draw": 5, "base_energy": 4}
+                    ),
+                }
+            ),
+            "objects": {
+                **current.objects,
+                "c4": wound.model_copy(update={"keywords": ("unplayable",)}),
+            },
+        }
+    )
+    assert DeckStatistics().view(current)[0]["baseline_unplayed_per_hand"] == 0.0
+    current = current.model_copy(
+        update={
+            "state": current.state.model_copy(
+                update={
+                    "player": current.state.player.model_copy(
+                        update={"base_draw": 5, "base_energy": 3}
+                    ),
+                }
+            ),
+        }
+    )
+    assert DeckStatistics().view(current)[0]["baseline_unplayed_per_hand"] == 1.0

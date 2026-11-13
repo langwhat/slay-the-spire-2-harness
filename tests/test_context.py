@@ -55,6 +55,7 @@ def test_pile_membership_aggregates_without_order_or_instance_refs() -> None:
     observation = Observation.model_validate_json(COMBAT)
     state = observation.state
     assert isinstance(state, CombatState)
+    card = observation.objects["c1"]
     observation = observation.model_copy(
         update={
             "state": state.model_copy(
@@ -68,6 +69,7 @@ def test_pile_membership_aggregates_without_order_or_instance_refs() -> None:
                 }
             ),
             "descriptions": {"c1": "造成3点伤害。", "c2": "造成3点伤害。"},
+            "objects": {"c1": card, "c2": card},
             "modifier_descriptions": {},
         }
     )
@@ -266,3 +268,68 @@ def test_current_unknown_values_override_known_card_text_and_cost() -> None:
     row = json.loads(context.model_input()[-1].text)["observation"]["hand"][1]
     assert row["text"] is None
     assert row["cost"]["energy"] is None
+
+
+def test_nonhand_piles_preserve_current_cost_and_effect_differences() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    assert isinstance(observation.state, CombatState)
+    original = observation.objects["c1"]
+    assert isinstance(original, CardEntry)
+    observation = observation.model_copy(
+        update={
+            "state": observation.state.model_copy(
+                update={
+                    "piles": observation.state.piles.model_copy(
+                        update={
+                            "hand": (),
+                            "draw": (),
+                            "discard": ("c1", "c2", "c3"),
+                        }
+                    ),
+                }
+            ),
+            "objects": {
+                "c1": original.model_copy(update={"cost": ResourceCosts(energy=1)}),
+                "c2": original.model_copy(update={"cost": ResourceCosts(energy=0)}),
+                "c3": original.model_copy(update={"cost": ResourceCosts(energy=0)}),
+            },
+            "descriptions": {
+                "c1": "Deal 8 damage.",
+                "c2": "Deal 16 damage.",
+                "c3": "Deal 16 damage.",
+            },
+            "modifier_descriptions": {},
+        }
+    )
+    context = Context(DecisionOwner.COMBAT)
+    context.append_task(CombatActInput(), observation)
+    projected = json.loads(context.model_input()[-1].text)["observation"]
+    assert len(projected["discard"]) == 2
+    changed = next(row for row in projected["discard"] if row["n"] == 2)
+    assert changed["cost"]["energy"] == 0
+    assert changed["text"] == "Deal 16 damage."
+    assert all("ref" not in row for row in projected["discard"])
+
+
+def test_compaction_restores_rule_that_reappeared_after_an_absent_baseline() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    mechanism = MechanismView(
+        kind=MechanismKind.POWER,
+        definition_id="POWER.ONE",
+        name="Power",
+        owner="c1",
+        text="Native recurring rule",
+    )
+    visible = observation.model_copy(update={"mechanisms": (mechanism,)})
+    absent = observation.model_copy(update={"mechanisms": ()})
+    context = Context(DecisionOwner.COMBAT)
+    context.append_task(CombatActInput(), visible)
+    context.append_task(CombatActInput(), absent)
+    context.begin_group(absent, NotesView())
+    context.append_task(CombatActInput(), visible)
+    assert "mechanisms" not in json.loads(context.model_input()[-1].text)["observation"]
+    candidate = context.compaction_candidate()
+    context.validate_compaction(candidate)
+    context.install_compaction(candidate)
+    baseline = json.loads(context.model_input()[0].text)["context_baseline"]["observation"]
+    assert baseline["mechanisms"][0]["text"] == "Native recurring rule"

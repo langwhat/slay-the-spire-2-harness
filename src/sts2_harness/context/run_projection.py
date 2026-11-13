@@ -290,11 +290,7 @@ class RunDelivery:
         def counts(refs: tuple[str, ...], *, text: bool = False) -> list[JsonValue]:
             groups: dict[str, dict[str, JsonValue]] = {}
             for ref in refs:
-                row = (
-                    object_row(ref, actionable=False, text=True)
-                    if text
-                    else {name: value for name, value in identity(ref).items() if name != "ref"}
-                )
+                row = object_row(ref, actionable=False, text=text)
                 key = json.dumps(row, ensure_ascii=False, sort_keys=True)
                 if key not in groups:
                     groups[key] = {**row, "n": 0}
