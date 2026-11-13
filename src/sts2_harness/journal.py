@@ -22,6 +22,7 @@ from sts2_harness.capacity import (
 )
 from sts2_harness.client import ClientFailureKind
 from sts2_harness.client import models as native
+from sts2_harness.deck import CardChoiceCompletion
 from sts2_harness.diagnostics import (
     Diagnostics,
     Event,
@@ -147,7 +148,7 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[20] = 20
+    schema_version: Literal[21] = 21
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
@@ -313,6 +314,8 @@ CREATE TABLE IF NOT EXISTS model_requests (sequence INTEGER PRIMARY KEY, cursor 
 CREATE TABLE IF NOT EXISTS model_attempts (sequence INTEGER NOT NULL, attempt INTEGER NOT NULL,
     value TEXT NOT NULL, PRIMARY KEY(sequence,attempt));
 CREATE TABLE IF NOT EXISTS model_recoveries (sequence INTEGER PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS card_choices (stream TEXT NOT NULL, call_id TEXT NOT NULL,
+    value TEXT NOT NULL, PRIMARY KEY(stream,call_id));
 CREATE TABLE IF NOT EXISTS variant_preparations (timeline_index INTEGER PRIMARY KEY,
     source_model_sequence INTEGER UNIQUE NOT NULL, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS materials (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
@@ -907,6 +910,34 @@ class Journal:
                     self._write_summary(
                         connection, summary.model_copy(update={"physical_attempts": attempt.index})
                     )
+
+    def record_card_choice(self, completion: CardChoiceCompletion) -> None:
+        if self._read_only:
+            raise ArchiveError("An evidence reader cannot record a card choice.")
+        with self._storage() as connection:
+            if connection is not None:
+                connection.execute(
+                    "INSERT INTO card_choices VALUES (?,?,?)",
+                    (completion.stream, completion.call_id, self._blob(connection, completion)),
+                )
+
+    def card_choices(self) -> tuple[CardChoiceCompletion, ...]:
+        try:
+            with closing(self._read_connection(self.path)) as connection:
+                rows = connection.execute(
+                    "SELECT stream,call_id,value FROM card_choices ORDER BY rowid"
+                ).fetchall()
+                result: list[CardChoiceCompletion] = []
+                for stream, call_id, raw in rows:
+                    value = CardChoiceCompletion.model_validate_json(
+                        self._read_blob(connection, raw)
+                    )
+                    if (value.stream, value.call_id) != (stream, call_id):
+                        raise ArchiveError("The card choice evidence identity is inconsistent.")
+                    result.append(value)
+                return tuple(result)
+        except (OSError, sqlite3.Error, ValidationError):
+            raise ArchiveError("Cannot decode the card choice evidence.") from None
 
     def record_model_recovery(
         self,

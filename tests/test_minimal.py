@@ -103,7 +103,7 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 if isinstance(tool, dict) and isinstance(tool["name"], str)
             }
             assert names in (
-                {"run_act", "run_deck_choice", "run_plan", "run_next"},
+                {"run_act", "run_plan", "run_next"},
                 {"combat_act"},
             )
             messages = request["input"]

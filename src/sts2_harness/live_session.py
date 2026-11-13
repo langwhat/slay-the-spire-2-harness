@@ -96,6 +96,7 @@ async def live_session(
             RecordedCandidateLinks(candidate_links, journal)
             if candidate_links is not None
             else None,
+            journal.record_card_choice,
         )
         async with RunSession(
             manifest,

@@ -12,6 +12,7 @@ from test_mod_client import COMBAT, RUN
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatTask
+from sts2_harness.context.models import AutomaticProgress
 from sts2_harness.decisions import (
     ActionDecision,
     ActionKind,
@@ -21,6 +22,7 @@ from sts2_harness.decisions import (
     Decision,
     DecisionTask,
 )
+from sts2_harness.deck_role import DeckAgent
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution import Executed, Execution, ToolRecoveryBudget
 from sts2_harness.external import ExternalBackend
@@ -28,7 +30,7 @@ from sts2_harness.external_http import create_app
 from sts2_harness.game import LiveGame, RunEnded, RunEndReason
 from sts2_harness.loop import DefaultFlow
 from sts2_harness.notes import Notes
-from sts2_harness.results import ActionCompleted
+from sts2_harness.results import ActionCompleted, ActionToolResult
 from sts2_harness.run import ActStart
 
 
@@ -98,6 +100,12 @@ class TerminalMod:
 
 
 class TerminalSource(Source):
+    def deck(self, observation: native.Observation, offer: native.Offer) -> DeckAgent:
+        raise AssertionError("This fixture has no card rewards.")
+
+    def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+        raise AssertionError("This fixture has no card rewards.")
+
     def __init__(self, owner: native.DecisionOwner) -> None:
         step = (
             ActionStep(ActionKind.END_TURN)
@@ -191,6 +199,7 @@ def test_terminal_read_failure_ends_roles_before_recovery_pause(
                     source,
                     lambda observation, notes: source,
                     new_run=lambda: source,
+                    deck=source.deck,
                 ).run()
         assert result == RunEnded(RunEndReason.TERMINAL, None)
         assert len(source.observations) == 1 and len(source.outcomes) == 1

@@ -15,6 +15,7 @@ from sts2_harness.decisions import (
     ActTask,
     DecisionSource,
     DecisionTask,
+    LocalProgress,
     ReviewTask,
     SelectStep,
     TaskComplete,
@@ -73,7 +74,7 @@ class Rejected:
     pause_required: bool = False
 
 
-type UnitResult = Executed | TaskComplete | RouteChanged | Rejected | Interrupted
+type UnitResult = Executed | TaskComplete | LocalProgress | RouteChanged | Rejected | Interrupted
 
 
 class Execution:
@@ -191,6 +192,8 @@ class Execution:
             decision = await source.decide(task, observation)
         except DecisionInterrupted as error:
             return Interrupted(error.reason, error.pause_required)
+        if isinstance(decision, LocalProgress):
+            return decision
         if isinstance(decision, TaskComplete):
             if isinstance(task, ActTask):
                 raise TypeError("An action task requires an action proposal.")

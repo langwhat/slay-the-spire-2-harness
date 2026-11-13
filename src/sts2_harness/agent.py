@@ -17,6 +17,7 @@ from sts2_harness.decisions import (
     ActTask,
     Decision,
     DecisionTask,
+    LocalProgress,
     ReviewTask,
     TaskComplete,
 )
@@ -295,6 +296,10 @@ class Agent(ABC):
             else:
                 for index, call in enumerate(calls):
                     result = await self._dispatch(call, task, observation)
+                    if isinstance(result, LocalProgress):
+                        self._close_query(context, task, bound, call, result.result)
+                        context.finish_group()
+                        return result
                     if isinstance(result, ActionProposal):
                         self._pending_call = call
                         return ActionDecision(
@@ -326,7 +331,7 @@ class Agent(ABC):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult:
+    ) -> ActionProposal | QueryToolResult | LocalProgress:
         if call.name == self._tools.action_name:
             return self._tools.dispatch_action(call, task)
         return await self._tools.dispatch(call)

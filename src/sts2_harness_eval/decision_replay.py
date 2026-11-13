@@ -22,9 +22,11 @@ from sts2_harness.decisions import (
     CombatHandoff,
     DecisionTask,
     HandoffTask,
+    LocalProgress,
     SelectStep,
 )
-from sts2_harness.deck import deck_context, deck_observation, deck_tools
+from sts2_harness.deck import deck_context, deck_observation
+from sts2_harness.deck_role import DeckAgent
 from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.entry_materials import EntryMaterials, MaterialContext, entry_materials
 from sts2_harness.execution import Execution
@@ -168,12 +170,12 @@ class DecisionDeviation(ExtractionError):
     """The sample proposed an action outside the labeled native decision."""
 
 
-class DecisionRun(RunAgent):
+class DecisionRun(DeckAgent):
     """Restore harness-owned history and stop at its first proposed native decision."""
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult:
+    ) -> ActionProposal | QueryToolResult | LocalProgress:
         if self.variant is DecisionVariant.DECK and call.name not in (
             ToolName.RUN_DECK_CHOICE,
             ToolName.RUN_NOTES,
@@ -188,7 +190,11 @@ class DecisionRun(RunAgent):
             return await super()._dispatch(call, task, observation)
         if call.name != self.case.decision_tool:
             raise DecisionDeviation("The model proposed a different game action.")
-        result = await super()._dispatch(call, task, observation)
+        result = (
+            await super()._dispatch(call, task, observation)
+            if self.variant is DecisionVariant.DECK
+            else await RunAgent._dispatch(self, call, task, observation)
+        )
         if isinstance(result, QueryToolResult) and isinstance(result.outcome, Rejected):
             raise DecisionDeviation(result.outcome.reason.message)
         if call.name == ToolName.RUN_DECK_CHOICE:
@@ -230,16 +236,30 @@ class DecisionRun(RunAgent):
     def reward_observation(
         self, observation: native.Observation, declined: tuple[str, ...]
     ) -> native.Observation:
-        location = observation.location
-        self._declined_node = (location.game_instance_id, location.run_id, location.node_id)
-        self._declined_offers = set(declined)
-        return self._reward_view(observation)
+        state = observation.state
+        if not isinstance(state, native.RunState) or not declined:
+            return observation
+        excluded = {ref for offer in state.offers if offer.ref in declined for ref in offer.actions}
+        return observation.model_copy(
+            update={
+                "state": state.model_copy(
+                    update={
+                        "offers": tuple(
+                            offer for offer in state.offers if offer.ref not in declined
+                        ),
+                        "actions": tuple(
+                            action for action in state.actions if action.ref not in excluded
+                        ),
+                    }
+                )
+            }
+        )
 
     def _initial_context(
         self, documents: tuple[DocumentView, ...], observation: native.Observation
     ) -> Context:
         if self.variant is DecisionVariant.RUN:
-            return super()._initial_context(documents, observation)
+            return RunAgent._initial_context(self, documents, observation)
         return deck_context(self._prompts, documents, observation, minimal=self._tools.minimal)
 
     async def restore(
@@ -474,9 +494,8 @@ async def rebuild_case(
         supplements=documents,
         skills=documents,
         minimal=case.minimal,
+        focused_deck=variant is DecisionVariant.DECK,
     )
-    if variant is DecisionVariant.DECK:
-        tools.definitions = deck_tools(tools.definitions)
 
     async def selected(observation: native.Observation) -> tuple[DocumentView, ...]:
         if documents is None or not case.entry_documents_enabled:
@@ -495,6 +514,7 @@ async def rebuild_case(
             case.configured_guidance,
         )
 
+    definitions = tools.definitions
     agent = DecisionRun(
         lambda: client,
         tools,
@@ -504,6 +524,7 @@ async def rebuild_case(
         candidate_links=links if case.candidate_links_enabled else None,
         user_input=UserInputQueue() if case.viewer else None,
     )
+    tools.definitions = definitions
     agent.variant = variant
     task, observation = await agent.restore(case, game, execution, documents)
     prepared = await agent.prepared()

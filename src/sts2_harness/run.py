@@ -24,7 +24,7 @@ from sts2_harness.decisions import (
     DecisionSource,
     DecisionTask,
     HandoffTask,
-    SelectStep,
+    LocalProgress,
     TaskComplete,
 )
 from sts2_harness.diagnostics import AutoFinished, Diagnostics
@@ -59,15 +59,88 @@ from sts2_harness.results import (
 from sts2_harness.route_plan import Edge, MovementStatus, RoutePlan, reconcile_plan, replace_plan
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.tools.inputs import (
-    RunDeckChoice,
     RunNext,
     RunPlan,
-    SkipCard,
-    TakeCard,
 )
 from sts2_harness.user_input_values import UserInputSource
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+
+
+def run_observation(observation: native.Observation) -> native.Observation:
+    state = observation.state
+    if not isinstance(state, native.RunState) or state.screen is not native.RunScreen.REWARDS:
+        return observation
+    excluded_offers = {offer.ref for offer in state.offers if offer.kind is native.OfferKind.CARD}
+    if not excluded_offers:
+        return observation
+    excluded = {
+        action for offer in state.offers if offer.ref in excluded_offers for action in offer.actions
+    }
+    offers = tuple(o for o in state.offers if o.ref not in excluded_offers)
+    actions = tuple(a for a in state.actions if a.ref not in excluded)
+    selection = state.selection
+    if selection is not None and any(
+        offer.ref in excluded_offers and set(offer.contents) <= set(selection.candidates)
+        for offer in state.offers
+    ):
+        selection = None
+    hidden = set(excluded_offers) | excluded
+    hidden.update(
+        ref for offer in state.offers if offer.ref in excluded_offers for ref in offer.contents
+    )
+    hidden.update(
+        action.subject
+        for action in state.actions
+        if action.ref in excluded and isinstance(action.subject, str)
+    )
+    retained = set((*state.deck, *state.relics, *state.potions))
+    retained.update(ref for offer in offers for ref in (offer.ref, *offer.contents))
+    retained.update(action.subject for action in actions if isinstance(action.subject, str))
+    if selection is not None:
+        retained.update(selection.candidates)
+    hidden.difference_update(retained)
+    hidden_ids = {
+        entry.definition_id
+        for ref, entry in observation.objects.items()
+        if ref in hidden and isinstance(entry.definition_id, str)
+    }
+    objects = {ref: entry for ref, entry in observation.objects.items() if ref not in hidden}
+    visible_ids = {
+        entry.definition_id for entry in objects.values() if isinstance(entry.definition_id, str)
+    }
+    return observation.model_copy(
+        update={
+            "state": state.model_copy(
+                update={
+                    "offers": offers,
+                    "actions": actions,
+                    "selection": selection,
+                }
+            ),
+            "objects": objects,
+            "descriptions": {
+                ref: text for ref, text in observation.descriptions.items() if ref not in hidden
+            },
+            "modifier_descriptions": {
+                ref: text
+                for ref, text in observation.modifier_descriptions.items()
+                if ref not in hidden
+            },
+            "upgrades": {
+                ref: preview for ref, preview in observation.upgrades.items() if ref not in hidden
+            },
+            "generated": {
+                ref: cards for ref, cards in observation.generated.items() if ref not in hidden
+            },
+            "mechanisms": tuple(
+                rule
+                for rule in observation.mechanisms
+                if rule.owner not in hidden
+                and (rule.definition_id not in hidden_ids or rule.definition_id in visible_ids)
+            ),
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,15 +148,10 @@ class ActStart:
     observation: native.Observation
 
 
-@dataclass(frozen=True, slots=True)
-class PendingDeckChoice:
-    before: native.Observation
-    taken: bool
-    reward: bool
-
-
 class RunRole(DecisionSource, Protocol):
     async def enter_act(self, start: ActStart) -> None: ...
+
+    def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None: ...
 
 
 class RunAgent(Agent):
@@ -98,6 +166,7 @@ class RunAgent(Agent):
         diagnostics: Diagnostics | None = None,
         user_input: UserInputSource | None = None,
         candidate_links: CandidateLinks | None = None,
+        card_reports: list[tuple[AutomaticProgress, ActionToolResult]] | None = None,
     ) -> None:
         if tools.notes is None:
             raise ValueError("Run requires the run's notes owner.")
@@ -121,48 +190,13 @@ class RunAgent(Agent):
         self._plan: RoutePlan | None = None
         self._plan_identity: tuple[str, str | None, int | None] | None = None
         self._candidate_links = candidate_links
-        self._declined_node: tuple[str, str | None, str | None] | None = None
-        self._declined_offers: set[str] = set()
-        self._pending_deck_choice: PendingDeckChoice | None = None
-        self._card_actions: set[tuple[str, str | None, str | None, str]] = set()
+        self._card_reports = card_reports if card_reports is not None else []
 
     def _reward_view(self, observation: native.Observation) -> native.Observation:
-        location = observation.location
-        node = (location.game_instance_id, location.run_id, location.node_id)
-        if node != self._declined_node:
-            self._declined_node = node
-            self._declined_offers.clear()
-        state = observation.state
-        if isinstance(state, native.RunState) and state.screen in (
-            native.RunScreen.REWARDS,
-            native.RunScreen.SHOP,
-        ):
-            self._card_actions.update(
-                (*node, action)
-                for offer in state.offers
-                if offer.kind is native.OfferKind.CARD
-                for action in offer.actions
-            )
-        if not self._declined_offers or not isinstance(state, native.RunState):
-            return observation
-        excluded = {
-            action
-            for offer in state.offers
-            if offer.ref in self._declined_offers
-            for action in offer.actions
-        }
-        return observation.model_copy(
-            update={
-                "state": state.model_copy(
-                    update={
-                        "offers": tuple(
-                            o for o in state.offers if o.ref not in self._declined_offers
-                        ),
-                        "actions": tuple(a for a in state.actions if a.ref not in excluded),
-                    }
-                ),
-            }
-        )
+        return run_observation(observation)
+
+    def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+        self._card_reports.append((progress, result))
 
     async def _enrich(self, context: Context, observation: native.Observation) -> None:
         self._sync_notes(context)
@@ -262,7 +296,8 @@ class RunAgent(Agent):
             reason=Reason(code=code, message=message),
             suggested_actions=(
                 Suggestion(
-                    message="Inspect the current map and decision, then choose a valid next step."
+                    message="Check the tool schema and current state references, "
+                    "then choose a valid next step."
                 ),
             ),
         )
@@ -279,46 +314,9 @@ class RunAgent(Agent):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult:
-        if call.name == ToolName.RUN_DECK_CHOICE:
-            return await self._deck_choice(call, task)
+    ) -> ActionProposal | QueryToolResult | LocalProgress:
         if call.name == ToolName.RUN_ACT:
             result = self._tools.dispatch_action(call, task)
-            if isinstance(result, ActionProposal):
-                current = await self._tools.current()
-                if current is None:
-                    return self._route_rejected(
-                        ReasonCode.QUERY_FAILED, "The current actions are unavailable.", None
-                    )
-                current = self._reward_view(current)
-                state = current.state
-                if isinstance(state, native.RunState):
-                    card_offers = tuple(
-                        o
-                        for o in state.offers
-                        if o.kind is native.OfferKind.CARD
-                        and state.screen in (native.RunScreen.REWARDS, native.RunScreen.SHOP)
-                    )
-                    card_actions = {ref for offer in card_offers for ref in offer.actions}
-                    candidates = {ref for offer in card_offers for ref in offer.contents}
-                    node = (
-                        current.location.game_instance_id,
-                        current.location.run_id,
-                        current.location.node_id,
-                    )
-                    if any(
-                        isinstance(step, ActionStep)
-                        and (step.ref in card_actions or (*node, step.ref) in self._card_actions)
-                        or isinstance(step, SelectStep)
-                        and state.selection is not None
-                        and bool(candidates.intersection(state.selection.candidates))
-                        for step in result.steps
-                    ):
-                        return self._route_rejected(
-                            ReasonCode.INVALID_ARGUMENTS,
-                            "Resolve card rewards and buy shop cards with run_deck_choice.",
-                            observation,
-                        )
             return (
                 replace(result, allow_map_travel=False)
                 if isinstance(result, ActionProposal)
@@ -492,141 +490,6 @@ class RunAgent(Agent):
         assert next_call is not None
         return ActionProposal((ActionStep(ActionKind.INTERACT, action.ref),), next_call.reason)
 
-    async def _deck_choice(
-        self, call: ToolCall, task: DecisionTask
-    ) -> ActionProposal | QueryToolResult:
-        current = await self._tools.current()
-        if current is None:
-            return self._route_rejected(
-                ReasonCode.QUERY_FAILED, "The current reward is unavailable.", None
-            )
-        current = self._reward_view(current)
-        if not isinstance(task, ActTask):
-            return self._route_rejected(
-                ReasonCode.WRONG_ROLE, "This task cannot take card rewards.", current
-            )
-        if current.location != native.Location.model_validate(task.expected_route.model_dump()):
-            return self._route_rejected(
-                ReasonCode.ROLE_CHANGED, "The action route changed.", current
-            )
-        try:
-            json.loads(call.arguments, object_pairs_hook=unique_fields)
-            query = RunDeckChoice.model_validate_json(call.arguments, strict=True).root
-        except (ValueError, ValidationError):
-            return self._route_rejected(
-                ReasonCode.INVALID_ARGUMENTS, "The deck choice does not match its schema.", current
-            )
-        state = current.state
-        offer = (
-            next((o for o in state.offers if o.ref == query.offer), None)
-            if isinstance(state, native.RunState)
-            and state.screen in (native.RunScreen.REWARDS, native.RunScreen.SHOP)
-            else None
-        )
-        if offer is None or offer.kind is not native.OfferKind.CARD:
-            return self._route_rejected(
-                ReasonCode.INVALID_ARGUMENTS,
-                "The offer is not a current card reward or shop card.",
-                current,
-            )
-        assert isinstance(state, native.RunState)
-        if state.control is not native.StateControl.READY or current.input_readiness not in (
-            native.InputReadiness.READY,
-            native.InputReadiness.SELECTION,
-        ):
-            return self._route_rejected(
-                ReasonCode.BUSY, "The current card choice is not ready.", current
-            )
-        shop = state.screen is native.RunScreen.SHOP
-        if shop and not isinstance(query, TakeCard):
-            return self._route_rejected(
-                ReasonCode.INVALID_ARGUMENTS,
-                "Shop cards use run_deck_choice only when buying.",
-                current,
-            )
-        if not shop and offer.requires_selection is MISSING:
-            return self._route_rejected(
-                ReasonCode.QUERY_FAILED,
-                "The Mod must publish this card reward's selection mode.",
-                current,
-            )
-        if isinstance(query, TakeCard) and query.card not in offer.contents:
-            return self._route_rejected(
-                ReasonCode.INVALID_ARGUMENTS,
-                "The taken card must belong to this offer.",
-                current,
-            )
-        chosen = (query.card,) if isinstance(query, TakeCard) else ()
-        if not shop and not offer.requires_selection and not chosen:
-            self._declined_offers.add(offer.ref)
-            remaining = self._reward_view(current)
-            automatic = choose_auto(remaining, shop_strategy=False)
-            if automatic is not None:
-                return self._propose_deck_choice(
-                    replace(automatic[0], reason=query.reason), query, current
-                )
-            if self._tools.deck_stats is not None:
-                self._tools.deck_stats.record_choice(current, taken=False)
-            return QueryToolResult(ReadCompleted(), remaining)
-        selection = state.selection
-        if selection is not None:
-            if not set(offer.contents) <= set(selection.candidates):
-                return self._route_rejected(
-                    ReasonCode.PENDING_CHOICE, "Another selection is open.", current
-                )
-            if not selection.min <= len(chosen) <= selection.max:
-                return self._route_rejected(
-                    ReasonCode.INVALID_ARGUMENTS,
-                    "This reward does not permit that choice.",
-                    current,
-                )
-            return self._propose_deck_choice(
-                ActionProposal((SelectStep(chosen),), query.reason, allow_map_travel=False),
-                query,
-                current,
-            )
-        opening = next(
-            (action for action in state.actions if action.ref in offer.actions and action.enabled),
-            None,
-        )
-        if opening is None:
-            return self._route_rejected(
-                ReasonCode.ILLEGAL_ACTION, "The card reward cannot be opened now.", current
-            )
-        if shop or not offer.requires_selection:
-            return self._propose_deck_choice(
-                ActionProposal(
-                    (ActionStep(ActionKind.INTERACT, opening.ref),),
-                    query.reason,
-                    allow_map_travel=False,
-                ),
-                query,
-                current,
-            )
-        return self._propose_deck_choice(
-            ActionProposal(
-                (ActionStep(ActionKind.INTERACT, opening.ref), SelectStep(chosen)),
-                query.reason,
-                allow_map_travel=False,
-            ),
-            query,
-            current,
-        )
-
-    def _propose_deck_choice(
-        self,
-        proposal: ActionProposal,
-        query: TakeCard | SkipCard,
-        before: native.Observation,
-    ) -> ActionProposal:
-        self._pending_deck_choice = PendingDeckChoice(
-            before=before,
-            taken=isinstance(query, TakeCard),
-            reward=isinstance(before.state, native.RunState)
-            and before.state.screen is native.RunScreen.REWARDS,
-        )
-        return proposal
-
     def _close_query(
         self,
         context: Context,
@@ -706,11 +569,6 @@ class RunAgent(Agent):
         return decision
 
     async def accept(self, outcome: ActionToolResult) -> None:
-        pending = self._pending_deck_choice
-        self._pending_deck_choice = None
-        if pending is not None and isinstance(outcome.outcome, ActionCompleted):
-            if pending.reward and self._tools.deck_stats is not None:
-                self._tools.deck_stats.record_choice(pending.before, taken=pending.taken)
         if outcome.observation is not None:
             outcome = replace(outcome, observation=self._reward_view(outcome.observation))
         # A closed group can still contain uncertain execution feedback.
@@ -784,6 +642,11 @@ class RunAgent(Agent):
         else:
             context = await super()._prepare(observation)
         await self._enrich(context, observation)
+        for progress, result in self._card_reports:
+            if result.observation is not None:
+                result = replace(result, observation=self._reward_view(result.observation))
+            context.append_automatic(progress, result)
+        self._card_reports.clear()
         return context
 
     def _initial_context(

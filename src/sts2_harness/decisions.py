@@ -7,7 +7,7 @@ from typing import Annotated, Protocol
 from pydantic import MISSING, Field
 
 from sts2_harness.client import models as native
-from sts2_harness.results import ActionToolResult, SemanticValue
+from sts2_harness.results import ActionToolResult, QueryToolResult, SemanticValue
 
 
 class ActionKind(StrEnum):
@@ -51,7 +51,12 @@ class TaskComplete:
     text: str | None = None
 
 
-type Decision = ActionDecision | TaskComplete
+@dataclass(frozen=True, slots=True)
+class LocalProgress:
+    result: QueryToolResult
+
+
+type Decision = ActionDecision | TaskComplete | LocalProgress
 
 
 class BattleLocation(SemanticValue):

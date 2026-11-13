@@ -15,6 +15,7 @@ from test_responses import configuration
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.config import Configuration, Driver
+from sts2_harness.context.models import AutomaticProgress
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.journal import Journal, Manifest
 from sts2_harness.live_session import live_session
@@ -195,7 +196,7 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(
     for path in archives:
         archive = Journal.open(path)
         assert archive.manifest.initial_notes == ""
-        assert archive.manifest.schema_version == 20
+        assert archive.manifest.schema_version == 21
         assert archive.manifest.minimal is minimal
         assert archive.operations()[0].request.kind.value == "pause"
         assert archive.gaps == ()
@@ -236,6 +237,9 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
     paths: list[Path] = []
 
     class CodeRun:
+        def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+            raise AssertionError("This fixture has no card rewards.")
+
         async def enter_act(self, start: ActStart) -> None:
             assert sessions[0].notes.read().other == "Retain this session."
 

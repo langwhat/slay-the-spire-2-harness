@@ -133,6 +133,7 @@ class ToolCatalog:
         | None = None,
         minimal: bool = False,
         deck_stats: DeckStatistics | None = None,
+        focused_deck: bool = False,
     ) -> None:
         if role is native.DecisionOwner.RUN and notes is None:
             raise ValueError("Run tools require the run's notes owner.")
@@ -177,6 +178,11 @@ class ToolCatalog:
             for item in DEFINITIONS
             if item.name.startswith(role.value + "_")
             and (
+                ToolName(item.name) in {ToolName.RUN_DECK_CHOICE, ToolName.RUN_NOTES}
+                if focused_deck
+                else ToolName(item.name) is not ToolName.RUN_DECK_CHOICE
+            )
+            and (
                 not minimal
                 or ToolName(item.name)
                 in {
@@ -197,7 +203,7 @@ class ToolCatalog:
     def dispatch_action(
         self, call: ToolCall, task: DecisionTask
     ) -> ActionProposal | QueryToolResult:
-        if call.name != self.action_name:
+        if call.name != self.action_name or call.name not in self._names:
             return QueryToolResult(
                 _problem(ReasonCode.WRONG_ROLE, "This action tool is not available."), None
             )

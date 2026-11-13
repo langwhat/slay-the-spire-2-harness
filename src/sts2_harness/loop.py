@@ -1,6 +1,7 @@
 """Schedule one run's roles, act entry, and pending battle handoff."""
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Protocol, assert_never
 
 from sts2_harness.client import models as native
@@ -10,8 +11,10 @@ from sts2_harness.decisions import (
     CombatHandoff,
     DecisionSource,
     HandoffTask,
+    LocalProgress,
     TaskComplete,
 )
+from sts2_harness.deck_role import DeckAgent
 from sts2_harness.diagnostics import ActEntered, Diagnostics, RoleChanged
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import (
@@ -28,6 +31,7 @@ from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.run import ActStart, RunRole
 
 type CombatFactory = Callable[[native.Observation, NotesView], DecisionSource]
+type DeckFactory = Callable[[native.Observation, native.Offer], DeckAgent]
 
 
 class RunFlow(Protocol):
@@ -44,6 +48,7 @@ class DefaultFlow:
         combat: CombatFactory,
         *,
         new_run: Callable[[], RunRole],
+        deck: DeckFactory,
         diagnostics: Diagnostics | None = None,
         minimal: bool = False,
     ) -> None:
@@ -60,6 +65,10 @@ class DefaultFlow:
         self._pending: CombatHandoff | None = None
         self._latest_handoff: CombatHandoff | None = None
         self._minimal = minimal
+        self._deck_factory = deck
+        self._deck: DeckAgent | None = None
+        self._deck_node: tuple[str, str | None, str | None] | None = None
+        self._declined: set[str] = set()
 
     def _enter_role(self, role: native.DecisionOwner) -> None:
         if self._active_role is role:
@@ -75,6 +84,55 @@ class DefaultFlow:
                 message=f"Model request unavailable: {reason.reason.value}.",
             )
         await self._execution.pause_until_resumed(reason)
+
+    def _finish_card(self, observation: native.Observation) -> None:
+        if self._deck is None:
+            return
+        resolution = self._deck.resolution
+        if resolution is None and not self._deck.offered(observation):
+            resolution = self._deck.feedback
+        if resolution is None:
+            return
+        self._run.card_progress(
+            resolution.progress, replace(resolution.result, observation=observation)
+        )
+        if resolution.declined_offer is not None:
+            self._declined.add(resolution.declined_offer)
+        self._deck = None
+
+    def _card_source(self, observation: native.Observation) -> DecisionSource:
+        state = observation.state
+        if not isinstance(state, native.RunState) or state.screen is not native.RunScreen.REWARDS:
+            return self._run
+        node = (
+            observation.location.game_instance_id,
+            observation.location.run_id,
+            observation.location.node_id,
+        )
+        if node != self._deck_node:
+            self._declined.clear()
+            self._deck = None
+            self._deck_node = node
+        if self._deck is not None and not self._deck.offered(observation):
+            self._deck = None
+        offer = next(
+            (
+                offer
+                for offer in state.offers
+                if offer.kind is native.OfferKind.CARD
+                and offer.ref not in self._declined
+                and (
+                    state.selection is None
+                    or set(offer.contents) <= set(state.selection.candidates)
+                )
+            ),
+            None,
+        )
+        if offer is None:
+            return self._run
+        if self._deck is None:
+            self._deck = self._deck_factory(observation, offer)
+        return self._deck
 
     async def run(self) -> RunEnded:
         observation: native.Observation | None = None
@@ -119,6 +177,7 @@ class DefaultFlow:
                         self._diagnostics.emit(ActEntered(act=act))
                     self._act = act
                     self._initialized = True
+                self._finish_card(observation)
                 if observation.location.owner is native.DecisionOwner.COMBAT:
                     if self._pending is None or self._minimal:
                         self._enter_role(native.DecisionOwner.COMBAT)
@@ -147,7 +206,8 @@ class DefaultFlow:
                         self._latest_handoff,
                     )
                 self._enter_role(native.DecisionOwner.RUN)
-                outcome = await self._execution.run_unit(self._run, task)
+                source = self._card_source(observation) if isinstance(task, ActTask) else self._run
+                outcome = await self._execution.run_unit(source, task)
                 entry_admitted = False
                 if isinstance(outcome, TaskComplete):
                     self._recovery.reset()
@@ -155,6 +215,9 @@ class DefaultFlow:
                     observation = None
                     continue
                 match outcome:
+                    case LocalProgress():
+                        assert self._deck is not None and self._deck.resolution is not None
+                        observation = self._deck.resolution.result.observation
                     case Executed():
                         if outcome.ended is not None:
                             return outcome.ended

@@ -20,6 +20,7 @@ from sts2_harness.context.models import (
     RunResultMessage,
     TaskMessage,
 )
+from sts2_harness.deck import CardChoiceKind, deck_observation
 from sts2_harness.game import Catalog, Cataloged, Inspect, Inspected, Pause, Settle, Settlement
 from sts2_harness.journal import Journal, Record
 from sts2_harness.journal_models import (
@@ -59,6 +60,7 @@ from sts2_harness.results import (
     PlanData,
     ReadCompleted,
 )
+from sts2_harness.run import run_observation
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness_eval._replay import (
@@ -324,25 +326,11 @@ def _native_observation(
         before, after = raw.state, delivered.state
         if not isinstance(before, native.RunState) or not isinstance(after, native.RunState):
             continue
+        for offer in before.offers:
+            if offer.kind is native.OfferKind.CARD and deck_observation(raw, offer) == delivered:
+                return raw, ()
         declined = tuple(offer.ref for offer in before.offers if offer not in after.offers)
-        actions = {
-            action for offer in before.offers if offer.ref in declined for action in offer.actions
-        }
-        filtered = raw.model_copy(
-            update={
-                "state": before.model_copy(
-                    update={
-                        "offers": tuple(
-                            offer for offer in before.offers if offer.ref not in declined
-                        ),
-                        "actions": tuple(
-                            action for action in before.actions if action.ref not in actions
-                        ),
-                    }
-                )
-            }
-        )
-        if filtered == delivered:
+        if run_observation(raw) == delivered:
             return raw, declined
     raise ExtractionError("A context observation has no matching raw native reply.")
 
@@ -529,6 +517,64 @@ def _recorded_completion(
         ) from None
     arguments = TypeAdapter(dict[str, JsonValue]).validate_json(call.arguments)
     chosen = arguments.get("card")
+    record = journal.request(source.model_sequence)
+    completion = next(
+        (
+            item
+            for item in journal.card_choices()
+            if item.stream == record.stream
+            and item.call_id == call.id
+            and item.offer_ref == arguments.get("offer")
+        ),
+        None,
+    )
+    if call.name == "run_deck_choice" and completion is None:
+        raise ExtractionError("The card decision has no exact typed completion evidence.")
+    if completion is not None:
+        state = completion.before.state
+        offer = (
+            next((offer for offer in state.offers if offer.ref == completion.offer_ref), None)
+            if isinstance(state, native.RunState)
+            else None
+        )
+        source_state = observation.state
+        source_offer = (
+            next(
+                (offer for offer in source_state.offers if offer.ref == completion.offer_ref), None
+            )
+            if isinstance(source_state, native.RunState)
+            else None
+        )
+        # Native publication numbers advance every frame, including unchanged reads.
+        before = completion.before.model_copy(update={"stamp": observation.stamp})
+        if (
+            completion.choice.value != arguments.get("choice")
+            or completion.card_ref != chosen
+            or offer is None
+            or source_offer is None
+            or deck_observation(before, offer) != deck_observation(observation, source_offer)
+        ):
+            raise ExtractionError("The card completion does not match its source decision.")
+        if completion.local_decline:
+            if (
+                not isinstance(state, native.RunState)
+                or state.screen is not native.RunScreen.REWARDS
+                or state.selection is not None
+                or offer.requires_selection is not False
+                or completion.choice is not CardChoiceKind.SKIP
+                or not isinstance(completion.outcome, ReadCompleted)
+                or completion.after != completion.before
+            ):
+                raise ExtractionError("The local card decline has no valid completion proof.")
+            return {
+                "kind": "local_decline",
+                "stream": completion.stream,
+                "call_id": completion.call_id,
+                "offer": completion.offer_ref,
+                "native_steps": 0,
+            }
+        if not isinstance(completion.outcome, ActionCompleted):
+            raise ExtractionError("The recorded card action was not confirmed complete.")
     if call.name == "run_act":
         steps = arguments.get("steps")
         if not isinstance(steps, list) or len(steps) != 1 or not isinstance(steps[0], dict):
@@ -538,6 +584,24 @@ def _recorded_completion(
         step = native.Select(
             kind=native.StepKind.SELECT, refs=(chosen,) if isinstance(chosen, str) else ()
         )
+        state = observation.state
+        offer = (
+            next((offer for offer in state.offers if offer.ref == arguments.get("offer")), None)
+            if isinstance(state, native.RunState)
+            else None
+        )
+        if isinstance(chosen, str) and offer is not None and offer.requires_selection is False:
+            action = next(
+                (
+                    action
+                    for action in state.actions
+                    if action.ref in offer.actions and action.enabled
+                ),
+                None,
+            )
+            if action is None:
+                raise ExtractionError("The guaranteed card reward has no native interaction.")
+            step = native.Interact(kind=native.StepKind.INTERACT, action=action.ref)
     following = journal.requests(start=source.model_sequence + 1, stop=source.model_sequence + 200)
     next_request = following[0] if following else None
     if next_request is not None:

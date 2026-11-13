@@ -8,7 +8,10 @@ from typing import Self
 from sts2_harness.agent import MaterialReader
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent
+from sts2_harness.context.models import AutomaticProgress
 from sts2_harness.decisions import DecisionSource
+from sts2_harness.deck import CardChoiceCompletion
+from sts2_harness.deck_role import DeckAgent
 from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
@@ -22,7 +25,7 @@ from sts2_harness.loop import CombatFactory, DefaultFlow, RunFlow
 from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PromptReader
-from sts2_harness.results import QueryToolResult
+from sts2_harness.results import ActionToolResult, QueryToolResult
 from sts2_harness.run import RunAgent, RunRole
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input_values import UserInputSource
@@ -44,6 +47,7 @@ class SessionDependencies:
     documents: Documents
     model: ModelFactory
     candidate_links: CandidateLinks | None = None
+    card_completion: Callable[[CardChoiceCompletion], None] | None = None
 
 
 class RunSession:
@@ -72,6 +76,8 @@ class RunSession:
         self._user_input = user_input
         self._run_stream = 0
         self._combat_stream = 0
+        self._deck_stream = 0
+        self._card_reports: list[tuple[AutomaticProgress, ActionToolResult]] = []
         self._flow: RunFlow | None = None
 
     def _recovery_exhausted(self, failures: int) -> None:
@@ -99,6 +105,7 @@ class RunSession:
                 new_run=self._new_run,
                 diagnostics=self._diagnostics,
                 minimal=self._manifest.minimal,
+                deck=self._deck,
             )
         )
         return self
@@ -116,6 +123,7 @@ class RunSession:
                 diagnostics=self._diagnostics,
                 user_input=self._user_input,
                 candidate_links=self._dependencies.candidate_links,
+                card_reports=self._card_reports,
             )
         )
 
@@ -137,7 +145,7 @@ class RunSession:
             raise RuntimeError("Enter the run session before running its flow.")
         return await self._flow.run()
 
-    def _tools(self, role: native.DecisionOwner) -> ToolCatalog:
+    def _tools(self, role: native.DecisionOwner, *, focused_deck: bool = False) -> ToolCatalog:
         return ToolCatalog(
             role,
             observe=self.execution.observe,
@@ -150,6 +158,7 @@ class RunSession:
             supplements=self._dependencies.documents,
             minimal=self._manifest.minimal,
             deck_stats=self.deck_stats,
+            focused_deck=focused_deck,
         )
 
     async def _notes_write_guard(
@@ -162,6 +171,23 @@ class RunSession:
     def _run_client(self) -> ModelClient:
         self._run_stream += 1
         return self._dependencies.model(native.DecisionOwner.RUN, f"run:{self._run_stream}")
+
+    def _deck(self, opening: native.Observation, offer: native.Offer) -> DeckAgent:
+        self._deck_stream += 1
+        stream = f"deck:{self._deck_stream}"
+        return DeckAgent(
+            lambda: self._dependencies.model(native.DecisionOwner.RUN, stream),
+            self._tools(native.DecisionOwner.RUN, focused_deck=True),
+            self.recovery,
+            offer_ref=offer.ref,
+            stream=stream,
+            prompts=self._dependencies.prompts,
+            materials=self._materials(native.DecisionOwner.RUN, opening),
+            candidate_links=self._dependencies.candidate_links,
+            completion=self._dependencies.card_completion,
+            diagnostics=self._diagnostics,
+            user_input=self._user_input,
+        )
 
     def _materials(
         self, role: native.DecisionOwner, opening: native.Observation | None = None

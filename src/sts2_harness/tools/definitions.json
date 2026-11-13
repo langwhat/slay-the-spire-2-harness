@@ -633,7 +633,7 @@
   },
   {
     "name": "run_act",
-    "description": "Perform non-combat operations other than card offers and travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Card offers go through run_deck_choice, travel through run_plan and run_next.",
+    "description": "Perform non-combat operations other than travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Travel goes through run_plan and run_next.",
     "input_schema": {
       "type": "object",
       "properties": {

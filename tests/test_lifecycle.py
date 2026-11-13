@@ -11,6 +11,7 @@ from test_responses import configuration
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
+from sts2_harness.context.models import AutomaticProgress
 from sts2_harness.decisions import (
     ActionDecision,
     ActionKind,
@@ -450,6 +451,9 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
     rejected: list[ActionToolResult] = []
 
     class Run:
+        def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+            raise AssertionError("This fixture has no card rewards.")
+
         def __init__(self, notes: Notes, recovery: ToolRecoveryBudget) -> None:
             self.notes = notes
             self.recovery = recovery

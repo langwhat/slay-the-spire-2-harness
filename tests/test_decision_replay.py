@@ -174,7 +174,7 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("variant", tuple(DecisionVariant))
+@pytest.mark.parametrize("variant", [DecisionVariant.DECK])
 def test_real_loop_allows_notes_then_stops_without_native_action(
     tmp_path: Path, variant: DecisionVariant
 ) -> None:
