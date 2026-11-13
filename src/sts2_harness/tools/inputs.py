@@ -141,7 +141,7 @@ class TakeCard(native.WireModel):
     card: native.Nonempty
     reason: str
     purpose: CardPurpose = Field(alias="for")
-    with_: native.Nonempty | MISSING = Field(default=MISSING, alias="with")
+    over: native.Nonempty | MISSING = MISSING
 
 
 class SkipCard(native.WireModel):

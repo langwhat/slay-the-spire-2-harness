@@ -797,6 +797,8 @@ class RunAgent(Agent):
             self._prompts.read("state-format"),
             "\n",
             self._prompts.read("run-observations"),
+            "\n",
+            self._prompts.read("deck"),
         )
         if not self._tools.minimal:
             blocks += ("\n", self._prompts.read("run-notes"))

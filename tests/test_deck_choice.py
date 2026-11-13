@@ -144,9 +144,9 @@ def test_reward_choice_opens_one_group_then_uses_native_selection(
             arguments["card"] = "c1"
             arguments["for"] = "draw"
         if scenario_kind == "unowned-partner":
-            arguments.update({"for": "core", "with": "CARD.NOT_OWNED"})
+            arguments.update({"for": "core", "over": "CARD.NOT_OWNED"})
         if scenario_kind in {"outside-core", "first-core"}:
-            arguments.update({"for": "core", "with": card.definition_id})
+            arguments.update({"for": "core", "over": card.definition_id})
         if scenario_kind == "late-transition":
             arguments["for"] = "transition"
         if scenario_kind == "core-no-partner":

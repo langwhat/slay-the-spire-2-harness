@@ -760,7 +760,7 @@
             },
             "reason": {
               "type": "string",
-              "description": "One short line: the rule, document, or link behind the choice."
+              "description": "One short line: what a normal turn gains with this card over that one, or over skipping."
             },
             "for": {
               "type": "string",
@@ -771,12 +771,12 @@
                 "block",
                 "transition"
               ],
-              "description": "The kind of card this is for the deck: core, support (energy, draw, or block), or transition."
+              "description": "The job this card does for the deck: core, support (energy, draw, or block), or transition."
             },
-            "with": {
+            "over": {
               "type": "string",
               "minLength": 1,
-              "description": "Native definition ID of the owned card or relic it works with, when there is one."
+              "description": "Native definition ID of the best owned card that does the same job. Omit when no owned card does that job."
             }
           },
           "required": [
