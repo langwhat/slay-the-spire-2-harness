@@ -11,16 +11,18 @@ from test_combat import reply
 from test_lifecycle import terminal
 from test_mod_client import CARD, PREVIEW, RUN
 from test_responses import configuration
+from test_run import handoff
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
-from sts2_harness.context.models import RunActContent
-from sts2_harness.game import RunEndReason
+from sts2_harness.context.models import RunActContent, RunActHandoffContent
+from sts2_harness.game import RunEnded, RunEndReason
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import AutomaticSnapshot, ResultSnapshot, RunTaskSnapshot
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import AssistantMessage
+from sts2_harness.loop import DefaultFlow
 from sts2_harness.note_values import NotesState
 from sts2_harness.results import ActionCompleted, ActionUnknown, ReadCompleted
 from sts2_harness.user_input import UserInputQueue
@@ -37,7 +39,7 @@ class RewardGame:
         card = native.CardEntry.model_validate_json(CARD)
         self.minimal = minimal
         self.unknown = unknown
-        self.local_sent = False
+        self.skip_regular = False
         self.inputs: list[dict[str, JsonValue]] = []
         self.steps: list[native.NativeStep] = []
         self.observation = observation.model_copy(
@@ -148,10 +150,11 @@ class RewardGame:
         if isinstance(step.step, native.Select):
             update = {"deck": (*state.deck, *step.step.refs), "selection": None}
             if state.screen is native.RunScreen.REWARDS:
-                update.update(
-                    offers=tuple(o for o in state.offers if o.ref != "regular"),
-                    actions=tuple(a for a in state.actions if a.ref != "open-regular"),
-                )
+                if step.step.refs or not self.skip_regular:
+                    update.update(
+                        offers=tuple(o for o in state.offers if o.ref != "regular"),
+                        actions=tuple(a for a in state.actions if a.ref != "open-regular"),
+                    )
                 unknown = self.unknown
             else:
                 assert state.screen is native.RunScreen.EVENT
@@ -277,15 +280,21 @@ class RewardGame:
             assert names == (
                 {"run_deck_choice"} if self.minimal else {"run_deck_choice", "run_notes"}
             )
-            offer = (
-                "local"
-                if not self.local_sent
-                else "regular"
-                if any(o.ref == "regular" for o in state.offers)
-                else "guaranteed"
-            )
+            messages = body["input"]
+            assert isinstance(messages, list)
+            first = next(m for m in messages if isinstance(m, dict) and m.get("role") == "user")
+            assert isinstance(first, dict) and isinstance(first["content"], str)
+            task = TypeAdapter(dict[str, JsonValue]).validate_json(first["content"])
+            observation = task["observation"]
+            assert isinstance(observation, dict)
+            choice = observation["choice"]
+            assert isinstance(choice, dict)
+            offers = choice["offers"]
+            assert isinstance(offers, list) and len(offers) == 1
+            focused = offers[0]
+            assert isinstance(focused, dict) and isinstance(focused["ref"], str)
+            offer = focused["ref"]
             if offer == "local":
-                self.local_sent = True
                 if not self.minimal:
                     calls.append(
                         (
@@ -296,10 +305,12 @@ class RewardGame:
                     )
             args = {
                 "offer": offer,
-                "choice": "skip" if offer == "local" else "take",
+                "choice": "skip"
+                if offer == "local" or (offer == "regular" and self.skip_regular)
+                else "take",
                 "reason": "Measured " + offer,
             }
-            if offer != "local":
+            if args["choice"] == "take":
                 args.update(card=offer, **{"for": "draw"})
             calls.append((f"choice-{index}", "run_deck_choice", json.dumps(args)))
         elif state.screen is native.RunScreen.REWARDS:
@@ -659,6 +670,94 @@ def test_local_decline_is_durable_when_no_later_model_request_exists(tmp_path: P
             assert [step.action for step in game.steps if isinstance(step, native.Interact)] == [
                 "proceed"
             ]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("minimal", [False, True])
+def test_completed_native_skip_is_not_reopened_and_preserves_run_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minimal: bool
+) -> None:
+    async def scenario() -> None:
+        game = RewardGame(minimal=minimal)
+        game.skip_regular = True
+
+        def model(request: httpx.Request) -> httpx.Response:
+            assert len(game.inputs) < 7, "A completed skip must not ask again for the same offer."
+            return game.model(request)
+
+        archive = tmp_path / "archive.sqlite"
+        pending = handoff("Preserve this battle review for Run.")
+
+        class PendingFlow(DefaultFlow):
+            async def run(self) -> RunEnded:
+                self._pending = self._latest_handoff = pending
+                return await super().run()
+
+        monkeypatch.setattr("sts2_harness.session.DefaultFlow", PendingFlow)
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(game.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="native-skip",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=minimal,
+            ),
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+        (tmp_path / "actual-request-bodies.json").write_text(
+            json.dumps(game.inputs, ensure_ascii=False, indent=2)
+        )
+        with closing(Journal.open(archive)) as journal:
+            choices = journal.card_choices()
+            assert [c.offer_ref for c in choices] == ["local", "regular", "guaranteed"]
+            skipped = choices[1]
+            assert not skipped.local_decline
+            assert isinstance(skipped.outcome, ActionCompleted)
+            assert skipped.outcome.completed_steps == 2
+            assert skipped.after is not None
+            assert skipped.before.state.deck == skipped.after.state.deck
+            assert isinstance(skipped.after.state, native.RunState)
+            assert skipped.after.state.selection is None
+            assert any(o.ref == "regular" for o in skipped.after.state.offers)
+            assert (
+                sum(
+                    isinstance(step, native.Interact) and step.action == "open-regular"
+                    for step in game.steps
+                )
+                == 1
+            )
+            assert (
+                sum(isinstance(step, native.Select) and not step.refs for step in game.steps) == 1
+            )
+            requests = journal.requests()
+            assert [r.stream for r in requests] == [
+                "deck:1",
+                "deck:2",
+                "deck:3",
+                "run:1",
+                "run:1",
+                "run:1",
+            ]
+            task = next(m for m in requests[3].input if isinstance(m, RunTaskSnapshot))
+            assert isinstance(task.content, RunActHandoffContent)
+            assert task.content.battle_report == pending.report
+            assert task.content.combat_review == pending.review
+            reports = [m for m in requests[3].input if isinstance(m, AutomaticSnapshot)]
+            assert [m.content.automatic_progress.label for m in reports] == [
+                "Skip",
+                "Skip",
+                "CARD.GUARANTEED",
+            ]
+            stats, _ = session.deck_stats.view(skipped.after)
+            assert stats["added"] == 1 and stats["skipped"] == 2
 
     asyncio.run(scenario())
 

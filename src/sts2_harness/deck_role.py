@@ -161,9 +161,7 @@ class DeckAgent(RunAgent):
                 )
             )
 
-    def _resolved(
-        self, pending: PendingCardChoice, result: ActionToolResult, *, local: bool = False
-    ) -> None:
+    def _resolved(self, pending: PendingCardChoice, result: ActionToolResult) -> None:
         query = pending.query
         label = "Skip"
         if isinstance(query, TakeCard):
@@ -173,7 +171,7 @@ class DeckAgent(RunAgent):
         self.resolution = CardResolution(
             AutomaticProgress(label=label, reason=query.reason),
             result,
-            query.offer if local else None,
+            query.offer if isinstance(query, SkipCard) else None,
         )
         if self._tools.deck_stats is not None:
             self._tools.deck_stats.record_choice(pending.before, taken=isinstance(query, TakeCard))
@@ -275,9 +273,7 @@ class DeckAgent(RunAgent):
         elif not offer.requires_selection and not chosen:
             result = QueryToolResult(ReadCompleted(), current)
             self._record(pending, QueryToolResult(ReadCompleted(), raw), local=True)
-            self._resolved(
-                pending, ActionToolResult(ActionCompleted(completed_steps=0), raw), local=True
-            )
+            self._resolved(pending, ActionToolResult(ActionCompleted(completed_steps=0), raw))
             return LocalProgress(result)
         else:
             opening = next((a for a in state.actions if a.ref in offer.actions and a.enabled), None)
