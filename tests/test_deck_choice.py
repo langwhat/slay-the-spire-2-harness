@@ -19,6 +19,7 @@ from sts2_harness.context.models import RunActContent, RunActHandoffContent
 from sts2_harness.game import RunEnded, RunEndReason
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import AutomaticSnapshot, ResultSnapshot, RunTaskSnapshot
+from sts2_harness.knowledge import CandidateLink, LinkDirection
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import AssistantMessage
@@ -859,6 +860,24 @@ def test_event_choice_submits_all_selected_cards_once_and_reports_to_run(
     tmp_path: Path, taken: tuple[str, ...]
 ) -> None:
     async def scenario() -> None:
+        class Links:
+            async def links(
+                self, candidate_ids: tuple[str, ...], owned_ids: tuple[str, ...]
+            ) -> dict[str, tuple[CandidateLink, ...]]:
+                assert "CARD.OWNED" in owned_ids
+                return {
+                    card: (
+                        CandidateLink.model_validate(
+                            {
+                                "with": "CARD.OWNED",
+                                "event": "fixture synergy",
+                                "direction": LinkDirection.CANDIDATE_TRIGGERS_OWNED,
+                            }
+                        ),
+                    )
+                    for card in candidate_ids
+                }
+
         game = RewardGame(minimal=False)
         game.event_handoff = True
         game.event_take = taken
@@ -878,11 +897,19 @@ def test_event_choice_submits_all_selected_cards_once_and_reports_to_run(
                 initial_notes=NotesState(),
             ),
             archive,
+            candidate_links=Links(),
             model=Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)),
         ) as session:
             assert (await session.run()).reason is RunEndReason.TERMINAL
         with closing(Journal.open(archive)) as journal:
             completion = journal.card_choices()[-1]
+            event_request = next(
+                request for request in journal.requests() if request.stream == completion.stream
+            )
+            task = next(m for m in event_request.input if isinstance(m, RunTaskSnapshot))
+            candidates = json.loads(task.text)["observation"]["choice"]["selection"]["candidates"]
+            assert {card["id"] for card in candidates} == {"CARD.GIFT", "CARD.SHARED"}
+            assert all(card["links"][0]["event"] == "fixture synergy" for card in candidates)
             assert completion.offer_ref is None and completion.local_decline is False
             assert isinstance(completion.outcome, ActionCompleted)
             assert completion.after is not None

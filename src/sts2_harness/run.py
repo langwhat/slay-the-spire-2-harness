@@ -27,6 +27,7 @@ from sts2_harness.decisions import (
     LocalProgress,
     TaskComplete,
 )
+from sts2_harness.deck import adding_selection
 from sts2_harness.diagnostics import AutoFinished, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.game import GameReadError
@@ -228,12 +229,15 @@ class RunAgent(Agent):
                 }
             )
         )
+        candidate_refs = {ref for offer in state.offers for ref in offer.contents}
+        selection = adding_selection(observation)
+        if selection is not None:
+            candidate_refs.update(selection.candidates)
         candidate_ids = tuple(
             sorted(
                 {
                     entry.definition_id
-                    for offer in state.offers
-                    for ref in offer.contents
+                    for ref in candidate_refs
                     if isinstance(entry := observation.objects.get(ref), native.CardEntry)
                 }
             )
