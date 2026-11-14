@@ -13,6 +13,7 @@ from sts2_harness.capacity import CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.context.models import RunActContent, TaskMessage
 from sts2_harness.deck import deck_observation
+from sts2_harness.fights import Fight, FightKind
 from sts2_harness.game import Inspect, Inspected
 from sts2_harness.journal_models import BaselineSnapshot, NativeSnapshot, PreparationEvidence
 from sts2_harness.llm.client import Llm
@@ -160,6 +161,19 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
 ) -> None:
     async def run() -> None:
         case = decision_case(tmp_path).model_copy(update={"minimal": minimal})
+        fights = (Fight(floor=1, kind=FightKind.NORMAL, turns=2, hp_in=50, hp_out=46),)
+        case = case.model_copy(
+            update={
+                "events": tuple(
+                    event.model_copy(
+                        update={"state": event.state.model_copy(update={"fights": fights})}
+                    )
+                    if isinstance(event, TaskEvent)
+                    else event
+                    for event in case.events
+                )
+            }
+        )
         async with Llm(configuration(tmp_path)) as client:
             rebuilt = await rebuild_case(case, client, variant=DecisionVariant.DECK)
             other_mode = await rebuild_case(
@@ -167,6 +181,7 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
                 client,
                 variant=DecisionVariant.DECK,
             )
+            run_role = await rebuild_case(case, client, variant=DecisionVariant.RUN)
         assert {tool.name for tool in rebuilt.prepared.tools} == {"run_deck_choice"}
         system = tuple(
             message.text
@@ -179,6 +194,7 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
             if isinstance(message, TextMessage) and message.role is TextRole.SYSTEM
         )
         assert PackagedPrompts().read("run-notes").body not in "\n".join(system)
+        assert "`fights`" not in "\n".join(system)
         task = next(
             message
             for message in reversed(rebuilt.prepared.input)
@@ -186,6 +202,14 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
         )
         assert isinstance(task.content, RunActContent)
         assert (task.content.observation.notes is MISSING) is minimal
+        assert task.content.observation.fights is MISSING
+        run_task = next(
+            message
+            for message in reversed(run_role.prepared.input)
+            if isinstance(message, TaskMessage)
+        )
+        assert isinstance(run_task.content, RunActContent)
+        assert run_task.content.observation.fights == fights
 
     asyncio.run(run())
 

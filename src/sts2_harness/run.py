@@ -200,6 +200,8 @@ class RunAgent(Agent):
 
     async def _enrich(self, context: Context, observation: native.Observation) -> None:
         self._sync_notes(context)
+        if self._tools.fights is not None:
+            context.set_fights(self._tools.fights.recent)
         if self._tools.deck_stats is not None and isinstance(observation.state, native.RunState):
             stats, use = self._tools.deck_stats.view(observation)
             context.set_deck_stats(stats, use)

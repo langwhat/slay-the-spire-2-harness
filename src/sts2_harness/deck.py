@@ -45,9 +45,11 @@ def deck_context(
         prompts.read("deck"),
     )
     state = prompts.read("state-format")
-    # Map counts have no meaning in a context containing only one card reward.
+    # Route and battle history belong to the run role, not a single card reward.
     relevant = "\n\n".join(
-        paragraph for paragraph in state.body.split("\n\n") if "`ahead`" not in paragraph
+        paragraph
+        for paragraph in state.body.split("\n\n")
+        if "`ahead`" not in paragraph and "`fights`" not in paragraph
     )
     blocks += ("\n", MaterialText.create(state.id, relevant))
     system = (

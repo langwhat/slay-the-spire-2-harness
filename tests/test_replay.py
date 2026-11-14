@@ -137,7 +137,19 @@ class StartedCampaign(Campaign):
 def test_reach_runs_start_combat_handoff_and_act_rebuild(tmp_path: Path) -> None:
     async def scenario() -> None:
         path = tmp_path / "archive.sqlite"
-        anchors = await record_campaign(path, StartedCampaign(), start=True)
+        campaign = StartedCampaign()
+        reward = campaign.states[2]
+        campaign.states[2] = reward.model_copy(
+            update={
+                "state": reward.state.model_copy(
+                    update={
+                        "progress": reward.state.progress.model_copy(update={"floor": 1}),
+                        "battle_turns": 3,
+                    }
+                )
+            }
+        )
+        anchors = await record_campaign(path, campaign, start=True)
         archive = Journal.open(path)
         records = archive.requests()
         archive.close()
@@ -152,6 +164,8 @@ def test_reach_runs_start_combat_handoff_and_act_rebuild(tmp_path: Path) -> None
             (native.DecisionOwner.RUN, "run:2"),
             (native.DecisionOwner.COMBAT, "combat:2"),
         ]
+        assert '"fights"' not in str(campaign.inputs[0])
+        assert '"fights"' in str(campaign.inputs[6])
         for anchor, record in zip(anchors[3:], records[3:], strict=True):
             async with reach(path, anchor) as result:
                 assert result == Reached(

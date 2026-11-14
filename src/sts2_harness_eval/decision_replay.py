@@ -284,6 +284,8 @@ class DecisionRun(DeckAgent):
                 current = self.reward_observation(event.observation, event.declined_offers)
                 self._notes.write(_notes_state(event.state), set(NotesState.model_fields))
                 self._tools.deck_stats = _CaseStatistics(event.state, current)
+                if self._tools.fights is not None:
+                    self._tools.fights.recent = event.state.fights
                 route = event.state.route
                 self._plan = (
                     RoutePlan(route.position, "", tuple(Edge(*edge) for edge in route.edges))
@@ -492,6 +494,7 @@ async def rebuild_case(
         skills=documents,
         minimal=case.minimal,
         focused_deck=variant is DecisionVariant.DECK,
+        fights=execution.fights if variant is DecisionVariant.RUN else None,
     )
 
     async def selected(observation: native.Observation) -> tuple[DocumentView, ...]:

@@ -34,6 +34,7 @@ from sts2_harness.context.run_models import RunObservation
 from sts2_harness.context.run_projection import RunDelivery, definition_references, mechanism_key
 from sts2_harness.context.view import visible_observation
 from sts2_harness.decisions import CombatHandoff
+from sts2_harness.fights import Fight
 from sts2_harness.knowledge import DocumentView, GuidanceContent, KnowledgeLookup
 from sts2_harness.llm.messages import (
     AssistantMessage,
@@ -167,6 +168,9 @@ class Context:
 
     def set_route_plan(self, plan: RoutePlan | None) -> None:
         self._run_delivery.route_plan = plan
+
+    def set_fights(self, fights: tuple[Fight, ...]) -> None:
+        self._run_delivery.fights = fights
 
     def set_deck_stats(self, stats: dict[str, JsonValue], use: dict[str, int]) -> None:
         self._run_delivery.deck_stats = stats

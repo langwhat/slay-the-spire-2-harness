@@ -11,6 +11,7 @@ from sts2_harness.client import models as native
 from sts2_harness.context.map_projection import project_map
 from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
 from sts2_harness.context.run_models import RunObservation
+from sts2_harness.fights import Fight
 from sts2_harness.note_values import NotesView
 from sts2_harness.route_plan import RoutePlan
 
@@ -121,6 +122,7 @@ class RunDelivery:
     inline_card_ids: set[str] = field(default_factory=lambda: set[str]())
 
     deck_stats: dict[str, JsonValue] | None = None
+    fights: tuple[Fight, ...] = ()
     deck_use: dict[str, int] = field(default_factory=lambda: dict[str, int]())
     candidate_links: dict[str, tuple[dict[str, JsonValue], ...]] = field(
         default_factory=lambda: dict[str, tuple[dict[str, JsonValue], ...]]()
@@ -314,6 +316,8 @@ class RunDelivery:
             sections["deck"] = counts(state.deck, text=True)
         if self.role is native.DecisionOwner.RUN and self.deck_stats is not None:
             sections["deck_stats"] = self.deck_stats
+        if self.role is native.DecisionOwner.RUN and self.fights:
+            sections["fights"] = [_json(fight) for fight in self.fights]
         post_boss = (
             isinstance(state, native.RunState)
             and state.progress.room_type == "boss"
@@ -460,7 +464,7 @@ class RunDelivery:
         self.delivered_mechanisms.update(mechanisms)
         # Each ordinary section replaces its predecessor, including empty sections.
         sections = {
-            name: value if name == "notes" else _slim(value, self.definitions)
+            name: value if name in ("notes", "fights") else _slim(value, self.definitions)
             for name, value in sections.items()
         }
         baseline = not self.sections

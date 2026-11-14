@@ -308,7 +308,12 @@ def _state(message: TaskMessage, previous: HarnessState) -> HarnessState:
             route = None
 
     return HarnessState(
-        notes=notes, added=added, skipped=skipped, observed_plays=plays, route=route
+        notes=notes,
+        added=added,
+        skipped=skipped,
+        observed_plays=plays,
+        route=route,
+        fights=(previous.fights if observation.fights is MISSING else observation.fights),
     )
 
 

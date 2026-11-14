@@ -54,7 +54,17 @@ def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool = False)
     ):
         if blocks:
             blocks.append("\n")
-        blocks.append(prompts.read(name))
+        material = prompts.read(name)
+        if name == "state-format":
+            material = MaterialText.create(
+                material.id,
+                "\n\n".join(
+                    paragraph
+                    for paragraph in material.body.split("\n\n")
+                    if "`fights`" not in paragraph
+                ),
+            )
+        blocks.append(material)
     return MaterialParts(tuple(blocks))
 
 

@@ -22,6 +22,7 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.diagnostics import BatchSettled, BatchStatus, BatchSubmitted, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, Interrupted, ToolRecoveryBudget
+from sts2_harness.fights import FightHistory
 from sts2_harness.game import (
     ControlWriteError as ControlWriteError,
 )
@@ -92,6 +93,7 @@ class Execution:
         self._recovery = recovery
         self._game_instance_id = game_instance_id
         self._run_id = run_id
+        self.fights = FightHistory()
         self._observed: Callable[[native.Observation], None] | None = None
 
     def end_reason(self, location: native.Location | None) -> RunEndReason:
@@ -136,6 +138,7 @@ class Execution:
             self._recovery.reset()
 
     def _record_observation(self, observation: native.Observation) -> None:
+        self.fights.observe(observation)
         if self._observed is not None:
             self._observed(observation)
 
@@ -290,7 +293,10 @@ class Execution:
                         status = BatchStatus.STOPPED
                         uncertain_step = None
                         break
-                settled = unwrap(await self._game.settle(route, step))
+                settlement = await self._game.settle(route, step)
+                for observation in settlement.observations:
+                    self.fights.observe(observation)
+                settled = unwrap(settlement)
                 receipt = settled.receipt
                 if isinstance(receipt, native.ReceiptCompleted):
                     confirmed += 1

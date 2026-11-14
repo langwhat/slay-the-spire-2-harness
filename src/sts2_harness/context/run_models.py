@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import MISSING, JsonValue
 
+from sts2_harness.fights import Fight
 from sts2_harness.note_values import NotesView
 from sts2_harness.results import SemanticValue
 
@@ -18,6 +19,7 @@ class RunObservation(SemanticValue):
     deck: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
     notes: NotesView | MISSING = MISSING
     deck_stats: dict[str, JsonValue] | None | MISSING = MISSING
+    fights: tuple[Fight, ...] | MISSING = MISSING
     relics: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
     potions: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
     map_topology: dict[str, JsonValue] | None | MISSING = MISSING

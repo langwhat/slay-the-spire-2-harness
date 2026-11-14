@@ -443,6 +443,7 @@ class EventState(WireModel):
 
 
 class RunState(WireModel):
+    battle_turns: int | None | MISSING = MISSING
     card_rarity_offset: float
     control: StateControl
     progress: Progress

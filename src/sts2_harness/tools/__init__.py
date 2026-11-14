@@ -19,6 +19,7 @@ from sts2_harness.decisions import (
     SelectStep,
 )
 from sts2_harness.deck_stats import DeckStatistics
+from sts2_harness.fights import FightHistory
 from sts2_harness.game import GameReadError, Presented
 from sts2_harness.knowledge import (
     DocumentView,
@@ -134,12 +135,14 @@ class ToolCatalog:
         minimal: bool = False,
         deck_stats: DeckStatistics | None = None,
         focused_deck: bool = False,
+        fights: FightHistory | None = None,
     ) -> None:
         if role is native.DecisionOwner.RUN and notes is None:
             raise ValueError("Run tools require the run's notes owner.")
         self._notes_owner = notes
         self.minimal = minimal
         self.deck_stats = deck_stats
+        self.fights = fights
         self._query_view = query_view
         self._notes_write_guard = notes_write_guard
         self.action_name = (
