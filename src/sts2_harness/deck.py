@@ -44,8 +44,6 @@ def deck_context(
         "\n",
         prompts.read("deck"),
     )
-    if not minimal:
-        blocks += ("\n", prompts.read("run-notes"))
     state = prompts.read("state-format")
     # Map counts have no meaning in a context containing only one card reward.
     relevant = "\n\n".join(
@@ -69,9 +67,7 @@ def deck_context(
 
 
 def deck_tools(definitions: tuple[ToolDefinition, ...]) -> tuple[ToolDefinition, ...]:
-    return tuple(
-        tool for tool in definitions if tool.name in (ToolName.RUN_DECK_CHOICE, ToolName.RUN_NOTES)
-    )
+    return tuple(tool for tool in definitions if tool.name == ToolName.RUN_DECK_CHOICE)
 
 
 def deck_observation(

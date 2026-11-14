@@ -16,7 +16,8 @@ from sts2_harness.deck import deck_observation
 from sts2_harness.game import Inspect, Inspected
 from sts2_harness.journal_models import BaselineSnapshot, NativeSnapshot, PreparationEvidence
 from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import ResponsesReply, TextRole
+from sts2_harness.llm.messages import ResponsesReply, TextMessage, TextRole
+from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.results import Reason, ReasonCode, Rejected, Suggestion
 from sts2_harness_eval.decision_cases import (
     AssistantEvent,
@@ -161,8 +162,23 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
         case = decision_case(tmp_path).model_copy(update={"minimal": minimal})
         async with Llm(configuration(tmp_path)) as client:
             rebuilt = await rebuild_case(case, client, variant=DecisionVariant.DECK)
-        expected = {"run_deck_choice"} if minimal else {"run_deck_choice", "run_notes"}
-        assert {tool.name for tool in rebuilt.prepared.tools} == expected
+            other_mode = await rebuild_case(
+                case.model_copy(update={"minimal": not minimal}),
+                client,
+                variant=DecisionVariant.DECK,
+            )
+        assert {tool.name for tool in rebuilt.prepared.tools} == {"run_deck_choice"}
+        system = tuple(
+            message.text
+            for message in rebuilt.prepared.input
+            if isinstance(message, TextMessage) and message.role is TextRole.SYSTEM
+        )
+        assert system == tuple(
+            message.text
+            for message in other_mode.prepared.input
+            if isinstance(message, TextMessage) and message.role is TextRole.SYSTEM
+        )
+        assert PackagedPrompts().read("run-notes").body not in "\n".join(system)
         task = next(
             message
             for message in reversed(rebuilt.prepared.input)
@@ -175,7 +191,7 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
 
 
 @pytest.mark.parametrize("variant", [DecisionVariant.DECK])
-def test_real_loop_allows_notes_then_stops_without_native_action(
+def test_real_loop_resolves_reward_without_writing_notes_or_native_action(
     tmp_path: Path, variant: DecisionVariant
 ) -> None:
     async def run() -> None:
@@ -188,7 +204,6 @@ def test_real_loop_allows_notes_then_stops_without_native_action(
             return httpx.Response(
                 200,
                 content=reply(
-                    ("notes", "run_notes", '{"mode":"write","plan":"Better cycle."}'),
                     (
                         "choice",
                         "run_deck_choice",
@@ -211,7 +226,6 @@ def test_real_loop_allows_notes_then_stops_without_native_action(
             if variant is DecisionVariant.DECK:
                 assert {tool.name for tool in rebuilt.prepared.tools} == {
                     "run_deck_choice",
-                    "run_notes",
                 }
                 task = next(
                     message
@@ -231,7 +245,7 @@ def test_real_loop_allows_notes_then_stops_without_native_action(
         assert result.choices == case.labels.good
         assert result.reason == "A better turn."
         assert "PRIVATE-LABEL-DO-NOT-SEND" not in bodies[0]
-        assert result.raw_calls[0]["name"] == "run_notes"
+        assert result.raw_calls[0]["name"] == "run_deck_choice"
 
     asyncio.run(run())
 

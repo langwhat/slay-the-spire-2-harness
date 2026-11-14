@@ -33,9 +33,9 @@ from private_package.entry import entry_materials
 raise SystemExit(main(materials=entry_materials()))
 ```
 
-`--variant deck` is an evaluation-only role. It uses `deck.md`, the normal notes
-instructions, relevant state-format instructions, and only `run_deck_choice` and
-`run_notes`. It sees one current card offer, current player/deck/relics/potions,
+`--variant deck` shares the live card-reward role's input assembly. It uses
+`deck-tasks.md`, `deck.md`, relevant state-format instructions, and only
+`run_deck_choice`. It sees one current card offer, current player/deck/relics/potions,
 notes, statistics, definitions/mechanisms, and the latest battle report/review.
 It omits map fields and earlier reward interactions, while selecting the same
 guidance documents as the Run variant. Non-card selection cases are
@@ -106,7 +106,7 @@ Native instance references are resolved to exposed native definition IDs or
 multi-selection passes only when it contains every `good` ID and no `bad` ID.
 Other known bad choices fail; an unclassified single choice is `unlabeled`.
 Another game action, another offer, or an illegal native selection is `deviated`.
-Notes updates are allowed before the decision.
+The Run variant can update notes before the decision; the Deck variant only reads them.
 
 Technical incompatibility, such as an unmappable historical notes shape or a new
 native read missing from the case, is `unsupported`, not a model failure or

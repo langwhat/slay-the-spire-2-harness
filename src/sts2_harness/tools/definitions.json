@@ -739,7 +739,7 @@
   },
   {
     "name": "run_deck_choice",
-    "description": "Resolve the card reward: take one of its cards or skip it. This ends the decision; a run_notes call comes before it in the same response.",
+    "description": "Resolve the card reward: take one of its cards or skip it.",
     "input_schema": {
       "oneOf": [
         {

@@ -176,10 +176,7 @@ class DecisionRun(DeckAgent):
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
     ) -> ActionProposal | QueryToolResult | LocalProgress:
-        if self.variant is DecisionVariant.DECK and call.name not in (
-            ToolName.RUN_DECK_CHOICE,
-            ToolName.RUN_NOTES,
-        ):
+        if self.variant is DecisionVariant.DECK and call.name != ToolName.RUN_DECK_CHOICE:
             raise DecisionDeviation("The deck role proposed a tool outside its tool set.")
         if call.name not in (
             ToolName.RUN_ACT,

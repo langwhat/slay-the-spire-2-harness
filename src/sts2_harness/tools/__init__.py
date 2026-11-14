@@ -178,7 +178,7 @@ class ToolCatalog:
             for item in DEFINITIONS
             if item.name.startswith(role.value + "_")
             and (
-                ToolName(item.name) in {ToolName.RUN_DECK_CHOICE, ToolName.RUN_NOTES}
+                ToolName(item.name) is ToolName.RUN_DECK_CHOICE
                 if focused_deck
                 else ToolName(item.name) is not ToolName.RUN_DECK_CHOICE
             )

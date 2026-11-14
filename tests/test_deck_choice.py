@@ -277,9 +277,7 @@ class RewardGame:
         index = len(self.inputs)
         calls: list[tuple[str, str, str]] = []
         if "run_deck_choice" in names:
-            assert names == (
-                {"run_deck_choice"} if self.minimal else {"run_deck_choice", "run_notes"}
-            )
+            assert names == {"run_deck_choice"}
             messages = body["input"]
             assert isinstance(messages, list)
             first = next(m for m in messages if isinstance(m, dict) and m.get("role") == "user")
@@ -294,15 +292,6 @@ class RewardGame:
             focused = offers[0]
             assert isinstance(focused, dict) and isinstance(focused["ref"], str)
             offer = focused["ref"]
-            if offer == "local":
-                if not self.minimal:
-                    calls.append(
-                        (
-                            f"notes-{index}",
-                            "run_notes",
-                            '{"mode":"write","other":"Deck shared note."}',
-                        )
-                    )
             args = {
                 "offer": offer,
                 "choice": "skip"
@@ -363,7 +352,7 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 core_version="test",
                 game_instance_id="game",
                 run_id="run",
-                initial_notes=NotesState(),
+                initial_notes=NotesState(other="" if minimal else "Existing Run note."),
                 minimal=minimal,
             ),
             archive,
@@ -439,7 +428,7 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
             assert isinstance(offers[0], dict) and offers[0]["ref"] == "gold"
             if not minimal:
                 assert (
-                    "Deck shared note."
+                    "Existing Run note."
                     in next(m for m in requests[2].input if isinstance(m, RunTaskSnapshot)).text
                 )
             for record in requests[:3]:
