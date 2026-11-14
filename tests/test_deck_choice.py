@@ -40,6 +40,10 @@ class RewardGame:
         self.minimal = minimal
         self.unknown = unknown
         self.skip_regular = False
+        self.event_handoff = False
+        self.event_take: tuple[str, ...] = ("gift",)
+        self.event_min = 1
+        self.event_max = 1
         self.inputs: list[dict[str, JsonValue]] = []
         self.steps: list[native.NativeStep] = []
         self.observation = observation.model_copy(
@@ -157,7 +161,8 @@ class RewardGame:
                     )
                 unknown = self.unknown
             else:
-                assert state.screen is native.RunScreen.EVENT
+                assert state.screen in (native.RunScreen.EVENT, native.RunScreen.SELECTION)
+                update["screen"] = native.RunScreen.EVENT
         else:
             assert isinstance(step.step, native.Interact)
             action = step.step.action
@@ -213,15 +218,17 @@ class RewardGame:
                 }
             elif action == "close":
                 update = {
-                    "screen": native.RunScreen.EVENT,
+                    "screen": native.RunScreen.SELECTION
+                    if self.event_handoff
+                    else native.RunScreen.EVENT,
                     "offers": (),
                     "actions": (native.Action(ref="finish", label="Finish", enabled=True),),
                     "selection": native.Selection(
                         prompt="Event card",
                         source=None,
-                        min=1,
-                        max=1,
-                        candidates=("gift",),
+                        min=self.event_min,
+                        max=self.event_max,
+                        candidates=("gift", "shared") if self.event_handoff else ("gift",),
                         selected=(),
                     ),
                 }
@@ -287,8 +294,21 @@ class RewardGame:
             assert isinstance(observation, dict)
             choice = observation["choice"]
             assert isinstance(choice, dict)
-            offers = choice["offers"]
-            assert isinstance(offers, list) and len(offers) == 1
+            offers = choice.get("offers", [])
+            assert isinstance(offers, list)
+            if not offers:
+                args: dict[str, object] = {
+                    "choice": "take" if self.event_take else "skip",
+                    "reason": "Event addition.",
+                }
+                if self.event_take:
+                    args.update(card=list(self.event_take), **{"for": "draw"})
+                return httpx.Response(
+                    200,
+                    content=reply((f"event-choice-{index}", "run_deck_choice", json.dumps(args))),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            assert len(offers) == 1
             focused = offers[0]
             assert isinstance(focused, dict) and isinstance(focused["ref"], str)
             offer = focused["ref"]
@@ -324,7 +344,12 @@ class RewardGame:
                 (
                     f"event-{index}",
                     "run_act",
-                    '{"steps":[{"kind":"select","refs":["gift"]},{"kind":"interact","action":"finish"}]}',
+                    (
+                        '{"steps":[{"kind":"interact","action":"finish"}]}'
+                        if self.event_handoff
+                        else '{"steps":[{"kind":"select","refs":["gift"]},'
+                        '{"kind":"interact","action":"finish"}]}'
+                    ),
                 )
             )
         return httpx.Response(
@@ -825,5 +850,53 @@ def test_stopped_selection_keeps_focused_context_and_does_not_reopen_reward(
         (tmp_path / "actual-request-bodies.json").write_text(
             json.dumps(game.inputs, ensure_ascii=False, indent=2)
         )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("taken", [("gift", "shared"), ()])
+def test_event_choice_submits_all_selected_cards_once_and_reports_to_run(
+    tmp_path: Path, taken: tuple[str, ...]
+) -> None:
+    async def scenario() -> None:
+        game = RewardGame(minimal=False)
+        game.event_handoff = True
+        game.event_take = taken
+        game.event_min = 0
+        game.event_max = 2
+        archive = tmp_path / "archive.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(game.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="event-cards",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+            ),
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)),
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+        with closing(Journal.open(archive)) as journal:
+            completion = journal.card_choices()[-1]
+            assert completion.offer_ref is None and completion.local_decline is False
+            assert isinstance(completion.outcome, ActionCompleted)
+            assert completion.after is not None
+            assert completion.after.state.deck == (*completion.before.state.deck, *taken)
+            selections = [step.refs for step in game.steps if isinstance(step, native.Select)]
+            assert selections[-1] == taken
+            final_request = journal.requests()[-1]
+            reports = [
+                m
+                for m in final_request.input
+                if isinstance(m, AutomaticSnapshot)
+                and m.content.automatic_progress.reason == "Event addition."
+            ]
+            assert len(reports) == 1
+            assert reports[0].content.automatic_progress.reason == "Event addition."
 
     asyncio.run(scenario())

@@ -173,6 +173,9 @@ class DecisionDeviation(ExtractionError):
 class DecisionRun(DeckAgent):
     """Restore harness-owned history and stop at its first proposed native decision."""
 
+    def _reward_view(self, observation: native.Observation) -> native.Observation:
+        return observation
+
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
     ) -> ActionProposal | QueryToolResult | LocalProgress:

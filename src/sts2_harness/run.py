@@ -149,12 +149,19 @@ class ActStart:
 
 
 class RunRole(DecisionSource, Protocol):
+    @property
+    def route_plan(self) -> RoutePlan | None: ...
+
     async def enter_act(self, start: ActStart) -> None: ...
 
     def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None: ...
 
 
 class RunAgent(Agent):
+    @property
+    def route_plan(self) -> RoutePlan | None:
+        return self._plan
+
     def __init__(
         self,
         client: Callable[[], ModelClient],

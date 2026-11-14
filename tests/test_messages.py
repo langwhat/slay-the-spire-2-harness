@@ -26,7 +26,7 @@ def test_messages_real_tool_object_unions_keep_their_schema_on_wire(tmp_path: Pa
 
     from sts2_harness.tools.inputs import (
         CombatActInput,
-        InspectInput,
+        CombatInspectInput,
         KnowledgeInput,
         NotesInput,
         RunActInput,
@@ -45,7 +45,7 @@ def test_messages_real_tool_object_unions_keep_their_schema_on_wire(tmp_path: Pa
         pass
 
     parameters: dict[str, type[BaseModel]] = {
-        "combat_inspect": InspectInput,
+        "combat_inspect": CombatInspectInput,
         "combat_act": CombatActInput,
         "run_act": RunActInput,
         "combat_knowledge": KnowledgeInput,

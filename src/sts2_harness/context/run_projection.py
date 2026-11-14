@@ -7,8 +7,9 @@ from dataclasses import dataclass, field
 
 from pydantic import MISSING, JsonValue, TypeAdapter
 
+from sts2_harness.card_projection import card_rules, upgrade_changes
 from sts2_harness.client import models as native
-from sts2_harness.context.map_projection import project_map
+from sts2_harness.context.map_projection import planned_route, project_map
 from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
 from sts2_harness.context.run_models import RunObservation
 from sts2_harness.fights import Fight
@@ -92,19 +93,6 @@ def definition_references(value: JsonValue) -> set[str]:
     return references
 
 
-def _card_definition(obj: native.CardEntry, text: str | None) -> dict[str, JsonValue]:
-    raw = _json(obj)
-    definition: dict[str, JsonValue] = {
-        "id": _key(obj),
-        "name": obj.name,
-        "type": obj.card_type,
-        "cost": _json(obj.cost),
-        "text": text,
-    }
-    definition["keywords"] = raw["keywords"]
-    return definition
-
-
 @dataclass
 class RunDelivery:
     role: native.DecisionOwner = native.DecisionOwner.RUN
@@ -160,7 +148,7 @@ class RunDelivery:
                         return row
                     referenced.add(key)
                     definition = (
-                        _card_definition(obj, observation.descriptions.get(ref))
+                        card_rules(obj, observation.descriptions.get(ref))
                         if isinstance(obj, native.CardEntry)
                         else {
                             "id": key,
@@ -226,7 +214,7 @@ class RunDelivery:
                         "text": observation.descriptions.get(ref),
                     }
                 return row
-            definition = _card_definition(obj, observation.descriptions.get(ref))
+            definition = card_rules(obj, observation.descriptions.get(ref))
             if key is not None and self.role is native.DecisionOwner.COMBAT:
                 self.definitions.setdefault(key, definition)
                 known = self.definitions[key]
@@ -269,23 +257,15 @@ class RunDelivery:
             modifier_text = observation.modifier_descriptions.get(ref)
             if modifier_text is not None:
                 row["modifier_text"] = _json(modifier_text)
-            if actionable and ref in observation.upgrades:
-                upgrade = observation.upgrades[ref]
-                row["upgrade"] = {"status": upgrade.status}
-                if isinstance(upgrade, native.UpgradeAvailable):
-                    base = {**raw, "text": observation.descriptions.get(ref)}
-                    row["upgrade"].update(
-                        {
-                            name: value
-                            for name, value in _json(upgrade.card).items()
-                            if name not in ("definition_id", "upgrades", "rarity")
-                            and base.get(name) != value
-                        }
-                    )
+            if ref in observation.upgrades and (actionable or text):
+                row["upgrade"] = upgrade_changes(
+                    obj, observation.descriptions.get(ref), observation.upgrades[ref]
+                )
             if actionable and obj.previews is not MISSING:
                 row["previews"] = [
                     {"target": identity(preview.target), "text": preview.text}
                     for preview in obj.previews
+                    if preview.text != observation.descriptions.get(ref)
                 ]
             return row
 
@@ -336,6 +316,12 @@ class RunDelivery:
                 unknown_odds={ref: _json(value) for ref, value in odds.items()},
             )
         if self.role is native.DecisionOwner.COMBAT:
+            if source.map is not MISSING:
+                route = planned_route(source.map, state.progress, self.route_plan)
+                if route is not MISSING:
+                    progress = sections["progress"]
+                    assert isinstance(progress, dict)
+                    progress["route"] = list(route)
             player = sections["player"]
             assert isinstance(player, dict)
             for name in ("gold", "potion_slot_count", "empty_potion_slot_count"):

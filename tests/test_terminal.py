@@ -100,7 +100,9 @@ class TerminalMod:
 
 
 class TerminalSource(Source):
-    def deck(self, observation: native.Observation, offer: native.Offer) -> DeckAgent:
+    route_plan = None
+
+    def deck(self, observation: native.Observation, offer: native.Offer | None) -> DeckAgent:
         raise AssertionError("This fixture has no card rewards.")
 
     def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
@@ -197,7 +199,7 @@ def test_terminal_read_failure_ends_roles_before_recovery_pause(
                     budget,
                     Notes(""),
                     source,
-                    lambda observation, notes: source,
+                    lambda observation, notes, plan: source,
                     new_run=lambda: source,
                     deck=source.deck,
                 ).run()

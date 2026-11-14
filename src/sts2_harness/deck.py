@@ -23,9 +23,9 @@ class CardChoiceKind(StrEnum):
 class CardChoiceCompletion(native.WireModel):
     stream: str
     call_id: str
-    offer_ref: str
+    offer_ref: str | None
     choice: CardChoiceKind
-    card_ref: str | None
+    card_ref: str | tuple[str, ...] | None
     before: native.Observation
     after: native.Observation | None
     outcome: Outcome
@@ -80,7 +80,7 @@ def deck_observation(
     actions = tuple(
         action for action in state.actions if offer is not None and action.ref in offer.actions
     )
-    selection = state.selection if offer is not None else None
+    selection = state.selection if offer is not None else adding_selection(observation)
     if (
         selection is not None
         and offer is not None
@@ -90,6 +90,8 @@ def deck_observation(
     refs = set((*state.deck, *state.relics, *state.potions))
     if offer is not None:
         refs.update((offer.ref, *offer.contents))
+    if selection is not None:
+        refs.update(selection.candidates)
     refs.update(action.subject for action in actions if isinstance(action.subject, str))
     identities = {
         entry.definition_id
@@ -127,3 +129,21 @@ def deck_observation(
             ),
         }
     )
+
+
+def adding_selection(observation: native.Observation) -> native.Selection | None:
+    state = observation.state
+    if (
+        not isinstance(state, native.RunState)
+        or state.screen is not native.RunScreen.SELECTION
+        or state.selection is None
+        or not state.selection.candidates
+    ):
+        return None
+    candidates = state.selection.candidates
+    if any(
+        ref in state.deck or not isinstance(observation.objects.get(ref), native.CardEntry)
+        for ref in candidates
+    ):
+        return None
+    return state.selection

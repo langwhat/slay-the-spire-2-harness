@@ -3,7 +3,6 @@
 import json
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
-from typing import Literal
 
 from pydantic import MISSING, BaseModel, ValidationError
 
@@ -50,18 +49,19 @@ from sts2_harness.results import (
 from sts2_harness.tools.inputs import (
     DEFINITIONS,
     CombatActInput,
-    InspectInput,
+    CombatInspectInput,
     KnowledgeInput,
     NotesInput,
     NotesReadInput,
     RunActInput,
     RunDeckChoice,
+    RunInspectInput,
+    RunMapQuery,
     RunNext,
     RunPlan,
     SkillInput,
     SkillListInput,
     StateQuery,
-    UpgradeQuery,
 )
 
 
@@ -162,8 +162,8 @@ class ToolCatalog:
             ToolName.RUN_NEXT: RunNext,
             ToolName.COMBAT_ACT: CombatActInput,
             ToolName.RUN_NOTES: NotesInput,
-            ToolName.RUN_INSPECT: InspectInput,
-            ToolName.COMBAT_INSPECT: InspectInput,
+            ToolName.RUN_INSPECT: RunInspectInput,
+            ToolName.COMBAT_INSPECT: CombatInspectInput,
             ToolName.RUN_SKILL: SkillInput,
             ToolName.COMBAT_SKILL: SkillInput,
             ToolName.RUN_KNOWLEDGE: KnowledgeInput,
@@ -389,8 +389,10 @@ class ToolCatalog:
         try:
             json.loads(call.arguments, object_pairs_hook=unique_fields)
             query = (
-                InspectInput.model_validate_json(call.arguments, strict=True).root
-                if ToolName(call.name) in (ToolName.RUN_INSPECT, ToolName.COMBAT_INSPECT)
+                RunInspectInput.model_validate_json(call.arguments, strict=True).root
+                if call.name == ToolName.RUN_INSPECT
+                else CombatInspectInput.model_validate_json(call.arguments, strict=True).root
+                if call.name == ToolName.COMBAT_INSPECT
                 else KnowledgeInput.model_validate_json(call.arguments, strict=True).root
             )
         except (ValueError, ValidationError):
@@ -458,63 +460,11 @@ class ToolCatalog:
         return KnowledgeLookup(entries=tuple(entries), missing_ids=data.missing_ids)
 
     async def _read_details(
-        self, query: StateQuery | native.MapQuery | UpgradeQuery
+        self, query: StateQuery | native.MapQuery | RunMapQuery
     ) -> QueryToolResult:
         if isinstance(query, StateQuery):
             return QueryToolResult(ReadCompleted(), await self._observe())
-        native_query: native.InspectQuery
-        if isinstance(query, UpgradeQuery):
-            current = await self._observe()
-            state = current.state
-            refs = query.refs
-            if refs is MISSING:
-                native_query = native.CardQuery(area=native.InspectArea.DECK, upgrade=True)
-            else:
-                areas: list[
-                    tuple[
-                        Literal[
-                            native.InspectArea.DECK,
-                            native.InspectArea.OPTIONS,
-                            native.InspectArea.SHOP,
-                            native.InspectArea.REWARDS,
-                            native.InspectArea.HAND,
-                        ],
-                        tuple[str, ...],
-                    ]
-                ] = [
-                    (native.InspectArea.DECK, state.deck),
-                ]
-                if state.selection is not None:
-                    areas.append((native.InspectArea.OPTIONS, state.selection.candidates))
-                if isinstance(state, native.RunState):
-                    areas.append(
-                        (
-                            native.InspectArea.SHOP
-                            if state.screen is native.RunScreen.SHOP
-                            else native.InspectArea.REWARDS,
-                            tuple(ref for offer in state.offers for ref in offer.contents),
-                        )
-                    )
-                if isinstance(state, native.CombatState):
-                    areas.append((native.InspectArea.HAND, state.piles.hand))
-                matched_query = next(
-                    (
-                        native.CardQuery(area=card_area, refs=refs, upgrade=True)
-                        for card_area, members in areas
-                        if set(refs) <= set(members)
-                    ),
-                    None,
-                )
-                if matched_query is None or len(set(refs)) != len(refs):
-                    return QueryToolResult(
-                        _problem(
-                            ReasonCode.INVALID_ARGUMENTS, "Use card refs from one current area."
-                        ),
-                        current,
-                    )
-                native_query = matched_query
-        else:
-            native_query = query
+        native_query = native.MapQuery(area=query.area)
         try:
             result = await self._inspect(native_query)
         except ClientUnavailable as error:

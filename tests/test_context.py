@@ -11,6 +11,7 @@ from sts2_harness.client.models import (
     Observation,
     ResourceCosts,
     RunState,
+    TargetPreview,
 )
 from sts2_harness.context import CombatActInput, Context, QueryToolResult, ReadCompleted
 from sts2_harness.context.models import RunActInput
@@ -192,6 +193,66 @@ def test_history_use_names_its_base_definition_scope_across_upgrade_rows() -> No
     deck = json.loads(context.model_input()[-1].text)["observation"]["deck"]
     assert {row["id"] for row in deck} == {"CARD.ONE", "CARD.ONE+1"}
     assert all(row["use"] == {"observed_plays": 3} for row in deck)
+
+
+def test_owned_deck_upgrades_group_copies_and_target_previews_keep_only_changes() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    state = observation.state
+    card = observation.objects["c1"]
+    assert isinstance(state, CombatState) and isinstance(card, CardEntry)
+    observation = observation.model_copy(
+        update={
+            "state": state.model_copy(update={"deck": ("c1", "copy")}),
+            "objects": {
+                **observation.objects,
+                "copy": card,
+                "c1": card.model_copy(
+                    update={
+                        "previews": (
+                            TargetPreview(target="same", text="Deal 3 damage."),
+                            TargetPreview(target="different", text="Deal 9 damage."),
+                        ),
+                    }
+                ),
+            },
+            "descriptions": {
+                **observation.descriptions,
+                "c1": "Deal 3 damage.",
+                "copy": "Deal 3 damage.",
+            },
+            "modifier_descriptions": {
+                **observation.modifier_descriptions,
+                "copy": observation.modifier_descriptions["c1"],
+            },
+            "upgrades": {**observation.upgrades, "copy": observation.upgrades["c1"]},
+        }
+    )
+    run = Context(DecisionOwner.RUN)
+    run.append_task(RunActInput(), observation)
+    deck = json.loads(run.model_input()[-1].text)["observation"]["deck"]
+    assert len(deck) == 1 and deck[0]["n"] == 2
+    assert deck[0]["upgrade"] == {"status": "available", "text": "造成3点伤害。"}
+    combat = Context(DecisionOwner.COMBAT)
+    combat.append_task(CombatActInput(), observation)
+    hand = json.loads(combat.model_input()[-1].text)["observation"]["hand"]
+    assert hand[1]["previews"] == [{"target": {"ref": "different"}, "text": "Deal 9 damage."}]
+    changed = observation.model_copy(
+        update={
+            "objects": {
+                **observation.objects,
+                "c1": card.model_copy(
+                    update={
+                        "previews": (
+                            TargetPreview(target="same", text=observation.descriptions["c1"] or ""),
+                        ),
+                    }
+                ),
+            }
+        }
+    )
+    combat.append_task(CombatActInput(), changed)
+    hand = json.loads(combat.model_input()[-1].text)["observation"]["hand"]
+    assert "previews" not in hand[1]
 
 
 def test_mechanisms_are_once_delivered_without_owners_and_restore_after_compaction() -> None:

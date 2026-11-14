@@ -237,6 +237,8 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
     paths: list[Path] = []
 
     class CodeRun:
+        route_plan = None
+
         def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
             raise AssertionError("This fixture has no card rewards.")
 

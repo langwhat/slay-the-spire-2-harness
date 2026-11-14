@@ -101,7 +101,7 @@ class Source(Campaign):
         self.responses = iter(
             [
                 reply(("travel", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
-                reply(("inspect", "combat_inspect", '{"area":"upgrades"}')),
+                reply(("inspect", "combat_inspect", '{"area":"map"}')),
                 reply(
                     (
                         "play",
@@ -126,13 +126,8 @@ class Source(Campaign):
                 content=native.InspectCompleted(
                     status=native.ResultStatus.COMPLETED,
                     observation=self.current,
-                    data=native.DetailData(
-                        objects=self.current.objects,
-                        descriptions=self.current.descriptions,
-                        modifier_descriptions=self.current.modifier_descriptions,
-                        generated=self.current.generated,
-                        mechanisms=self.current.mechanisms,
-                        upgrades=self.current.upgrades,
+                    data=native.MapData(
+                        map=native.PublicMap(bosses=(), nodes=(), legal_destinations=None)
                     ),
                 ).to_json(),
             )

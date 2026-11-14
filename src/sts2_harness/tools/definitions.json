@@ -1,53 +1,27 @@
 [
   {
     "name": "run_inspect",
-    "description": "Read public information missing from the current sections: state refreshes the view, map reads the act map, combat_history reads this battle's card history, and upgrades previews next upgrades. With upgrades, omit refs for the owned deck or supply card refs from one current area. Read-only.",
+    "description": "Read public information missing from the current sections: state refreshes the view and map reads the act map. Read-only.",
     "input_schema": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "enum": [
-                "state",
-                "map",
-                "combat_history"
-              ]
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "const": "upgrades"
-            },
-            "refs": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "minItems": 1,
-              "uniqueItems": true,
-              "description": "Current card refs from one area; omit to preview the owned deck."
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
+      "type": "object",
+      "properties": {
+        "area": {
+          "type": "string",
+          "enum": [
+            "state",
+            "map"
+          ]
         }
-      ]
+      },
+      "required": [
+        "area"
+      ],
+      "additionalProperties": false
     }
   },
   {
     "name": "run_knowledge",
-    "description": "Look up game definitions, including objects you do not have. mode=lookup returns the full entries for up to 20 native IDs; a card entry includes its next upgrade. mode=search finds definitions whose ID, name, or text contains every term in text; narrow it with category and, for cards, with filters (pools, types, rarities, energy_costs: values inside one filter are alternatives, different filters combine). It returns 5 matches unless limit is set (up to 20); continue with offset=next_offset. mode=catalog lists the categories and filter values. Results are base definitions; current prices, costs, and instance values come from the state. Read-only.",
+    "description": "Look up game definitions, including objects you do not have. Objects shown in the state already carry their rules and next upgrade, and supplied guidance already includes their mechanism notes; look up only what neither shows. mode=lookup returns the full entries for up to 20 native IDs; a card entry includes its next upgrade. mode=search finds definitions whose ID, name, or text contains every term in text; narrow it with category and, for cards, with filters (pools, types, rarities, energy_costs: values inside one filter are alternatives, different filters combine). It returns 5 matches unless limit is set (up to 20); continue with offset=next_offset. mode=catalog lists the categories and filter values. Results are base definitions; current prices, costs, and instance values come from the state. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -84,7 +58,21 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "enum": [
+                      "CARD_POOL.COLORLESS_CARD_POOL",
+                      "CARD_POOL.CURSE_CARD_POOL",
+                      "CARD_POOL.DEFECT_CARD_POOL",
+                      "CARD_POOL.DEPRECATED_CARD_POOL",
+                      "CARD_POOL.EVENT_CARD_POOL",
+                      "CARD_POOL.IRONCLAD_CARD_POOL",
+                      "CARD_POOL.NECROBINDER_CARD_POOL",
+                      "CARD_POOL.QUEST_CARD_POOL",
+                      "CARD_POOL.REGENT_CARD_POOL",
+                      "CARD_POOL.SILENT_CARD_POOL",
+                      "CARD_POOL.STATUS_CARD_POOL",
+                      "CARD_POOL.TOKEN_CARD_POOL"
+                    ]
                   },
                   "minItems": 1,
                   "uniqueItems": true
@@ -93,7 +81,16 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "enum": [
+                      "attack",
+                      "curse",
+                      "none",
+                      "power",
+                      "quest",
+                      "skill",
+                      "status"
+                    ]
                   },
                   "minItems": 1,
                   "uniqueItems": true
@@ -102,7 +99,19 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "enum": [
+                      "ancient",
+                      "basic",
+                      "common",
+                      "curse",
+                      "event",
+                      "quest",
+                      "rare",
+                      "status",
+                      "token",
+                      "uncommon"
+                    ]
                   },
                   "minItems": 1,
                   "uniqueItems": true
@@ -190,53 +199,28 @@
   },
   {
     "name": "combat_inspect",
-    "description": "Read public information missing from the current sections: state refreshes the view, map reads the act map, combat_history reads this battle's card history, and upgrades previews next upgrades. With upgrades, omit refs for the owned deck or supply card refs from one current area. Read-only.",
+    "description": "Read public information missing from the current sections: state refreshes the view, map reads the act map, and combat_history reads this battle's card history only during an active battle, not its review. Read-only.",
     "input_schema": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "enum": [
-                "state",
-                "map",
-                "combat_history"
-              ]
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "properties": {
-            "area": {
-              "const": "upgrades"
-            },
-            "refs": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              },
-              "minItems": 1,
-              "uniqueItems": true,
-              "description": "Current card refs from one area; omit to preview the owned deck."
-            }
-          },
-          "required": [
-            "area"
-          ],
-          "additionalProperties": false
+      "type": "object",
+      "properties": {
+        "area": {
+          "type": "string",
+          "enum": [
+            "state",
+            "map",
+            "combat_history"
+          ]
         }
-      ]
+      },
+      "required": [
+        "area"
+      ],
+      "additionalProperties": false
     }
   },
   {
     "name": "combat_knowledge",
-    "description": "Look up game definitions, including objects you do not have. mode=lookup returns the full entries for up to 20 native IDs; a card entry includes its next upgrade. mode=search finds definitions whose ID, name, or text contains every term in text; narrow it with category and, for cards, with filters (pools, types, rarities, energy_costs: values inside one filter are alternatives, different filters combine). It returns 5 matches unless limit is set (up to 20); continue with offset=next_offset. mode=catalog lists the categories and filter values. Results are base definitions; current prices, costs, and instance values come from the state. Read-only.",
+    "description": "Look up game definitions, including objects you do not have. Objects shown in the state already carry their rules and next upgrade, and supplied guidance already includes their mechanism notes; look up only what neither shows. mode=lookup returns the full entries for up to 20 native IDs; a card entry includes its next upgrade. mode=search finds definitions whose ID, name, or text contains every term in text; narrow it with category and, for cards, with filters (pools, types, rarities, energy_costs: values inside one filter are alternatives, different filters combine). It returns 5 matches unless limit is set (up to 20); continue with offset=next_offset. mode=catalog lists the categories and filter values. Results are base definitions; current prices, costs, and instance values come from the state. Read-only.",
     "input_schema": {
       "oneOf": [
         {
@@ -273,7 +257,21 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "enum": [
+                      "CARD_POOL.COLORLESS_CARD_POOL",
+                      "CARD_POOL.CURSE_CARD_POOL",
+                      "CARD_POOL.DEFECT_CARD_POOL",
+                      "CARD_POOL.DEPRECATED_CARD_POOL",
+                      "CARD_POOL.EVENT_CARD_POOL",
+                      "CARD_POOL.IRONCLAD_CARD_POOL",
+                      "CARD_POOL.NECROBINDER_CARD_POOL",
+                      "CARD_POOL.QUEST_CARD_POOL",
+                      "CARD_POOL.REGENT_CARD_POOL",
+                      "CARD_POOL.SILENT_CARD_POOL",
+                      "CARD_POOL.STATUS_CARD_POOL",
+                      "CARD_POOL.TOKEN_CARD_POOL"
+                    ]
                   },
                   "minItems": 1,
                   "uniqueItems": true
@@ -282,7 +280,16 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "enum": [
+                      "attack",
+                      "curse",
+                      "none",
+                      "power",
+                      "quest",
+                      "skill",
+                      "status"
+                    ]
                   },
                   "minItems": 1,
                   "uniqueItems": true
@@ -291,7 +298,19 @@
                   "type": "array",
                   "items": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "enum": [
+                      "ancient",
+                      "basic",
+                      "common",
+                      "curse",
+                      "event",
+                      "quest",
+                      "rare",
+                      "status",
+                      "token",
+                      "uncommon"
+                    ]
                   },
                   "minItems": 1,
                   "uniqueItems": true
@@ -739,7 +758,7 @@
   },
   {
     "name": "run_deck_choice",
-    "description": "Resolve the card reward: take one of its cards or skip it.",
+    "description": "Resolve the current card addition: take cards or skip. For a reward, supply its offer and take one card. For an event or relic selection, omit offer; card may list multiple refs only when the current selection allows it. Follow its minimum and maximum.",
     "input_schema": {
       "oneOf": [
         {
@@ -748,15 +767,28 @@
             "offer": {
               "type": "string",
               "minLength": 1,
-              "description": "Ref of the card offer."
+              "description": "Ref of the card reward offer. Omit for an event or relic selection."
             },
             "choice": {
               "const": "take"
             },
             "card": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Ref of the card taken."
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "minItems": 1,
+                  "uniqueItems": true
+                }
+              ],
+              "description": "Card ref to take, or multiple refs when the current selection permits more than one."
             },
             "reason": {
               "type": "string",
@@ -780,7 +812,6 @@
             }
           },
           "required": [
-            "offer",
             "choice",
             "card",
             "for",
@@ -794,7 +825,7 @@
             "offer": {
               "type": "string",
               "minLength": 1,
-              "description": "Ref of the card offer."
+              "description": "Ref of the card reward offer. Omit for an event or relic selection."
             },
             "choice": {
               "const": "skip"
@@ -805,7 +836,6 @@
             }
           },
           "required": [
-            "offer",
             "choice",
             "reason"
           ],

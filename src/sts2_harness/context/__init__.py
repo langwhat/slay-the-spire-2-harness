@@ -168,6 +168,7 @@ class Context:
 
     def set_route_plan(self, plan: RoutePlan | None) -> None:
         self._run_delivery.route_plan = plan
+        self._combat_delivery.route_plan = plan
 
     def set_fights(self, fights: tuple[Fight, ...]) -> None:
         self._run_delivery.fights = fights

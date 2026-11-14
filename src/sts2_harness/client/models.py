@@ -289,6 +289,7 @@ class Progress(WireModel):
     room_type: Nonempty | None
     name: Nonempty | MISSING = MISSING
     definition_id: Nonempty | MISSING = MISSING
+    bosses_left: Annotated[int, Field(ge=0)] | MISSING = MISSING
 
 
 class AscensionRule(WireModel):

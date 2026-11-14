@@ -37,12 +37,7 @@ class InspectBattle(BattleHTTP):
                 "status": "completed",
                 "observation": (self.inspected or self.opening).model_dump(mode="json"),
                 "data": {
-                    "objects": {},
-                    "descriptions": {},
-                    "modifier_descriptions": {},
-                    "generated": {},
-                    "mechanisms": [],
-                    "upgrades": {},
+                    "map": {"bosses": [], "nodes": [], "legal_destinations": None},
                 },
             },
         )
@@ -54,7 +49,7 @@ def test_inspection_and_final_action_execute_without_an_intermediate_request(
     battle = InspectBattle(
         [
             reply(
-                ("inspect", "combat_inspect", '{"area":"upgrades"}'),
+                ("inspect", "combat_inspect", '{"area":"map"}'),
                 ("act", "combat_act", '{"steps":[{"kind":"end_turn"}]}'),
             ),
             reply(text="Reviewed."),
@@ -72,15 +67,15 @@ def test_inspection_and_final_action_execute_without_an_intermediate_request(
     ]
 
 
-def test_failed_query_cancels_remaining_queries_and_action_without_extra_recovery(
+def test_failed_query_keeps_read_only_calls_and_aborts_game_action(
     tmp_path: Path,
 ) -> None:
     battle = InspectBattle(
         [
             reply(
-                ("completed-query", "combat_inspect", '{"area":"upgrades"}'),
+                ("completed-query", "combat_inspect", '{"area":"map"}'),
                 ("bad", "combat_skill", '{"mode":"read","id":"missing"}'),
-                ("cancelled-query", "combat_inspect", '{"area":"upgrades"}'),
+                ("cancelled-query", "combat_inspect", '{"area":"map"}'),
                 ("cancelled-action", "combat_act", '{"steps":[{"kind":"end_turn"}]}'),
             ),
             reply(("retry", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
@@ -88,9 +83,12 @@ def test_failed_query_cancels_remaining_queries_and_action_without_extra_recover
         ]
     )
     assert isinstance(asyncio.run(battle.run(tmp_path)), CombatHandoff)
-    assert [query.area for query in battle.queries] == [native.InspectArea.DECK]
+    assert [query.area for query in battle.queries] == [
+        native.InspectArea.MAP,
+        native.InspectArea.MAP,
+    ]
     assert len(battle.actions) == 1
-    assert battle.model_budget[:2] == [0, 1]
+    assert battle.model_budget[:2] == [0, 0]
     items = battle.inputs[1]["input"]
     assert isinstance(items, list)
     results = items[-5:-1]
@@ -100,7 +98,12 @@ def test_failed_query_cancels_remaining_queries_and_action_without_extra_recover
         "cancelled-query",
         "cancelled-action",
     ]
-    for item in results[2:]:
+    query_result = results[2]
+    assert isinstance(query_result, dict)
+    query_output = query_result["output"]
+    assert isinstance(query_output, str)
+    assert json.loads(query_output)["outcome"]["status"] == "completed"
+    for item in results[3:]:
         assert isinstance(item, dict) and isinstance(content := item["output"], str)
         result = json.loads(content)
         assert result == {
@@ -128,9 +131,9 @@ def test_nonfinal_action_rejects_the_whole_reply_before_any_inspection(
     battle = InspectBattle(
         [
             reply(
-                ("before", "combat_inspect", '{"area":"upgrades"}'),
+                ("before", "combat_inspect", '{"area":"map"}'),
                 ("nonfinal", action_name, '{"steps":[{"kind":"end_turn"}]}'),
-                ("after", "combat_inspect", '{"area":"upgrades"}'),
+                ("after", "combat_inspect", '{"area":"map"}'),
             ),
             reply(("retry", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
             reply(text="Reviewed."),

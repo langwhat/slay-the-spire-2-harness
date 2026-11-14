@@ -54,23 +54,16 @@ class DynamicMap(SemanticValue):
     ahead: dict[AheadKind, int] | MISSING = MISSING
 
 
-def _ahead(
+def planned_route(
     public_map: native.PublicMap, progress: native.Progress, plan: RoutePlan | None
-) -> dict[AheadKind, int] | MISSING:
+) -> tuple[str, ...] | MISSING:
     if plan is None or plan.position != progress.position:
         return MISSING
     nodes = {node.position: node for node in public_map.nodes}
     outgoing: dict[str, list[str]] = {}
     for edge in plan.edges:
         outgoing.setdefault(edge.source, []).append(edge.destination)
-    kinds = {
-        "monster": AheadKind.FIGHTS,
-        "elite": AheadKind.ELITES,
-        "unknown": AheadKind.UNKNOWN,
-        "restsite": AheadKind.RESTS,
-        "shop": AheadKind.SHOPS,
-    }
-    counts: dict[AheadKind, int] = {}
+    route: list[str] = []
     position = plan.position
     while True:
         destinations = outgoing.get(position, [])
@@ -79,11 +72,30 @@ def _ahead(
         node = nodes.get(destinations[0])
         if node is None:
             return MISSING
+        route.append(node.room_type)
         if node.room_type == "boss":
-            return counts
-        if (kind := kinds.get(node.room_type)) is not None:
-            counts[kind] = counts.get(kind, 0) + 1
+            return tuple(route)
         position = node.position
+
+
+def _ahead(
+    public_map: native.PublicMap, progress: native.Progress, plan: RoutePlan | None
+) -> dict[AheadKind, int] | MISSING:
+    route = planned_route(public_map, progress, plan)
+    if route is MISSING:
+        return MISSING
+    kinds = {
+        "monster": AheadKind.FIGHTS,
+        "elite": AheadKind.ELITES,
+        "unknown": AheadKind.UNKNOWN,
+        "restsite": AheadKind.RESTS,
+        "shop": AheadKind.SHOPS,
+    }
+    counts: dict[AheadKind, int] = {}
+    for room_type in route:
+        if (kind := kinds.get(room_type)) is not None:
+            counts[kind] = counts.get(kind, 0) + 1
+    return counts
 
 
 def project_map(

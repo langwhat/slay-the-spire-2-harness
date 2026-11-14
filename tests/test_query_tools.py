@@ -82,7 +82,9 @@ def test_knowledge_preserves_native_matches_pagination_and_lookup_order() -> Non
             assert lookup.data is not MISSING
             # Model-facing lookup adds supplements without changing the native result.
             encoded = json.loads(lookup.data.model_dump_json())
-            assert encoded["entries"][0]["definition_id"] == "RELIC.ONE"
+            assert encoded["entries"][0]["id"] == "RELIC.ONE"
+            assert "native" not in encoded["entries"][0]
+            assert "rarity" not in encoded["entries"][0]
             assert encoded["entries"][0]["supplements"] == []
             assert encoded["missing_ids"] == ["MISSING"]
             before = len(requests)
@@ -273,3 +275,45 @@ def test_failed_reads_preserve_trustworthy_state_without_reusing_old_observation
             assert isinstance(invalid.outcome, Rejected) and invalid.observation is None
 
     asyncio.run(run())
+
+
+def test_card_lookup_keeps_rules_and_explicit_upgrade_overrides_without_native_envelope() -> None:
+    import json
+
+    from sts2_harness.client import models as native
+    from sts2_harness.knowledge import KnowledgeEntry
+
+    observation = native.Observation.model_validate_json(COMBAT)
+    upgrade = observation.upgrades["c1"]
+    assert isinstance(upgrade, native.UpgradeAvailable)
+    base = upgrade.card.model_copy(
+        update={
+            "text": "Deal 6 damage.",
+            "keywords": ("exhaust",),
+            "cost": native.ResourceCosts(energy=1),
+        }
+    )
+    upgraded = base.model_copy(
+        update={"text": "Deal 9 damage.", "keywords": (), "cost": native.ResourceCosts(energy=0)}
+    )
+    result = json.loads(
+        KnowledgeEntry(
+            definition=native.CardDefinition(
+                category=native.NativeCategory.CARD,
+                definition_id=base.definition_id,
+                name=base.name,
+                native=base,
+                upgrade=native.UpgradeAvailable(
+                    status=native.UpgradeStatus.AVAILABLE, card=upgraded
+                ),
+            )
+        ).to_json()
+    )
+    assert result["text"] == "Deal 6 damage." and result["keywords"] == ["exhaust"]
+    assert result["upgrade"] == {
+        "status": "available",
+        "text": "Deal 9 damage.",
+        "keywords": [],
+        "cost": {"energy": 0},
+    }
+    assert "native" not in result and "card" not in result["upgrade"]

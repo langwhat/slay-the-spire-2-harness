@@ -451,6 +451,8 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
     rejected: list[ActionToolResult] = []
 
     class Run:
+        route_plan = None
+
         def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
             raise AssertionError("This fixture has no card rewards.")
 

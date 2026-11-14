@@ -32,6 +32,7 @@ from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.note_values import NotesView
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import Reason, ReasonCode
+from sts2_harness.route_plan import RoutePlan
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input_values import UserInputSource
 
@@ -76,6 +77,7 @@ class CombatAgent(Agent):
         recovery: ToolRecoveryBudget,
         *,
         opening_notes: NotesView,
+        route_plan: RoutePlan | None = None,
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
@@ -91,6 +93,7 @@ class CombatAgent(Agent):
         )
         self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._opening_notes = opening_notes
+        self._route_plan = route_plan
         self._opening_delivered = False
 
     def _initial_context(
@@ -108,7 +111,9 @@ class CombatAgent(Agent):
         )
         if documents:
             system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
-        return Context(native.DecisionOwner.COMBAT, system=system, minimal=self._tools.minimal)
+        context = Context(native.DecisionOwner.COMBAT, system=system, minimal=self._tools.minimal)
+        context.set_route_plan(self._route_plan)
+        return context
 
     async def _prepare(self, observation: native.Observation) -> Context:
         context = await super()._prepare(observation)

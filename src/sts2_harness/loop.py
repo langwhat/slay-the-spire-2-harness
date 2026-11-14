@@ -14,6 +14,7 @@ from sts2_harness.decisions import (
     LocalProgress,
     TaskComplete,
 )
+from sts2_harness.deck import adding_selection
 from sts2_harness.deck_role import DeckAgent
 from sts2_harness.diagnostics import ActEntered, Diagnostics, RoleChanged
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
@@ -28,10 +29,11 @@ from sts2_harness.game import GameLifetimeEnded, RunEnded
 from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.results import Reason, ReasonCode
+from sts2_harness.route_plan import RoutePlan, reconcile_plan
 from sts2_harness.run import ActStart, RunRole
 
-type CombatFactory = Callable[[native.Observation, NotesView], DecisionSource]
-type DeckFactory = Callable[[native.Observation, native.Offer], DeckAgent]
+type CombatFactory = Callable[[native.Observation, NotesView, RoutePlan | None], DecisionSource]
+type DeckFactory = Callable[[native.Observation, native.Offer | None], DeckAgent]
 
 
 class RunFlow(Protocol):
@@ -54,12 +56,12 @@ class DefaultFlow:
     ) -> None:
         self._diagnostics = diagnostics
         self._active_role: native.DecisionOwner | None = None
-        self._execution = execution
-        self._recovery = recovery
-        self._notes = notes
-        self._run = run
-        self._new_run = new_run
-        self._combat = combat
+        self._execution: Execution = execution
+        self._recovery: ToolRecoveryBudget = recovery
+        self._notes: Notes = notes
+        self._run: RunRole = run
+        self._new_run: Callable[[], RunRole] = new_run
+        self._combat: CombatFactory = combat
         self._initialized = False
         self._act: int | None = None
         self._pending: CombatHandoff | None = None
@@ -102,7 +104,7 @@ class DefaultFlow:
 
     def _card_source(self, observation: native.Observation) -> DecisionSource:
         state = observation.state
-        if not isinstance(state, native.RunState) or state.screen is not native.RunScreen.REWARDS:
+        if not isinstance(state, native.RunState):
             return self._run
         node = (
             observation.location.game_instance_id,
@@ -115,6 +117,12 @@ class DefaultFlow:
             self._deck_node = node
         if self._deck is not None and not self._deck.offered(observation):
             self._deck = None
+        if adding_selection(observation) is not None:
+            if self._deck is None:
+                self._deck = self._deck_factory(observation, None)
+            return self._deck
+        if state.screen is not native.RunScreen.REWARDS:
+            return self._run
         offer = next(
             (
                 offer
@@ -184,6 +192,9 @@ class DefaultFlow:
                         role = self._combat(
                             observation,
                             NotesView() if self._minimal else self._notes.read(),
+                            reconcile_plan(
+                                self._run.route_plan, observation.state.progress.position
+                            ).plan,
                         )
                         result = await CombatTask(
                             self._execution,

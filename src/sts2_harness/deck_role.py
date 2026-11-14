@@ -24,6 +24,7 @@ from sts2_harness.decisions import (
 from sts2_harness.deck import (
     CardChoiceCompletion,
     CardChoiceKind,
+    adding_selection,
     deck_context,
     deck_observation,
     deck_tools,
@@ -51,6 +52,17 @@ class PendingCardChoice:
     call: ToolCall
     query: TakeCard | SkipCard
     before: native.Observation
+
+    @property
+    def label(self) -> str:
+        if isinstance(self.query, SkipCard):
+            return "Skip"
+        identities: list[str] = []
+        for ref in self.query.cards:
+            card = self.before.objects[ref]
+            assert isinstance(card, native.CardEntry)
+            identities.append(card.definition_id)
+        return ", ".join(identities)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,13 +108,15 @@ class DeckAgent(RunAgent):
 
     def _reward_view(self, observation: native.Observation) -> native.Observation:
         state = observation.state
-        if not isinstance(state, native.RunState) or self._offer_ref is None:
+        if not isinstance(state, native.RunState):
             return observation
         offer = next((offer for offer in state.offers if offer.ref == self._offer_ref), None)
         return deck_observation(observation, offer)
 
     def offered(self, observation: native.Observation) -> bool:
         state = observation.state
+        if self._offer_ref is None:
+            return adding_selection(observation) is not None
         return (
             isinstance(state, native.RunState)
             and state.screen is native.RunScreen.REWARDS
@@ -149,7 +163,7 @@ class DeckAgent(RunAgent):
                 CardChoiceCompletion(
                     stream=self._stream,
                     call_id=pending.call.id,
-                    offer_ref=pending.query.offer,
+                    offer_ref=None if pending.query.offer is MISSING else pending.query.offer,
                     choice=CardChoiceKind.TAKE
                     if isinstance(pending.query, TakeCard)
                     else CardChoiceKind.SKIP,
@@ -163,18 +177,17 @@ class DeckAgent(RunAgent):
 
     def _resolved(self, pending: PendingCardChoice, result: ActionToolResult) -> None:
         query = pending.query
-        label = "Skip"
-        if isinstance(query, TakeCard):
-            card = pending.before.objects[query.card]
-            assert isinstance(card, native.CardEntry)
-            label = card.definition_id
         self.resolution = CardResolution(
-            AutomaticProgress(label=label, reason=query.reason),
+            AutomaticProgress(label=pending.label, reason=query.reason),
             result,
-            query.offer if isinstance(query, SkipCard) else None,
+            query.offer if isinstance(query, SkipCard) and query.offer is not MISSING else None,
         )
         if self._tools.deck_stats is not None:
-            self._tools.deck_stats.record_choice(pending.before, taken=isinstance(query, TakeCard))
+            self._tools.deck_stats.record_choice(
+                pending.before,
+                taken=isinstance(query, TakeCard),
+                count=len(query.cards) if isinstance(query, TakeCard) else 1,
+            )
 
     async def accept(self, outcome: ActionToolResult) -> None:
         pending = self._choice
@@ -182,12 +195,9 @@ class DeckAgent(RunAgent):
         self._choice = None
         self._record(pending, outcome)
         query = pending.query
-        label = "Skip"
-        if isinstance(query, TakeCard):
-            card = pending.before.objects[query.card]
-            assert isinstance(card, native.CardEntry)
-            label = card.definition_id
-        self.feedback = CardResolution(AutomaticProgress(label=label, reason=query.reason), outcome)
+        self.feedback = CardResolution(
+            AutomaticProgress(label=pending.label, reason=query.reason), outcome
+        )
         if isinstance(outcome.outcome, ActionCompleted):
             self._resolved(pending, outcome)
         await super().accept(outcome)
@@ -219,6 +229,23 @@ class DeckAgent(RunAgent):
                 ReasonCode.INVALID_ARGUMENTS, "The deck choice does not match its schema.", current
             )
         state = current.state
+        chosen = query.cards if isinstance(query, TakeCard) else ()
+        selection = adding_selection(current)
+        if selection is not None:
+            if query.offer is not MISSING or not set(chosen) <= set(selection.candidates):
+                return self._route_rejected(
+                    ReasonCode.INVALID_ARGUMENTS,
+                    "Use the current selection's card refs without an offer.",
+                    current,
+                )
+            if len(set(chosen)) != len(chosen) or not selection.min <= len(chosen) <= selection.max:
+                return self._route_rejected(
+                    ReasonCode.INVALID_ARGUMENTS,
+                    "This selection does not permit that choice.",
+                    current,
+                )
+            self._choice = PendingCardChoice(call, query, raw)
+            return ActionProposal((SelectStep(chosen),), query.reason, allow_map_travel=False)
         if (
             isinstance(raw.state, native.RunState)
             and raw.state.selection is not None
@@ -251,12 +278,11 @@ class DeckAgent(RunAgent):
                 "The Mod must publish this card reward's selection mode.",
                 current,
             )
-        if isinstance(query, TakeCard) and query.card not in offer.contents:
+        if isinstance(query, TakeCard) and (len(chosen) != 1 or chosen[0] not in offer.contents):
             return self._route_rejected(
                 ReasonCode.INVALID_ARGUMENTS, "The taken card must belong to this offer.", current
             )
         pending = PendingCardChoice(call, query, raw)
-        chosen = (query.card,) if isinstance(query, TakeCard) else ()
         selection = state.selection
         if selection is not None:
             if not set(offer.contents) <= set(selection.candidates):

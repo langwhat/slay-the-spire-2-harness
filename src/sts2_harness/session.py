@@ -26,6 +26,7 @@ from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PromptReader
 from sts2_harness.results import ActionToolResult, QueryToolResult
+from sts2_harness.route_plan import RoutePlan
 from sts2_harness.run import RunAgent, RunRole
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input_values import UserInputSource
@@ -177,14 +178,14 @@ class RunSession:
         self._run_stream += 1
         return self._dependencies.model(native.DecisionOwner.RUN, f"run:{self._run_stream}")
 
-    def _deck(self, opening: native.Observation, offer: native.Offer) -> DeckAgent:
+    def _deck(self, opening: native.Observation, offer: native.Offer | None) -> DeckAgent:
         self._deck_stream += 1
         stream = f"deck:{self._deck_stream}"
         return DeckAgent(
             lambda: self._dependencies.model(native.DecisionOwner.RUN, stream),
             self._tools(native.DecisionOwner.RUN, focused_deck=True),
             self.recovery,
-            offer_ref=offer.ref,
+            offer_ref=offer.ref if offer is not None else None,
             stream=stream,
             prompts=self._dependencies.prompts,
             materials=self._materials(native.DecisionOwner.RUN, opening),
@@ -219,7 +220,9 @@ class RunSession:
 
         return read
 
-    def _combat(self, opening: native.Observation, notes: NotesView) -> DecisionSource:
+    def _combat(
+        self, opening: native.Observation, notes: NotesView, route_plan: RoutePlan | None
+    ) -> DecisionSource:
         if self._combat_factory is not None:
             return self._combat_factory(self.execution, self.recovery, opening, notes)
         self._combat_stream += 1
@@ -228,6 +231,7 @@ class RunSession:
             self._tools(native.DecisionOwner.COMBAT),
             self.recovery,
             opening_notes=notes,
+            route_plan=route_plan,
             prompts=self._dependencies.prompts,
             materials=self._materials(native.DecisionOwner.COMBAT, opening),
             diagnostics=self._diagnostics,

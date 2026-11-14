@@ -54,6 +54,10 @@ from sts2_harness.user_input_values import UserInputSource
 
 type MaterialReader = Callable[[native.Observation], Awaitable[tuple[DocumentView, ...]]]
 
+_GAME_ACTION_TOOLS = frozenset(
+    (ToolName.RUN_ACT, ToolName.RUN_DECK_CHOICE, ToolName.COMBAT_ACT, ToolName.RUN_NEXT)
+)
+
 
 class Agent(ABC):
     def __init__(
@@ -282,19 +286,14 @@ class Agent(ABC):
                     raise DecisionInterrupted(
                         Reason(code=ReasonCode.INVALID_ARGUMENTS, message=message), True
                     )
-            elif any(
-                call.name
-                in (
-                    ToolName.RUN_ACT,
-                    ToolName.RUN_DECK_CHOICE,
-                    ToolName.COMBAT_ACT,
-                    ToolName.RUN_NEXT,
-                )
-                for call in calls[:-1]
-            ):
+            elif any(call.name in _GAME_ACTION_TOOLS for call in calls[:-1]):
                 self._reject_action_layout(context, calls, observation)
             else:
+                stopped: tuple[int, ToolCall] | None = None
                 for index, call in enumerate(calls):
+                    if stopped is not None and call.name in _GAME_ACTION_TOOLS:
+                        self._abort_calls(context, (call,), *stopped)
+                        continue
                     result = await self._dispatch(call, task, observation)
                     if isinstance(result, LocalProgress):
                         self._close_query(context, task, bound, call, result.result)
@@ -313,8 +312,8 @@ class Agent(ABC):
                     if current is not None:
                         observation = latest = current
                     if not isinstance(result.outcome, ReadCompleted):
-                        self._abort_calls(context, calls[index + 1 :], index + 1, call)
-                        break
+                        if stopped is None:
+                            stopped = (index + 1, call)
             context = await self._prepare(observation)
             if isinstance(task, ActTask) and latest is not None:
                 self._append_task(context, task, observation)

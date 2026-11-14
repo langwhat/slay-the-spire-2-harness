@@ -35,17 +35,26 @@ class StateQuery(native.WireModel):
     area: Literal["state"]
 
 
-class UpgradeQuery(native.WireModel):
-    area: Literal["upgrades"]
-    refs: Annotated[tuple[native.Nonempty, ...], Field(min_length=1)] | MISSING = MISSING
+class RunMapQuery(native.WireModel):
+    area: Literal[native.InspectArea.MAP]
 
 
-class InspectInput(RootModel[StateQuery | native.MapQuery | UpgradeQuery]):
+class RunInspectInput(RootModel[StateQuery | RunMapQuery]):
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
-        return dict(DEFINITIONS[0].input_schema)
+        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_inspect"))
+
+
+class CombatInspectInput(RootModel[StateQuery | native.MapQuery]):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return dict(
+            next(item.input_schema for item in DEFINITIONS if item.name == "combat_inspect")
+        )
 
 
 class KnowledgeInput(RootModel[native.CatalogRequest]):
@@ -136,16 +145,20 @@ class CardPurpose(StrEnum):
 
 
 class TakeCard(native.WireModel):
-    offer: native.Nonempty
+    offer: native.Nonempty | MISSING = MISSING
     choice: Literal[DeckChoice.TAKE]
-    card: native.Nonempty
+    card: native.Nonempty | Annotated[tuple[native.Nonempty, ...], Field(min_length=1)]
     reason: str
     purpose: CardPurpose = Field(alias="for")
     over: native.Nonempty | MISSING = MISSING
 
+    @property
+    def cards(self) -> tuple[str, ...]:
+        return (self.card,) if isinstance(self.card, str) else self.card
+
 
 class SkipCard(native.WireModel):
-    offer: native.Nonempty
+    offer: native.Nonempty | MISSING = MISSING
     choice: Literal[DeckChoice.SKIP]
     reason: str
 

@@ -1,7 +1,10 @@
 import json
 
-from sts2_harness.client.models import Progress, PublicMap
-from sts2_harness.context.map_projection import project_map
+from test_mod_client import COMBAT
+
+from sts2_harness.client.models import CombatState, DecisionOwner, Observation, Progress, PublicMap
+from sts2_harness.context import CombatActInput, Context
+from sts2_harness.context.map_projection import planned_route, project_map
 from sts2_harness.route_plan import Edge, RoutePlan
 
 
@@ -95,6 +98,7 @@ def test_ahead_counts_only_remaining_chain_before_boss() -> None:
         "rests": 1,
         "shops": 1,
     }
+    assert planned_route(raw_map, progress, plan) == rooms[2:]
 
 
 def test_ahead_is_omitted_for_partial_or_branched_plan() -> None:
@@ -109,3 +113,30 @@ def test_ahead_is_omitted_for_partial_or_branched_plan() -> None:
     for edges in ((Edge("0", "1"),), (Edge("0", "1"), Edge("1", "2"), Edge("1", "3"))):
         _, dynamic, _ = project_map(raw_map, progress, RoutePlan("0", "rest", edges))
         assert "ahead" not in json.loads(dynamic.to_json())
+
+
+def test_combat_progress_receives_only_accepted_remaining_route_and_native_boss_count() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    assert isinstance(observation.state, CombatState)
+    progress = observation.state.progress.model_copy(update={"position": "0", "bosses_left": 2})
+    public_map = PublicMap.model_validate_json(
+        '{"bosses":[],"nodes":['
+        '{"position":"0","room_type":"monster","children":["1"]},'
+        '{"position":"1","room_type":"restsite","children":["2"]},'
+        '{"position":"2","room_type":"boss","children":[]}],"legal_destinations":["1"]}'
+    )
+    observation = observation.model_copy(
+        update={
+            "map": public_map,
+            "state": observation.state.model_copy(update={"progress": progress}),
+        }
+    )
+    context = Context(DecisionOwner.COMBAT)
+    context.set_route_plan(RoutePlan("0", "rest", (Edge("0", "1"), Edge("1", "2"))))
+    context.append_task(CombatActInput(), observation)
+    progress = json.loads(context.model_input()[-1].text)["observation"]["progress"]
+    assert progress["route"] == ["restsite", "boss"] and progress["bosses_left"] == 2
+    context = Context(DecisionOwner.COMBAT)
+    context.set_route_plan(RoutePlan("0", "rest", (Edge("0", "1"),)))
+    context.append_task(CombatActInput(), observation)
+    assert "route" not in json.loads(context.model_input()[-1].text)["observation"]["progress"]

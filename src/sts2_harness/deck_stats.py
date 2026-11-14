@@ -46,9 +46,11 @@ class DeckStatistics:
         if len(self._battles) > 5:
             del self._battles[next(iter(self._battles))]
 
-    def record_choice(self, observation: native.Observation, taken: bool) -> None:
+    def record_choice(
+        self, observation: native.Observation, taken: bool, *, count: int = 1
+    ) -> None:
         self._enter(observation)
-        self._choices.setdefault(observation.state.progress.act, Counter())[taken] += 1
+        self._choices.setdefault(observation.state.progress.act, Counter())[taken] += count
 
     def view(self, observation: native.Observation) -> tuple[dict[str, JsonValue], dict[str, int]]:
         state = observation.state
