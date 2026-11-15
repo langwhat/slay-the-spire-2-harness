@@ -236,7 +236,6 @@ def test_real_loop_resolves_reward_without_writing_notes_or_native_action(
                                 "offer": "offer",
                                 "choice": "take",
                                 "card": "candidate",
-                                "for": "draw",
                                 "reason": "A better turn.",
                             }
                         ),
@@ -285,7 +284,6 @@ def test_wrong_native_target_or_illegal_selection_is_deviation(tmp_path: Path, w
                 "offer": "different",
                 "choice": "take",
                 "card": "candidate",
-                "for": "draw",
                 "reason": "Wrong.",
             }
         )

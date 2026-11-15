@@ -758,7 +758,7 @@
   },
   {
     "name": "run_deck_choice",
-    "description": "Resolve the current card addition: take cards or skip. For a reward, supply its offer and take one card. For an event or relic selection, omit offer; card may list multiple refs only when the current selection allows it. Follow its minimum and maximum.",
+    "description": "Resolve the current card addition: take cards or skip. For a reward, give its offer and take one card. For an event or relic selection, omit offer; card may list several refs when the selection allows it, within its minimum and maximum.",
     "input_schema": {
       "oneOf": [
         {
@@ -792,29 +792,12 @@
             },
             "reason": {
               "type": "string",
-              "description": "One short line: what a normal turn gains with this card over that one, or over skipping."
-            },
-            "for": {
-              "type": "string",
-              "enum": [
-                "core",
-                "energy",
-                "draw",
-                "block",
-                "transition"
-              ],
-              "description": "The job this card does for the deck: core, support (energy, draw, or block), or transition."
-            },
-            "over": {
-              "type": "string",
-              "minLength": 1,
-              "description": "Native definition ID of the best owned card that does the same job. Omit when no owned card does that job."
+              "description": "One short line."
             }
           },
           "required": [
             "choice",
             "card",
-            "for",
             "reason"
           ],
           "additionalProperties": false
@@ -832,7 +815,7 @@
             },
             "reason": {
               "type": "string",
-              "description": "One short line: why no candidate is taken."
+              "description": "One short line."
             }
           },
           "required": [

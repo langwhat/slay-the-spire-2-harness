@@ -136,21 +136,11 @@ class DeckChoice(StrEnum):
     SKIP = "skip"
 
 
-class CardPurpose(StrEnum):
-    CORE = "core"
-    ENERGY = "energy"
-    DRAW = "draw"
-    BLOCK = "block"
-    TRANSITION = "transition"
-
-
 class TakeCard(native.WireModel):
     offer: native.Nonempty | MISSING = MISSING
     choice: Literal[DeckChoice.TAKE]
     card: native.Nonempty | Annotated[tuple[native.Nonempty, ...], Field(min_length=1)]
     reason: str
-    purpose: CardPurpose = Field(alias="for")
-    over: native.Nonempty | MISSING = MISSING
 
     @property
     def cards(self) -> tuple[str, ...]:

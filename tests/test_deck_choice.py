@@ -304,7 +304,7 @@ class RewardGame:
                     "reason": "Event addition.",
                 }
                 if self.event_take:
-                    args.update(card=list(self.event_take), **{"for": "draw"})
+                    args.update(card=list(self.event_take))
                 return httpx.Response(
                     200,
                     content=reply((f"event-choice-{index}", "run_deck_choice", json.dumps(args))),
@@ -322,7 +322,7 @@ class RewardGame:
                 "reason": "Measured " + offer,
             }
             if args["choice"] == "take":
-                args.update(card=offer, **{"for": "draw"})
+                args.update(card=offer)
             calls.append((f"choice-{index}", "run_deck_choice", json.dumps(args)))
         elif state.screen is native.RunScreen.REWARDS:
             if not self.minimal:
