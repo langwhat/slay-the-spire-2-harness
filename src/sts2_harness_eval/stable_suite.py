@@ -21,7 +21,6 @@ from sts2_harness.client import models as native
 from sts2_harness.config import ConfigurationError, ModelConfiguration, Protocol, load_configuration
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
-from sts2_harness.route_plan import Edge, replace_plan
 from sts2_harness.tools import ToolName, unique_fields
 from sts2_harness.tools.inputs import (
     CombatActInput,
@@ -318,6 +317,10 @@ def _escape(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", " ")
 
 
+def _flag(value: bool | None) -> str:
+    return "unknown" if value is None else "yes" if value else "no"
+
+
 def _token_total(values: tuple[int | None, ...]) -> str:
     known = sum(value for value in values if isinstance(value, int))
     missing = sum(value is None for value in values)
@@ -341,23 +344,6 @@ def _proposal_action(proposal: CapturedProposal) -> tuple[ToolName, dict[str, Js
         return None
     if isinstance(value, TakeCard):
         action["card"] = list(value.cards)
-    if isinstance(value, RunPlan):
-        edges = tuple(Edge(edge.source, edge.destination) for edge in value.edges)
-        sources = {edge.source for edge in edges}
-        destinations = {edge.destination for edge in edges}
-        # An accepted reachable, acyclic plan has exactly one root.
-        roots = sources - destinations
-        if len(roots) != 1:
-            return None
-        validated = replace_plan(
-            None, next(iter(roots)), frozenset(sources | destinations), "", edges
-        )
-        if validated.rejection is not None:
-            return None
-        action["edges"] = [
-            {"from": edge.source, "to": edge.destination}
-            for edge in sorted(edges, key=lambda edge: (edge.source, edge.destination))
-        ]
     return proposal.tool, action
 
 
@@ -416,6 +402,41 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             f"{_token_total(tuple(a.cache_read_tokens for a in trial.attempts))} | "
             f"{reasoning} ({unknown_reasoning} unknown) | {usage:g} ({unknown_usage} unknown) |"
         )
+    rows.extend(
+        (
+            "",
+            "## Route metrics",
+            "",
+            "Low HP is at most 40% of maximum HP. Forced Elite considers all ordinary map "
+            "continuations from the first planned room until a rest site or Boss; future "
+            "special movement is not modeled. These metrics do not score a trial.",
+            "",
+        )
+    )
+    route_count = 0
+    for trial in trials:
+        sample = trial.sample
+        if (
+            sample is None
+            or sample.proposal is None
+            or sample.proposal.tool is not ToolName.RUN_PLAN
+        ):
+            continue
+        route_count += 1
+        label = f"{_escape(trial.case_id)}: {_escape(trial.configuration)} #{trial.repetition}"
+        metrics = sample.route_metrics
+        if metrics is None:
+            rows.append(f"- {label}: route metrics unknown.")
+            continue
+        rows.append(
+            f"- {label}: {'complete' if metrics.full_route else 'partial'} route; "
+            f"{metrics.planned_elites} planned Elites; HP {metrics.hp}/{metrics.max_hp}; "
+            f"low HP {_flag(metrics.low_hp)}; "
+            f"forced Elite before recovery {_flag(metrics.forced_elite_before_recovery)}; "
+            f"low-HP forced Elite {_flag(metrics.bad_low_hp_route)}."
+        )
+    if not route_count:
+        rows.append("No route proposals.")
     rows.extend(("", "## Inferred historical values", ""))
     recorded_inferences: set[tuple[str, str]] = set()
     for trial in trials:

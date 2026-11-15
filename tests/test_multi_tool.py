@@ -159,7 +159,7 @@ def test_plan_then_next_uses_the_new_plan_in_the_same_response(
                 (
                     "plan",
                     "run_plan",
-                    '{"reason":"Rest.","edges":[{"from":"map:0:0","to":"map:1:0"}]}',
+                    '{"reason":"Rest.","stretches":["s2"]}',
                 ),
                 ("next", "run_next", '{"reason":"Follow the new plan."}'),
             ),
@@ -190,7 +190,7 @@ def test_plan_then_next_uses_the_new_plan_in_the_same_response(
                 '{"bosses":[],"nodes":['
                 '{"position":"map:0:0","room_type":"ancient",'
                 '"children":["map:1:0","map:1:1"]},'
-                '{"position":"map:1:0","room_type":"rest","children":[]},'
+                '{"position":"map:1:0","room_type":"restsite","children":[]},'
                 '{"position":"map:1:1","room_type":"monster","children":[]}],'
                 '"legal_destinations":["map:1:0","map:1:1"]}'
             ),

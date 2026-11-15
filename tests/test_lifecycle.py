@@ -116,7 +116,7 @@ class Campaign:
             state["map"] = {
                 "bosses": [],
                 "nodes": [
-                    {"position": "0:0", "room_type": "event", "children": ["1:0", "1:1"]},
+                    {"position": "0:0", "room_type": "ancient", "children": ["1:0", "1:1"]},
                     {"position": "1:0", "room_type": "monster", "children": []},
                     {"position": "1:1", "room_type": "monster", "children": []},
                 ],
@@ -143,7 +143,7 @@ class Campaign:
                     (
                         "plan",
                         "run_plan",
-                        '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                        '{"reason":"Enter combat.","stretches":["s2"]}',
                     )
                 ),
                 reply(("travel", "run_next", '{"reason":"Enter combat."}')),
@@ -154,7 +154,7 @@ class Campaign:
                     (
                         "plan2",
                         "run_plan",
-                        '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                        '{"reason":"Enter combat.","stretches":["s2"]}',
                     )
                 ),
                 reply(("travel2", "run_next", '{"reason":"Enter combat."}')),

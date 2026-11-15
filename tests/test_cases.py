@@ -72,7 +72,7 @@ def admission_game(
     opening["map"] = {
         "bosses": [],
         "nodes": [
-            {"position": "0:0", "room_type": "event", "children": ["1:0", "1:1"]},
+            {"position": "0:0", "room_type": "ancient", "children": ["1:0", "1:1"]},
             {"position": "1:0", "room_type": "monster", "children": []},
             {"position": "1:1", "room_type": "monster", "children": []},
         ],
@@ -396,7 +396,7 @@ def test_admission_replays_source_then_independently_loads_and_publishes_after_c
                     (
                         "plan",
                         "run_plan",
-                        '{"reason":"Enter the battle.","edges":[{"from":"0:0","to":"1:0"}]}',
+                        '{"reason":"Enter the battle.","stretches":["s2"]}',
                     )
                 ),
                 reply(("travel", "run_next", '{"reason":"Enter the battle."}')),

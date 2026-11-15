@@ -82,7 +82,7 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
         state["map"] = {
             "bosses": [],
             "nodes": [
-                {"position": "0:0", "room_type": "event", "children": ["1:0", "1:1"]},
+                {"position": "0:0", "room_type": "ancient", "children": ["1:0", "1:1"]},
                 {"position": "1:0", "room_type": "monster", "children": []},
                 {"position": "1:1", "room_type": "monster", "children": []},
             ],
@@ -113,7 +113,7 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
                 (
                     "plan",
                     "run_plan",
-                    '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                    '{"reason":"Enter combat.","stretches":["s2"]}',
                 ),
             ),
             response(protocol, ("travel", "run_next", '{"reason":"Enter combat."}')),
@@ -141,7 +141,7 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
                 (
                     "plan2",
                     "run_plan",
-                    '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                    '{"reason":"Enter combat.","stretches":["s2"]}',
                 ),
             ),
             response(protocol, ("travel2", "run_next", '{"reason":"Enter combat."}')),

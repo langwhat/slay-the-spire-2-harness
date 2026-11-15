@@ -32,8 +32,8 @@ class DecisionLabels(native.WireModel):
 
 
 class RouteState(native.WireModel):
-    position: str
-    edges: tuple[tuple[str, str], ...]
+    position: str | None
+    edges: tuple[tuple[str | None, str], ...]
 
 
 class HarnessState(native.WireModel):
@@ -182,6 +182,16 @@ class CapturedProposal(native.WireModel):
     arguments: str
 
 
+class RouteMetrics(native.WireModel):
+    full_route: bool
+    planned_elites: int
+    hp: int
+    max_hp: int
+    low_hp: bool | None
+    forced_elite_before_recovery: bool | None
+    bad_low_hp_route: bool | None
+
+
 class DecisionSample(native.WireModel):
     source: DecisionSource
     sample: int
@@ -191,6 +201,7 @@ class DecisionSample(native.WireModel):
     error: str | None = None
     proposal: CapturedProposal | None = None
     proposal_status: ProposalStatus | None = None
+    route_metrics: RouteMetrics | None = None
     requests: tuple[RequestSize, ...] = ()
     usage: tuple[dict[str, int | None], ...] = ()
     elapsed_seconds: float = 0
@@ -204,4 +215,10 @@ class DecisionSample(native.WireModel):
     def require_proposal_and_status_together(self) -> Self:
         if (self.proposal is None) != (self.proposal_status is None):
             raise ValueError("A proposal and its status must be supplied together.")
+        if self.route_metrics is not None and (
+            self.proposal is None
+            or self.proposal.tool is not ToolName.RUN_PLAN
+            or self.proposal_status is not ProposalStatus.VALID
+        ):
+            raise ValueError("Route metrics require a valid captured route plan.")
         return self

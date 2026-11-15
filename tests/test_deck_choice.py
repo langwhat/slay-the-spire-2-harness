@@ -422,9 +422,9 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 task = next(m for m in record.input if isinstance(m, RunTaskSnapshot))
                 assert isinstance(task.content, RunActContent)
                 assert task.content.observation is not None
-                assert task.content.observation.map_topology is MISSING
+                assert task.content.observation.map is MISSING
                 payload = json.loads(task.text)["observation"]
-                assert "map_topology" not in payload and "dynamic_map" not in payload
+                assert "map" not in payload
                 assert len(payload["choice"]["offers"]) == 1
             first_run = requests[3]
             body_input = game.inputs[3]["input"]

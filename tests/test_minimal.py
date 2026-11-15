@@ -36,7 +36,7 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 (
                     "plan",
                     "run_plan",
-                    '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                    '{"reason":"Enter combat.","stretches":["s2"]}',
                 )
             ),
             reply(("travel", "run_next", '{"reason":"Enter combat."}')),
@@ -52,7 +52,7 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 (
                     "plan2",
                     "run_plan",
-                    '{"reason":"Enter combat.","edges":[{"from":"0:0","to":"1:0"}]}',
+                    '{"reason":"Enter combat.","stretches":["s2"]}',
                 )
             ),
             reply(("travel2", "run_next", '{"reason":"Enter combat."}')),

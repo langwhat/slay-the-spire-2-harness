@@ -22,9 +22,7 @@ class RunObservation(SemanticValue):
     fights: tuple[Fight, ...] | MISSING = MISSING
     relics: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
     potions: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
-    map_topology: dict[str, JsonValue] | None | MISSING = MISSING
-    dynamic_map: dict[str, JsonValue] | None | MISSING = MISSING
-    unknown_odds: dict[str, JsonValue] | None | MISSING = MISSING
+    map: dict[str, JsonValue] | None | MISSING = MISSING
     turn: int | None | MISSING = MISSING
     hand: tuple[dict[str, JsonValue], ...] | None | MISSING = MISSING
     draw: tuple[dict[str, JsonValue], ...] | None | MISSING = MISSING

@@ -9,7 +9,7 @@ from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.card_projection import card_rules, upgrade_changes
 from sts2_harness.client import models as native
-from sts2_harness.context.map_projection import planned_route, project_map
+from sts2_harness.context.map_projection import MapUnavailable, planned_route, project_map
 from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
 from sts2_harness.context.run_models import RunObservation
 from sts2_harness.fights import Fight
@@ -309,15 +309,16 @@ class RunDelivery:
             )
         )
         if self.role is native.DecisionOwner.RUN and source.map is not MISSING and not post_boss:
-            topology, dynamic, odds = project_map(source.map, state.progress, self.route_plan)
-            sections.update(
-                map_topology=_json(topology),
-                dynamic_map=_json(dynamic),
-                unknown_odds={ref: _json(value) for ref, value in odds.items()},
-            )
+            try:
+                sections["map"] = _json(project_map(source.map, state.progress, self.route_plan))
+            except MapUnavailable:
+                sections["map"] = None
         if self.role is native.DecisionOwner.COMBAT:
             if source.map is not MISSING:
-                route = planned_route(source.map, state.progress, self.route_plan)
+                try:
+                    route = planned_route(source.map, state.progress, self.route_plan)
+                except MapUnavailable:
+                    route = MISSING
                 if route is not MISSING:
                     progress = sections["progress"]
                     assert isinstance(progress, dict)
@@ -450,7 +451,7 @@ class RunDelivery:
         self.delivered_mechanisms.update(mechanisms)
         # Each ordinary section replaces its predecessor, including empty sections.
         sections = {
-            name: value if name in ("notes", "fights") else _slim(value, self.definitions)
+            name: value if name in ("notes", "fights", "map") else _slim(value, self.definitions)
             for name, value in sections.items()
         }
         baseline = not self.sections

@@ -10,7 +10,7 @@ from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.capacity import CompactionDecision
 from sts2_harness.client import models as native
-from sts2_harness.context.map_projection import Plan
+from sts2_harness.context.map_projection import MapUnavailable, restore_stretches
 from sts2_harness.context.models import (
     BaselineMessage,
     RunActContent,
@@ -273,7 +273,9 @@ def choices_for(call: ToolCall, observation: native.Observation) -> tuple[str, .
     return tuple(dict.fromkeys(identities))
 
 
-def _state(message: TaskMessage, previous: HarnessState) -> HarnessState:
+def _state(
+    message: TaskMessage, previous: HarnessState, original: native.Observation
+) -> HarnessState:
     content = message.content
     if not isinstance(content, RunActContent):
         return previous
@@ -298,17 +300,32 @@ def _state(message: TaskMessage, previous: HarnessState) -> HarnessState:
                 count = use.get("observed_plays")
                 if isinstance(count, int):
                     plays[identity.split("+")[0]] = count
-    dynamic = observation.dynamic_map
-    if isinstance(dynamic, dict):
-        plan, position = dynamic.get("plan"), dynamic.get("position")
-        if isinstance(plan, dict) and isinstance(position, str):
-            parsed = Plan.model_validate_json(json.dumps(plan))
+    map_view = observation.map
+    if isinstance(map_view, dict):
+        plan = map_view.get("plan")
+        if plan is None:
+            route = None
+        elif isinstance(plan, list) and all(isinstance(item, str) for item in plan):
+            if original.map is MISSING:
+                raise ExtractionError("The recorded plan has no native map.")
+            try:
+                restored = restore_stretches(
+                    original.map,
+                    original.state.progress.position,
+                    tuple(item for item in plan if isinstance(item, str)),
+                )
+            except MapUnavailable as error:
+                raise ExtractionError("The recorded map is incomplete.") from error
+            if restored.plan is None:
+                raise ExtractionError("The recorded route cannot be reconstructed.")
             route = RouteState(
-                position=position,
-                edges=tuple((edge.source, edge.destination) for edge in parsed.edges),
+                position=restored.plan.position,
+                edges=tuple((edge.source, edge.destination) for edge in restored.plan.edges),
             )
         else:
-            route = None
+            raise ExtractionError("The recorded route is not an ordered stretch plan.")
+    elif map_view is None:
+        route = None
 
     return HarnessState(
         notes=notes,
@@ -363,7 +380,6 @@ def _events(
                         )
                     }
                 )
-            state = _state(message, state)
             observation = message.observation
             if observation is None:
                 observation = next(
@@ -377,6 +393,7 @@ def _events(
             if observation is None:
                 raise ExtractionError("A handoff-only source has no native observation.")
             observation, declined = _native_observation(observation, originals)
+            state = _state(message, state, observation)
             handoff = task.handoff
             previous = task.previous_battle if isinstance(task, RunActInput) else None
             events.append(

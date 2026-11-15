@@ -895,7 +895,7 @@
   },
   {
     "name": "run_plan",
-    "description": "Set the remaining route as directed edges between current-act map node IDs, starting at the current node with exactly one next destination; later branches are allowed. It replaces the previous plan and does not move. The result reports acceptance, map drawing, and interface restoration separately.",
+    "description": "Replace the remaining route with an ordered list beginning at a destination in map.next and continuing through connected stretches. It may stop before the Boss and does not move. A node ID in map.next enters that stretch at the specified room. The result reports acceptance, map drawing, and interface restoration separately.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -904,33 +904,18 @@
           "minLength": 1,
           "description": "One short line: what this route is for."
         },
-        "edges": {
+        "stretches": {
           "type": "array",
           "minItems": 1,
-          "uniqueItems": true,
           "items": {
-            "type": "object",
-            "properties": {
-              "from": {
-                "type": "string",
-                "minLength": 1
-              },
-              "to": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "required": [
-              "from",
-              "to"
-            ],
-            "additionalProperties": false
+            "type": "string",
+            "minLength": 1
           }
         }
       },
       "required": [
         "reason",
-        "edges"
+        "stretches"
       ],
       "additionalProperties": false
     }

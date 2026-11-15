@@ -12,7 +12,12 @@ from sts2_harness.auto import choose_auto, shop_controls
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
-from sts2_harness.context.map_projection import Plan, PlanEdge
+from sts2_harness.context.map_projection import (
+    MapUnavailable,
+    planned_stretches,
+    replace_stretches,
+    split_stretches,
+)
 from sts2_harness.context.models import AutomaticProgress, RunActInput, RunHandoffInput
 from sts2_harness.decisions import (
     ActionDecision,
@@ -57,7 +62,7 @@ from sts2_harness.results import (
     Rejected,
     Suggestion,
 )
-from sts2_harness.route_plan import Edge, MovementStatus, RoutePlan, reconcile_plan, replace_plan
+from sts2_harness.route_plan import MovementStatus, RoutePlan, reconcile_plan
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.tools.inputs import (
     RunNext,
@@ -286,16 +291,16 @@ class RunAgent(Agent):
             self._context.set_route_plan(self._plan)
         return movement.status
 
-    def _plan_value(self) -> JsonValue:
-        if self._plan is None:
+    def _plan_value(self, observation: native.Observation) -> JsonValue:
+        if self._plan is None or observation.map is MISSING:
             return None
-        plan = Plan(
-            edges=tuple(
-                PlanEdge(source=edge.source, destination=edge.destination)
-                for edge in self._plan.edges
-            ),
-        )
-        return _JSON_OBJECT.validate_json(plan.to_json())
+        try:
+            stretches = planned_stretches(
+                split_stretches(observation.map), observation.state.progress.position, self._plan
+            )
+        except MapUnavailable:
+            return None
+        return list(stretches) if stretches is not None else None
 
     def _route_rejected(
         self,
@@ -379,13 +384,21 @@ class RunAgent(Agent):
                     current,
                     plan=True,
                 )
-            update = replace_plan(
-                self._plan,
-                current.state.progress.position,
-                frozenset(node.position for node in current.map.nodes),
-                proposed.reason,
-                tuple(Edge(edge.source, edge.destination) for edge in proposed.edges),
-            )
+            try:
+                update = replace_stretches(
+                    self._plan,
+                    current.map,
+                    current.state.progress.position,
+                    proposed.reason,
+                    proposed.stretches,
+                )
+            except MapUnavailable:
+                return self._route_rejected(
+                    ReasonCode.QUERY_FAILED,
+                    "Current map facts are incomplete.",
+                    current,
+                    plan=True,
+                )
             if update.rejection is not None:
                 return self._route_rejected(
                     ReasonCode(update.rejection.value),
@@ -410,6 +423,7 @@ class RunAgent(Agent):
                     {"from": edge.source, "to": edge.destination}
                 )
                 for edge in self._plan.edges
+                if edge.source is not None
             )
             try:
                 presented = await self._tools.present(route, edges)
@@ -445,7 +459,7 @@ class RunAgent(Agent):
                 ReadCompleted(),
                 current,
                 PlanData(
-                    plan=PlanAccepted(next=self._plan.next_destination),
+                    plan=PlanAccepted(next=proposed.stretches[0]),
                     presentation=display,
                     restoration=restoration,
                 ),
@@ -454,7 +468,7 @@ class RunAgent(Agent):
             return self._route_rejected(ReasonCode.WRONG_ROLE, "This task cannot travel.", current)
         if self._plan is None:
             return self._route_rejected(ReasonCode.NO_PLAN, "No route plan is active.", current)
-        if current.state.progress.position is None:
+        if current.state.progress.position is None and self._plan.position is not None:
             return self._route_rejected(
                 ReasonCode.UNKNOWN_POSITION, "The current map position is unknown.", current
             )
@@ -535,7 +549,9 @@ class RunAgent(Agent):
                 observation, shop_strategy=self._shop_strategy_node == observation.location
             )
             if automatic is not None:
-                self._context.begin_group(observation, self._notes.read(), self._plan_value())
+                self._context.begin_group(
+                    observation, self._notes.read(), self._plan_value(observation)
+                )
                 proposal, progress = automatic
                 self._pending_auto = progress, observation
                 return ActionDecision(proposal)
@@ -568,13 +584,13 @@ class RunAgent(Agent):
                 ) from error
             context = self._initial_context(documents, observation)
             context.set_route_plan(self._plan)
-            context.begin_group(observation, self._notes.read(), self._plan_value())
+            context.begin_group(observation, self._notes.read(), self._plan_value(observation))
             self._context = context
             self._context_location = location
             self._notes_delivered = False
         if isinstance(observation.state, native.RunState) and shop_controls(observation.state):
             self._shop_strategy_node = observation.location
-        self._context.begin_group(observation, self._notes.read(), self._plan_value())
+        self._context.begin_group(observation, self._notes.read(), self._plan_value(observation))
         decision = await super().decide(task, observation)
         if isinstance(decision, TaskComplete):
             self._context.finish_group()

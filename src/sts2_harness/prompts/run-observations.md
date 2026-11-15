@@ -1,8 +1,10 @@
 # Map
 
-`map_topology` is the act's connections and known Bosses. `dynamic_map` is the current position, the destinations the game currently allows, and the remaining plan. `unknown_odds` is the published odds for unknown rooms. Map node IDs are stable within the act.
+`map.boss` identifies the known Bosses. `map.at` identifies the current node, its stretch, and its 1-based room number within that stretch; it is null before entering the act's first node. `map.next` is the set of destinations the game currently allows: null means availability is unknown, and an empty list means no destination is currently available.
 
-A connection or old ink does not make travel legal now; a pending choice can block it. run_plan replaces the remaining plan and never moves. run_next enters the plan's next node. After any movement, read the actual position, and replace a plan whose next edge is missing, ambiguous, or illegal. Automatic travel follows the game's legal destinations, not the plan.
+A stretch has no fork inside: entering it commits to every room in it. `floors` gives its native act-local row or row range, and `rooms` lists the rooms in order. The room codes are M (Monster), E (Elite), R (rest site), $ (shop), T (treasure), ? (unknown), B (Boss), and A (Ancient). Each stretch's `next` lists its successor stretches. Stretch IDs are stable within the act. `unknown_odds` gives the native odds for unknown rooms, either once when they match or by stretch and 1-based room number when they differ; absent odds are unknown.
+
+The current stretch ID in `map.next` means continue from the current room. A node ID in `map.next` is a special legal destination inside a stretch: only rooms from that entry point onward are committed. Use run_plan to replace the remaining plan with a sequence beginning at a destination in `map.next` and continuing through connected stretches. The plan may stop before the Boss and does not move. run_next enters the plan's next room; it requires a plan. A pending choice can block travel. After movement, read the actual position and replace an invalidated plan; automatic travel follows the game's legal destinations.
 
 # Run basics
 
@@ -44,7 +46,7 @@ First compare the paths to the act's Boss by what they pay: Elites, treasure, sh
 
 - Count the fights before each certain recovery and price each at what `fights` shows battles of its kind have cost this run. Price an Elite not yet fought from its supplied rules when present, otherwise from the act's normal fights so far and the fact that it hits harder.
 - A segment that does not fit within current HP is changed, or prepared for with a rest, gold, or potions, before entering.
-- Past the last fork before an Elite, the Elite is certain. Check it against current HP when choosing the fork, not later.
+- Before choosing a stretch, count its forced rooms from the entry point, including any Elite, and follow any only-successor stretches to the next choice; check whether current HP and resources reach the next recovery.
 
 Elites by act:
 

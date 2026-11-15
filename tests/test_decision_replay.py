@@ -31,6 +31,7 @@ from sts2_harness_eval.decision_cases import (
     NativeRead,
     RequestSize,
     ResultEvent,
+    RouteState,
     TaskEvent,
     score,
 )
@@ -214,6 +215,92 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
     asyncio.run(run())
 
 
+def test_recorded_native_route_is_rebuilt_as_stretches_when_travel_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        state = task.observation.state
+        public_map = native.PublicMap.model_validate_json(
+            '{"bosses":[],"nodes":['
+            '{"position":"map:0:0","room_type":"ancient","children":["map:1:0"]},'
+            '{"position":"map:1:0","room_type":"monster","children":["map:2:0"]},'
+            '{"position":"map:2:0","room_type":"restsite","children":[]}],'
+            '"legal_destinations":null}'
+        )
+        observation = task.observation.model_copy(
+            update={
+                "state": state.model_copy(
+                    update={"progress": state.progress.model_copy(update={"position": "map:0:0"})}
+                ),
+                "map": public_map,
+            }
+        )
+        case = case.model_copy(
+            update={
+                "events": (
+                    task.model_copy(
+                        update={
+                            "observation": observation,
+                            "state": HarnessState(
+                                route=RouteState(
+                                    position="map:0:0",
+                                    edges=(("map:0:0", "map:1:0"), ("map:1:0", "map:2:0")),
+                                )
+                            ),
+                        }
+                    ),
+                )
+            }
+        )
+        bodies: list[dict[str, JsonValue]] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return httpx.Response(
+                200,
+                content=reply(
+                    ("choice", "run_act", '{"steps":[{"kind":"select","refs":["candidate"]}]}')
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            sample = await sample_case(case, client, variant=DecisionVariant.RUN)
+            incomplete = case.model_copy(
+                update={
+                    "events": (
+                        task.model_copy(
+                            update={
+                                "observation": observation,
+                                "state": HarnessState(
+                                    route=RouteState(
+                                        position="map:0:0", edges=(("map:0:0", "map:1:0"),)
+                                    )
+                                ),
+                            }
+                        ),
+                    )
+                }
+            )
+            unsupported = await sample_case(incomplete, client, variant=DecisionVariant.RUN)
+        assert sample.verdict is DecisionVerdict.PASSED
+        assert unsupported.verdict is DecisionVerdict.UNSUPPORTED
+        assert unsupported.error == "The recorded route cannot be represented as stretches."
+        assert len(bodies) == 1
+        items = bodies[0]["input"]
+        assert isinstance(items, list) and isinstance(item := items[-1], dict)
+        assert isinstance(content := item["content"], str)
+        projected = json.loads(content)["observation"]["map"]
+        assert projected["at"] == {"node": "map:0:0", "stretch": "s1", "room": 1}
+        assert projected["next"] is None and projected["plan"] == ["s1"]
+        assert projected["stretches"][0]["rooms"] == "AMR"
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("variant", [DecisionVariant.DECK])
 def test_real_loop_resolves_reward_without_writing_notes_or_native_action(
     tmp_path: Path, variant: DecisionVariant
@@ -256,9 +343,7 @@ def test_real_loop_resolves_reward_without_writing_notes_or_native_action(
                     if isinstance(message, TaskMessage)
                 )
                 assert isinstance(task.content, RunActContent)
-                assert task.content.observation.map_topology is MISSING
-                assert task.content.observation.dynamic_map is MISSING
-                assert task.content.observation.unknown_odds is MISSING
+                assert task.content.observation.map is MISSING
             result = await sample_case(case, client, variant=variant)
         assert result.verdict is DecisionVerdict.PASSED
         assert result.proposal is None and result.proposal_status is None

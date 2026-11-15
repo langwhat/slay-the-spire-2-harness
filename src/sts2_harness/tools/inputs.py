@@ -163,14 +163,9 @@ class RunDeckChoice(RootModel[TakeCard | SkipCard]):
         )
 
 
-class RouteEdge(native.WireModel):
-    source: native.Nonempty = Field(alias="from")
-    destination: native.Nonempty = Field(alias="to")
-
-
 class RunPlan(native.WireModel):
     reason: native.Nonempty
-    edges: Annotated[tuple[RouteEdge, ...], Field(min_length=1)]
+    stretches: Annotated[tuple[native.Nonempty, ...], Field(min_length=1)]
 
     @classmethod
     def __get_pydantic_json_schema__(

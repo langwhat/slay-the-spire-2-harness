@@ -522,6 +522,11 @@ unverifiable proposal legality are reported as `unsupported` with the unknown ca
 recordings that cannot satisfy the current schema are also unsupported, without guessing.
 Proposal status records local validation as `valid`, `invalid`, or `unknown`; `valid` does
 not mean the action was executed. Trials without a captured proposal have no proposal status.
+Route proposals keep their submitted stretch order. For a valid route, the report shows
+whether it reaches a terminal Boss, the planned Elite count, and whether all ordinary map
+continuations from the first room lead to an Elite before a certain rest site or Boss.
+The low-HP flag uses 40% of maximum HP. Future special movement is not modeled, and route
+metrics do not score or execute a proposal. Unverifiable metrics are reported as unknown.
 At the evaluation-file boundary only, an old Run observation missing `base_orb_slots`
 receives the verified native character default in memory: three for `CHARACTER.DEFECT`
 and zero for `CHARACTER.IRONCLAD`, `CHARACTER.SILENT`, `CHARACTER.REGENT`, and

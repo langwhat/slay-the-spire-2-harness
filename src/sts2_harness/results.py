@@ -41,6 +41,7 @@ class ReasonCode(StrEnum):
     EXECUTION_UNCONFIRMED = "execution_unconfirmed"
     CONTENT_UNAVAILABLE = "content_unavailable"
     UNKNOWN_POSITION = "unknown_position"
+    DESTINATIONS_UNKNOWN = "destinations_unknown"
     EMPTY = "empty"
     UNKNOWN_NODE = "unknown_node"
     DUPLICATE_EDGE = "duplicate_edge"

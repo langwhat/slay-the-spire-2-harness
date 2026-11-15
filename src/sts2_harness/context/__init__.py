@@ -206,7 +206,7 @@ class Context:
             deepcopy(delivery.snapshot()),
             notes,
             tuple(self._guidance.values()),
-            {"edges": deepcopy(route_plan["edges"])} if isinstance(route_plan, dict) else None,
+            deepcopy(route_plan),
         )
 
     def finish_group(self) -> None:
@@ -269,8 +269,8 @@ class Context:
                 )
                 if battle not in retained_battles:
                     values["previous_battle"] = _JSON_OBJECT.validate_json(battle.to_json())
-            dynamic = observation.get("dynamic_map")
-            if not isinstance(dynamic, dict):
+            current_map = observation.get("map")
+            if not isinstance(current_map, dict):
                 values["route_plan"] = group.route_plan
         elif not self._minimal:
             if not any(

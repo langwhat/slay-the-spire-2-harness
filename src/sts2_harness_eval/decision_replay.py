@@ -296,7 +296,10 @@ class DecisionRun(DeckAgent):
                     else None
                 )
                 context.set_route_plan(self._plan)
-                context.begin_group(current, self._notes.read(), self._plan_value())
+                plan = self._plan_value(current)
+                if route is not None and plan is None:
+                    raise ExtractionError("The recorded route cannot be represented as stretches.")
+                context.begin_group(current, self._notes.read(), plan)
                 if self._materials is not None:
                     context.append_materials(await self._materials(current))
                 await self._enrich(context, current)

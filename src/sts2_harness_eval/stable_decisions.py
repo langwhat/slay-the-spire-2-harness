@@ -11,6 +11,7 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import InspectResult
 from sts2_harness.combat import CombatAgent
 from sts2_harness.context import Context, same_observation
+from sts2_harness.context.map_projection import MapRoom, MapUnavailable, replace_stretches
 from sts2_harness.context.models import TaskMessage
 from sts2_harness.decisions import ActionProposal, ActTask, DecisionTask, LocalProgress
 from sts2_harness.deck_role import DeckAgent
@@ -37,7 +38,7 @@ from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import Failed, QueryToolResult, ReadCompleted, ReasonCode, Rejected
-from sts2_harness.route_plan import Edge, replace_plan
+from sts2_harness.route_plan import PlanRejection, RoutePlan
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.tools.inputs import CombatActInput, RunActInput, RunNext, RunPlan
@@ -48,6 +49,7 @@ from sts2_harness_eval.decision_cases import (
     DecisionSample,
     DecisionVerdict,
     ProposalStatus,
+    RouteMetrics,
     TaskEvent,
     score,
 )
@@ -89,6 +91,7 @@ class CaptureDecision(Agent):
         )
     )
     _tools: ToolCatalog
+    route_metrics: RouteMetrics | None = None
 
     def focus_observation(self, observation: native.Observation) -> native.Observation:
         return observation
@@ -151,6 +154,43 @@ class CaptureDecision(Agent):
         return await super()._dispatch(call, task, observation)
 
 
+def _forced_elite_before_recovery(
+    position: str, nodes: dict[str, native.MapNode], visited: frozenset[str] = frozenset()
+) -> bool | None:
+    node = nodes.get(position)
+    if node is None or position in visited:
+        return None
+    if node.room_type == MapRoom.ELITE:
+        return True
+    if node.room_type in (MapRoom.REST, MapRoom.BOSS) or not node.children:
+        return False
+    outcomes = tuple(
+        _forced_elite_before_recovery(child, nodes, visited | {position}) for child in node.children
+    )
+    if False in outcomes:
+        return False
+    return None if None in outcomes else True
+
+
+def _route_metrics(observation: native.Observation, plan: RoutePlan) -> RouteMetrics:
+    assert isinstance(observation.state, native.RunState) and observation.map is not MISSING
+    nodes = {node.position: node for node in observation.map.nodes}
+    rooms = tuple(nodes[edge.destination].room_type for edge in plan.edges)
+    player = observation.state.player
+    low_hp = player.hp * 5 <= player.max_hp * 2 if player.max_hp else None
+    forced = _forced_elite_before_recovery(plan.edges[0].destination, nodes)
+    bad = None if low_hp is None or (low_hp and forced is None) else low_hp and forced is True
+    return RouteMetrics(
+        full_route=rooms[-1] == MapRoom.BOSS and not nodes[plan.edges[-1].destination].children,
+        planned_elites=rooms.count(MapRoom.ELITE),
+        hp=player.hp,
+        max_hp=player.max_hp,
+        low_hp=low_hp,
+        forced_elite_before_recovery=forced,
+        bad_low_hp_route=bad,
+    )
+
+
 class RunProbe(CaptureDecision, RunAgent):
     decision_names = frozenset((ToolName.RUN_ACT, ToolName.RUN_NEXT, ToolName.RUN_PLAN))
 
@@ -180,19 +220,27 @@ class RunProbe(CaptureDecision, RunAgent):
         if isinstance(parameters, RunPlan):
             if not isinstance(observation.state, native.RunState) or observation.map is MISSING:
                 raise Captured(call, ProposalStatus.UNKNOWN, "Current map facts are unavailable.")
-            update = replace_plan(
-                self._plan,
-                observation.state.progress.position,
-                frozenset(node.position for node in observation.map.nodes),
-                parameters.reason,
-                tuple(Edge(edge.source, edge.destination) for edge in parameters.edges),
-            )
+            try:
+                update = replace_stretches(
+                    self._plan,
+                    observation.map,
+                    observation.state.progress.position,
+                    parameters.reason,
+                    parameters.stretches,
+                )
+            except MapUnavailable as error:
+                raise Captured(call, ProposalStatus.UNKNOWN, str(error)) from error
             if update.rejection is not None:
                 raise Captured(
                     call,
-                    ProposalStatus.INVALID,
+                    ProposalStatus.UNKNOWN
+                    if update.rejection
+                    in (PlanRejection.DESTINATIONS_UNKNOWN, PlanRejection.UNKNOWN_POSITION)
+                    else ProposalStatus.INVALID,
                     f"The route plan was rejected: {update.rejection.value}.",
                 )
+            assert update.plan is not None
+            self.route_metrics = _route_metrics(observation, update.plan)
             return
 
     def focus_observation(self, observation: native.Observation) -> native.Observation:
@@ -366,6 +414,7 @@ async def sample_fresh(
     reason, error = "", None
     proposal: CapturedProposal | None = None
     proposal_status: ProposalStatus | None = None
+    route_metrics: RouteMetrics | None = None
     verdict = DecisionVerdict.UNSUPPORTED
     try:
         task_event = next(event for event in reversed(case.events) if isinstance(event, TaskEvent))
@@ -473,6 +522,7 @@ async def sample_fresh(
                 )
                 error = f"{prefix}: {captured.error}"
             else:
+                route_metrics = agent.route_metrics
                 if captured.call.name in (ToolName.RUN_DECK_CHOICE, ToolName.RUN_ACT) and (
                     case.labels.good or case.labels.bad
                 ):
@@ -511,6 +561,7 @@ async def sample_fresh(
         error=error,
         proposal=proposal,
         proposal_status=proposal_status,
+        route_metrics=route_metrics,
         requests=tuple(measured.sizes),
         usage=tuple(measured.usage),
         elapsed_seconds=round(monotonic() - started, 3),

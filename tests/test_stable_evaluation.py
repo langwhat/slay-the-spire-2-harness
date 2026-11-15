@@ -918,44 +918,44 @@ def test_report_compares_unscored_combat_proposals_and_reasons(tmp_path: Path) -
         ),
         (
             ToolName.RUN_PLAN,
-            '{"reason":"First.","edges":[{"from":"0:0","to":"0:1"}]}',
+            '{"reason":"First.","stretches":["s1"]}',
             ToolName.RUN_PLAN,
-            '{"edges":[{"to":"0:1","from":"0:0"}],"reason":"Second."}',
+            '{"stretches":["s1"],"reason":"Second."}',
             "same",
         ),
         (
             ToolName.RUN_PLAN,
-            '{"reason":"First.","edges":[{"from":"a","to":"b"},{"from":"b","to":"c"}]}',
+            '{"reason":"First.","stretches":["s1","s2"]}',
             ToolName.RUN_PLAN,
-            '{"reason":"Second.","edges":[{"from":"b","to":"c"},{"from":"a","to":"b"}]}',
-            "same",
-        ),
-        (
-            ToolName.RUN_PLAN,
-            '{"reason":"First.","edges":[{"from":"a","to":"b"},{"from":"b","to":"c"}]}',
-            ToolName.RUN_PLAN,
-            '{"reason":"Second.","edges":[{"from":"a","to":"b"},{"from":"b","to":"d"}]}',
+            '{"reason":"Second.","stretches":["s2","s1"]}',
             "different",
         ),
         (
             ToolName.RUN_PLAN,
-            '{"reason":"First.","edges":[{"from":"a","to":"b"},{"from":"a","to":"b"}]}',
+            '{"reason":"First.","stretches":["s1","s2"]}',
             ToolName.RUN_PLAN,
-            '{"reason":"Second.","edges":[{"from":"a","to":"b"}]}',
+            '{"reason":"Second.","stretches":["s1","s3"]}',
+            "different",
+        ),
+        (
+            ToolName.RUN_PLAN,
+            '{"reason":"First.","stretches":["s1"],"stretches":["s2"]}',
+            ToolName.RUN_PLAN,
+            '{"reason":"Second.","stretches":["s1"]}',
             "incomparable",
         ),
         (
             ToolName.RUN_PLAN,
-            '{"reason":"First.","edges":[{"from":"a","to":"a"}]}',
+            '{"reason":"First.","stretches":[]}',
             ToolName.RUN_PLAN,
-            '{"reason":"Second.","edges":[{"from":"a","to":"b"}]}',
+            '{"reason":"Second.","stretches":["s1"]}',
             "incomparable",
         ),
         (
             ToolName.RUN_PLAN,
-            '{"reason":"First.","edges":[{"from":"a","to":"b","to":"c"}]}',
+            '{"reason":"First.","reason":"Other.","stretches":["s1"]}',
             ToolName.RUN_PLAN,
-            '{"reason":"Second.","edges":[{"from":"a","to":"b"}]}',
+            '{"reason":"Second.","stretches":["s1"]}',
             "incomparable",
         ),
         (
@@ -1070,7 +1070,7 @@ def test_report_compares_proposal_actions_with_strict_schema(
     assert ("could not be compared" in text) == (expected == "incomparable")
 
 
-def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: Path) -> None:
+def test_report_compares_ordered_stretches_after_production_acceptance(tmp_path: Path) -> None:
     from sts2_harness_eval.decision_cases import CapturedProposal, DecisionSample
     from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
 
@@ -1084,18 +1084,26 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
             update={
                 "state": observation.state.model_copy(
                     update={
-                        "progress": observation.state.progress.model_copy(update={"position": "a"})
+                        "progress": observation.state.progress.model_copy(
+                            update={"position": "map:0:0"}
+                        )
                     }
                 ),
                 "map": native.PublicMap(
                     bosses=(),
                     nodes=(
-                        native.MapNode(position="a", room_type="monster", children=("b",)),
-                        native.MapNode(position="b", room_type="monster", children=("c", "d")),
-                        native.MapNode(position="c", room_type="elite", children=()),
-                        native.MapNode(position="d", room_type="elite", children=()),
+                        native.MapNode(
+                            position="map:0:0", room_type="monster", children=("map:1:0",)
+                        ),
+                        native.MapNode(
+                            position="map:1:0",
+                            room_type="monster",
+                            children=("map:2:0", "map:2:1"),
+                        ),
+                        native.MapNode(position="map:2:0", room_type="elite", children=()),
+                        native.MapNode(position="map:2:1", room_type="elite", children=()),
                     ),
-                    legal_destinations=("b",),
+                    legal_destinations=("map:1:0",),
                 ),
             }
         )
@@ -1126,21 +1134,11 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
             assert len(requests) == 1 and sample.proposal is not None
             return sample
 
-        first = await sample_for(
-            '{"reason":"First route.","edges":[{"from":"a","to":"b"},{"from":"b","to":"c"}]}'
-        )
-        reordered = await sample_for(
-            '{"reason":"Same route.","edges":[{"from":"b","to":"c"},{"from":"a","to":"b"}]}'
-        )
-        different = await sample_for(
-            '{"reason":"Other route.","edges":[{"from":"a","to":"b"},{"from":"b","to":"d"}]}'
-        )
-        invalid = await sample_for(
-            '{"reason":"Unknown node.","edges":[{"from":"a","to":"not-on-map"}]}'
-        )
-        duplicate = await sample_for(
-            '{"reason":"Bad key.","edges":[{"from":"a","to":"b","to":"c"}]}'
-        )
+        first = await sample_for('{"reason":"First route.","stretches":["s1","s2"]}')
+        reordered = await sample_for('{"stretches":["s1","s2"],"reason":"Same route."}')
+        different = await sample_for('{"reason":"Other route.","stretches":["s1","s3"]}')
+        invalid = await sample_for('{"reason":"Unknown node.","stretches":["s999"]}')
+        duplicate = await sample_for('{"reason":"Bad key.","stretches":["s1"],"stretches":["s2"]}')
         assert all(
             sample.verdict is DecisionVerdict.UNLABELED and sample.choices
             for sample in (first, reordered, different)
@@ -1153,7 +1151,7 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
             DecisionSample.model_validate_json(first.model_dump_json()).proposal_status
             is ProposalStatus.VALID
         )
-        assert first.choices != reordered.choices
+        assert first.choices == reordered.choices
         assert invalid.error is not None and "Invalid action proposal" in invalid.error
         assert duplicate.error is not None and "Invalid action proposal" in duplicate.error
         assert invalid.proposal_status is ProposalStatus.INVALID
@@ -1191,6 +1189,7 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
                 "verdict": DecisionVerdict.UNSUPPORTED,
                 "error": "unknown",
                 "proposal_status": ProposalStatus.UNKNOWN,
+                "route_metrics": None,
             }
         )
         raw_reordered = reordered.model_copy(
@@ -1199,6 +1198,7 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
                 "verdict": DecisionVerdict.UNSUPPORTED,
                 "error": "unknown",
                 "proposal_status": ProposalStatus.UNKNOWN,
+                "route_metrics": None,
             }
         )
         raw_different = different.model_copy(
@@ -1207,6 +1207,7 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
                 "verdict": DecisionVerdict.UNSUPPORTED,
                 "error": "unknown",
                 "proposal_status": ProposalStatus.UNKNOWN,
+                "route_metrics": None,
             }
         )
         raw_same = report(plan, (trial("one", raw_first), trial("two", raw_reordered)))
@@ -1231,6 +1232,7 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
                     "verdict": DecisionVerdict.UNSUPPORTED,
                     "error": "unknown",
                     "proposal_status": ProposalStatus.UNKNOWN,
+                    "route_metrics": None,
                 }
             )
             text = report(plan, (trial("one", other_tool), trial("two", rejected)))
@@ -1244,6 +1246,178 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
         )
         text = report(plan, (trial("one", raw_first), trial("two", misleading)))
         assert "No differing comparable" in text and "could not be compared" not in text
+
+    asyncio.run(run())
+
+
+def test_route_metrics_use_ordered_stretches_and_all_native_continuations(tmp_path: Path) -> None:
+    from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
+
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        state = observation.state
+        assert isinstance(state, native.RunState)
+        public_map = native.PublicMap.model_validate_json(
+            '{"bosses":[],"nodes":['
+            '{"position":"map:0:0","room_type":"ancient",'
+            '"children":["map:1:0","map:1:1"]},'
+            '{"position":"map:1:0","room_type":"unknown","children":["map:2:0"]},'
+            '{"position":"map:1:1","room_type":"monster","children":["map:2:1"]},'
+            '{"position":"map:2:0","room_type":"elite","children":["map:3:0"]},'
+            '{"position":"map:2:1","room_type":"restsite","children":["map:3:0"]},'
+            '{"position":"map:3:0","room_type":"restsite","children":["map:4:0"]},'
+            '{"position":"map:4:0","room_type":"boss","children":[]}],'
+            '"legal_destinations":["map:1:0","map:1:1"]}'
+        )
+        observation = observation.model_copy(
+            update={
+                "state": state.model_copy(
+                    update={
+                        "progress": state.progress.model_copy(update={"position": "map:0:0"}),
+                        "player": state.player.model_copy(update={"hp": 25, "max_hp": 80}),
+                    }
+                ),
+                "map": public_map,
+            }
+        )
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        requests: list[httpx.Request] = []
+        responses = iter(
+            (
+                '{"reason":"Go.","stretches":["s2","s4"]}',
+                '{"reason":"Rest first.","stretches":["s3","s4"]}',
+                '{"reason":"Skip ahead.","stretches":["map:2:0","s4"]}',
+                '{"reason":"Stop at first Boss.","stretches":["s2","s4"]}',
+            )
+        )
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("plan", "run_plan", next(responses))),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+            safe = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+            special_case = case.model_copy(
+                update={
+                    "events": (
+                        task.model_copy(
+                            update={
+                                "observation": observation.model_copy(
+                                    update={
+                                        "map": public_map.model_copy(
+                                            update={
+                                                "legal_destinations": ("map:2:0",),
+                                                "nodes": tuple(
+                                                    node.model_copy(
+                                                        update={
+                                                            "room_type": "elite"
+                                                            if node.position == "map:1:0"
+                                                            else "unknown"
+                                                        }
+                                                    )
+                                                    if node.position in ("map:1:0", "map:2:0")
+                                                    else node
+                                                    for node in public_map.nodes
+                                                ),
+                                            }
+                                        )
+                                    }
+                                )
+                            }
+                        ),
+                    )
+                }
+            )
+            special = await sample_fresh(
+                special_case, client, catalog=catalog, role=EvaluationRole.RUN
+            )
+            two_boss_map = public_map.model_copy(
+                update={
+                    "nodes": tuple(
+                        node.model_copy(update={"children": ("map:5:0",)})
+                        if node.position == "map:4:0"
+                        else node
+                        for node in public_map.nodes
+                    )
+                    + (
+                        native.MapNode(
+                            position="map:4:1", room_type="monster", children=("map:5:0",)
+                        ),
+                        native.MapNode(position="map:5:0", room_type="boss", children=()),
+                    )
+                }
+            )
+            two_boss_case = case.model_copy(
+                update={
+                    "events": (
+                        task.model_copy(
+                            update={
+                                "observation": observation.model_copy(update={"map": two_boss_map})
+                            }
+                        ),
+                    )
+                }
+            )
+            first_boss = await sample_fresh(
+                two_boss_case, client, catalog=catalog, role=EvaluationRole.RUN
+            )
+        assert len(requests) == 4 and sample.verdict is DecisionVerdict.UNLABELED
+        assert sample.route_metrics is not None
+        assert sample.route_metrics.model_dump() == {
+            "full_route": True,
+            "planned_elites": 1,
+            "hp": 25,
+            "max_hp": 80,
+            "low_hp": True,
+            "forced_elite_before_recovery": True,
+            "bad_low_hp_route": True,
+        }
+        assert safe.route_metrics is not None
+        assert safe.route_metrics.planned_elites == 0
+        assert safe.route_metrics.forced_elite_before_recovery is False
+        assert safe.route_metrics.bad_low_hp_route is False
+        assert special.route_metrics is not None
+        assert special.route_metrics.planned_elites == 0
+        assert special.route_metrics.forced_elite_before_recovery is False
+        assert first_boss.route_metrics is not None
+        assert first_boss.route_metrics.full_route is False
+        plan = EvaluationPlan.model_validate_json(
+            '{"configurations":[{"id":"one","effort":"high","prompt_version":"one"}],'
+            '"cases":[{"id":"q1","role":"run","case":"case.json",'
+            '"catalog":"catalog.json","configurations":["one"],"repetitions":1}]}'
+        )
+        trial = Trial(
+            case_id="q1",
+            role=EvaluationRole.RUN,
+            configuration="one",
+            repetition=1,
+            prompt_version="one",
+            prompt_digest="digest",
+            input_hashes={},
+            sample=sample,
+            error=None,
+            attempts=(),
+        )
+        text = report(plan, (trial,))
+        assert "complete route; 1 planned Elites; HP 25/80" in text
+        assert "forced Elite before recovery yes; low-HP forced Elite yes" in text
 
     asyncio.run(run())
 
@@ -2514,7 +2688,7 @@ def test_run_next_without_a_plan_is_captured_as_invalid(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "destination, expected",
-    (("0:0", DecisionVerdict.UNSUPPORTED), ("0:1", DecisionVerdict.UNLABELED)),
+    (("s2", DecisionVerdict.UNSUPPORTED), ("s1", DecisionVerdict.UNLABELED)),
 )
 def test_run_plan_uses_frozen_map_to_distinguish_invalid_from_accepted(
     tmp_path: Path, destination: str, expected: DecisionVerdict
@@ -2537,10 +2711,10 @@ def test_run_plan_uses_frozen_map_to_distinguish_invalid_from_accepted(
                 "map": native.PublicMap(
                     bosses=(),
                     nodes=(
-                        native.MapNode(position="0:0", room_type="monster", children=("0:1",)),
-                        native.MapNode(position="0:1", room_type="elite", children=()),
+                        native.MapNode(position="0:0", room_type="monster", children=("1:0",)),
+                        native.MapNode(position="1:0", room_type="elite", children=()),
                     ),
-                    legal_destinations=("0:1",),
+                    legal_destinations=("1:0",),
                 ),
             }
         )
@@ -2551,9 +2725,7 @@ def test_run_plan_uses_frozen_map_to_distinguish_invalid_from_accepted(
             '{"complete":false,"catalog":{"categories":[],"card_filters":'
             '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
         )
-        arguments = json.dumps(
-            {"reason": "Plan ahead.", "edges": [{"from": "0:0", "to": destination}]}
-        )
+        arguments = json.dumps({"reason": "Plan ahead.", "stretches": [destination]})
         requests: list[httpx.Request] = []
 
         def respond(request: httpx.Request) -> httpx.Response:
@@ -2588,7 +2760,7 @@ def test_first_run_plan_is_captured_without_execution_or_a_second_request(tmp_pa
             '{"complete":false,"catalog":{"categories":[],"card_filters":'
             '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
         )
-        arguments = '{"reason":"Reach the elite.","edges":[{"from":"0:0","to":"0:1"}]}'
+        arguments = '{"reason":"Reach the elite.","stretches":["s1"]}'
         requests: list[httpx.Request] = []
 
         def respond(request: httpx.Request) -> httpx.Response:
@@ -2609,5 +2781,53 @@ def test_first_run_plan_is_captured_without_execution_or_a_second_request(tmp_pa
         assert sample.reason == "Reach the elite."
         assert sample.proposal is not None
         assert sample.proposal.tool is ToolName.RUN_PLAN and sample.proposal.arguments == arguments
+
+    asyncio.run(run())
+
+
+def test_run_plan_position_absent_from_frozen_map_is_unknown(tmp_path: Path) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        state = task.observation.state
+        observation = task.observation.model_copy(
+            update={
+                "state": state.model_copy(
+                    update={"progress": state.progress.model_copy(update={"position": "map:9:9"})}
+                ),
+                "map": native.PublicMap(
+                    bosses=(),
+                    nodes=(native.MapNode(position="map:1:0", room_type="elite", children=()),),
+                    legal_destinations=("map:1:0",),
+                ),
+            }
+        )
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("plan", "run_plan", '{"reason":"Try.","stretches":["s1"]}')),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.proposal_status is ProposalStatus.UNKNOWN
+        assert sample.route_metrics is None and not sample.choices
+        assert sample.error is not None and "unknown_position" in sample.error
 
     asyncio.run(run())

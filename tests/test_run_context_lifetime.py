@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
+from pydantic import JsonValue, TypeAdapter
 from test_combat import reply
 from test_responses import configuration
 from test_run import RunHTTP
@@ -94,7 +95,20 @@ def test_run_keeps_local_exchanges_and_rebuilds_current_node_input(
         assert "Guidance for next." in latest
         assert "Old decision memo." not in latest
         assert ("Current decision memo." in latest) is (not minimal)
-        assert "map_topology" in latest and "dynamic_map" in latest
+        latest_input = http.inputs[2]["input"]
+        assert isinstance(latest_input, list)
+        observations: list[dict[str, JsonValue]] = []
+        for item in latest_input:
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            content = item.get("content")
+            if not isinstance(content, str) or not content.startswith("{"):
+                continue
+            task = TypeAdapter(dict[str, JsonValue]).validate_json(content)
+            observation = task.get("observation")
+            if isinstance(observation, dict):
+                observations.append(observation)
+        assert any("map" in observation for observation in observations)
         assert len(http.actions) == 3
 
     asyncio.run(scenario())
