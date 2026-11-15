@@ -535,6 +535,32 @@ and zero for `CHARACTER.IRONCLAD`, `CHARACTER.SILENT`, `CHARACTER.REGENT`, and
 `CHARACTER.NECROBINDER`. The source file is unchanged, and the derived field and basis
 appear in the trial and report. Other characters with a missing value remain unsupported.
 
+To enrich a historical single-task case with provable combat encounter identities, first
+replay its original case using the public and private packages from the recorded run and a
+compatible historical extractor. The source packages must be on `PYTHONPATH`; select the
+matching interpreter and provider for that recording:
+
+```sh
+PYTHONPATH=/frozen/public/src:/frozen/private/src /path/to/source-python \
+  scripts/replay_source_case.py --source-case /evidence/source-case.json \
+  --extractor-directory /frozen/extractor/src/sts2_harness_eval \
+  --provider-module sts2_knowledge.entry --output /evidence/replay.json
+
+uv run python -m sts2_harness_eval.historical_fights \
+  --case /evidence/frozen-case.json --source-case /evidence/source-case.json \
+  --source-replay /evidence/replay.json --case-sha256 CASE_SHA256 \
+  --source-replay-sha256 REPLAY_SHA256 --output /evidence/derived-case
+```
+
+The first step checks the source model inputs, tool definitions, and request digests with
+recorded dependencies, and writes whether replay succeeded. The second binds that proof to
+the source and frozen cases, reads the archive without changing it, verifies its anchor and
+native blob digests, and writes a new case and provenance in a new directory. It preserves
+the case other than newly established encounters. Missing, conflicting, repeated, or
+interrupted encounter evidence remains unknown. The archive prefix must be complete and
+remain within one game and run; multi-task cases and unverified source replay are unsupported.
+Neither step calls a model or game. Synthetic test evidence is labeled separately.
+
 Keep the plan, case files, snapshots, annotations, and output outside this repository.
 A plan is a JSON file such as:
 

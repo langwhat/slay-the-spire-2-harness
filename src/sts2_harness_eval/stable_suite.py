@@ -187,10 +187,10 @@ class InferredValue(native.WireModel):
     basis: str
 
 
-def _infer_old_run_player(value: JsonValue, path: str, inferred: list[InferredValue]) -> None:
+def infer_old_run_player(value: JsonValue, path: str, inferred: list[InferredValue]) -> None:
     if isinstance(value, list):
         for index, item in enumerate(value):
-            _infer_old_run_player(item, f"{path}[{index}]", inferred)
+            infer_old_run_player(item, f"{path}[{index}]", inferred)
         return
     if not isinstance(value, dict):
         return
@@ -214,7 +214,7 @@ def _infer_old_run_player(value: JsonValue, path: str, inferred: list[InferredVa
                     )
                 )
     for key, item in value.items():
-        _infer_old_run_player(item, f"{path}.{key}", inferred)
+        infer_old_run_player(item, f"{path}.{key}", inferred)
 
 
 def _read(path: Path, root: Path) -> bytes:
@@ -234,7 +234,7 @@ def prepare_case(plan: CasePlan, root: Path) -> PreparedCase:
     inferred: list[InferredValue] = []
     try:
         recorded = TypeAdapter(dict[str, JsonValue]).validate_json(data)
-        _infer_old_run_player(recorded, "$", inferred)
+        infer_old_run_player(recorded, "$", inferred)
         case = DecisionCase.model_validate_json(json.dumps(recorded))
         error = None
     except ValidationError as failure:
