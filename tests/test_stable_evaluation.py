@@ -1071,8 +1071,6 @@ def test_report_compares_proposal_actions_with_strict_schema(
 
 
 def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: Path) -> None:
-    from pydantic import TypeAdapter
-
     from sts2_harness_eval.decision_cases import CapturedProposal, DecisionSample
     from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
 
@@ -1246,30 +1244,22 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
         )
         text = report(plan, (trial("one", raw_first), trial("two", misleading)))
         assert "No differing comparable" in text and "could not be compared" not in text
-        legacy_data = TypeAdapter(dict[str, JsonValue]).validate_json(reordered.model_dump_json())
-        legacy_data.pop("proposal_status")
-        legacy = DecisionSample.model_validate_json(json.dumps(legacy_data))
-        assert legacy.proposal_status is None and legacy.proposal == reordered.proposal
-        text = report(plan, (trial("one", first), trial("two", legacy)))
-        assert "could not be compared" in text
 
     asyncio.run(run())
 
 
-def test_proposal_status_is_not_inferred_for_historical_or_missing_proposals(
-    tmp_path: Path,
-) -> None:
+def test_proposal_and_status_must_be_supplied_together(tmp_path: Path) -> None:
     from pydantic import ValidationError
 
-    from sts2_harness_eval.decision_cases import DecisionSample
+    from sts2_harness_eval.decision_cases import CapturedProposal, DecisionSample
     from sts2_harness_eval.decision_replay import recorded
 
     case = decision_case(tmp_path)
-    historical = recorded(case)
-    assert historical.proposal is None and historical.proposal_status is None
-    restored = DecisionSample.model_validate_json(historical.to_json())
+    sample = recorded(case)
+    assert sample.proposal is None and sample.proposal_status is None
+    restored = DecisionSample.model_validate_json(sample.to_json())
     assert restored.proposal is None and restored.proposal_status is None
-    with pytest.raises(ValidationError, match="requires a captured proposal"):
+    with pytest.raises(ValidationError, match="proposal and its status"):
         DecisionSample(
             source=case.source,
             sample=1,
@@ -1278,6 +1268,23 @@ def test_proposal_status_is_not_inferred_for_historical_or_missing_proposals(
             reason="",
             proposal_status=ProposalStatus.VALID,
         )
+    with pytest.raises(ValidationError, match="proposal and its status"):
+        DecisionSample(
+            source=case.source,
+            sample=1,
+            verdict=DecisionVerdict.UNSUPPORTED,
+            choices=(),
+            reason="",
+            proposal=CapturedProposal(tool=ToolName.RUN_NEXT, arguments='{"reason":"Continue."}'),
+        )
+
+    proposal_data = sample.model_dump(mode="json")
+    proposal_data["proposal"] = {"tool": ToolName.RUN_NEXT.value, "arguments": "{}"}
+    with pytest.raises(ValidationError, match="proposal and its status"):
+        DecisionSample.model_validate_json(json.dumps(proposal_data))
+    proposal_data.pop("proposal_status")
+    with pytest.raises(ValidationError, match="proposal and its status"):
+        DecisionSample.model_validate_json(json.dumps(proposal_data))
 
 
 def test_old_character_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> None:

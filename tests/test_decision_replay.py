@@ -261,6 +261,7 @@ def test_real_loop_resolves_reward_without_writing_notes_or_native_action(
                 assert task.content.observation.unknown_odds is MISSING
             result = await sample_case(case, client, variant=variant)
         assert result.verdict is DecisionVerdict.PASSED
+        assert result.proposal is None and result.proposal_status is None
         assert len(result.requests) == len(result.request_bodies) == len(result.model_replies) == 1
         assert len(result.attempts) == 1
         assert result.attempts[0]["digest"] == result.requests[0].digest

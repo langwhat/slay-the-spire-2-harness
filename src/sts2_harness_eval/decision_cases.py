@@ -201,7 +201,7 @@ class DecisionSample(native.WireModel):
     attempts: tuple[dict[str, JsonValue], ...] = ()
 
     @model_validator(mode="after")
-    def require_proposal_for_status(self) -> Self:
-        if self.proposal is None and self.proposal_status is not None:
-            raise ValueError("A proposal status requires a captured proposal.")
+    def require_proposal_and_status_together(self) -> Self:
+        if (self.proposal is None) != (self.proposal_status is None):
+            raise ValueError("A proposal and its status must be supplied together.")
         return self

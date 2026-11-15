@@ -445,7 +445,7 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             if any(
                 sample.proposal is not None
                 and sample.proposal.tool is ToolName.RUN_PLAN
-                and sample.proposal_status in (None, ProposalStatus.INVALID)
+                and sample.proposal_status is ProposalStatus.INVALID
                 for sample in (first, second)
             ):
                 incomparable = True
