@@ -398,6 +398,14 @@ def _recorded_route(
     if event.action:
         raise ExtractionError("The recorded route result is not a query result.")
     try:
+        raw_arguments = json.loads(call.arguments)
+    except ValueError as error:
+        raise ExtractionError(
+            "The recorded route interaction uses an incompatible schema."
+        ) from error
+    if isinstance(raw_arguments, dict) and "edges" in raw_arguments:
+        raise ExtractionError("The recorded route interaction uses an incompatible schema.")
+    try:
         json.loads(call.arguments, object_pairs_hook=unique_fields)
         arguments = RunPlan.model_validate_json(call.arguments, strict=True)
     except (ValueError, ValidationError) as error:

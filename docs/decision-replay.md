@@ -111,7 +111,10 @@ The Run variant can update notes before the decision; the Deck variant only read
 Technical incompatibility, such as an unmappable historical notes shape or a new
 native read missing from the case, is `unsupported`, not a model failure or
 deviation. Preserve the raw case and re-extract from its source when a faithful
-state mapping is unavailable. An incompatible role is `not_applicable`. Both
+state mapping is unavailable. Recorded `run_plan` calls with a top-level `edges`
+field or unparseable JSON are `unsupported`, even when rejected or aborted.
+Parseable invalid current-format arguments can retain their recorded rejection.
+An incompatible role is `not_applicable`. Both
 categories are excluded from the reported eligible-sample denominator.
 The CLI keeps a recorded-only typed header for incompatible native case formats:
 `recorded` can still score their original choices, while `replay` writes one

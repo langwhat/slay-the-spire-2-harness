@@ -607,6 +607,111 @@ def test_legacy_route_history_is_unsupported_before_model_request(tmp_path: Path
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("code", (ReasonCode.BATCH_ABORTED, ReasonCode.INVALID_ARGUMENTS))
+@pytest.mark.parametrize(
+    "unsupported_arguments",
+    (
+        '{"reason":"Old route.","edges":[{"from":"map:0:0","to":"map:1:0"}]}',
+        '{"reason":"Old.","reason":"Route.","edges":[]}',
+        '{"reason":"Old route.","edges":[{"from":"map:0:0","to":"map:1:0"}]',
+        '{"reason":"Go.","stretches":[',
+        None,
+    ),
+)
+def test_rejected_route_batches_preserve_only_current_schema_history(
+    tmp_path: Path, code: ReasonCode, unsupported_arguments: str | None
+) -> None:
+    async def run() -> None:
+        case = _recorded_route_case(tmp_path)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent)
+        arguments = unsupported_arguments or (
+            '{"reason":"Use edges.","stretches":["s2"]}'
+            if code is ReasonCode.BATCH_ABORTED
+            else '{"reason":"Use edges.","stretches":[]}'
+        )
+        first_tool = "run_notes" if code is ReasonCode.BATCH_ABORTED else "run_next"
+        native_reply = ResponsesReply.from_json(
+            json.dumps(
+                [
+                    {
+                        "type": "function_call",
+                        "id": "first-fc",
+                        "call_id": "first",
+                        "name": first_tool,
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call",
+                        "id": "plan-fc",
+                        "call_id": "plan",
+                        "name": "run_plan",
+                        "arguments": arguments,
+                    },
+                ]
+            )
+        )
+        response = AssistantEvent(
+            reply=NativeSnapshot(
+                protocol=native_reply.protocol, native_output=native_reply.to_json()
+            )
+        )
+        first_code = ReasonCode.QUERY_FAILED if code is ReasonCode.BATCH_ABORTED else code
+        observation = task.observation if code is ReasonCode.INVALID_ARGUMENTS else None
+        case = case.model_copy(
+            update={
+                "events": (
+                    task,
+                    response,
+                    ResultEvent(
+                        call_id="first",
+                        outcome=Rejected(
+                            reason=Reason(code=first_code, message="First call failed."),
+                            suggested_actions=(Suggestion(message="Review."),),
+                        ),
+                        action=False,
+                        observation=observation,
+                    ),
+                    ResultEvent(
+                        call_id="plan",
+                        outcome=Rejected(
+                            reason=Reason(code=code, message="Plan was not executed."),
+                            suggested_actions=(Suggestion(message="Review."),),
+                        ),
+                        action=False,
+                        observation=observation,
+                    ),
+                )
+            }
+        )
+        original = response.reply.native_output
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("next", "run_next", '{"reason":"Go."}')),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            sample = await sample_case(case, client)
+        assert response.reply.native_output == original
+        if unsupported_arguments is not None:
+            assert sample.verdict is DecisionVerdict.UNSUPPORTED
+            assert sample.error is not None and "incompatible schema" in sample.error
+            assert requests == []
+        else:
+            assert sample.verdict is DecisionVerdict.DEVIATED
+            assert sample.error == "No route plan is active." and len(requests) == 1
+            body = json.loads(requests[0].content)
+            calls = [item for item in body["input"] if item.get("type") == "function_call"]
+            assert calls[-1]["arguments"] == arguments
+
+    asyncio.run(run())
+
+
 def test_accepted_recorded_stretches_restore_the_route_before_run_next(tmp_path: Path) -> None:
     async def run() -> None:
         case = _recorded_route_case(tmp_path)
