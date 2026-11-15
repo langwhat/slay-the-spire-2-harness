@@ -62,6 +62,17 @@ def test_frozen_catalog_answers_new_queries_and_preserves_unknowns() -> None:
                         },
                     },
                 ],
+                "search_index": {
+                    "source": "native capture",
+                    "entries": [
+                        {"definition_id": "RELIC.ALPHA", "name": "Alpha", "text": "Gain strength."},
+                        {
+                            "definition_id": "RELIC.BETA",
+                            "name": "Beta",
+                            "text": "Gain strength and block.",
+                        },
+                    ],
+                },
             }
         )
     )
@@ -83,6 +94,14 @@ def test_frozen_catalog_answers_new_queries_and_preserves_unknowns() -> None:
         assert isinstance(search.data, native.SearchData)
         assert search.data.total == 2 and search.data.next_offset == 1
         assert search.data.matches[0].definition_id == "RELIC.ALPHA"
+        without_index = snapshot.model_copy(update={"search_index": None})
+        with pytest.raises(SnapshotIncomplete, match="raw search index"):
+            await without_index.query(
+                native.SearchQuery(mode=native.CatalogMode.SEARCH, text="Alpha")
+            )
+        listing = await without_index.query(native.SearchQuery(mode=native.CatalogMode.SEARCH))
+        assert isinstance(listing, native.CatalogCompleted)
+        assert isinstance(listing.data, native.SearchData) and listing.data.total == 2
         mixed = await snapshot.query(
             native.LookupQuery(mode=native.CatalogMode.LOOKUP, ids=("RELIC.UNKNOWN", "RELIC.ALPHA"))
         )
@@ -98,6 +117,134 @@ def test_frozen_catalog_answers_new_queries_and_preserves_unknowns() -> None:
             await snapshot.model_copy(update={"complete": False}).query(
                 native.SearchQuery(mode=native.CatalogMode.SEARCH, text="strength")
             )
+
+    asyncio.run(run())
+
+
+def test_raw_catalog_search_fields_are_complete_and_never_returned() -> None:
+    from pydantic import ValidationError
+
+    data: dict[str, JsonValue] = {
+        "complete": True,
+        "catalog": {
+            "categories": ["relic"],
+            "card_filters": {"pools": [], "types": [], "rarities": [], "energy_costs": []},
+        },
+        "definitions": [
+            {
+                "category": "relic",
+                "definition_id": "RELIC.ALPHA",
+                "name": "Alpha",
+                "native": {
+                    "definition_id": "RELIC.ALPHA",
+                    "name": "Alpha",
+                    "text": "获得1能量。",
+                    "rarity": "common",
+                },
+            }
+        ],
+        "search_index": {
+            "source": "native capture",
+            "entries": [
+                {
+                    "definition_id": "RELIC.ALPHA",
+                    "name": "[b]Alpha[/b]",
+                    "text": "[img]energy_icon[/img]",
+                }
+            ],
+        },
+    }
+    snapshot = FrozenCatalog.model_validate_json(json.dumps(data))
+
+    async def run() -> None:
+        result = await snapshot.query(
+            native.SearchQuery(mode=native.CatalogMode.SEARCH, text="energy")
+        )
+        assert isinstance(result, native.CatalogCompleted)
+        assert isinstance(result.data, native.SearchData) and result.data.total == 1
+        assert result.data.matches[0].name == "Alpha"
+        assert result.data.matches[0].description == "获得1能量。"
+        assert "[img]" not in result.to_json() and "[b]" not in result.to_json()
+
+    asyncio.run(run())
+    index_data = data["search_index"]
+    assert isinstance(index_data, dict)
+    index_data["entries"] = []
+    with pytest.raises(ValidationError, match="cover each definition"):
+        FrozenCatalog.model_validate_json(json.dumps(data))
+
+
+def test_model_search_result_contains_only_rendered_catalog_fields(tmp_path: Path) -> None:
+    from pydantic import TypeAdapter
+
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        assert isinstance(observation.state, native.RunState)
+        observation = observation.model_copy(
+            update={
+                "state": observation.state.model_copy(update={"screen": native.RunScreen.SELECTION})
+            }
+        )
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        snapshot = FrozenCatalog.model_validate_json(
+            '{"complete":true,"catalog":{"categories":["relic"],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},'
+            '"definitions":[{"category":"relic","definition_id":"RELIC.ALPHA",'
+            '"name":"Alpha","native":{"definition_id":"RELIC.ALPHA","name":"Alpha",'
+            '"text":"获得1能量。","rarity":"common"}}],'
+            '"search_index":{"source":"SOURCE-PROVENANCE-SENTINEL","entries":'
+            '[{"definition_id":"RELIC.ALPHA","name":"[b]Alpha[/b]",'
+            '"text":"RAW_ONLY_MARKER [img]energy_icon[/img]"}]}}'
+        )
+        replies = iter(
+            (
+                reply(("search", "run_knowledge", '{"mode":"search","text":"RAW_ONLY_MARKER"}')),
+                reply(("action", "run_act", '{"steps":[{"kind":"select","refs":["candidate"]}]}')),
+            )
+        )
+        requests: list[dict[str, JsonValue]] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+            return httpx.Response(
+                200, content=next(replies), headers={"Content-Type": "text/event-stream"}
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(
+                case,
+                client,
+                catalog=snapshot,
+                role=EvaluationRole.RUN,
+            )
+        assert sample.verdict is DecisionVerdict.PASSED and len(requests) == 2, sample.error
+        messages = requests[1]["input"]
+        assert isinstance(messages, list)
+        outputs = [
+            message
+            for message in messages
+            if isinstance(message, dict) and message.get("type") == "function_call_output"
+        ]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == "search"
+        output = outputs[0]["output"]
+        assert isinstance(output, str)
+        parsed = TypeAdapter(dict[str, JsonValue]).validate_json(output)
+        data = parsed["data"]
+        assert isinstance(data, dict) and data["total"] == 1
+        matches = data["matches"]
+        assert isinstance(matches, list) and len(matches) == 1 and isinstance(matches[0], dict)
+        assert matches[0]["name"] == "Alpha" and matches[0]["description"] == "获得1能量。"
+        assert "RAW_ONLY_MARKER" not in output
+        assert "SOURCE-PROVENANCE-SENTINEL" not in output
+        assert "[img]" not in output and "[b]" not in output
 
     asyncio.run(run())
 
@@ -124,6 +271,16 @@ def test_frozen_catalog_search_rejects_unverified_unicode_comparisons() -> None:
                         },
                     },
                 ],
+                "search_index": {
+                    "source": "native capture",
+                    "entries": [
+                        {
+                            "definition_id": "RELIC.ALPHA",
+                            "name": "力量 Alpha",
+                            "text": "获得3点力量。",
+                        }
+                    ],
+                },
             }
         )
     )
@@ -138,19 +295,22 @@ def test_frozen_catalog_search_rejects_unverified_unicode_comparisons() -> None:
         for text in ("Straße", "İ", "ı", "ſ", "K", "ﬀ", "力\u001c量", "力\u3000量", "\ud800"):
             with pytest.raises(SnapshotIncomplete):
                 await snapshot.query(native.SearchQuery(mode=native.CatalogMode.SEARCH, text=text))
+        index = snapshot.search_index
+        assert index is not None
         for text in ("Straße", "İ", "ı", "ſ", "K", "ﬀ", "\ud800", "\u0378"):
             unsafe = snapshot.model_copy(
-                update={"definitions": (snapshot.definitions[0].model_copy(update={"name": text}),)}
+                update={
+                    "search_index": index.model_copy(
+                        update={"entries": (index.entries[0].model_copy(update={"name": text}),)}
+                    )
+                }
             )
             with pytest.raises(SnapshotIncomplete):
                 await unsafe.query(native.SearchQuery(mode=native.CatalogMode.SEARCH, text="力量"))
-        definition = snapshot.definitions[0]
         unsafe_description = snapshot.model_copy(
             update={
-                "definitions": (
-                    definition.model_copy(
-                        update={"native": definition.native.model_copy(update={"text": "Straße"})}
-                    ),
+                "search_index": index.model_copy(
+                    update={"entries": (index.entries[0].model_copy(update={"text": "Straße"}),)}
                 )
             }
         )
@@ -678,13 +838,27 @@ def test_fresh_deck_scores_multiple_chosen_cards(tmp_path: Path) -> None:
         )
         updated = observation.model_copy(
             update={
-                "state": observation.state.model_copy(update={"offers": (offer,)}),
+                "state": observation.state.model_copy(
+                    update={
+                        "screen": native.RunScreen.SELECTION,
+                        "offers": (offer,),
+                        "selection": native.Selection(
+                            prompt="Choose two",
+                            source=None,
+                            min=2,
+                            max=2,
+                            candidates=("candidate", "candidate-2"),
+                            selected=(),
+                        ),
+                    }
+                ),
                 "objects": {**observation.objects, "candidate-2": second_card},
             }
         )
         case = original.model_copy(
             update={
                 "events": (task.model_copy(update={"observation": updated}),),
+                "decision_offer": None,
                 "labels": DecisionLabels(
                     good=(first_card.definition_id, "CARD.SECOND"), comment="both", multiselect=True
                 ),
@@ -700,7 +874,6 @@ def test_fresh_deck_scores_multiple_chosen_cards(tmp_path: Path) -> None:
                 "run_deck_choice",
                 json.dumps(
                     {
-                        "offer": "offer",
                         "choice": "take",
                         "card": ["candidate", "candidate-2"],
                         "reason": "Take both.",
@@ -916,6 +1089,62 @@ def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) ->
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("role", (EvaluationRole.DECK, EvaluationRole.RUN))
+def test_schema_valid_but_illegal_choice_is_not_scored(
+    tmp_path: Path, role: EvaluationRole
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=role is EvaluationRole.RUN)
+        if role is EvaluationRole.RUN:
+            task = case.events[0]
+            assert isinstance(task, TaskEvent) and isinstance(
+                task.observation.state, native.RunState
+            )
+            observation = task.observation
+            assert isinstance(observation.state, native.RunState)
+            observation = observation.model_copy(
+                update={
+                    "state": observation.state.model_copy(
+                        update={"screen": native.RunScreen.SELECTION}
+                    )
+                }
+            )
+            case = case.model_copy(
+                update={"events": (task.model_copy(update={"observation": observation}),)}
+            )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        if role is EvaluationRole.DECK:
+            name = "run_deck_choice"
+            arguments = '{"offer":"WRONG-OFFER","choice":"take","card":"candidate","reason":"Try."}'
+        else:
+            name = "run_act"
+            arguments = '{"steps":[{"kind":"select","refs":["owned"]}],"reason":"Try."}'
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("action", name, arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=role)
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "Invalid action proposal" in sample.error
+        assert sample.proposal is not None and sample.proposal.arguments == arguments
+        assert sample.reason == "Try." and not sample.choices
+
+    asyncio.run(run())
+
+
 def test_failed_catalog_query_ends_the_trial_without_a_correction(tmp_path: Path) -> None:
     from sts2_harness.client.http import ClientFailureKind, ClientUnavailable
 
@@ -1117,6 +1346,61 @@ def test_missing_or_inconsistent_combat_history_is_unknown_without_a_request(
             sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.COMBAT)
         assert sample.verdict is DecisionVerdict.UNSUPPORTED and sample.proposal is None
         assert sample.error is not None and "combat history" in sample.error
+        assert not requests
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_conflicting_current_history_reads_are_unknown_without_a_request(
+    tmp_path: Path, reverse: bool
+) -> None:
+    from sts2_harness.game import Inspect
+
+    async def run() -> None:
+        original = decision_case(tmp_path)
+        task = original.events[0]
+        assert isinstance(task, TaskEvent)
+        observation = native.Observation.model_validate_json(COMBAT)
+        query = native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)
+        reads = tuple(
+            NativeRead(
+                request=Inspect(query=query),
+                result=native.InspectCompleted(
+                    status=native.ResultStatus.COMPLETED,
+                    observation=observation,
+                    data=native.HistoryData(
+                        cards_played_this_combat=(native.NamedDefinition(name=name),),
+                        cards_played_this_turn=(),
+                        cards_exhausted_this_turn=(),
+                    ),
+                ),
+            )
+            for name in ("First", "Second")
+        )
+        case = original.model_copy(
+            update={
+                "events": (task.model_copy(update={"observation": observation}),),
+                "native_reads": reads[::-1] if reverse else reads,
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(500)
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.COMBAT)
+        assert sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "inconsistent" in sample.error
         assert not requests
 
     asyncio.run(run())

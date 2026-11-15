@@ -13,6 +13,7 @@ from sts2_harness.fights import Fight
 from sts2_harness.game import Catalog, Inspect
 from sts2_harness.journal_models import NativeSnapshot
 from sts2_harness.results import ActionOutcome, Outcome, PlanData
+from sts2_harness.tools import ToolName
 
 
 class DecisionSource(native.WireModel):
@@ -171,7 +172,7 @@ class RequestSize(native.WireModel):
 
 
 class CapturedProposal(native.WireModel):
-    tool: str
+    tool: ToolName
     arguments: str
 
 

@@ -12,16 +12,32 @@ class SnapshotIncomplete(RuntimeError):
     """The snapshot does not establish the requested native fact."""
 
 
+class FrozenSearchEntry(native.WireModel):
+    definition_id: native.Nonempty
+    name: native.Nonempty
+    text: str | None
+
+
+class FrozenSearchIndex(native.WireModel):
+    source: native.Nonempty
+    entries: tuple[FrozenSearchEntry, ...]
+
+
 class FrozenCatalog(native.WireModel):
     complete: bool
     catalog: native.CatalogData
     definitions: tuple[native.NativeDefinition, ...]
+    search_index: FrozenSearchIndex | None = None
 
     @model_validator(mode="after")
     def unique_definitions(self) -> Self:
         ids = tuple(definition.definition_id for definition in self.definitions)
         if len(ids) != len(set(ids)):
             raise ValueError("Native snapshot contains duplicate definition IDs.")
+        if self.search_index is not None:
+            search_ids = tuple(entry.definition_id for entry in self.search_index.entries)
+            if len(search_ids) != len(set(search_ids)) or set(search_ids) != set(ids):
+                raise ValueError("Native search index must cover each definition exactly once.")
         return self
 
     async def query(
@@ -62,11 +78,22 @@ class FrozenCatalog(native.WireModel):
                 ),
             )
         text = request.text if request.text is not MISSING else ""
-        if not _search_text_is_supported(text) or any(
-            not _ascii_id(entry.definition_id)
-            or not _search_text_is_supported(entry.name)
-            or not _search_text_is_supported(entry.native.text or "")
-            for entry in self.definitions
+        if any(not _ascii_id(entry.definition_id) for entry in self.definitions):
+            raise SnapshotIncomplete("Native ordinal search cannot be established for this text.")
+        if text and self.search_index is None:
+            raise SnapshotIncomplete("Search requires the complete native raw search index.")
+        index = (
+            {entry.definition_id: entry for entry in self.search_index.entries}
+            if self.search_index is not None
+            else {}
+        )
+        if text and (
+            not _search_text_is_supported(text)
+            or any(
+                not _search_text_is_supported(entry.name)
+                or not _search_text_is_supported(entry.text or "")
+                for entry in index.values()
+            )
         ):
             raise SnapshotIncomplete("Native ordinal search cannot be established for this text.")
         terms = tuple(term.casefold() for term in text.split())
@@ -77,14 +104,19 @@ class FrozenCatalog(native.WireModel):
             and self._matches_filters(entry, request.filters)
             and all(
                 term in entry.definition_id.casefold()
-                or term in entry.name.casefold()
-                or term in (entry.native.text or "").casefold()
+                or term in index[entry.definition_id].name.casefold()
+                or term in (index[entry.definition_id].text or "").casefold()
                 for term in terms
             )
         ]
 
         def rank(entry: native.NativeDefinition) -> tuple[int, str]:
-            identity, name = entry.definition_id.casefold(), entry.name.casefold()
+            if not text:
+                return (1, entry.definition_id)
+            identity, name = (
+                entry.definition_id.casefold(),
+                index[entry.definition_id].name.casefold(),
+            )
             if text.casefold() in (identity, name):
                 return (0, entry.definition_id)
             if all(term in identity or term in name for term in terms):

@@ -5,7 +5,7 @@ from dataclasses import replace
 from enum import StrEnum
 from time import monotonic
 
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.agent import Agent
 from sts2_harness.client import models as native
@@ -36,9 +36,10 @@ from sts2_harness.llm.messages import (
 from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PackagedPrompts, PromptReader
-from sts2_harness.results import QueryToolResult, ReadCompleted
+from sts2_harness.results import Failed, QueryToolResult, ReadCompleted, ReasonCode, Rejected
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
+from sts2_harness.tools.inputs import RunActInput
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness_eval.decision_cases import (
     CapturedProposal,
@@ -67,9 +68,10 @@ class NoProposal(RuntimeError):
 
 
 class Captured(Exception):
-    def __init__(self, call: ToolCall, error: str | None = None) -> None:
+    def __init__(self, call: ToolCall, error: str | None = None, *, unknown: bool = False) -> None:
         self.call = call
         self.error = error
+        self.unknown = unknown
         super().__init__(error or "First proposal captured before execution.")
 
 
@@ -114,6 +116,9 @@ class CaptureDecision(Agent):
         first = next(call for call in calls if call.name in self.all_decisions)
         raise Captured(first, "Invalid action layout.")
 
+    async def _validate_proposal(self, call: ToolCall, task: DecisionTask) -> None:
+        return None
+
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
     ) -> ActionProposal | QueryToolResult | LocalProgress:
@@ -128,6 +133,7 @@ class CaptureDecision(Agent):
                 definition.parameters.model_validate_json(call.arguments, strict=True)
             except (ValueError, ValidationError) as error:
                 raise Captured(call, str(error)) from error
+            await self._validate_proposal(call, task)
             raise Captured(call)
         return await super()._dispatch(call, task, observation)
 
@@ -145,6 +151,12 @@ class CombatProbe(CaptureDecision, CombatAgent):
 
 class DeckProbe(CaptureDecision, DeckAgent):
     decision_names = frozenset((ToolName.RUN_DECK_CHOICE,))
+
+    async def _validate_proposal(self, call: ToolCall, task: DecisionTask) -> None:
+        result = await self._deck_choice(call, task)
+        if isinstance(result, QueryToolResult) and isinstance(result.outcome, (Rejected, Failed)):
+            reason = result.outcome.reason
+            raise Captured(call, reason.message, unknown=reason.code is ReasonCode.QUERY_FAILED)
 
     def focus_observation(self, observation: native.Observation) -> native.Observation:
         return self._reward_view(observation)
@@ -194,6 +206,7 @@ class FreshGame(CaseGame):
             and query.area is native.InspectArea.COMBAT_HISTORY
             and isinstance(self.observation.state, native.CombatState)
         )
+        history_read: native.InspectCompleted | None = None
         for read in reversed(self.case.native_reads):
             if read.request != Inspect(query=query) or not isinstance(
                 read.result, native.InspectCompleted
@@ -206,11 +219,17 @@ class FreshGame(CaseGame):
                 continue
             if history_query:
                 history = self.case.combat_history
-                if not isinstance(read.result.data, native.HistoryData) or (
-                    history is not None and history != read.result.data
+                if (
+                    not isinstance(read.result.data, native.HistoryData)
+                    or (history is not None and history != read.result.data)
+                    or (history_read is not None and history_read.data != read.result.data)
                 ):
                     raise SnapshotIncomplete("The frozen combat history is inconsistent.")
+                history_read = read.result
+                continue
             return read.result.model_copy(update={"observation": self.observation})
+        if history_read is not None:
+            return history_read.model_copy(update={"observation": self.observation})
         if history_query and self.case.combat_history is not None:
             return native.InspectCompleted(
                 status=native.ResultStatus.COMPLETED,
@@ -346,7 +365,9 @@ async def sample_fresh(
             await Agent.decide(agent, ActTask(route), observation)
             raise NoProposal("The decision loop returned without an action proposal.")
         except Captured as captured:
-            proposal = CapturedProposal(tool=captured.call.name, arguments=captured.call.arguments)
+            proposal = CapturedProposal(
+                tool=ToolName(captured.call.name), arguments=captured.call.arguments
+            )
             try:
                 json.loads(captured.call.arguments, object_pairs_hook=unique_fields)
                 arguments = _OBJECT.validate_json(captured.call.arguments)
@@ -355,11 +376,16 @@ async def sample_fresh(
             value = arguments.get("reason")
             reason = value if isinstance(value, str) else ""
             if captured.error:
-                error = f"Invalid action proposal: {captured.error}"
+                prefix = (
+                    "Proposal legality unknown" if captured.unknown else "Invalid action proposal"
+                )
+                error = f"{prefix}: {captured.error}"
             else:
                 if captured.call.name in (ToolName.RUN_DECK_CHOICE, ToolName.RUN_ACT) and (
                     case.labels.good or case.labels.bad
                 ):
+                    if captured.call.name == ToolName.RUN_ACT:
+                        _verify_labeled_run_action(captured.call, observation)
                     choices = choices_for(captured.call, observation)
                     verdict = score(case.labels, choices)
                 else:
@@ -390,3 +416,35 @@ async def sample_fresh(
         model_replies=tuple(measured.replies),
         attempts=tuple(measured.attempts),
     )
+
+
+def _verify_labeled_run_action(call: ToolCall, observation: native.Observation) -> None:
+    state = observation.state
+    steps = RunActInput.model_validate_json(call.arguments, strict=True).root.steps
+    if not isinstance(state, native.RunState) or len(steps) != 1:
+        raise SnapshotIncomplete("The frozen state cannot verify this action batch.")
+    if (
+        observation.location.owner is not native.DecisionOwner.RUN
+        or state.control is not native.StateControl.READY
+        or observation.input_readiness
+        not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
+    ):
+        raise SnapshotIncomplete("The frozen state cannot verify a ready Run decision.")
+    step = steps[0]
+    if isinstance(step, native.Select):
+        selection = state.selection
+        if selection is None:
+            raise ExtractionError("Invalid action proposal: no current selection is available.")
+        if not set(step.refs) <= set(selection.candidates) or not (
+            selection.min <= len(step.refs) <= selection.max
+        ):
+            raise ExtractionError("Invalid action proposal: selection is not currently legal.")
+        return
+    if isinstance(step, native.Interact):
+        action = next((item for item in state.actions if item.ref == step.action), None)
+        if action is None or not action.enabled or action.destination is not MISSING:
+            raise ExtractionError("Invalid action proposal: interaction is not currently legal.")
+        if state.selection is not None or state.screen is native.RunScreen.MAP:
+            raise ExtractionError("Invalid action proposal: interaction is not currently legal.")
+        return
+    raise SnapshotIncomplete("The frozen state cannot verify this labeled action.")
