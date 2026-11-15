@@ -56,6 +56,7 @@ from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
 from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
+INVALID_PROPOSAL_PREFIX = "Invalid action proposal"
 
 
 class EvaluationRole(StrEnum):
@@ -445,7 +446,7 @@ async def sample_fresh(
             proposal, arguments, reason = _proposal_details(captured.call)
             if captured.error:
                 prefix = (
-                    "Proposal legality unknown" if captured.unknown else "Invalid action proposal"
+                    "Proposal legality unknown" if captured.unknown else INVALID_PROPOSAL_PREFIX
                 )
                 error = f"{prefix}: {captured.error}"
             else:

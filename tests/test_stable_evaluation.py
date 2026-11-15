@@ -920,6 +920,55 @@ def test_report_compares_unscored_combat_proposals_and_reasons(tmp_path: Path) -
             "same",
         ),
         (
+            ToolName.RUN_PLAN,
+            '{"reason":"First.","edges":[{"from":"a","to":"b"},{"from":"b","to":"c"}]}',
+            ToolName.RUN_PLAN,
+            '{"reason":"Second.","edges":[{"from":"b","to":"c"},{"from":"a","to":"b"}]}',
+            "same",
+        ),
+        (
+            ToolName.RUN_PLAN,
+            '{"reason":"First.","edges":[{"from":"a","to":"b"},{"from":"b","to":"c"}]}',
+            ToolName.RUN_PLAN,
+            '{"reason":"Second.","edges":[{"from":"a","to":"b"},{"from":"b","to":"d"}]}',
+            "different",
+        ),
+        (
+            ToolName.RUN_PLAN,
+            '{"reason":"First.","edges":[{"from":"a","to":"b"},{"from":"a","to":"b"}]}',
+            ToolName.RUN_PLAN,
+            '{"reason":"Second.","edges":[{"from":"a","to":"b"}]}',
+            "incomparable",
+        ),
+        (
+            ToolName.RUN_PLAN,
+            '{"reason":"First.","edges":[{"from":"a","to":"a"}]}',
+            ToolName.RUN_PLAN,
+            '{"reason":"Second.","edges":[{"from":"a","to":"b"}]}',
+            "incomparable",
+        ),
+        (
+            ToolName.RUN_PLAN,
+            '{"reason":"First.","edges":[{"from":"a","to":"b","to":"c"}]}',
+            ToolName.RUN_PLAN,
+            '{"reason":"Second.","edges":[{"from":"a","to":"b"}]}',
+            "incomparable",
+        ),
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"},{"kind":"use_potion","potion":"p"}]}',
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"use_potion","potion":"p"},{"kind":"end_turn"}]}',
+            "different",
+        ),
+        (
+            ToolName.RUN_ACT,
+            '{"steps":[{"kind":"interact","action":"a"},{"kind":"interact","action":"b"}]}',
+            ToolName.RUN_ACT,
+            '{"steps":[{"kind":"interact","action":"b"},{"kind":"interact","action":"a"}]}',
+            "different",
+        ),
+        (
             ToolName.COMBAT_ACT,
             '{"steps":[{"kind":"end_turn"}]}',
             ToolName.COMBAT_ACT,
@@ -1014,6 +1063,148 @@ def test_report_compares_proposal_actions_with_strict_schema(
     assert all(proposal.to_json() in text for proposal in proposals)
     assert ("declared" in text) == (expected == "different")
     assert ("could not be compared" in text) == (expected == "incomparable")
+
+
+def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: Path) -> None:
+    from sts2_harness_eval.decision_cases import CapturedProposal, DecisionSample
+    from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
+
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        assert isinstance(observation.state, native.RunState)
+        observation = observation.model_copy(
+            update={
+                "state": observation.state.model_copy(
+                    update={
+                        "progress": observation.state.progress.model_copy(update={"position": "a"})
+                    }
+                ),
+                "map": native.PublicMap(
+                    bosses=(),
+                    nodes=(
+                        native.MapNode(position="a", room_type="monster", children=("b",)),
+                        native.MapNode(position="b", room_type="monster", children=("c", "d")),
+                        native.MapNode(position="c", room_type="elite", children=()),
+                        native.MapNode(position="d", room_type="elite", children=()),
+                    ),
+                    legal_destinations=("b",),
+                ),
+            }
+        )
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+
+        async def sample_for(arguments: str) -> DecisionSample:
+            requests: list[httpx.Request] = []
+
+            def respond(request: httpx.Request) -> httpx.Response:
+                requests.append(request)
+                return httpx.Response(
+                    200,
+                    content=reply(("plan", "run_plan", arguments)),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+
+            async with Llm(
+                replace(configuration(tmp_path), extra_retries=0),
+                transport=httpx.MockTransport(respond),
+            ) as client:
+                sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+            assert len(requests) == 1 and sample.proposal is not None
+            return sample
+
+        first = await sample_for(
+            '{"reason":"First route.","edges":[{"from":"a","to":"b"},{"from":"b","to":"c"}]}'
+        )
+        reordered = await sample_for(
+            '{"reason":"Same route.","edges":[{"from":"b","to":"c"},{"from":"a","to":"b"}]}'
+        )
+        different = await sample_for(
+            '{"reason":"Other route.","edges":[{"from":"a","to":"b"},{"from":"b","to":"d"}]}'
+        )
+        invalid = await sample_for(
+            '{"reason":"Unknown node.","edges":[{"from":"a","to":"not-on-map"}]}'
+        )
+        duplicate = await sample_for(
+            '{"reason":"Bad key.","edges":[{"from":"a","to":"b","to":"c"}]}'
+        )
+        assert all(
+            sample.verdict is DecisionVerdict.UNLABELED and sample.choices
+            for sample in (first, reordered, different)
+        )
+        assert first.choices != reordered.choices
+        assert invalid.error is not None and "Invalid action proposal" in invalid.error
+        assert duplicate.error is not None and "Invalid action proposal" in duplicate.error
+        plan = EvaluationPlan.model_validate_json(
+            '{"configurations":[{"id":"one","effort":"high","prompt_version":"one"},'
+            '{"id":"two","effort":"high","prompt_version":"two"}],'
+            '"cases":[{"id":"q1","role":"run","case":"case.json",'
+            '"catalog":"catalog.json","configurations":["one","two"],"repetitions":1}]}'
+        )
+
+        def trial(config: str, sample: DecisionSample) -> Trial:
+            return Trial(
+                case_id="q1",
+                role=EvaluationRole.RUN,
+                configuration=config,
+                repetition=1,
+                prompt_version=config,
+                prompt_digest="digest",
+                input_hashes={},
+                sample=sample,
+                error=None,
+                attempts=(),
+            )
+
+        same_text = report(plan, (trial("one", first), trial("two", reordered)))
+        assert "No differing comparable" in same_text
+        assert "First route." in same_text and "Same route." in same_text
+        different_text = report(plan, (trial("one", first), trial("two", different)))
+        assert "chose" in different_text and "First route." in different_text
+        assert "Other route." in different_text
+        raw_first = first.model_copy(
+            update={"choices": (), "verdict": DecisionVerdict.UNSUPPORTED, "error": "unknown"}
+        )
+        raw_reordered = reordered.model_copy(
+            update={"choices": (), "verdict": DecisionVerdict.UNSUPPORTED, "error": "unknown"}
+        )
+        raw_different = different.model_copy(
+            update={"choices": (), "verdict": DecisionVerdict.UNSUPPORTED, "error": "unknown"}
+        )
+        raw_same = report(plan, (trial("one", raw_first), trial("two", raw_reordered)))
+        assert "No differing comparable" in raw_same
+        raw_diff = report(plan, (trial("one", raw_first), trial("two", raw_different)))
+        assert "declared" in raw_diff and "First route." in raw_diff and "Other route." in raw_diff
+        for rejected in (invalid, duplicate):
+            text = report(plan, (trial("one", first), trial("two", rejected)))
+            assert "could not be compared" in text
+            assert rejected.proposal is not None and rejected.proposal.to_json() in text
+            assert rejected.reason in text
+            with_choices = rejected.model_copy(update={"choices": ("untrusted",)})
+            text = report(plan, (trial("one", first), trial("two", with_choices)))
+            assert "could not be compared" in text
+            other_tool = first.model_copy(
+                update={
+                    "proposal": CapturedProposal(
+                        tool=ToolName.RUN_NEXT, arguments='{"reason":"Continue."}'
+                    ),
+                    "choices": (),
+                    "verdict": DecisionVerdict.UNSUPPORTED,
+                    "error": "unknown",
+                }
+            )
+            text = report(plan, (trial("one", other_tool), trial("two", rejected)))
+            assert "could not be compared" in text
+
+    asyncio.run(run())
 
 
 def test_old_character_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> None:

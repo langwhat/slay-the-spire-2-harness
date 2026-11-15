@@ -21,6 +21,7 @@ from sts2_harness.client import models as native
 from sts2_harness.config import ConfigurationError, ModelConfiguration, Protocol, load_configuration
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
+from sts2_harness.route_plan import Edge, replace_plan
 from sts2_harness.tools import ToolName, unique_fields
 from sts2_harness.tools.inputs import (
     CombatActInput,
@@ -38,7 +39,7 @@ from sts2_harness_eval.decision_cases import (
 )
 from sts2_harness_eval.frozen_catalog import FrozenCatalog
 from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
-from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
+from sts2_harness_eval.stable_decisions import INVALID_PROPOSAL_PREFIX, EvaluationRole, sample_fresh
 from sts2_harness_eval.traffic import AuditingTransport, HttpAttempt, ReceiptUsage
 
 _BASE_ORB_SLOTS = {
@@ -339,6 +340,23 @@ def _proposal_action(proposal: CapturedProposal) -> tuple[ToolName, dict[str, Js
         return None
     if isinstance(value, TakeCard):
         action["card"] = list(value.cards)
+    if isinstance(value, RunPlan):
+        edges = tuple(Edge(edge.source, edge.destination) for edge in value.edges)
+        sources = {edge.source for edge in edges}
+        destinations = {edge.destination for edge in edges}
+        # An accepted reachable, acyclic plan has exactly one root.
+        roots = sources - destinations
+        if len(roots) != 1:
+            return None
+        validated = replace_plan(
+            None, next(iter(roots)), frozenset(sources | destinations), "", edges
+        )
+        if validated.rejection is not None:
+            return None
+        action["edges"] = [
+            {"from": edge.source, "to": edge.destination}
+            for edge in sorted(edges, key=lambda edge: (edge.source, edge.destination))
+        ]
     return proposal.tool, action
 
 
@@ -416,6 +434,29 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             if first is None or second is None:
                 incomparable = True
                 continue
+            first_action: tuple[ToolName, dict[str, JsonValue]] | None = None
+            second_action: tuple[ToolName, dict[str, JsonValue]] | None = None
+            if any(
+                sample.proposal is not None
+                and sample.proposal.tool is ToolName.RUN_PLAN
+                and sample.error is not None
+                and sample.error.startswith(f"{INVALID_PROPOSAL_PREFIX}:")
+                for sample in (first, second)
+            ):
+                incomparable = True
+                continue
+            if first.proposal is not None and first.proposal.tool is ToolName.RUN_PLAN:
+                first_action = _proposal_action(first.proposal)
+                if first_action is None:
+                    incomparable = True
+                    continue
+            if second.proposal is not None and second.proposal.tool is ToolName.RUN_PLAN:
+                second_action = _proposal_action(second.proposal)
+                if second_action is None:
+                    incomparable = True
+                    continue
+            if first_action is not None and first_action == second_action:
+                continue
             if first.choices and second.choices:
                 if first.choices != second.choices:
                     differences += 1
@@ -430,8 +471,10 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             if first.proposal is None or second.proposal is None:
                 incomparable = True
                 continue
-            first_action = _proposal_action(first.proposal)
-            second_action = _proposal_action(second.proposal)
+            if first_action is None:
+                first_action = _proposal_action(first.proposal)
+            if second_action is None:
+                second_action = _proposal_action(second.proposal)
             if first_action is None or second_action is None:
                 incomparable = True
                 continue
