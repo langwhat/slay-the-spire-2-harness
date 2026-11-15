@@ -16,6 +16,7 @@ from sts2_harness.capacity import CapacityPolicy, Measurement
 from sts2_harness.client import models as native
 from sts2_harness.config import ConfigurationError, load_configuration
 from sts2_harness.context import Context
+from sts2_harness.context.map_projection import MapUnavailable, replace_stretches, restore_stretches
 from sts2_harness.decisions import (
     ActionProposal,
     ActTask,
@@ -72,14 +73,18 @@ from sts2_harness.results import (
     ActionToolResult,
     NotesText,
     NotesUpdated,
+    PlanAccepted,
+    PlanRejected,
     QueryToolResult,
+    ReadCompleted,
     Reason,
     ReasonCode,
     Rejected,
 )
-from sts2_harness.route_plan import Edge, RoutePlan
+from sts2_harness.route_plan import Edge, RoutePlan, reconcile_plan
 from sts2_harness.run import RunAgent
-from sts2_harness.tools import ToolCatalog, ToolName
+from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
+from sts2_harness.tools.inputs import RunPlan
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness_eval.decision_cases import (
     AssistantEvent,
@@ -279,12 +284,15 @@ class DecisionRun(DeckAgent):
         self._llm = self._client()
         self._context_location = first.observation.location
         calls: dict[str, ToolCall] = {}
+        pending_routes: set[str] = set()
         current = first.observation
+        anchored = False
         task: DecisionTask = _task(first)
         for event in case.events:
             if isinstance(event, TaskEvent):
                 game.observation = event.observation
                 current = self.reward_observation(event.observation, event.declined_offers)
+                anchored = True
                 self._notes.write(_notes_state(event.state), set(NotesState.model_fields))
                 self._tools.deck_stats = CaseStatistics(event.state, current)
                 if self._tools.fights is not None:
@@ -309,16 +317,34 @@ class DecisionRun(DeckAgent):
                 reply = AssistantMessage(event.reply.native_reply)
                 context.append_reply(reply)
                 calls.update((call.id, call) for call in reply.tool_calls)
+                pending_routes.update(
+                    call.id for call in reply.tool_calls if call.name == ToolName.RUN_PLAN
+                )
             elif isinstance(event, ResultEvent):
                 call = calls[event.call_id]
-                if event.observation is not None:
-                    event = event.model_copy(
-                        update={
-                            "observation": self.reward_observation(
-                                event.observation, event.declined_offers
-                            )
-                        }
+                if call.name == ToolName.RUN_PLAN:
+                    route = _recorded_route(call, event, current if anchored else None)
+                    pending_routes.discard(call.id)
+                    if route is not None:
+                        self._plan = route
+                        context.set_route_plan(route)
+                elif event.plan is not None:
+                    raise ExtractionError("A recorded plan result belongs to a different tool.")
+                recorded_observation = event.observation
+                if recorded_observation is not None:
+                    projected_observation = self.reward_observation(
+                        recorded_observation, event.declined_offers
                     )
+                    event = event.model_copy(update={"observation": projected_observation})
+                    current = projected_observation
+                    anchored = not isinstance(task, ActTask) or (
+                        current.location
+                        == native.Location.model_validate(task.expected_route.model_dump())
+                    )
+                    self._plan = reconcile_plan(self._plan, current.state.progress.position).plan
+                    context.set_route_plan(self._plan)
+                elif event.action and not isinstance(event.outcome, Rejected):
+                    anchored = False
                 if event.action:
                     outcome = TypeAdapter(ActionToolResult).validate_python(
                         {"outcome": event.outcome, "observation": event.observation}
@@ -329,12 +355,26 @@ class DecisionRun(DeckAgent):
                 else:
                     result = await _query_result(event, call, self._notes, execution, documents)
                     context.append_tool_result(call, result, defer_observation=True)
+                if recorded_observation is not None:
+                    game.observation = recorded_observation
             elif isinstance(event, AutomaticEvent):
                 observation = (
                     self.reward_observation(event.observation, event.declined_offers)
                     if event.observation is not None
                     else None
                 )
+                if observation is not None:
+                    current = observation
+                    assert event.observation is not None
+                    game.observation = event.observation
+                    anchored = not isinstance(task, ActTask) or (
+                        current.location
+                        == native.Location.model_validate(task.expected_route.model_dump())
+                    )
+                    self._plan = reconcile_plan(self._plan, current.state.progress.position).plan
+                    context.set_route_plan(self._plan)
+                else:
+                    anchored = False
                 context.append_automatic(
                     event.progress,
                     ActionToolResult(event.outcome, observation),
@@ -344,8 +384,84 @@ class DecisionRun(DeckAgent):
                     context.finish_group()
             else:
                 context.append_correction(event.message)
+        if pending_routes:
+            raise ExtractionError("A recorded route tool call has no result.")
+        if not anchored:
+            raise ExtractionError("The recorded decision has no current native anchor.")
         self._resuming = True
         return task, current
+
+
+def _recorded_route(
+    call: ToolCall, event: ResultEvent, anchor: native.Observation | None
+) -> RoutePlan | None:
+    if event.action:
+        raise ExtractionError("The recorded route result is not a query result.")
+    try:
+        json.loads(call.arguments, object_pairs_hook=unique_fields)
+        arguments = RunPlan.model_validate_json(call.arguments, strict=True)
+    except (ValueError, ValidationError) as error:
+        if isinstance(event.outcome, Rejected) and (
+            event.outcome.reason.code is ReasonCode.INVALID_ARGUMENTS
+            and (event.plan is None or isinstance(event.plan.plan, PlanRejected))
+            or event.outcome.reason.code is ReasonCode.BATCH_ABORTED
+            and event.plan is None
+        ):
+            return None
+        raise ExtractionError(
+            "The recorded route interaction uses an incompatible schema."
+        ) from error
+    if event.plan is None:
+        if isinstance(event.outcome, Rejected) and event.outcome.reason.code in (
+            ReasonCode.INVALID_ARGUMENTS,
+            ReasonCode.BATCH_ABORTED,
+        ):
+            return None
+        raise ExtractionError("The recorded route result has no plan status.")
+    accepted = isinstance(event.plan.plan, PlanAccepted)
+    if isinstance(event.plan.plan, PlanAccepted):
+        if not isinstance(event.outcome, ReadCompleted) or (
+            event.plan.plan.next != arguments.stretches[0]
+        ):
+            raise ExtractionError("The recorded route acceptance is inconsistent.")
+    else:
+        if not isinstance(event.outcome, Rejected):
+            raise ExtractionError("The recorded route rejection cannot use the current schema.")
+        if event.outcome.reason.code in (ReasonCode.QUERY_FAILED, ReasonCode.ROLE_CHANGED):
+            return None
+    if anchor is None or not isinstance(anchor.state, native.RunState) or anchor.map is MISSING:
+        raise ExtractionError("The recorded route has no current native anchor.")
+    if anchor.location.owner is not native.DecisionOwner.RUN:
+        raise ExtractionError("The recorded route acceptance is inconsistent.")
+    after = event.observation
+    if after is not None and (
+        after.location != anchor.location
+        or after.map != anchor.map
+        or after.state.progress.position != anchor.state.progress.position
+    ):
+        raise ExtractionError("The recorded route has conflicting native anchors.")
+    try:
+        update = (
+            restore_stretches(anchor.map, anchor.state.progress.position, arguments.stretches)
+            if accepted and anchor.map.legal_destinations is None
+            else replace_stretches(
+                None,
+                anchor.map,
+                anchor.state.progress.position,
+                arguments.reason,
+                arguments.stretches,
+            )
+        )
+    except MapUnavailable as error:
+        raise ExtractionError("The recorded route has an incomplete native map.") from error
+    if accepted:
+        if update.plan is None:
+            raise ExtractionError("The recorded route is inconsistent with its native anchor.")
+        return RoutePlan(update.plan.position, arguments.reason, update.plan.edges)
+    assert isinstance(event.outcome, Rejected)
+    if update.rejection is None or update.rejection.value != event.outcome.reason.code.value:
+        raise ExtractionError("The recorded route rejection conflicts with its native anchor.")
+    return None
 
 
 def _notes_state(state: HarnessState) -> NotesState:

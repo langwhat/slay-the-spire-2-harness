@@ -19,7 +19,19 @@ from sts2_harness.journal_models import BaselineSnapshot, NativeSnapshot, Prepar
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ResponsesReply, TextMessage, TextRole
 from sts2_harness.prompts import PackagedPrompts
-from sts2_harness.results import Reason, ReasonCode, Rejected, Suggestion
+from sts2_harness.results import (
+    ActionCompleted,
+    PlanAccepted,
+    PlanData,
+    PlanPresentation,
+    PlanPresentationStatus,
+    PlanRejected,
+    ReadCompleted,
+    Reason,
+    ReasonCode,
+    Rejected,
+    Suggestion,
+)
 from sts2_harness_eval.decision_cases import (
     AssistantEvent,
     DecisionCase,
@@ -468,6 +480,349 @@ def test_rebuild_retains_rejected_query_history(tmp_path: Path) -> None:
         assert "Invalid historical query." in body
         assert "Supply valid arguments." in body
         assert "invalid_arguments" in body
+
+    asyncio.run(run())
+
+
+def _route_reply(call_id: str, tool: str, arguments: str) -> AssistantEvent:
+    native_reply = ResponsesReply.from_json(
+        json.dumps(
+            [
+                {
+                    "type": "function_call",
+                    "id": f"{call_id}-fc",
+                    "call_id": call_id,
+                    "name": tool,
+                    "arguments": arguments,
+                }
+            ]
+        )
+    )
+    return AssistantEvent(
+        reply=NativeSnapshot(protocol=native_reply.protocol, native_output=native_reply.to_json())
+    )
+
+
+def _recorded_route_case(tmp_path: Path) -> DecisionCase:
+    case = decision_case(tmp_path, multiselect=True)
+    task = case.events[0]
+    assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+    state = task.observation.state
+    observation = task.observation.model_copy(
+        update={
+            "state": state.model_copy(
+                update={
+                    "screen": native.RunScreen.MAP,
+                    "progress": state.progress.model_copy(update={"position": "map:0:0"}),
+                    "selection": None,
+                    "offers": (),
+                    "actions": (
+                        native.Action(
+                            ref="travel", label="Travel", enabled=True, destination="map:1:0"
+                        ),
+                    ),
+                }
+            ),
+            "map": native.PublicMap.model_validate_json(
+                '{"bosses":[],"nodes":['
+                '{"position":"map:0:0","room_type":"ancient",'
+                '"children":["map:1:0","map:1:1"]},'
+                '{"position":"map:1:0","room_type":"monster","children":["map:2:0"]},'
+                '{"position":"map:1:1","room_type":"restsite","children":[]},'
+                '{"position":"map:2:0","room_type":"boss","children":[]}],'
+                '"legal_destinations":["map:1:0","map:1:1"]}'
+            ),
+        }
+    )
+    return case.model_copy(
+        update={
+            "decision_tool": "run_next",
+            "events": (
+                task.model_copy(update={"observation": observation}),
+                _route_reply(
+                    "plan", "run_plan", '{"reason":"Fight then Boss.","stretches":["s2"]}'
+                ),
+                ResultEvent(
+                    call_id="plan",
+                    outcome=ReadCompleted(),
+                    action=False,
+                    observation=None,
+                    plan=PlanData(
+                        plan=PlanAccepted(next="s2"),
+                        presentation=PlanPresentation(status=PlanPresentationStatus.NOT_AVAILABLE),
+                    ),
+                ),
+            ),
+        }
+    )
+
+
+def test_legacy_route_history_is_unsupported_before_model_request(tmp_path: Path) -> None:
+    async def run() -> None:
+        case = _recorded_route_case(tmp_path)
+        old_call = _route_reply(
+            "plan",
+            "run_plan",
+            '{"reason":"Old route.","edges":[{"from":"map:0:0","to":"map:1:0"}]}',
+        )
+        result = case.events[2]
+        assert isinstance(result, ResultEvent) and result.plan is not None
+        case = case.model_copy(
+            update={
+                "events": (
+                    case.events[0],
+                    old_call,
+                    result.model_copy(
+                        update={
+                            "plan": result.plan.model_copy(
+                                update={"plan": PlanAccepted(next="map:1:0")}
+                            )
+                        }
+                    ),
+                )
+            }
+        )
+        original = old_call.reply.native_output
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("next", "run_next", '{"reason":"Go."}')),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            sample = await sample_case(case, client)
+            unfinished = await sample_case(
+                case.model_copy(update={"events": case.events[:2]}), client
+            )
+        assert sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "route" in sample.error.lower()
+        assert unfinished.verdict is DecisionVerdict.UNSUPPORTED
+        assert unfinished.error == "A recorded route tool call has no result."
+        assert requests == [] and old_call.reply.native_output == original
+
+    asyncio.run(run())
+
+
+def test_accepted_recorded_stretches_restore_the_route_before_run_next(tmp_path: Path) -> None:
+    async def run() -> None:
+        case = _recorded_route_case(tmp_path)
+        task, result = case.events[0], case.events[2]
+        assert isinstance(task, TaskEvent) and isinstance(result, ResultEvent)
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("next", "run_next", '{"reason":"Go."}')),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            rebuilt = await rebuild_case(case, client)
+            route = rebuilt.agent.route_plan
+            assert route is not None
+            assert [(edge.source, edge.destination) for edge in route.edges] == [
+                ("map:0:0", "map:1:0"),
+                ("map:1:0", "map:2:0"),
+            ]
+            sample = await sample_case(case, client)
+            assert len(requests) == 1
+            assert sample.error == "A different game action deviated from the labeled decision."
+            body = json.loads(requests[0].content)
+            calls = [item for item in body["input"] if item.get("type") == "function_call"]
+            outputs = [item for item in body["input"] if item.get("type") == "function_call_output"]
+            assert json.loads(calls[-1]["arguments"])["stretches"] == ["s2"]
+            assert json.loads(outputs[-1]["output"])["data"]["plan"]["next"] == "s2"
+            later = task.observation.model_copy(
+                update={
+                    "stamp": task.observation.stamp.model_copy(
+                        update={
+                            "observation_sequence": task.observation.stamp.observation_sequence + 1
+                        }
+                    )
+                }
+            )
+            observed = case.model_copy(
+                update={
+                    "events": (*case.events[:2], result.model_copy(update={"observation": later}))
+                }
+            )
+            assert (await rebuild_case(observed, client)).agent.route_plan == route
+            assert task.observation.map is not MISSING
+            unavailable = task.observation.model_copy(
+                update={"map": task.observation.map.model_copy(update={"legal_destinations": None})}
+            )
+            blocked = case.model_copy(
+                update={
+                    "events": (
+                        task.model_copy(update={"observation": unavailable}),
+                        *case.events[1:],
+                    )
+                }
+            )
+            assert (await rebuild_case(blocked, client)).agent.route_plan == route
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "problem",
+    ("wrong_next", "conflicting_anchor", "missing_status", "unobserved_action", "bad_rejection"),
+)
+def test_unprovable_recorded_route_is_unsupported(tmp_path: Path, problem: str) -> None:
+    async def run() -> None:
+        case = _recorded_route_case(tmp_path)
+        task, result = case.events[0], case.events[2]
+        assert (
+            isinstance(task, TaskEvent)
+            and isinstance(result, ResultEvent)
+            and result.plan is not None
+        )
+        if problem == "wrong_next":
+            result = result.model_copy(
+                update={"plan": result.plan.model_copy(update={"plan": PlanAccepted(next="s3")})}
+            )
+        elif problem == "conflicting_anchor":
+            observation = task.observation
+            conflict = observation.model_copy(
+                update={
+                    "state": observation.state.model_copy(
+                        update={
+                            "progress": observation.state.progress.model_copy(
+                                update={"position": "map:1:1"}
+                            )
+                        }
+                    )
+                }
+            )
+            result = result.model_copy(update={"observation": conflict})
+        elif problem == "missing_status":
+            result = result.model_copy(update={"plan": None})
+        elif problem == "bad_rejection":
+            result = result.model_copy(
+                update={
+                    "outcome": Rejected(
+                        reason=Reason(code=ReasonCode.DISCONNECTED, message="Disconnected."),
+                        suggested_actions=(Suggestion(message="Check route."),),
+                    ),
+                    "plan": result.plan.model_copy(update={"plan": PlanRejected()}),
+                }
+            )
+        events = (task, case.events[1], result)
+        if problem == "unobserved_action":
+            events = (
+                task,
+                _route_reply("action", "run_act", "{}"),
+                ResultEvent(
+                    call_id="action",
+                    outcome=ActionCompleted(completed_steps=1),
+                    action=True,
+                    observation=None,
+                ),
+                *events[1:],
+            )
+        case = case.model_copy(update={"events": events})
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("next", "run_next", '{"reason":"Go."}')),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            sample = await sample_case(case, client)
+        assert sample.verdict is DecisionVerdict.UNSUPPORTED and sample.error is not None
+        assert requests == []
+
+    asyncio.run(run())
+
+
+def test_recorded_rejection_preserves_route_and_valid_failed_calls(tmp_path: Path) -> None:
+    async def run() -> None:
+        case = _recorded_route_case(tmp_path)
+        task, result = case.events[0], case.events[2]
+        assert (
+            isinstance(task, TaskEvent)
+            and isinstance(result, ResultEvent)
+            and result.plan is not None
+        )
+        previous = task.model_copy(
+            update={
+                "state": task.state.model_copy(
+                    update={
+                        "route": RouteState(
+                            position="map:0:0",
+                            edges=(("map:0:0", "map:1:0"), ("map:1:0", "map:2:0")),
+                        )
+                    }
+                )
+            }
+        )
+        failed = Rejected(
+            reason=Reason(code=ReasonCode.QUERY_FAILED, message="Unavailable."),
+            suggested_actions=(Suggestion(message="Retry."),),
+        )
+        rejected = case.model_copy(
+            update={
+                "events": (
+                    previous,
+                    case.events[1],
+                    result.model_copy(
+                        update={
+                            "outcome": failed,
+                            "plan": result.plan.model_copy(update={"plan": PlanRejected()}),
+                        }
+                    ),
+                )
+            }
+        )
+        malformed = case.model_copy(
+            update={
+                "events": (
+                    task,
+                    _route_reply("plan", "run_plan", "{}"),
+                    result.model_copy(
+                        update={
+                            "outcome": Rejected(
+                                reason=Reason(
+                                    code=ReasonCode.INVALID_ARGUMENTS, message="Invalid."
+                                ),
+                                suggested_actions=(Suggestion(message="Fix arguments."),),
+                            ),
+                            "plan": result.plan.model_copy(update={"plan": PlanRejected()}),
+                        }
+                    ),
+                )
+            }
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("next", "run_next", '{"reason":"Go."}')),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            rebuilt = await rebuild_case(rejected, client)
+            assert rebuilt.agent.route_plan is not None
+            assert [(edge.source, edge.destination) for edge in rebuilt.agent.route_plan.edges] == [
+                ("map:0:0", "map:1:0"),
+                ("map:1:0", "map:2:0"),
+            ]
+            sample = await sample_case(malformed, client)
+        assert sample.verdict is DecisionVerdict.DEVIATED
+        assert sample.error == "No route plan is active." and len(requests) == 1
 
     asyncio.run(run())
 
