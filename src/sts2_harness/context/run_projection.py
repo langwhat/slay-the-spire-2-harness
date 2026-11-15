@@ -324,7 +324,7 @@ class RunDelivery:
                     progress["route"] = list(route)
             player = sections["player"]
             assert isinstance(player, dict)
-            for name in ("gold", "potion_slot_count", "empty_potion_slot_count"):
+            for name in ("gold", "potion_slot_count", "empty_potion_slot_count", "base_orb_slots"):
                 player.pop(name, None)
         if self.role is native.DecisionOwner.COMBAT and isinstance(state, native.CombatState):
             sections.update(

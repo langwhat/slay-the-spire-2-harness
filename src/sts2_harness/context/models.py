@@ -51,7 +51,7 @@ class ForeignRunState(ForeignState):
 class ForeignCombatState(ForeignState):
     phase: Literal[native.Phase.COMBAT]
     screen: native.CombatScreen
-    player: native.RunPlayer
+    player: native.Player
     deck: tuple[str, ...]
     encounter: native.NamedDefinition | MISSING = MISSING
 
@@ -69,7 +69,7 @@ class FinishedState(ForeignState):
 class RunFinishedState(ForeignState):
     phase: Literal[native.Phase.TERMINAL]
     screen: native.TerminalScreen
-    player: native.RunPlayer
+    player: native.Player
     result: native.TerminalResult
     deck: tuple[str, ...]
     last_observed_turn: int | None | MISSING = MISSING

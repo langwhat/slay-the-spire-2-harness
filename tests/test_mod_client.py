@@ -14,6 +14,7 @@ from sts2_harness.client.models import (
     CatalogMode,
     CombatState,
     CostSymbol,
+    DecisionOwner,
     DetailData,
     ErrorCode,
     InspectArea,
@@ -30,6 +31,8 @@ from sts2_harness.client.models import (
     TerminalState,
     UpgradeAvailable,
 )
+from sts2_harness.context import CombatActInput, Context
+from sts2_harness.context.models import RunActInput
 
 RUN = """{
   "game_language":"zhs",
@@ -41,7 +44,7 @@ RUN = """{
     "phase":"run","screen":"map","control":"ready","card_rarity_offset":-0.05,
     "progress":{"acts":3,"act":1,"floor":0,"position":null,"room_type":null},
     "player":{"name":"角色","definition_id":"CHARACTER.TEST","hp":10,"max_hp":10,
-      "gold":0,"potion_slot_count":1,"empty_potion_slot_count":1},
+      "gold":0,"potion_slot_count":1,"empty_potion_slot_count":1,"base_orb_slots":0},
     "relics":[],"potions":[],
     "actions":[{"ref":"travel","label":"前进","enabled":false,"reason":"等待"}],
     "selection":null,"deck":[],"offers":[],"event":null
@@ -162,8 +165,17 @@ def test_terminal_is_a_complete_observation_not_no_run() -> None:
             result = await client.state()
         assert isinstance(result, StateCompleted)
         assert isinstance(result.observation.state, TerminalState)
+        assert result.observation.state.player.base_orb_slots == 0
         assert result.observation.state.actions == ()
         assert result.observation.location.run_id == "run"
+        context = Context(DecisionOwner.RUN)
+        context.append_task(RunActInput(), result.observation)
+        view = json.loads(context.model_input()[-1].text)["observation"]
+        assert view["player"]["base_orb_slots"] == 0
+        combat = Context(DecisionOwner.COMBAT)
+        combat.append_task(CombatActInput(), result.observation)
+        view = json.loads(combat.model_input()[-1].text)["observation"]
+        assert "base_orb_slots" not in view["player"]
 
     asyncio.run(read())
 

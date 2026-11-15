@@ -13,8 +13,8 @@ from sts2_harness.context.models import (
 )
 
 
-def _run_player(player: native.CombatPlayer | native.Player) -> native.RunPlayer:
-    return native.RunPlayer(
+def _run_player(player: native.CombatPlayer | native.Player) -> native.Player:
+    return native.Player(
         name=player.name,
         definition_id=player.definition_id,
         hp=player.hp,
@@ -22,6 +22,7 @@ def _run_player(player: native.CombatPlayer | native.Player) -> native.RunPlayer
         gold=player.gold,
         potion_slot_count=player.potion_slot_count,
         empty_potion_slot_count=player.empty_potion_slot_count,
+        base_orb_slots=player.base_orb_slots if isinstance(player, native.Player) else MISSING,
     )
 
 

@@ -47,6 +47,7 @@ Every added card is drawn in place of the cards already owned, for the rest of t
 - A draw card's net gain is the cards it draws minus itself, and the cards drawn still need energy. An effect that pays per card or per attack is worth the number the turn's energy pays for; one that needs a counter to reach a threshold is worth nothing unless owned sources reach it within a fight.
 - A power, or a card that exhausts when played, costs its draw and energy once per fight. A power may return nothing on the turn it is played; count any immediate benefit from its rule. When several powers must be played before damage arrives, count the setup turns spent being hit and the block, relics, or potions that cover them.
 - Cards that enemies add during a fight take a larger share of a smaller deck, so a deck that works only while thin is fragile against them. A small deck is not a problem in itself; a small deck without strong numbers is.
+- A character with base_orb_slots 0 gains one orb slot when it channels an orb while its current orb capacity is 0; channeling with all slots full evokes the oldest orb first.
 - Removing a weak card, or upgrading an owned one, improves every later draw and adds no card.
 
 ## The decision

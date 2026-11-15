@@ -11,6 +11,7 @@ Read every value from the current state; these rules cover what the state does n
 - Turn end runs in this order: automatic end-of-turn plays and their triggers, then end-of-turn-in-hand effects, then discarding every unretained hand card, including cards drawn during that sequence.
 - Retain does not suppress an end-of-turn-in-hand effect (for example CARD.BURN, CARD.DECAY, CARD.DOUBT, CARD.SHAME). An Ethereal card with such an effect resolves it and then exhausts; Ethereal exhausts at turn end even when retained. The Exhaust keyword applies only when the card is played.
 - Battle piles are not the permanent deck. Cards created, changed, or exhausted in battle are temporary unless their text says otherwise.
+- A character without base orb slots gains one orb slot when it channels an orb while its current orb capacity is 0.
 - Potions are consumed on use. Random draws, targets, and generated options are unknown until revealed.
 
 # Choosing a line
@@ -25,6 +26,7 @@ At each decision, work in this order.
 These settle close cases:
 
 - Damage that changes no enemy action and does not bring any kill closer, such as overkill, is worth nothing, and HP spent for it is wasted. In a long fight, damage on an enemy that must die is never wasted: the total decides the turn it dies, and each turn earlier removes that turn's attacks. Block that only postpones defeat is not a line; compare the lines that can still win.
+- When a line takes blockable damage, check what it loses if its least useful plays are replaced with block or prevention, through the same enemy action.
 - Setup, growth, and clearing bad cards pay back over the remaining turns. Do them on quiet or already covered turns. Under attack, weigh the HP lost while setting up against the attacks the setup later prevents. Once output is enough to finish, finish.
 - Order plays so each one sees the most. Reveal draws and random results before committing choices that depend on them, while the energy to act on them remains. Apply debuffs and buffs before the hits they scale. A draw that costs the energy needed to play what it finds is not access.
 - Choose targets by the action their death prevents, not by HP. Crossing a threshold (a kill, a broken shield, a stun, a phase change) matters; damage short of it or beyond it matters only through later turns.
