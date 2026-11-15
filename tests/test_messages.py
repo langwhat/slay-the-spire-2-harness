@@ -101,6 +101,45 @@ def test_messages_real_tool_object_unions_keep_their_schema_on_wire(tmp_path: Pa
     assert set(referenced["$defs"]) == {"First", "Second"}
 
 
+def test_role_clients_share_injected_transport_without_closing_it_twice(tmp_path: Path) -> None:
+    from sts2_harness.model_purpose import ModelPurpose
+
+    class CountingTransport(httpx.MockTransport):
+        closes = 0
+
+        async def aclose(self) -> None:
+            self.closes += 1
+            await super().aclose()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        stream = events(stop="end_turn")
+        return httpx.Response(
+            200,
+            content=sse(stream[:1] + stream[-2:]),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async def scenario() -> None:
+        transport = CountingTransport(handler)
+        async with Llm(
+            configuration(
+                tmp_path,
+                LLM_PROTOCOL="messages",
+                LLM_REASONING_EFFORT="low",
+                LLM_REASONING_EFFORT_DECK="medium",
+                LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS="high",
+            ),
+            transport=transport,
+        ) as llm:
+            await llm.complete((), ())
+            await llm.for_purpose(ModelPurpose.DECK).complete((), ())
+            await llm.for_purpose(ModelPurpose.COMBAT_ELITE_BOSS).complete((), ())
+            assert transport.closes == 0
+        assert transport.closes == 1
+
+    asyncio.run(scenario())
+
+
 def sse(events: list[dict[str, object]]) -> bytes:
     return "".join(
         f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events

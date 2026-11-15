@@ -37,9 +37,9 @@ raise SystemExit(main(materials=entry_materials()))
 `deck-tasks.md`, `deck.md`, relevant state-format instructions, and only
 `run_deck_choice`. It sees one current card offer, current player/deck/relics/potions,
 notes, statistics, definitions/mechanisms, and the latest battle report/review.
-It omits map fields and earlier reward interactions, while selecting the same
-guidance documents as the Run variant. Non-card selection cases are
-`not_applicable` for this variant.
+It omits map fields and earlier reward interactions. Guidance is selected for
+the Deck audience from owned objects and the focused offer, rather than the Run
+audience. Non-card selection cases are `not_applicable` for this variant.
 
 ## Case extraction
 

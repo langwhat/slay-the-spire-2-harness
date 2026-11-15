@@ -149,3 +149,33 @@ def test_reasoning_effort_inherits_per_purpose(tmp_path: Path) -> None:
     ).model
     assert fallback is not None
     assert all(fallback.for_purpose(purpose).reasoning_effort == "low" for purpose in ModelPurpose)
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "LLM_REASONING_EFFORT_RUN",
+        "LLM_REASONING_EFFORT_DECK",
+        "LLM_REASONING_EFFORT_COMBAT",
+        "LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS",
+    ],
+)
+def test_check_config_rejects_invalid_role_effort_before_startup(
+    tmp_path: Path, setting: str
+) -> None:
+    result = cli(
+        tmp_path,
+        "check-config",
+        "--set",
+        "LLM_PROTOCOL=messages",
+        "--set",
+        "LLM_MODEL=model",
+        "--set",
+        "LLM_AUTH=none",
+        "--set",
+        "LLM_REASONING_EFFORT=low",
+        "--set",
+        f"{setting}=invalid",
+    )
+    assert result.returncode == 2
+    assert "Configuration error:" in result.stderr

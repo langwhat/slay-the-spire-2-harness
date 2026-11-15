@@ -118,3 +118,34 @@ def test_fight_encounter_comes_from_opening_observation() -> None:
     )
     history.observe(after(31, 5))
     assert history.recent[1].encounter is None
+
+
+def test_fight_encounter_uses_consistent_later_observation_and_keeps_opening_hp() -> None:
+    history = FightHistory()
+    encounter = native.NamedDefinition(name="守卫者", definition_id="ENCOUNTER.GUARDIAN")
+    history.observe(battle(4, 50))
+    history.observe(battle(4, 40, 2).model_copy(update={"encounter": encounter}))
+    history.observe(after(37, 4))
+    assert history.recent[0].encounter is not None
+    assert history.recent[0].encounter.definition_id == "ENCOUNTER.GUARDIAN"
+    assert history.recent[0].encounter.name == "守卫者"
+    assert history.recent[0].hp_in == 50
+
+
+def test_fight_encounter_conflicts_are_not_assigned_or_carried_to_another_fight() -> None:
+    history = FightHistory()
+    first = native.NamedDefinition(name="守卫者", definition_id="ENCOUNTER.GUARDIAN")
+    other = native.NamedDefinition(name="另一遭遇", definition_id="ENCOUNTER.OTHER")
+    history.observe(battle(4, 50).model_copy(update={"encounter": first}))
+    history.observe(battle(4, 40, 2).model_copy(update={"encounter": other}))
+    history.observe(after(37, 4))
+    assert history.recent[0].encounter is None
+    history.observe(battle(5, 37))
+    history.observe(after(31, 5))
+    assert history.recent[1].encounter is None
+
+    history.observe(battle(6, 31).model_copy(update={"encounter": first}))
+    translated = first.model_copy(update={"name": "Guardian"})
+    history.observe(battle(6, 29, 2).model_copy(update={"encounter": translated}))
+    history.observe(after(27, 6))
+    assert history.recent[2].encounter is None

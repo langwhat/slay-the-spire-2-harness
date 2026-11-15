@@ -32,6 +32,7 @@ class FightHistory:
         self.recent: tuple[Fight, ...] = ()
         self._identity: tuple[str, str | None] | None = None
         self._opening: native.Observation | None = None
+        self._encounters: set[tuple[str, str]] = set()
 
     def observe(self, observation: native.Observation) -> None:
         location, state = observation.location, observation.state
@@ -39,13 +40,19 @@ class FightHistory:
         if identity != self._identity:
             self.recent = ()
             self._opening = None
+            self._encounters.clear()
             self._identity = identity
         if isinstance(state, native.TerminalState):
             self._opening = None
+            self._encounters.clear()
             return
         if isinstance(state, native.CombatState):
             if self._opening is None or location.node_id != self._opening.location.node_id:
                 self._opening = observation
+                self._encounters.clear()
+            encounter = observation.encounter
+            if encounter is not MISSING and encounter.definition_id is not MISSING:
+                self._encounters.add((encounter.definition_id, encounter.name))
             return
         if self._opening is None or observation.input_readiness not in (
             native.InputReadiness.READY,
@@ -58,6 +65,7 @@ class FightHistory:
         assert isinstance(opening, native.CombatState)
         if state.progress.floor != opening.progress.floor:
             self._opening = None
+            self._encounters.clear()
             return
         match opening.progress.room_type:
             case "elite":
@@ -66,21 +74,20 @@ class FightHistory:
                 kind = FightKind.BOSS
             case _:
                 kind = FightKind.NORMAL
-        encounter = self._opening.encounter
-        identity = (
-            FightEncounter(definition_id=encounter.definition_id, name=encounter.name)
-            if encounter is not MISSING and encounter.definition_id is not MISSING
-            else None
-        )
+        encounter = None
+        if len(self._encounters) == 1:
+            definition_id, name = next(iter(self._encounters))
+            encounter = FightEncounter(definition_id=definition_id, name=name)
         self.recent = (
             *self.recent,
             Fight(
                 floor=opening.progress.floor,
                 kind=kind,
-                encounter=identity,
+                encounter=encounter,
                 turns=None if state.battle_turns is MISSING else state.battle_turns,
                 hp_in=opening.player.hp,
                 hp_out=state.player.hp,
             ),
         )[-6:]
         self._opening = None
+        self._encounters.clear()

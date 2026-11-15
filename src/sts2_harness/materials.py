@@ -115,7 +115,7 @@ class FileDocuments:
                     text=view.text,
                     resources=view.resources,
                     subjects=source.subjects,
-                    auto_roles=tuple(MaterialRole(role.value) for role in source.auto_roles),
+                    auto_roles=source.auto_roles,
                 )
             )
         return tuple(documents)

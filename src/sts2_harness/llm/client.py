@@ -38,6 +38,16 @@ from sts2_harness.llm.responses import ResponsesAdapter
 from sts2_harness.model_purpose import ModelPurpose
 
 
+class _BorrowedTransport(httpx.AsyncBaseTransport):
+    """Let derived clients share the root client's transport without owning it."""
+
+    def __init__(self, transport: httpx.AsyncBaseTransport) -> None:
+        self._transport = transport
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self._transport.handle_async_request(request)
+
+
 class Llm:
     def __init__(
         self,
@@ -67,7 +77,11 @@ class Llm:
             return self
         if effort not in self._purpose_clients:
             self._purpose_clients[effort] = Llm(
-                configuration, transport=self._transport, sleep=self._sleep
+                configuration,
+                transport=(
+                    _BorrowedTransport(self._transport) if self._transport is not None else None
+                ),
+                sleep=self._sleep,
             )
         return self._purpose_clients[effort]
 
@@ -81,6 +95,8 @@ class Llm:
             raise ModelUnavailable(FailureKind.CONFIGURATION)
         if configuration.protocol is Protocol.MESSAGES:
             MessagesAdapter.request_options(configuration)
+            for purpose in ModelPurpose:
+                MessagesAdapter.request_options(configuration.for_purpose(purpose))
 
     @property
     def configuration(self) -> ModelConfiguration:
