@@ -149,3 +149,29 @@ def test_fight_encounter_conflicts_are_not_assigned_or_carried_to_another_fight(
     history.observe(battle(6, 29, 2).model_copy(update={"encounter": translated}))
     history.observe(after(27, 6))
     assert history.recent[2].encounter is None
+
+
+def test_fight_encounter_does_not_cross_an_interrupted_combat_segment() -> None:
+    history = FightHistory()
+    history.observe(battle(4, 50))
+    busy = after(45, 4)
+    history.observe(
+        busy.model_copy(
+            update={
+                "input_readiness": native.InputReadiness.BUSY,
+                "state": busy.state.model_copy(update={"battle_turns": None}),
+            }
+        )
+    )
+    later = native.NamedDefinition(name="另一遭遇", definition_id="ENCOUNTER.OTHER")
+    history.observe(battle(4, 39, 2).model_copy(update={"encounter": later}))
+    history.observe(after(35, 4))
+    assert history.recent[0].hp_in == 50
+    assert history.recent[0].encounter is None
+
+    continuous = FightHistory()
+    continuous.observe(battle(4, 50).model_copy(update={"encounter": later}))
+    continuous.observe(busy)
+    continuous.observe(after(35, 4))
+    assert continuous.recent[0].encounter is not None
+    assert continuous.recent[0].encounter.definition_id == "ENCOUNTER.OTHER"

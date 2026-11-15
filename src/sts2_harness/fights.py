@@ -33,39 +33,49 @@ class FightHistory:
         self._identity: tuple[str, str | None] | None = None
         self._opening: native.Observation | None = None
         self._encounters: set[tuple[str, str]] = set()
+        self._interrupted = False
+        self._ambiguous = False
+
+    def _reset_opening(self) -> None:
+        self._opening = None
+        self._encounters.clear()
+        self._interrupted = False
+        self._ambiguous = False
 
     def observe(self, observation: native.Observation) -> None:
         location, state = observation.location, observation.state
         identity = (location.game_instance_id, location.run_id)
         if identity != self._identity:
             self.recent = ()
-            self._opening = None
-            self._encounters.clear()
+            self._reset_opening()
             self._identity = identity
         if isinstance(state, native.TerminalState):
-            self._opening = None
-            self._encounters.clear()
+            self._reset_opening()
             return
         if isinstance(state, native.CombatState):
             if self._opening is None or location.node_id != self._opening.location.node_id:
+                self._reset_opening()
                 self._opening = observation
-                self._encounters.clear()
+            elif self._interrupted:
+                self._ambiguous = True
+            self._interrupted = False
             encounter = observation.encounter
             if encounter is not MISSING and encounter.definition_id is not MISSING:
                 self._encounters.add((encounter.definition_id, encounter.name))
             return
-        if self._opening is None or observation.input_readiness not in (
+        if self._opening is None:
+            return
+        settled = observation.input_readiness in (
             native.InputReadiness.READY,
             native.InputReadiness.SELECTION,
-        ):
-            return
-        if state.battle_turns is None:
+        )
+        if not settled or state.battle_turns is None:
+            self._interrupted = True
             return
         opening = self._opening.state
         assert isinstance(opening, native.CombatState)
         if state.progress.floor != opening.progress.floor:
-            self._opening = None
-            self._encounters.clear()
+            self._reset_opening()
             return
         match opening.progress.room_type:
             case "elite":
@@ -75,7 +85,7 @@ class FightHistory:
             case _:
                 kind = FightKind.NORMAL
         encounter = None
-        if len(self._encounters) == 1:
+        if len(self._encounters) == 1 and not self._ambiguous:
             definition_id, name = next(iter(self._encounters))
             encounter = FightEncounter(definition_id=definition_id, name=name)
         self.recent = (
@@ -89,5 +99,4 @@ class FightHistory:
                 hp_out=state.player.hp,
             ),
         )[-6:]
-        self._opening = None
-        self._encounters.clear()
+        self._reset_opening()
