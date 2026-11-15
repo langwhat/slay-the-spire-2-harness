@@ -97,7 +97,7 @@ def main() -> None:
         documents = None
         if args.provider_module:
             provider = importlib.import_module(args.provider_module)
-            provider_file = provider.__file__
+            provider_file = getattr(provider, "__file__", None)
             if provider_file is None:
                 raise ValueError("The source provider has no file path.")
             report["source_private_module"] = provider_file

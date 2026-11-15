@@ -516,6 +516,16 @@ def test_source_replay_cli_rejects_invalid_provider(tmp_path: Path, provider_bod
     assert evidence["error_type"] == "ValueError"
 
 
+def test_source_replay_cli_rejects_provider_without_file(tmp_path: Path) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    output = tmp_path / "provider-no-file.json"
+    result = run_source_replay(source, output, "sys")
+    assert result.returncode == 2
+    assert "no file path" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert json.loads(output.read_text())["status"] == "failed"
+
+
 @pytest.mark.parametrize("field", ("archive_wal_clear_before", "archive_wal_clear_after"))
 @pytest.mark.parametrize("value", (False, None))
 def test_unchecked_source_replay_wal_is_rejected(
