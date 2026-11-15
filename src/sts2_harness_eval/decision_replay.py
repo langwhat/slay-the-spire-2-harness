@@ -146,7 +146,7 @@ class CaseGame:
         raise ExtractionError("Decision replay cannot control a game session.")
 
 
-class _CaseStatistics(DeckStatistics):
+class CaseStatistics(DeckStatistics):
     def __init__(self, state: HarnessState, observation: native.Observation) -> None:
         super().__init__()
         self.observed_plays = state.observed_plays
@@ -286,7 +286,7 @@ class DecisionRun(DeckAgent):
                 game.observation = event.observation
                 current = self.reward_observation(event.observation, event.declined_offers)
                 self._notes.write(_notes_state(event.state), set(NotesState.model_fields))
-                self._tools.deck_stats = _CaseStatistics(event.state, current)
+                self._tools.deck_stats = CaseStatistics(event.state, current)
                 if self._tools.fights is not None:
                     self._tools.fights.recent = event.state.fights
                 route = event.state.route

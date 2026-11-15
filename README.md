@@ -506,3 +506,89 @@ owner. Finish pending action feedback before entering an act. The first actual a
 task in the new Context carries current notes, including an empty string; construction alone
 does not consume them. Session orchestration creates a new Run role for each confirmed native
 act transition and owns recording stream assembly.
+
+## Frozen decision evaluation
+
+The stable evaluator runs a fixed set of recorded decisions through the current role and
+context assembly. It starts with the current task and observation, with empty notes and no
+past conversation, battle report, or route plan. It serves read-only queries from each
+case's frozen data, applies in-memory note and route-plan updates, and stops before the
+first game-action proposal. No game action is sent. A missing snapshot fact is reported
+as unknown; an old recording that cannot satisfy the current schema is reported as
+unsupported rather than reconstructed from guesses.
+At the evaluation-file boundary only, an old Run observation missing `base_orb_slots`
+receives the verified `CHARACTER.IRONCLAD` default of zero in memory. The source file is
+unchanged, and the derived field and basis appear in the trial and report. Other
+characters with a missing value remain unsupported until their defaults are verified.
+
+Keep the plan, case files, snapshots, annotations, and output outside this repository.
+A plan is a JSON file such as:
+
+```json
+{
+  "configurations": [
+    {"id": "current-high", "effort": "high", "prompt_version": "current"}
+  ],
+  "cases": [
+    {
+      "id": "q1506", "role": "deck", "case": "cases/q1506.json",
+      "catalog": "snapshots/q1506-catalog.json",
+      "documents": "snapshots/q1506-documents.json",
+      "candidate_links": "snapshots/q1506-links.json",
+      "configurations": ["current-high"], "repetitions": 2
+    }
+  ],
+  "historical_means": [
+    {"role": "deck", "effort": "high", "requests_per_trial": 1.5,
+     "weighted_tokens_per_request": 6851.4, "source": "prior evaluation"}
+  ]
+}
+```
+
+Paths are relative to the plan. Each case uses the `DecisionCase` JSON schema in
+`sts2_harness_eval.decision_cases`, including its own labels and recorded native reads.
+Roles are `run`, `deck`, and `combat`. Omit `documents` or `candidate_links` only when
+the case did not enable that source. A catalog file uses the `FrozenCatalog` schema:
+`catalog` contains the native catalog metadata, `definitions` contains native lookup
+entries, and `complete` asserts the definition set covers the entire native catalog.
+Only a verified complete snapshot can answer arbitrary searches. Partial snapshots can
+answer lookups for included IDs, but missing IDs and searches are unknown. Document
+snapshots use `FrozenDocuments`: declare all covered subjects (or `complete_subjects`)
+and freeze the documents, requested resources, and role skill lists. Candidate-link
+snapshots use `FrozenLinks`, with the exact candidate/owned inputs and result for each
+covered assembly. Inspect queries are answered only by matching native reads in the case.
+The snapshot schemas are in `sts2_harness_eval.frozen_catalog` and `frozen_documents`.
+
+By default, each configuration snapshots the packaged prompts before the run. To compare
+another version, set `prompt_directory` to a directory containing the corresponding
+named Markdown files. The version label and the digest of the actual prompt set are both
+recorded. The case, catalog, document, and link files are read into memory before calls;
+their hashes are recorded per trial. Prepare full snapshots from trustworthy sources:
+an exact-query cache alone is not a complete catalog or document snapshot.
+
+Before launch, check active batches, system memory pressure, representative worker
+memory, and headroom for the OS and interactive applications. Choose `--concurrency`
+from the available capacity; record scheduling changes separately. Configure the existing
+builtin model and run:
+
+```sh
+uv run python -m sts2_harness_eval.stable_suite \
+  --plan /private/evaluation/plan.json --output /private/evaluation/result \
+  --env-file .env --concurrency 4
+```
+
+The output directory must be new. This entry point currently accepts the Responses
+protocol only and rejects other protocols before any request; the game's other protocols
+are unaffected. No transport retries or replacement trials are made. Before sending,
+the evaluator prints estimated trial and request counts and weighted tokens from the
+provided per-role, per-effort historical means. Missing means remain unknown. Estimates
+are informational, never a spending limit. Weighted tokens are uncached input plus 5%
+of cache-read input plus five times output; reasoning is already included in output.
+
+`report.md` lists every completed trial's choice, reason, verdict, token use, and
+reasoning tokens; unanswered usage is explicitly unknown. Unlabeled choices are not
+scored. When configurations differ, the report includes both choices and reasons.
+Each `trial-*.json` preserves attempt-level request and response bytes, status, failures,
+usage, receipt time for `response.completed`, and stream-close time separately. Failed
+attempts remain in totals when usage is available. These files may contain private model
+context and should be handled with the same care as the source cases.
