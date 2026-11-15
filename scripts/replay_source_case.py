@@ -63,7 +63,11 @@ def main() -> None:
 
     source_bytes = args.source_case.read_bytes()
     source_case = DecisionCase.model_validate_json(source_bytes)
-    task = next(event for event in reversed(source_case.events) if isinstance(event, TaskEvent))
+    task = next(
+        (event for event in reversed(source_case.events) if isinstance(event, TaskEvent)), None
+    )
+    if task is None:
+        raise ValueError("The source case has no task event.")
     archive = source_case.source.archive
     archive_before = digest(archive)
     audit = ExtractionAudit()
@@ -98,7 +102,12 @@ def main() -> None:
                 raise ValueError("The source provider has no file path.")
             report["source_private_module"] = provider_file
             report["source_private_python_sha256"] = package_digest(Path(provider_file).parent)
-            documents = provider.entry_materials().documents(
+            if not callable(getattr(provider, "entry_materials", None)):
+                raise ValueError("The source provider has no callable entry_materials.")
+            source_materials = provider.entry_materials()
+            if not callable(getattr(source_materials, "documents", None)):
+                raise ValueError("The source provider has no callable documents capability.")
+            documents = source_materials.documents(
                 MaterialContext(task.observation.run_rules.ascension)
             )
         derived = asyncio.run(

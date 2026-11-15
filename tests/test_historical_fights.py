@@ -489,6 +489,33 @@ def test_source_replay_cli_keeps_failure_evidence_without_traceback(tmp_path: Pa
     assert evidence["archive_wal_clear_after"] is True
 
 
+def test_source_replay_cli_rejects_case_without_task(tmp_path: Path) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    case = json.loads(source.read_text())
+    case["events"] = [{"kind": "correction", "message": "No task was recorded."}]
+    source.write_text(json.dumps(case))
+    output = tmp_path / "no-task.json"
+    result = run_source_replay(source, output, "unused_provider")
+    assert result.returncode == 2
+    assert "no task event" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("provider_body", ("", "def entry_materials():\n    return object()\n"))
+def test_source_replay_cli_rejects_invalid_provider(tmp_path: Path, provider_body: str) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    (tmp_path / "invalid_fixture_provider.py").write_text(provider_body)
+    output = tmp_path / "invalid-provider.json"
+    result = run_source_replay(source, output, "invalid_fixture_provider", tmp_path)
+    assert result.returncode == 2
+    assert "source provider" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["error_type"] == "ValueError"
+
+
 @pytest.mark.parametrize("field", ("archive_wal_clear_before", "archive_wal_clear_after"))
 @pytest.mark.parametrize("value", (False, None))
 def test_unchecked_source_replay_wal_is_rejected(
