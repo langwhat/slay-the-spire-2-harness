@@ -10,10 +10,12 @@ from pydantic import JsonValue
 from test_combat import reply
 from test_decision_replay import decision_case
 from test_responses import configuration
+from test_run import handoff
 
 from sts2_harness.client import models as native
+from sts2_harness.fights import Fight, FightKind
 from sts2_harness.llm.client import Llm
-from sts2_harness_eval.decision_cases import DecisionVerdict, HarnessState, TaskEvent
+from sts2_harness_eval.decision_cases import BattleState, DecisionVerdict, HarnessState, TaskEvent
 from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
 from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
 from sts2_harness_eval.traffic import AuditingTransport
@@ -90,12 +92,38 @@ def test_fresh_decision_uses_production_task_without_old_notes_or_report(tmp_pat
         original = decision_case(tmp_path)
         task = original.events[0]
         assert isinstance(task, TaskEvent)
+        card = task.observation.objects["owned"]
+        assert isinstance(card, native.CardEntry)
+        previous = handoff("OLD-REVIEW-SENTINEL")
+        report = previous.report.model_copy(
+            update={
+                "encounter": native.NamedDefinition(
+                    name="OLD-REPORT-SENTINEL", definition_id="ENCOUNTER.PREVIOUS"
+                )
+            }
+        )
         case = original.model_copy(
             update={
                 "recorded_reason": "OLD-REASON-SENTINEL",
                 "events": (
                     task.model_copy(
-                        update={"state": HarnessState(notes={"core": "OLD-NOTES-SENTINEL"})}
+                        update={
+                            "state": HarnessState(
+                                notes={"core": "OLD-NOTES-SENTINEL"},
+                                observed_plays={card.definition_id: 12345},
+                                fights=(
+                                    Fight(
+                                        floor=123,
+                                        kind=FightKind.ELITE,
+                                        turns=456,
+                                        hp_in=789,
+                                        hp_out=654,
+                                    ),
+                                ),
+                            ),
+                            "handoff": BattleState(report=report, review=previous.review),
+                            "previous_battle": BattleState(report=report, review=previous.review),
+                        }
                     ),
                 ),
             }
@@ -137,6 +165,10 @@ def test_fresh_decision_uses_production_task_without_old_notes_or_report(tmp_pat
         assert '"baseline":true' in bodies[0].replace('\\"', '"')
         assert "OLD-NOTES-SENTINEL" not in bodies[0]
         assert "OLD-REASON-SENTINEL" not in bodies[0]
+        assert "OLD-REPORT-SENTINEL" not in bodies[0]
+        assert "OLD-REVIEW-SENTINEL" not in bodies[0]
+        assert '"hp_in":789' in bodies[0].replace('\\"', '"')
+        assert '"observed_plays":12345' in bodies[0].replace('\\"', '"')
 
     asyncio.run(run())
 
