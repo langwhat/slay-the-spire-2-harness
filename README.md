@@ -517,9 +517,10 @@ first game-action proposal. No game action is sent. A missing snapshot fact is r
 as unknown; an old recording that cannot satisfy the current schema is reported as
 unsupported rather than reconstructed from guesses.
 At the evaluation-file boundary only, an old Run observation missing `base_orb_slots`
-receives the verified `CHARACTER.IRONCLAD` default of zero in memory. The source file is
-unchanged, and the derived field and basis appear in the trial and report. Other
-characters with a missing value remain unsupported until their defaults are verified.
+receives the verified native character default in memory: three for `CHARACTER.DEFECT`
+and zero for `CHARACTER.IRONCLAD`, `CHARACTER.SILENT`, `CHARACTER.REGENT`, and
+`CHARACTER.NECROBINDER`. The source file is unchanged, and the derived field and basis
+appear in the trial and report. Other characters with a missing value remain unsupported.
 
 Keep the plan, case files, snapshots, annotations, and output outside this repository.
 A plan is a JSON file such as:
@@ -558,6 +559,8 @@ and freeze the documents, requested resources, and role skill lists. Candidate-l
 snapshots use `FrozenLinks`, with the exact candidate/owned inputs and result for each
 covered assembly. Inspect queries are answered only by matching native reads in the case.
 The snapshot schemas are in `sts2_harness_eval.frozen_catalog` and `frozen_documents`.
+Use `FrozenDocuments.snapshot_json()` to save document snapshots: it preserves material
+IDs, content hashes, and bodies rather than the model-visible text-only serialization.
 
 By default, each configuration snapshots the packaged prompts before the run. To compare
 another version, set `prompt_directory` to a directory containing the corresponding

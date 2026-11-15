@@ -231,9 +231,12 @@ def choices_for(call: ToolCall, observation: native.Observation) -> tuple[str, .
         if arguments.get("choice") == "skip":
             return ("skip",)
         card = arguments.get("card")
-        if not isinstance(card, str):
+        if isinstance(card, str):
+            refs.append(card)
+        elif isinstance(card, list) and card and all(isinstance(ref, str) for ref in card):
+            refs.extend(ref for ref in card if isinstance(ref, str))
+        else:
             raise ExtractionError("The deck choice has no card reference.")
-        refs.append(card)
     elif call.name == "run_act":
         steps = arguments.get("steps")
         if not isinstance(steps, list):

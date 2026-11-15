@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import sys
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
@@ -25,6 +26,14 @@ from sts2_harness_eval.frozen_catalog import FrozenCatalog
 from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
 from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
 from sts2_harness_eval.traffic import AuditingTransport, HttpAttempt, ReceiptUsage
+
+_BASE_ORB_SLOTS = {
+    "CHARACTER.IRONCLAD": 0,
+    "CHARACTER.SILENT": 0,
+    "CHARACTER.REGENT": 0,
+    "CHARACTER.NECROBINDER": 0,
+    "CHARACTER.DEFECT": 3,
+}
 
 
 class EvaluationConfig(native.WireModel):
@@ -168,17 +177,19 @@ def _infer_old_run_player(value: JsonValue, path: str, inferred: list[InferredVa
         if (
             state.get("phase") == "run"
             and isinstance(player, dict)
-            and player.get("definition_id") == "CHARACTER.IRONCLAD"
             and "base_orb_slots" not in player
         ):
-            player["base_orb_slots"] = 0
-            inferred.append(
-                InferredValue(
-                    path=f"{path}.state.player.base_orb_slots",
-                    value=0,
-                    basis="Verified CHARACTER.IRONCLAD native default",
+            identity = player.get("definition_id")
+            slots = _BASE_ORB_SLOTS.get(identity) if isinstance(identity, str) else None
+            if slots is not None:
+                player["base_orb_slots"] = slots
+                inferred.append(
+                    InferredValue(
+                        path=f"{path}.state.player.base_orb_slots",
+                        value=slots,
+                        basis=f"Verified {identity} native default",
+                    )
                 )
-            )
     for key, item in value.items():
         _infer_old_run_player(item, f"{path}.{key}", inferred)
 
@@ -293,6 +304,11 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
     expected = estimate(plan)
     all_attempts = tuple(attempt for trial in trials for attempt in trial.attempts)
     weighted, missing_weighted, _, _ = _totals(all_attempts)
+    verdicts = Counter(
+        trial.sample.verdict if trial.sample is not None else DecisionVerdict.UNSUPPORTED
+        for trial in trials
+    )
+    passed, failed = verdicts[DecisionVerdict.PASSED], verdicts[DecisionVerdict.FAILED]
     rows = [
         "# Decision evaluation",
         "",
@@ -305,6 +321,10 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
         f"output: {_token_total(tuple(a.output_tokens for a in all_attempts))}; "
         f"cache read: {_token_total(tuple(a.cache_read_tokens for a in all_attempts))}; "
         f"cache write: {_token_total(tuple(a.cache_write_tokens for a in all_attempts))}.",
+        f"Scored: {passed + failed}; passed: {passed}; failed: {failed}. "
+        f"Unlabeled: {verdicts[DecisionVerdict.UNLABELED]}; "
+        f"unsupported: {verdicts[DecisionVerdict.UNSUPPORTED]}; "
+        f"deviated: {verdicts[DecisionVerdict.DEVIATED]}.",
         "",
         "| Case | Role | Configuration | Trial | Verdict | Choice | Reason "
         "| Input | Output | Cache read | Reasoning | Weighted |",
@@ -348,6 +368,8 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             if (
                 left.sample is None
                 or right.sample is None
+                or not left.sample.choices
+                or not right.sample.choices
                 or left.sample.choices == right.sample.choices
             ):
                 continue

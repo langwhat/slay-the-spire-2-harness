@@ -478,11 +478,25 @@ def test_report_compares_different_choices_with_both_reasons(tmp_path: Path) -> 
     )
     assert "one #1 chose take: First reason; two #1 chose skip: Second reason" in text
     assert "Unlabeled and unsupported trials are not scored" in text
+    assert "Scored: 0; passed: 0; failed: 0. Unlabeled: 2" in text
     assert estimate(plan).requests is None
     assert estimate(plan).missing_means == ("deck/high",)
 
+    failed = trial("one", "", "Unavailable")
+    assert failed.sample is not None
+    failed = failed.model_copy(
+        update={
+            "sample": failed.sample.model_copy(
+                update={"verdict": DecisionVerdict.UNSUPPORTED, "choices": ()}
+            )
+        }
+    )
+    assert "No differing choices observed." in report(
+        plan, (failed, trial("two", "skip", "Second reason"))
+    )
 
-def test_old_ironclad_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> None:
+
+def test_old_character_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> None:
     from sts2_harness_eval.stable_suite import CasePlan, prepare_case
 
     case_path = tmp_path / "case.json"
@@ -518,8 +532,113 @@ def test_old_ironclad_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> N
     assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
     assert task.observation.state.player.base_orb_slots == 0
 
+    for identity, expected in (("CHARACTER.DEFECT", 3), ("CHARACTER.SILENT", 0)):
+        player["definition_id"] = identity
+        case_path.write_text(json.dumps(original))
+        known = prepare_case(plan, tmp_path)
+        assert known.case is not None and len(known.inferred) == 1
+        assert known.inferred[0].value == expected and identity in known.inferred[0].basis
+
     player["definition_id"] = "CHARACTER.UNKNOWN"
     case_path.write_text(json.dumps(original))
     unknown = prepare_case(plan, tmp_path)
     assert unknown.case is None and not unknown.inferred
     assert unknown.error is not None and "base_orb_slots" in unknown.error
+
+
+def test_fresh_deck_scores_multiple_chosen_cards(tmp_path: Path) -> None:
+    from sts2_harness_eval.decision_cases import DecisionLabels
+
+    async def run() -> None:
+        original = decision_case(tmp_path)
+        task = original.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        assert isinstance(observation.state, native.RunState)
+        first_card = observation.objects["candidate"]
+        assert isinstance(first_card, native.CardEntry)
+        second_card = first_card.model_copy(update={"definition_id": "CARD.SECOND"})
+        offer = observation.state.offers[0].model_copy(
+            update={"contents": ("candidate", "candidate-2")}
+        )
+        updated = observation.model_copy(
+            update={
+                "state": observation.state.model_copy(update={"offers": (offer,)}),
+                "objects": {**observation.objects, "candidate-2": second_card},
+            }
+        )
+        case = original.model_copy(
+            update={
+                "events": (task.model_copy(update={"observation": updated}),),
+                "labels": DecisionLabels(
+                    good=(first_card.definition_id, "CARD.SECOND"), comment="both", multiselect=True
+                ),
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        response = reply(
+            (
+                "choice",
+                "run_deck_choice",
+                json.dumps(
+                    {
+                        "offer": "offer",
+                        "choice": "take",
+                        "card": ["candidate", "candidate-2"],
+                        "reason": "Take both.",
+                    }
+                ),
+            )
+        )
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, content=response, headers={"Content-Type": "text/event-stream"}
+                )
+            ),
+        ) as client:
+            result = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.DECK)
+        assert result.verdict is DecisionVerdict.PASSED, result.error
+        assert result.choices == (first_card.definition_id, "CARD.SECOND")
+
+    asyncio.run(run())
+
+
+def test_frozen_documents_preserve_material_identity_and_query_coverage() -> None:
+    from pydantic import ValidationError
+
+    from sts2_harness.knowledge import Document, SkillRead, SubjectId
+    from sts2_harness.material_text import MaterialText
+    from sts2_harness_eval.frozen_documents import FrozenDocuments
+
+    subject = SubjectId(category="card", definition_id="CARD.KNOWN")
+    document = Document(
+        id="doc",
+        name=MaterialText.create("name-source", "Name"),
+        text=MaterialText.create("text-source", "Known guidance"),
+        resources=(),
+        subjects=(subject,),
+    )
+    snapshot = FrozenDocuments(
+        complete_subjects=False, covered_subjects=(subject,), documents=(document,)
+    )
+    encoded = snapshot.snapshot_json()
+    restored = FrozenDocuments.model_validate_json(encoded)
+    assert restored.documents[0].text.id == "text-source"
+    assert restored.documents[0].text.version == document.text.version
+    assert restored.documents[0].text.body == "Known guidance"
+
+    async def run() -> None:
+        assert await restored.lookup((subject,)) == (document,)
+        assert (await restored.read(SkillRead("doc"))).text.body == "Known guidance"
+        with pytest.raises(SnapshotIncomplete):
+            await restored.lookup((SubjectId(category="card", definition_id="CARD.UNKNOWN"),))
+
+    asyncio.run(run())
+    corrupt = encoded.replace(document.text.version, "forged")
+    with pytest.raises(ValidationError, match="version does not match"):
+        FrozenDocuments.model_validate_json(corrupt)
