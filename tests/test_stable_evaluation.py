@@ -102,6 +102,75 @@ def test_frozen_catalog_answers_new_queries_and_preserves_unknowns() -> None:
     asyncio.run(run())
 
 
+def test_frozen_catalog_search_rejects_unverified_unicode_comparisons() -> None:
+    snapshot = FrozenCatalog.model_validate_json(
+        json.dumps(
+            {
+                "complete": True,
+                "catalog": {
+                    "categories": ["relic"],
+                    "card_filters": {"pools": [], "types": [], "rarities": [], "energy_costs": []},
+                },
+                "definitions": [
+                    {
+                        "category": "relic",
+                        "definition_id": "RELIC.ALPHA",
+                        "name": "力量 Alpha",
+                        "native": {
+                            "definition_id": "RELIC.ALPHA",
+                            "name": "力量 Alpha",
+                            "text": "获得3点力量。",
+                            "rarity": "common",
+                        },
+                    },
+                ],
+            }
+        )
+    )
+
+    async def run() -> None:
+        good = await snapshot.query(
+            native.SearchQuery(mode=native.CatalogMode.SEARCH, text="力量 alpha")
+        )
+        assert isinstance(good, native.CatalogCompleted)
+        assert isinstance(good.data, native.SearchData)
+        assert good.data.total == 1 and good.data.matches[0].definition_id == "RELIC.ALPHA"
+        for text in ("Straße", "İ", "ı", "ſ", "K", "ﬀ", "力\u001c量", "力\u3000量", "\ud800"):
+            with pytest.raises(SnapshotIncomplete):
+                await snapshot.query(native.SearchQuery(mode=native.CatalogMode.SEARCH, text=text))
+        for text in ("Straße", "İ", "ı", "ſ", "K", "ﬀ", "\ud800", "\u0378"):
+            unsafe = snapshot.model_copy(
+                update={"definitions": (snapshot.definitions[0].model_copy(update={"name": text}),)}
+            )
+            with pytest.raises(SnapshotIncomplete):
+                await unsafe.query(native.SearchQuery(mode=native.CatalogMode.SEARCH, text="力量"))
+        definition = snapshot.definitions[0]
+        unsafe_description = snapshot.model_copy(
+            update={
+                "definitions": (
+                    definition.model_copy(
+                        update={"native": definition.native.model_copy(update={"text": "Straße"})}
+                    ),
+                )
+            }
+        )
+        with pytest.raises(SnapshotIncomplete):
+            await unsafe_description.query(
+                native.SearchQuery(mode=native.CatalogMode.SEARCH, text="unrelated")
+            )
+        non_ascii_id = snapshot.model_copy(
+            update={
+                "definitions": (
+                    snapshot.definitions[0].model_copy(update={"definition_id": "RELIC.😀"}),
+                )
+            }
+        )
+        with pytest.raises(SnapshotIncomplete):
+            await non_ascii_id.query(native.SearchQuery(mode=native.CatalogMode.SEARCH))
+
+    asyncio.run(run())
+
+
 def test_fresh_decision_uses_production_task_without_old_notes_or_report(tmp_path: Path) -> None:
     async def run() -> None:
         original = decision_case(tmp_path)

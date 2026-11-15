@@ -1,6 +1,7 @@
 """Answer knowledge queries from a declared immutable native catalog snapshot."""
 
 from typing import Self
+from unicodedata import category
 
 from pydantic import MISSING, model_validator
 
@@ -61,6 +62,13 @@ class FrozenCatalog(native.WireModel):
                 ),
             )
         text = request.text if request.text is not MISSING else ""
+        if not _search_text_is_supported(text) or any(
+            not _ascii_id(entry.definition_id)
+            or not _search_text_is_supported(entry.name)
+            or not _search_text_is_supported(entry.native.text or "")
+            for entry in self.definitions
+        ):
+            raise SnapshotIncomplete("Native ordinal search cannot be established for this text.")
         terms = tuple(term.casefold() for term in text.split())
         matches = [
             entry
@@ -148,3 +156,23 @@ def _known[T](values: tuple[T, ...] | MISSING, allowed: tuple[T, ...]) -> bool:
 
 def _includes[T](values: tuple[T, ...] | MISSING, value: object) -> bool:
     return values is MISSING or value in values
+
+
+_SEARCH_PUNCTUATION = frozenset("。、，！（）“”？：～")
+
+
+def _search_text_is_supported(value: str) -> bool:
+    for character in value:
+        code = ord(character)
+        if code < 128 and not 0x1C <= code <= 0x1F:
+            continue
+        if character in _SEARCH_PUNCTUATION:
+            continue
+        if (0x3400 <= code <= 0x4DBF or 0x4E00 <= code <= 0x9FFF) and category(character) == "Lo":
+            continue
+        return False
+    return True
+
+
+def _ascii_id(value: str) -> bool:
+    return all(0x20 <= ord(character) < 0x7F for character in value)

@@ -552,6 +552,9 @@ A plan is a JSON file such as:
 
 Paths are relative to the plan. Each case uses the `DecisionCase` JSON schema in
 `sts2_harness_eval.decision_cases`, including its own labels and recorded native reads.
+Frozen catalog search supports ASCII and common Chinese ideographs and punctuation when
+all definition IDs are printable ASCII. Other search text is unknown rather than guessed,
+because native ordinal matching and ordering may differ from Python's Unicode behavior.
 Roles are `run`, `deck`, and `combat`. Omit `documents` or `candidate_links` only when
 the case did not enable that source. A catalog file uses the `FrozenCatalog` schema:
 `catalog` contains the native catalog metadata, `definitions` contains native lookup
