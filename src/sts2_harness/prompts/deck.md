@@ -9,11 +9,11 @@ Bosses decide the run. Later acts' Bosses are stronger, and the final act may re
 - Early damage: enough to end first-act fights and Elites before their damage piles up.
 - Damage to several enemies: single-target damage lowers the sum of their attacks one enemy at a time.
 - Block that keeps up with the largest hits, or prevention that scales with them, such as weakening the enemy.
-- Growth: damage per turn that keeps rising, so a high-HP Boss dies before its damage outgrows the deck's block.
+- Growth: damage per turn that keeps rising, so a high-HP Boss dies before its damage outgrows the deck's block. Damage per turn is the damage per energy of the cards played, times the energy, within the cards a turn can play; raising any of the three raises it.
 
 The fights help identify which demand is short. A late kill turn can mean the main cards arrive late because the deck is large or draws little, or they do not grow fast enough once in play. Hands that hold too little block for the hits coming can indicate a shortage of block. `fights` records turns and entering and leaving HP, including healing at battle end; it does not show hands or damage dealt. A fight that took far more turns or HP than comparable fights is evidence of a gap, not proof of its cause.
 
-When supplied knowledge describes the act's Elites and Boss or the final act's Bosses, play those fights out with the current deck, relics, and potions: which cards, on which turns, bring the enemy's HP to zero, and how much of its damage the same hands block until then. Without it, use comparable fights in `fights` to estimate the demands of a longer, harder Boss fight. When history is empty or incomparable, state what is unknown and judge from the visible card rules; do not invent exact enemy HP, damage, or kill turns. Either way the final act's Bosses need growth and block above all.
+When supplied knowledge describes the act's Elites and Boss or the final act's Bosses, play those fights out with the current deck, relics, and potions: which cards, on which turns, bring the enemy's HP to zero, and how much of its damage the same hands block until then. Without it, use comparable fights in `fights` to estimate the demands of a longer, harder Boss fight. When history is empty or incomparable, state what is unknown and judge from the visible card rules; do not invent exact enemy HP, damage, or kill turns. Either way the final act's Bosses cannot be outlasted: they need damage speed first, and block enough to survive until it lands.
 
 ## What wins fights
 
@@ -32,6 +32,8 @@ Every added card is drawn in place of the cards already owned for the rest of th
 - While hands already hold more than energy pays for, a card that costs energy is played only instead of another card; its value is the difference between the two.
 - Cards that work only when played in the same turn share a hand far less often than each is drawn, unless something holds or fetches them. A power, or a card that exhausts when played, costs its draw and energy once per fight.
 - A draw card's net gain is the cards it draws minus itself; the cards drawn still need energy. An effect that pays per card or per attack is worth the number the turn's energy pays for, and one that needs a counter to reach a threshold is worth nothing unless owned sources reach it within a fight.
+- A power returns nothing on the turn it is played. Each further power the deck must play before its damage arrives lengthens the turns spent being hit; a deck that relies on several needs block, relics, or potions to cover them.
+- Cards that enemies add during a fight take a larger share of a smaller deck, so a deck that works only while thin is fragile against them.
 - Removing a weak card, or upgrading an owned one, improves every later draw and adds no card.
 
 ## The decision
@@ -42,7 +44,7 @@ Every added card is drawn in place of the cards already owned for the rest of th
 
 The act changes what a candidate is compared with:
 
-- First act: most of the deck is basic cards, so a strong card is played instead of a basic one, and the deck must first beat this act's Elites and Boss. Take what works at once: early damage, damage to several enemies, block the fights show short, a card that an owned card triggers and that grows, or a source or payoff strong enough to carry a deck before its partners are owned. Two or three such starts can be owned at once. A further card for a demand the deck already meets is skipped.
+- First act: most of the deck is basic cards, so a strong card is played instead of a basic one, and the deck must first beat this act's Elites and Boss. Take what works at once: early damage, damage to several enemies, block the fights show short, a card that an owned card triggers and that grows, or a source or payoff strong enough to carry a deck before its partners are owned. Two or three such starts can be owned at once. Prefer cards that work the turn they are drawn over cards that pay off only after setup, and do not give up present power for a plan that needs cards not yet owned. A further card for a demand the deck already meets is skipped unless it makes the coming Elites clearly easier.
 - Later acts: draws now hold chosen cards, and each offer competes with those. Take the missing half of the core, a card that multiplies it, or a card for the demand the fights show short that outdoes what the deck has for it. A transition card taken now is drawn in place of the core for the rest of the run.
 - Final act: few fights are left in which a new card is drawn. Take a card only when it changes how the remaining Boss fights go, ahead of the cards the deck already owns; otherwise skip; removal and upgrades often do more.
 
