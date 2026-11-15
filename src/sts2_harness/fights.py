@@ -33,12 +33,14 @@ class FightHistory:
         self._identity: tuple[str, str | None] | None = None
         self._opening: native.Observation | None = None
         self._encounters: set[tuple[str, str]] = set()
+        self._encounter_names: set[str] = set()
         self._interrupted = False
         self._ambiguous = False
 
     def _reset_opening(self) -> None:
         self._opening = None
         self._encounters.clear()
+        self._encounter_names.clear()
         self._interrupted = False
         self._ambiguous = False
 
@@ -60,8 +62,10 @@ class FightHistory:
                 self._ambiguous = True
             self._interrupted = False
             encounter = observation.encounter
-            if encounter is not MISSING and encounter.definition_id is not MISSING:
-                self._encounters.add((encounter.definition_id, encounter.name))
+            if encounter is not MISSING:
+                self._encounter_names.add(encounter.name)
+                if encounter.definition_id is not MISSING:
+                    self._encounters.add((encounter.definition_id, encounter.name))
             return
         if self._opening is None:
             return
@@ -85,7 +89,7 @@ class FightHistory:
             case _:
                 kind = FightKind.NORMAL
         encounter = None
-        if len(self._encounters) == 1 and not self._ambiguous:
+        if len(self._encounters) == len(self._encounter_names) == 1 and not self._ambiguous:
             definition_id, name = next(iter(self._encounters))
             encounter = FightEncounter(definition_id=definition_id, name=name)
         self.recent = (

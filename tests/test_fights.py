@@ -150,6 +150,19 @@ def test_fight_encounter_conflicts_are_not_assigned_or_carried_to_another_fight(
     history.observe(after(27, 6))
     assert history.recent[2].encounter is None
 
+    history.observe(battle(7, 27).model_copy(update={"encounter": first}))
+    name_only = native.NamedDefinition(name="另一遭遇")
+    history.observe(battle(7, 25, 2).model_copy(update={"encounter": name_only}))
+    history.observe(after(23, 7))
+    assert history.recent[3].encounter is None
+
+    history.observe(battle(8, 23).model_copy(update={"encounter": first}))
+    same_name = native.NamedDefinition(name="守卫者")
+    history.observe(battle(8, 21, 2).model_copy(update={"encounter": same_name}))
+    history.observe(after(19, 8))
+    assert history.recent[4].encounter is not None
+    assert history.recent[4].encounter.definition_id == "ENCOUNTER.GUARDIAN"
+
 
 def test_fight_encounter_does_not_cross_an_interrupted_combat_segment() -> None:
     history = FightHistory()
