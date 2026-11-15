@@ -581,10 +581,12 @@ def test_plan_estimate_failure_usage_and_report(
     assert estimate(plan).requests == 3
     assert estimate(plan).weighted_tokens == 300
     count = 0
+    bodies: list[dict[str, JsonValue]] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
         nonlocal count
         count += 1
+        bodies.append(json.loads(request.content))
         if count == 1:
             event: dict[str, JsonValue] = {
                 "type": "response.failed",
@@ -617,11 +619,12 @@ def test_plan_estimate_failure_usage_and_report(
             plan,
             tmp_path,
             tmp_path / "results",
-            configuration(tmp_path),
+            configuration(tmp_path, LLM_REASONING_EFFORT_DECK="low"),
             concurrency=1,
             transport=lambda: httpx.MockTransport(respond),
         )
         assert len(results) == 2 and count == 2
+        assert all(body["reasoning"] == {"effort": "high"} for body in bodies)
         failed, success = results
         assert failed.attempts[0].terminal_event == "response.failed"
         assert failed.attempts[0].weighted_tokens == 162

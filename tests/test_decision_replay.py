@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import closing
 from pathlib import Path
 
 import httpx2 as httpx
@@ -11,13 +12,18 @@ from test_responses import configuration
 
 from sts2_harness.capacity import CompactionDecision, CompactionValidation
 from sts2_harness.client import models as native
+from sts2_harness.config import Configuration, Driver, ModelConfiguration
 from sts2_harness.context.models import RunActContent, TaskMessage
 from sts2_harness.deck import deck_observation
 from sts2_harness.fights import Fight, FightKind
 from sts2_harness.game import Inspect, Inspected
+from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import BaselineSnapshot, NativeSnapshot, PreparationEvidence
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ResponsesReply, TextMessage, TextRole
+from sts2_harness.model_journal import RecordedLlm
+from sts2_harness.model_purpose import ModelPurpose
+from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.results import (
     ActionCompleted,
@@ -113,6 +119,103 @@ def decision_case(tmp_path: Path, *, multiselect: bool = False) -> DecisionCase:
         recorded_choices=(card.definition_id,),
         recorded_reason="Recorded.",
     )
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    ((DecisionVariant.RUN, "low"), (DecisionVariant.DECK, "high")),
+)
+def test_replay_cli_and_journal_use_variant_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: DecisionVariant, expected: str
+) -> None:
+    bodies: list[dict[str, JsonValue]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        call = (
+            ("choice", "run_act", '{"steps":[{"kind":"select","refs":["candidate"]}]}')
+            if variant is DecisionVariant.RUN
+            else (
+                "choice",
+                "run_deck_choice",
+                '{"offer":"offer","choice":"take","card":"candidate","reason":"Useful."}',
+            )
+        )
+        return httpx.Response(
+            200,
+            content=reply(call),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    class FakeLlm(Llm):
+        def __init__(self, config: ModelConfiguration) -> None:
+            super().__init__(config, transport=httpx.MockTransport(respond))
+
+    config = configuration(
+        tmp_path,
+        LLM_REASONING_EFFORT="minimal",
+        LLM_REASONING_EFFORT_RUN="low",
+        LLM_REASONING_EFFORT_DECK="high",
+    )
+
+    def fake_configuration(*_args: object) -> Configuration:
+        return Configuration(driver=Driver.BUILTIN, model=config)
+
+    monkeypatch.setattr("sts2_harness_eval.decision_replay.Llm", FakeLlm)
+    monkeypatch.setattr(
+        "sts2_harness_eval.decision_replay.load_configuration",
+        fake_configuration,
+    )
+    case = decision_case(tmp_path, multiselect=variant is DecisionVariant.RUN)
+    case_path = tmp_path / "case.json"
+    case_path.write_text(case.model_dump_json())
+    assert (
+        main(
+            (
+                "replay",
+                "--cases",
+                str(case_path),
+                "--output",
+                str(tmp_path / "results"),
+                "--samples",
+                "1",
+                "--variant",
+                variant.value,
+            )
+        )
+        == 0
+    )
+    assert bodies[0]["reasoning"] == {"effort": expected}
+    results = json.loads((tmp_path / "results" / "results.json").read_text())
+    assert results[0]["verdict"] == "passed"
+
+    async def journal_sample() -> None:
+        manifest = Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="replay-effort",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+            initial_notes=NotesState(),
+        )
+        purpose = ModelPurpose.DECK if variant is DecisionVariant.DECK else ModelPurpose.RUN
+        with closing(Journal.create(tmp_path / "record.sqlite", manifest)) as journal:
+            async with Llm(
+                config.for_purpose(purpose), transport=httpx.MockTransport(respond)
+            ) as live:
+                client = RecordedLlm(
+                    live, journal, role=native.DecisionOwner.RUN, stream=variant.value
+                )
+                sample = await sample_case(case, client, variant=variant)
+            assert sample.verdict is DecisionVerdict.PASSED
+            records = journal.requests()
+            recorded_reply = records[0].attempts[-1].reply
+            assert recorded_reply is not None and recorded_reply.requested_effort == expected
+        assert bodies[1]["reasoning"] == {"effort": expected}
+
+    asyncio.run(journal_sample())
 
 
 def test_focused_reward_preserves_owned_state_without_other_rewards(tmp_path: Path) -> None:

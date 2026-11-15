@@ -67,6 +67,7 @@ from sts2_harness.llm.messages import (
     ToolCall,
     ToolDefinition,
 )
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PackagedPrompts, PromptReader
@@ -1012,7 +1013,8 @@ def main(argv: Sequence[str] | None = None, *, materials: EntryMaterials | None 
             async def run() -> tuple[DecisionSample, ...]:
                 assert configuration.model is not None
                 results: list[DecisionSample] = []
-                async with Llm(configuration.model) as client:
+                purpose = ModelPurpose.DECK if variant is DecisionVariant.DECK else ModelPurpose.RUN
+                async with Llm(configuration.model.for_purpose(purpose)) as client:
                     for case in cases:
                         for index in range(args.samples):
                             if not isinstance(case, DecisionCase):
