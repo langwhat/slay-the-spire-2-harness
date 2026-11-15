@@ -19,9 +19,10 @@ from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import GameIO, GameLifetimeEnded, RunEnded
 from sts2_harness.journal import Manifest
-from sts2_harness.knowledge import CandidateLinks, Documents, DocumentView
+from sts2_harness.knowledge import CandidateLinks, Documents, DocumentView, MaterialRole
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.loop import CombatFactory, DefaultFlow, RunFlow
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PromptReader
@@ -38,7 +39,7 @@ type RoleFactory = Callable[
 type FlowFactory = Callable[[Execution, ToolRecoveryBudget, Notes, RunRole, CombatFactory], RunFlow]
 
 
-type ModelFactory = Callable[[native.DecisionOwner, str], ModelClient]
+type ModelFactory = Callable[[ModelPurpose, str], ModelClient]
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +121,7 @@ class RunSession:
                 self._tools(native.DecisionOwner.RUN),
                 self.recovery,
                 prompts=self._dependencies.prompts,
-                materials=self._materials(native.DecisionOwner.RUN),
+                materials=self._materials(MaterialRole.RUN),
                 diagnostics=self._diagnostics,
                 user_input=self._user_input,
                 candidate_links=self._dependencies.candidate_links,
@@ -172,19 +173,19 @@ class RunSession:
 
     def _run_client(self) -> ModelClient:
         self._run_stream += 1
-        return self._dependencies.model(native.DecisionOwner.RUN, f"run:{self._run_stream}")
+        return self._dependencies.model(ModelPurpose.RUN, f"run:{self._run_stream}")
 
     def _deck(self, opening: native.Observation, offer: native.Offer | None) -> DeckAgent:
         self._deck_stream += 1
         stream = f"deck:{self._deck_stream}"
         return DeckAgent(
-            lambda: self._dependencies.model(native.DecisionOwner.RUN, stream),
+            lambda: self._dependencies.model(ModelPurpose.DECK, stream),
             self._tools(native.DecisionOwner.RUN, focused_deck=True),
             self.recovery,
             offer_ref=offer.ref if offer is not None else None,
             stream=stream,
             prompts=self._dependencies.prompts,
-            materials=self._materials(native.DecisionOwner.RUN, opening),
+            materials=self._materials(MaterialRole.DECK),
             candidate_links=self._dependencies.candidate_links,
             completion=self._dependencies.card_completion,
             diagnostics=self._diagnostics,
@@ -192,19 +193,23 @@ class RunSession:
         )
 
     def _materials(
-        self, role: native.DecisionOwner, opening: native.Observation | None = None
+        self, role: MaterialRole, opening: native.Observation | None = None
     ) -> MaterialReader | None:
         if not self._manifest.materials.entry_documents_enabled:
             return None
 
         async def read(observation: native.Observation) -> tuple[DocumentView, ...]:
-            if opening is not None and (
-                not isinstance(observation.state, native.CombatState)
-                or observation.location.node_id != opening.location.node_id
+            if (
+                role is MaterialRole.COMBAT
+                and opening is not None
+                and (
+                    not isinstance(observation.state, native.CombatState)
+                    or observation.location.node_id != opening.location.node_id
+                )
             ):
                 observation = opening
             configured = self._manifest.materials.battle_guidance
-            if role is native.DecisionOwner.RUN:
+            if role in (MaterialRole.RUN, MaterialRole.DECK):
                 configured = (
                     self._manifest.materials.act_guidance.get(observation.state.progress.act, ())
                     if observation.state.progress.act is not None
@@ -222,14 +227,19 @@ class RunSession:
         if self._combat_factory is not None:
             return self._combat_factory(self.execution, self.recovery, opening, notes)
         self._combat_stream += 1
+        purpose = (
+            ModelPurpose.COMBAT_ELITE_BOSS
+            if opening.state.progress.room_type in ("elite", "boss")
+            else ModelPurpose.COMBAT
+        )
         return CombatAgent(
-            self._dependencies.model(native.DecisionOwner.COMBAT, f"combat:{self._combat_stream}"),
+            self._dependencies.model(purpose, f"combat:{self._combat_stream}"),
             self._tools(native.DecisionOwner.COMBAT),
             self.recovery,
             opening_notes=notes,
             route_plan=route_plan,
             prompts=self._dependencies.prompts,
-            materials=self._materials(native.DecisionOwner.COMBAT, opening),
+            materials=self._materials(MaterialRole.COMBAT, opening),
             diagnostics=self._diagnostics,
             user_input=self._user_input,
         )

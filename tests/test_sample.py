@@ -23,6 +23,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval.sample import (
@@ -69,8 +70,8 @@ async def sample(
         ):
             host = SampleHost(budget, endpoint, journal)
 
-            def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
-                return RecordedLlm(model, journal, role=role, stream=stream)
+            def factory(role: ModelPurpose, stream: str) -> ModelClient:
+                return RecordedLlm(model, journal, role=role.owner, stream=stream)
 
             game = RecordedGame(
                 LiveGame(

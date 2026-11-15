@@ -21,6 +21,7 @@ from sts2_harness.context.models import (
     TaskMessage,
 )
 from sts2_harness.deck import CardChoiceKind, deck_observation
+from sts2_harness.fights import Fight, FightHistory
 from sts2_harness.game import Catalog, Cataloged, Inspect, Inspected, Pause, Settle, Settlement
 from sts2_harness.journal import Journal, Record
 from sts2_harness.journal_models import (
@@ -52,6 +53,7 @@ from sts2_harness.llm.messages import (
     ToolCall,
     ToolDefinition,
 )
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.results import (
     ActionCompleted,
     ActionToolResult,
@@ -70,7 +72,9 @@ from sts2_harness_eval._replay import (
     ReplayPrompts,
     ReplayRejected,
     Timeline,
+    document_view,
     prefix,
+    unsupported,
 )
 from sts2_harness_eval.decision_cases import (
     AssistantEvent,
@@ -87,7 +91,7 @@ from sts2_harness_eval.decision_cases import (
     RouteState,
     TaskEvent,
 )
-from sts2_harness_eval.results import ModelAnchor, Reached
+from sts2_harness_eval.results import ModelAnchor, Reached, UnsupportedCause
 
 
 class ExtractionError(ValueError):
@@ -274,7 +278,10 @@ def choices_for(call: ToolCall, observation: native.Observation) -> tuple[str, .
 
 
 def _state(
-    message: TaskMessage, previous: HarnessState, original: native.Observation
+    message: TaskMessage,
+    previous: HarnessState,
+    original: native.Observation,
+    originals: tuple[native.Observation, ...],
 ) -> HarnessState:
     content = message.content
     if not isinstance(content, RunActContent):
@@ -327,13 +334,56 @@ def _state(
     elif map_view is None:
         route = None
 
+    fights = previous.fights if observation.fights is MISSING else observation.fights
+    if any(fight.encounter is None and fight.floor is not None for fight in fights):
+        history = FightHistory()
+        run_identity: tuple[str, str | None] | None = None
+        nodes: dict[int, set[str | None]] = {}
+        encounters: dict[int, set[tuple[str, str]]] = {}
+        for raw in originals[: originals.index(original) + 1]:
+            current_identity = (raw.location.game_instance_id, raw.location.run_id)
+            if current_identity != run_identity:
+                run_identity = current_identity
+                nodes.clear()
+                encounters.clear()
+            history.observe(raw)
+            if isinstance(raw.state, native.CombatState) and raw.state.progress.floor is not None:
+                floor = raw.state.progress.floor
+                nodes.setdefault(floor, set()).add(raw.location.node_id)
+                encounter = raw.encounter
+                if encounter is not MISSING and encounter.definition_id is not MISSING:
+                    encounters.setdefault(floor, set()).add(
+                        (encounter.definition_id, encounter.name)
+                    )
+        enriched: list[Fight] = []
+        for fight in fights:
+            candidates = [
+                candidate
+                for candidate in history.recent
+                if candidate.model_copy(update={"encounter": None})
+                == fight.model_copy(update={"encounter": None})
+            ]
+            if (
+                fight.encounter is None
+                and fight.floor is not None
+                and sum(item.floor == fight.floor for item in fights) == 1
+                and sum(item.floor == fight.floor for item in history.recent) == 1
+                and len(nodes.get(fight.floor, ())) == 1
+                and len(encounters.get(fight.floor, ())) == 1
+                and len(candidates) == 1
+                and candidates[0].encounter is not None
+            ):
+                fight = fight.model_copy(update={"encounter": candidates[0].encounter})
+            enriched.append(fight)
+        fights = tuple(enriched)
+
     return HarnessState(
         notes=notes,
         added=added,
         skipped=skipped,
         observed_plays=plays,
         route=route,
-        fights=(previous.fights if observation.fights is MISSING else observation.fights),
+        fights=fights,
     )
 
 
@@ -393,7 +443,7 @@ def _events(
             if observation is None:
                 raise ExtractionError("A handoff-only source has no native observation.")
             observation, declined = _native_observation(observation, originals)
-            state = _state(message, state, observation)
+            state = _state(message, state, observation, originals)
             handoff = task.handoff
             previous = task.previous_battle if isinstance(task, RunActInput) else None
             events.append(
@@ -483,33 +533,51 @@ def _events(
     return tuple(events)
 
 
-class _SourceDocuments(ReplayDocuments):
+class SourceDocuments(ReplayDocuments):
     def __init__(self, timeline: Timeline, source: Documents | None) -> None:
         super().__init__(timeline)
         self.source = source
 
     async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
-        archived = await super().lookup(subjects)
-        if self.source is None:
-            return archived
-        # The archival document snapshot omits auto_roles. Recover only that metadata
-        # from the matching source package; all delivered text remains archive-bound.
-        source = {
-            (document.id, document.resource): document
-            for document in await self.source.lookup(subjects)
-        }
-        if any(
-            (document.id, document.resource) not in source
-            or source[(document.id, document.resource)].subjects != document.subjects
-            for document in archived
-        ):
-            raise ExtractionError("The source document package does not match the archive.")
-        return tuple(
-            document.model_copy(
-                update={"auto_roles": source[(document.id, document.resource)].auto_roles}
-            )
-            for document in archived
+        snapshots = await self._lookup_snapshots(subjects)
+        source = (
+            {
+                (document.id, document.resource): document
+                for document in await self.source.lookup(subjects)
+            }
+            if self.source is not None and any(item.auto_roles is MISSING for item in snapshots)
+            else {}
         )
+        archived: list[Document] = []
+        for snapshot in snapshots:
+            if snapshot.subjects is MISSING:
+                raise ExtractionError("The archived document has no subjects.")
+            roles = snapshot.auto_roles
+            if roles is MISSING:
+                if self.source is None:
+                    unsupported(self._timeline.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
+                match = source.get((snapshot.id, snapshot.resource))
+                if (
+                    match is None
+                    or match.subjects != snapshot.subjects
+                    or match.name.version != snapshot.name.version
+                    or match.text.version != snapshot.text.version
+                ):
+                    raise ExtractionError("The source document package does not match the archive.")
+                roles = match.auto_roles
+            view = document_view(snapshot)
+            archived.append(
+                Document(
+                    id=view.id,
+                    name=view.name,
+                    text=view.text,
+                    resources=view.resources,
+                    resource=view.resource,
+                    subjects=snapshot.subjects,
+                    auto_roles=roles,
+                )
+            )
+        return tuple(archived)
 
 
 def _deck_count(observation: native.Observation, identity: str) -> int:
@@ -701,13 +769,13 @@ async def extract_case(
         ) -> ModelReply:
             raise _Captured(input, tools)
 
-        def model(role: native.DecisionOwner, stream: str) -> ModelClient:
-            client = _SourceModel(timeline, role, stream, target, reached, capture)
+        def model(role: ModelPurpose, stream: str) -> ModelClient:
+            client = _SourceModel(timeline, role.owner, stream, target, reached, capture)
             client.audit = evidence
             models.append(client)
             return client
 
-        documents = _SourceDocuments(timeline, source_documents)
+        documents = SourceDocuments(timeline, source_documents)
         dependencies = SessionDependencies(
             ReplayGame(timeline),
             ReplayPrompts(timeline),

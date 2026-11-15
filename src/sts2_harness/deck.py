@@ -74,12 +74,20 @@ def deck_observation(
         action for action in state.actions if offer is not None and action.ref in offer.actions
     )
     selection = state.selection if offer is not None else adding_selection(observation)
-    if (
-        selection is not None
-        and offer is not None
-        and not set(offer.contents).issubset(selection.candidates)
-    ):
-        selection = None
+    if selection is not None and offer is not None:
+        candidates = tuple(ref for ref in selection.candidates if ref in offer.contents)
+        if not set(offer.contents).issubset(selection.candidates) or selection.min > len(
+            candidates
+        ):
+            selection = None
+        else:
+            selection = selection.model_copy(
+                update={
+                    "candidates": candidates,
+                    "selected": tuple(ref for ref in selection.selected if ref in candidates),
+                    "max": min(selection.max, len(candidates)),
+                }
+            )
     refs = set((*state.deck, *state.relics, *state.potions))
     if offer is not None:
         refs.update((offer.ref, *offer.contents))

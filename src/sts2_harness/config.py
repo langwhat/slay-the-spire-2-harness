@@ -3,7 +3,7 @@
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from io import StringIO
 from pathlib import Path
@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from dotenv.parser import parse_stream
+
+from sts2_harness.model_purpose import ModelPurpose
 
 
 class ConfigurationError(ValueError):
@@ -56,6 +58,20 @@ class ModelConfiguration:
     extra_retries: int
     context_window: int = 300_000
     capacity_verified_endpoint: str = field(default="", repr=False)
+    reasoning_effort_run: str = field(default="", repr=False)
+    reasoning_effort_deck: str = field(default="", repr=False)
+    reasoning_effort_combat: str = field(default="", repr=False)
+    reasoning_effort_combat_elite_boss: str = field(default="", repr=False)
+
+    def for_purpose(self, purpose: ModelPurpose) -> "ModelConfiguration":
+        combat = self.reasoning_effort_combat or self.reasoning_effort
+        effort = {
+            ModelPurpose.RUN: self.reasoning_effort_run or self.reasoning_effort,
+            ModelPurpose.DECK: self.reasoning_effort_deck or self.reasoning_effort,
+            ModelPurpose.COMBAT: combat,
+            ModelPurpose.COMBAT_ELITE_BOSS: self.reasoning_effort_combat_elite_boss or combat,
+        }[purpose]
+        return replace(self, reasoning_effort=effort)
 
 
 @dataclass(frozen=True)
@@ -73,6 +89,10 @@ _KEYS = frozenset(
         "MODEL",
         "BASE_URL",
         "REASONING_EFFORT",
+        "REASONING_EFFORT_RUN",
+        "REASONING_EFFORT_DECK",
+        "REASONING_EFFORT_COMBAT",
+        "REASONING_EFFORT_COMBAT_ELITE_BOSS",
         "SERVICE_TIER",
         "AUTH",
         "API_KEY",
@@ -228,6 +248,10 @@ def load_configuration(
             retries,
             context_window,
             get("CAPACITY_VERIFIED_ENDPOINT"),
+            get("REASONING_EFFORT_RUN"),
+            get("REASONING_EFFORT_DECK"),
+            get("REASONING_EFFORT_COMBAT"),
+            get("REASONING_EFFORT_COMBAT_ELITE_BOSS"),
         ),
         user_input,
         minimal,

@@ -15,6 +15,7 @@ from sts2_harness.knowledge import (
     CandidateLinks,
     Documents,
     DocumentView,
+    MaterialRole,
     SkillRead,
     SubjectId,
     UnknownDocument,
@@ -39,19 +40,20 @@ class EntryMaterials:
 async def entry_materials(
     execution: Execution,
     documents: Documents,
-    role: native.DecisionOwner,
+    role: MaterialRole,
     observation: native.Observation,
     configured: tuple[str, ...],
 ) -> tuple[DocumentView, ...]:
     """Select configured guidance and documents for current public identities."""
     selected: dict[str, DocumentView] = {}
     try:
-        for identity in configured:
-            view = await documents.read(SkillRead(identity))
-            selected[view.id] = view
+        if role is not MaterialRole.DECK:
+            for identity in configured:
+                view = await documents.read(SkillRead(identity))
+                selected[view.id] = view
         subjects: list[SubjectId] = []
         progress = observation.state.progress
-        if role is native.DecisionOwner.RUN:
+        if role in (MaterialRole.RUN, MaterialRole.DECK):
             subjects.append(
                 SubjectId(
                     category=native.NativeCategory.CHARACTER,
@@ -72,9 +74,15 @@ async def entry_materials(
                     or current.state.phase is native.Phase.TERMINAL
                 ):
                     raise GameLifetimeEnded(current.location)
-                if current.state.progress.act != progress.act:
+                if (
+                    current.state.progress.act != progress.act
+                    or current.location.owner is not observation.location.owner
+                    or current.state.phase is not observation.state.phase
+                ):
                     raise DecisionInterrupted(
-                        Reason(code=ReasonCode.ROLE_CHANGED, message="The current act changed."),
+                        Reason(
+                            code=ReasonCode.ROLE_CHANGED, message="The current role or act changed."
+                        ),
                         False,
                     )
                 if not isinstance(result.data, native.MapData):
@@ -87,15 +95,46 @@ async def entry_materials(
                 for boss in map_.bosses
                 if isinstance(boss.definition_id, str)
             )
-            subjects.extend(
-                SubjectId(category=native.NativeCategory.CARD, definition_id=entry.definition_id)
-                for entry in observation.objects.values()
-                if isinstance(entry, native.CardEntry)
-            )
+            if role is MaterialRole.RUN:
+                subjects.extend(
+                    SubjectId(
+                        category=native.NativeCategory.CARD, definition_id=entry.definition_id
+                    )
+                    for entry in observation.objects.values()
+                    if isinstance(entry, native.CardEntry)
+                )
+            elif isinstance(observation.state, native.RunState):
+                state = observation.state
+                refs = [*state.deck, *state.relics, *state.potions]
+                refs.extend(ref for offer in state.offers for ref in offer.contents)
+                if state.selection is not None:
+                    refs.extend(state.selection.candidates)
+                for ref in dict.fromkeys(refs):
+                    entry = observation.objects.get(ref)
+                    if entry is None:
+                        raise MaterialUnavailable(
+                            f"Current object {ref!r} is unavailable for guidance."
+                        )
+                    if isinstance(entry, native.CardEntry):
+                        category = native.NativeCategory.CARD
+                    elif isinstance(entry, native.RelicEntry):
+                        category = native.NativeCategory.RELIC
+                    elif isinstance(entry, native.PotionEntry):
+                        category = native.NativeCategory.POTION
+                    else:
+                        continue
+                    subjects.append(SubjectId(category=category, definition_id=entry.definition_id))
         elif isinstance(observation.state, native.CombatState):
-            subjects.extend(combat_subjects(observation, role))
+            subjects.extend(combat_subjects(observation, native.DecisionOwner.COMBAT))
         unique = {(subject.category, subject.definition_id): subject for subject in subjects}
         matches = await documents.lookup(tuple(unique.values()))
+        if role is MaterialRole.DECK:
+            for identity in configured:
+                match = next(
+                    (doc for doc in matches if doc.id == identity and role in doc.auto_roles), None
+                )
+                if match is not None:
+                    selected[match.id] = match.view()
         for document in matches:
             if role not in document.auto_roles:
                 continue

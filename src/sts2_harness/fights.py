@@ -13,9 +13,15 @@ class FightKind(StrEnum):
     BOSS = "boss"
 
 
+class FightEncounter(native.WireModel):
+    definition_id: str
+    name: str
+
+
 class Fight(native.WireModel):
     floor: int | None
     kind: FightKind
+    encounter: FightEncounter | None = None
     turns: int | None
     hp_in: int
     hp_out: int
@@ -60,11 +66,18 @@ class FightHistory:
                 kind = FightKind.BOSS
             case _:
                 kind = FightKind.NORMAL
+        encounter = self._opening.encounter
+        identity = (
+            FightEncounter(definition_id=encounter.definition_id, name=encounter.name)
+            if encounter is not MISSING and encounter.definition_id is not MISSING
+            else None
+        )
         self.recent = (
             *self.recent,
             Fight(
                 floor=opening.progress.floor,
                 kind=kind,
+                encounter=identity,
                 turns=None if state.battle_turns is MISSING else state.battle_turns,
                 hp_in=opening.player.hp,
                 hp_out=state.player.hp,

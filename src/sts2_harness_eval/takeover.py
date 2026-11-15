@@ -58,6 +58,7 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.native_template import TemplateError
 from sts2_harness.prompts import PromptReader
 from sts2_harness.results import Reason
@@ -563,7 +564,7 @@ class _Takeover:
         )
         historical_models: list[ReplayModel] = []
 
-        def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
+        def factory(role: ModelPurpose, stream: str) -> ModelClient:
             async def continue_live(
                 input: ModelInput,
                 tools: tuple[ToolDefinition, ...],
@@ -585,7 +586,7 @@ class _Takeover:
                 return await client.complete_prepared(prepared, preparation=preparation)
 
             historical = ReplayModel(
-                timeline, role, stream, self.case.source.anchor, reached, continue_live
+                timeline, role.owner, stream, self.case.source.anchor, reached, continue_live
             )
             historical_models.append(historical)
 
@@ -725,8 +726,10 @@ class _Takeover:
                     TargetIdentity(plan.target.location, location, loaded.refs),
                 )
 
-                def live_model(role: native.DecisionOwner, stream: str) -> ModelClient:
-                    return RecordedLlm(self.model, journal, role=role, stream=stream)
+                def live_model(role: ModelPurpose, stream: str) -> ModelClient:
+                    return RecordedLlm(
+                        self.model.for_purpose(role), journal, role=role.owner, stream=stream
+                    )
 
                 live = SessionDependencies(
                     host.game(RecordedGame(game, journal)),

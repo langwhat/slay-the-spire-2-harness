@@ -16,7 +16,7 @@ from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
-from sts2_harness.knowledge import DocumentView, SkillRead, SkillSummary, SubjectId
+from sts2_harness.knowledge import DocumentView, MaterialRole, SkillRead, SkillSummary, SubjectId
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.materials import DocumentSource, FileDocuments
@@ -117,7 +117,7 @@ def test_combat_guidance_uses_current_public_objects_without_skill_navigation(
             "Non-combat rules",
             run_only,
             subjects=(SubjectId(category="encounter", definition_id="ENCOUNTER.TEST"),),
-            auto_roles=(native.DecisionOwner.RUN,),
+            auto_roles=(MaterialRole.RUN,),
         )
     )
 
@@ -133,7 +133,7 @@ def test_combat_guidance_uses_current_public_objects_without_skill_navigation(
             )
             documents = ObjectDocuments(tuple(sources))
             found = await entry_materials(
-                execution, documents, native.DecisionOwner.COMBAT, observation, ()
+                execution, documents, MaterialRole.COMBAT, observation, ()
             )
             assert tuple(document.id for document in found) == expected
             assert (await documents.read(SkillRead("run-only"))).text.body == run_only.read_text()
@@ -149,7 +149,7 @@ def test_combat_guidance_uses_current_public_objects_without_skill_navigation(
             assert tuple(
                 document.id
                 for document in await entry_materials(
-                    execution, documents, native.DecisionOwner.RUN, run, ()
+                    execution, documents, MaterialRole.RUN, run, ()
                 )
             ) == ("ENCOUNTER.BOSS",)
             incomplete = observation.model_copy(
@@ -160,9 +160,7 @@ def test_combat_guidance_uses_current_public_objects_without_skill_navigation(
                 }
             )
             with pytest.raises(MaterialUnavailable, match="Current object 'hand' is unavailable"):
-                await entry_materials(
-                    execution, documents, native.DecisionOwner.COMBAT, incomplete, ()
-                )
+                await entry_materials(execution, documents, MaterialRole.COMBAT, incomplete, ())
 
     asyncio.run(scenario())
 
@@ -260,7 +258,7 @@ def test_combat_appends_new_or_changed_knowledge_before_the_next_request(tmp_pat
 
             async def materials(observation: native.Observation) -> tuple[DocumentView, ...]:
                 return await entry_materials(
-                    execution, documents, native.DecisionOwner.COMBAT, observation, ()
+                    execution, documents, MaterialRole.COMBAT, observation, ()
                 )
 
             task = ActTask(native.RouteKey.model_validate(opening.location.model_dump()))

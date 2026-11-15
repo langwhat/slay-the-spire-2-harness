@@ -65,11 +65,17 @@ class SubjectId(native.WireModel):
     definition_id: native.Nonempty
 
 
+class MaterialRole(StrEnum):
+    RUN = "run"
+    DECK = "deck"
+    COMBAT = "combat"
+
+
 class Document(DocumentView):
     subjects: tuple[SubjectId, ...]
-    auto_roles: tuple[native.DecisionOwner, ...] = (
-        native.DecisionOwner.RUN,
-        native.DecisionOwner.COMBAT,
+    auto_roles: tuple[MaterialRole, ...] = (
+        MaterialRole.RUN,
+        MaterialRole.COMBAT,
     )
 
     def view(self) -> DocumentView:

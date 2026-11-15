@@ -29,6 +29,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
@@ -64,8 +65,8 @@ async def record_campaign(
         Llm(configuration(path.parent), transport=httpx.MockTransport(campaign.model)) as model,
     ):
 
-        def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
-            return RecordedLlm(model, journal, role=role, stream=stream)
+        def factory(role: ModelPurpose, stream: str) -> ModelClient:
+            return RecordedLlm(model, journal, role=role.owner, stream=stream)
 
         dependencies = SessionDependencies(
             RecordedGame(
@@ -397,5 +398,72 @@ def test_reach_rejects_missing_prefix_and_unknown_writes(tmp_path: Path) -> None
                 first_settle.sequence,
                 Unsupported(UnsupportedCause.UNKNOWN_WRITE),
             )
+
+    asyncio.run(scenario())
+
+
+def test_document_audience_round_trips_or_requires_matching_historical_source(
+    tmp_path: Path,
+) -> None:
+    import pytest
+    from pydantic import MISSING
+
+    from sts2_harness.journal_models import DocumentLookup, DocumentLookupResult, DocumentSnapshot
+    from sts2_harness.knowledge import MaterialRole, SubjectId
+    from sts2_harness.materials import DocumentSource
+    from sts2_harness_eval._replay import ReplayDocuments, ReplayRejected, Timeline
+    from sts2_harness_eval.decision_extract import ExtractionError, SourceDocuments
+
+    path = tmp_path / "card.txt"
+    path.write_text("Recorded card rules.")
+    subject = SubjectId(category="card", definition_id="CARD.TEST")
+    source = FileDocuments(
+        (
+            DocumentSource(
+                "card",
+                "Card",
+                "Rules",
+                path,
+                subjects=(subject,),
+                auto_roles=(MaterialRole.RUN,),
+            ),
+        )
+    )
+
+    async def scenario() -> None:
+        original = (await source.lookup((subject,)))[0]
+        manifest = Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=True, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="audience",
+            core_version="test",
+            game_instance_id="game",
+            run_id="run",
+            initial_notes="",
+        )
+        archive = tmp_path / "audience.sqlite"
+        journal = Journal.create(archive, manifest)
+        for snapshot in (
+            DocumentSnapshot.of(original),
+            DocumentSnapshot.of(original).model_copy(update={"auto_roles": MISSING}),
+        ):
+            sequence = journal.begin_material(DocumentLookup(subjects=(subject,)))
+            journal.finish_material(sequence, DocumentLookupResult(documents=(snapshot,)))
+        journal.close()
+        with closing(Journal.open(archive)) as saved:
+            new, old = saved.materials()
+            replayed = await ReplayDocuments(Timeline((new,))).lookup((subject,))
+            assert replayed[0].auto_roles == (MaterialRole.RUN,)
+            with pytest.raises(ReplayRejected):
+                await ReplayDocuments(Timeline((old,))).lookup((subject,))
+            with pytest.raises(ReplayRejected):
+                await SourceDocuments(Timeline((old,)), None).lookup((subject,))
+            recovered = await SourceDocuments(Timeline((old,)), source).lookup((subject,))
+            assert recovered[0].auto_roles == (MaterialRole.RUN,)
+            assert recovered[0].text.body == "Recorded card rules."
+            path.write_text("Different rules.")
+            with pytest.raises(ExtractionError, match="does not match"):
+                await SourceDocuments(Timeline((old,)), source).lookup((subject,))
 
     asyncio.run(scenario())

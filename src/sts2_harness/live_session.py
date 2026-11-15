@@ -6,7 +6,6 @@ from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 
 from sts2_harness.client import ModClient
-from sts2_harness.client import models as native
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.game import LiveGame
 from sts2_harness.journal import ArchiveError, Journal, Manifest, RecordedGame
@@ -20,6 +19,7 @@ from sts2_harness.model_journal import (
     RecordedLlm,
     RecordedPrompts,
 )
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import (
     FlowFactory,
@@ -58,8 +58,11 @@ async def live_session(
         raise ValueError("Configured guidance requires a document provider.")
     async with AsyncExitStack() as resources:
         await resources.enter_async_context(client)
+        models: dict[ModelPurpose, Llm] = {}
         if model is not None:
             await resources.enter_async_context(model)
+            for purpose in ModelPurpose:
+                models[purpose] = model.for_purpose(purpose)
         journal = Journal.create(archive_path, manifest, diagnostics=diagnostics)
 
         def close_recording() -> None:
@@ -83,10 +86,10 @@ async def live_session(
             journal,
         )
 
-        def model_client(role: native.DecisionOwner, stream: str) -> ModelClient:
+        def model_client(purpose: ModelPurpose, stream: str) -> ModelClient:
             if model is None:
                 raise ValueError("Default model roles require a model resource.")
-            return RecordedLlm(model, journal, role=role, stream=stream)
+            return RecordedLlm(models[purpose], journal, role=purpose.owner, stream=stream)
 
         dependencies = SessionDependencies(
             game,

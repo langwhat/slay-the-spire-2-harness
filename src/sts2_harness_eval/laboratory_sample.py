@@ -30,6 +30,7 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import InitialNotes
 from sts2_harness.prompts import PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
@@ -122,13 +123,11 @@ class _Sample:
         self.operator_stopped = self.operator_stopped or self._stop_requested()
         return self.operator_stopped or self.host.stop_requested()
 
-    def models(
-        self, model: Llm, journal: Journal
-    ) -> Callable[[native.DecisionOwner, str], ModelClient]:
+    def models(self, model: Llm, journal: Journal) -> Callable[[ModelPurpose, str], ModelClient]:
         sample = self
 
-        def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
-            recorded = RecordedLlm(model, journal, role=role, stream=stream)
+        def factory(role: ModelPurpose, stream: str) -> ModelClient:
+            recorded = RecordedLlm(model.for_purpose(role), journal, role=role.owner, stream=stream)
 
             class Model:
                 @property
@@ -145,7 +144,7 @@ class _Sample:
 
                 def _check_first(self) -> None:
                     if sample._first_request:
-                        if role is not native.DecisionOwner.COMBAT:
+                        if role.owner is not native.DecisionOwner.COMBAT:
                             raise ArchiveError("A laboratory sample must begin with Combat.")
                         sample._first_request = False
 

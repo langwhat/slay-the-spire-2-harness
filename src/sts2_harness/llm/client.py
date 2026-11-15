@@ -35,6 +35,7 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.llm.openai_boundary import capacity_signal, classify_error
 from sts2_harness.llm.responses import ResponsesAdapter
+from sts2_harness.model_purpose import ModelPurpose
 
 
 class Llm:
@@ -55,7 +56,20 @@ class Llm:
             case Protocol.MESSAGES:
                 self._adapter = MessagesAdapter(configuration, transport)
         self._configuration = configuration
+        self._transport = transport
         self._sleep = sleep
+        self._purpose_clients: dict[str, Llm] = {}
+
+    def for_purpose(self, purpose: ModelPurpose) -> "Llm":
+        configuration = self._configuration.for_purpose(purpose)
+        effort = configuration.reasoning_effort
+        if effort == self._configuration.reasoning_effort:
+            return self
+        if effort not in self._purpose_clients:
+            self._purpose_clients[effort] = Llm(
+                configuration, transport=self._transport, sleep=self._sleep
+            )
+        return self._purpose_clients[effort]
 
     @staticmethod
     def validate_configuration(configuration: ModelConfiguration) -> None:
@@ -85,6 +99,8 @@ class Llm:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        for client in self._purpose_clients.values():
+            await client.__aexit__(exc_type, exc_value, traceback)
         await self._adapter.close()
 
     def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:

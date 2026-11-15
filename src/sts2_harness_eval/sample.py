@@ -30,6 +30,7 @@ from sts2_harness.llm.messages import (
     RequestPreparation,
     ToolDefinition,
 )
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.results import Reason
 from sts2_harness.session import ModelFactory, RunSession
 from sts2_harness_eval.results import Rejected
@@ -221,7 +222,7 @@ class SampleHost:
     def models(self, recorded: ModelFactory) -> ModelFactory:
         host = self
 
-        def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
+        def factory(role: ModelPurpose, stream: str) -> ModelClient:
             client = recorded(role, stream)
 
             class Model:

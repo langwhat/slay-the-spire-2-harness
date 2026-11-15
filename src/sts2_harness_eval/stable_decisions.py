@@ -20,7 +20,7 @@ from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.fights import FightHistory
 from sts2_harness.game import Cataloged, GameReply, Inspect, Inspected
-from sts2_harness.knowledge import DocumentView
+from sts2_harness.knowledge import DocumentView, MaterialRole
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
     CapacityRejected,
@@ -446,16 +446,13 @@ async def sample_fresh(
         execution = Execution(
             game, game_instance_id=observation.location.game_instance_id, run_id=run_id
         )
-        supplied = (
-            await entry_materials(
-                execution, documents, owner, observation, case.configured_guidance
-            )
-            if documents is not None and case.entry_documents_enabled
-            else ()
-        )
 
         async def materials(current: native.Observation) -> tuple[DocumentView, ...]:
-            return supplied
+            if documents is None or not case.entry_documents_enabled:
+                return ()
+            return await entry_materials(
+                execution, documents, MaterialRole(role.value), current, case.configured_guidance
+            )
 
         fights = FightHistory()
         fights.recent = task_event.state.fights

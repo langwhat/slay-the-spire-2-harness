@@ -86,6 +86,7 @@ def completed() -> bytes:
                     "usage": {
                         "input_tokens": 12000,
                         "output_tokens": 20,
+                        "output_tokens_details": {"reasoning_tokens": 13},
                         "total_tokens": 12020,
                         "input_tokens_details": {"cached_tokens": 4000, "cache_write_tokens": 7000},
                     },
@@ -190,6 +191,17 @@ def test_complete_and_continue_native_reply_once(tmp_path: Path) -> None:
             assert reply.assistant.text == "Checking."
             assert reply.assistant.tool_calls[0].id == "call_1"
             assert reply.usage.cache_hit_ratio == 1 / 3
+            assert reply.usage.output_tokens == 20
+            assert reply.usage.reasoning_tokens == 13
+            from sts2_harness.journal_models import ReplySnapshot
+
+            snapshot = ReplySnapshot.of(reply)
+            assert (
+                ReplySnapshot.model_validate_json(snapshot.model_dump_json()).reasoning_tokens == 13
+            )
+            old = json.loads(snapshot.model_dump_json())
+            del old["reasoning_tokens"]
+            assert ReplySnapshot.model_validate_json(json.dumps(old)).reasoning_tokens is None
             assert reply.metadata.requested_model == "requested-model"
             assert reply.metadata.response_model == "reported-model"
             retained = reply.assistant.native.to_json()

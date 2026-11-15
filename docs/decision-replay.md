@@ -60,15 +60,20 @@ from sts2_harness_eval.decision_extract import ExtractionAudit, extract_case
 from private_package.entry import entry_materials
 
 audit = ExtractionAudit()
-case = asyncio.run(extract_case(
-    DecisionSource(
-        round="source-round", seed="source-seed", floor=1,
-        model_sequence=123, archive=Path("/private/source.sqlite"),
-    ),
-    DecisionLabels(good=("CARD.EXAMPLE",), bad=(), comment="User judgment"),
-    source_documents=entry_materials().documents(MaterialContext(10)),
-    audit=audit,
-))
+case = asyncio.run(
+    extract_case(
+        DecisionSource(
+            round="source-round",
+            seed="source-seed",
+            floor=1,
+            model_sequence=123,
+            archive=Path("/private/source.sqlite"),
+        ),
+        DecisionLabels(good=("CARD.EXAMPLE",), bad=(), comment="User judgment"),
+        source_documents=entry_materials().documents(MaterialContext(10)),
+        audit=audit,
+    )
+)
 Path("/private/cases/example.json").write_text(case.model_dump_json(indent=2))
 ```
 

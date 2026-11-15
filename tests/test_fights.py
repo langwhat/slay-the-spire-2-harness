@@ -77,7 +77,44 @@ def test_fights_survive_context_replacement_and_stay_in_dynamic_run_observations
             delivered = json.loads(context.model_input()[-1].text)["observation"]
             assert delivered["fights"] == [fight.model_dump() for fight in history.recent]
             encoded = json.dumps({"fights": delivered["fights"]}, separators=(",", ":"))
-            assert len(encoded) <= 400
+            assert len(encoded) <= 500
         empty = Context(native.DecisionOwner.RUN, minimal=minimal)
         empty.append_task(RunActInput(), after(80))
         assert "fights" not in empty.model_input()[-1].text
+
+
+def test_fight_encounter_comes_from_opening_observation() -> None:
+    history = FightHistory()
+    opening = battle(4, 50).model_copy(
+        update={
+            "encounter": native.NamedDefinition(name="守卫者", definition_id="ENCOUNTER.GUARDIAN")
+        }
+    )
+    history.observe(opening)
+    history.observe(battle(4, 40))
+    history.observe(after(37, 4))
+    assert history.recent[0].model_dump() == {
+        "floor": 4,
+        "kind": "elite",
+        "encounter": {"definition_id": "ENCOUNTER.GUARDIAN", "name": "守卫者"},
+        "turns": 4,
+        "hp_in": 50,
+        "hp_out": 37,
+    }
+    context = Context(native.DecisionOwner.RUN)
+    context.set_fights(history.recent)
+    context.append_task(RunActInput(), after(37, 4))
+    delivered = context.model_input()[-1].text
+    assert list(json.loads(delivered)["observation"]["fights"][0]) == [
+        "floor",
+        "kind",
+        "encounter",
+        "turns",
+        "hp_in",
+        "hp_out",
+    ]
+    history.observe(
+        battle(5, 37).model_copy(update={"encounter": native.NamedDefinition(name="未知")})
+    )
+    history.observe(after(31, 5))
+    assert history.recent[1].encounter is None

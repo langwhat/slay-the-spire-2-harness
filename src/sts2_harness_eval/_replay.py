@@ -96,6 +96,7 @@ from sts2_harness.llm.messages import (
     Usage,
 )
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.results import Reason
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval.results import (
@@ -383,7 +384,7 @@ def _text(snapshot: MaterialSnapshot) -> MaterialText:
     return MaterialText(id=snapshot.id, version=snapshot.version, body=snapshot.body)
 
 
-def _document(snapshot: DocumentSnapshot) -> DocumentView:
+def document_view(snapshot: DocumentSnapshot) -> DocumentView:
     return DocumentView(
         id=snapshot.id,
         name=_text(snapshot.name),
@@ -444,19 +445,24 @@ class ReplayDocuments:
             raise MaterialUnavailable(reply.message)
         if not isinstance(reply, DocumentReadResult):
             _different(self._timeline.sequence, InputComponent.REQUEST)
-        return _document(reply.document)
+        return document_view(reply.document)
 
-    async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
+    async def _lookup_snapshots(
+        self, subjects: tuple[SubjectId, ...]
+    ) -> tuple[DocumentSnapshot, ...]:
         reply = self._timeline.material(DocumentLookup(subjects=subjects))
         if isinstance(reply, MaterialFailed):
             raise MaterialUnavailable(reply.message)
         if not isinstance(reply, DocumentLookupResult):
             _different(self._timeline.sequence, InputComponent.REQUEST)
+        return reply.documents
+
+    async def lookup(self, subjects: tuple[SubjectId, ...]) -> tuple[Document, ...]:
         documents: list[Document] = []
-        for snapshot in reply.documents:
-            if snapshot.subjects is MISSING:
+        for snapshot in await self._lookup_snapshots(subjects):
+            if snapshot.subjects is MISSING or snapshot.auto_roles is MISSING:
                 unsupported(self._timeline.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
-            view = _document(snapshot)
+            view = document_view(snapshot)
             documents.append(
                 Document(
                     id=view.id,
@@ -465,6 +471,7 @@ class ReplayDocuments:
                     resources=view.resources,
                     resource=view.resource,
                     subjects=snapshot.subjects,
+                    auto_roles=snapshot.auto_roles,
                 )
             )
         return tuple(documents)
@@ -751,6 +758,7 @@ class ReplayModel:
                 reply.output_tokens,
                 reply.cache_read_tokens,
                 reply.cache_write_tokens,
+                reply.reasoning_tokens,
             ),
             ModelMetadata(
                 reply.requested_model,
@@ -766,8 +774,8 @@ async def _run(
 ) -> None:
     models: list[ReplayModel] = []
 
-    def model(role: native.DecisionOwner, stream: str) -> ModelClient:
-        historical = ReplayModel(timeline, role, stream, target, reached)
+    def model(role: ModelPurpose, stream: str) -> ModelClient:
+        historical = ReplayModel(timeline, role.owner, stream, target, reached)
         models.append(historical)
 
         class Model:

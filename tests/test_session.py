@@ -14,6 +14,7 @@ from sts2_harness.journal import Manifest, SessionMaterials
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
@@ -82,7 +83,7 @@ def test_session_preserves_notes_when_query_observes_ended_lifetime(
 
 def test_session_runs_injected_dependencies_without_closing_them(tmp_path: Path) -> None:
     campaign = Campaign()
-    streams: list[tuple[native.DecisionOwner, str]] = []
+    streams: list[tuple[ModelPurpose, str]] = []
 
     game_transport = ClosingTransport(campaign.mod)
     model_transport = ClosingTransport(campaign.model)
@@ -100,7 +101,7 @@ def test_session_runs_injected_dependencies_without_closing_them(tmp_path: Path)
                 wait_for_start=True,
             )
 
-            def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
+            def factory(role: ModelPurpose, stream: str) -> ModelClient:
                 streams.append((role, stream))
                 return model
 
@@ -128,10 +129,10 @@ def test_session_runs_injected_dependencies_without_closing_them(tmp_path: Path)
     asyncio.run(scenario())
     assert game_transport.closed and model_transport.closed
     assert streams == [
-        (native.DecisionOwner.RUN, "run:1"),
-        (native.DecisionOwner.COMBAT, "combat:1"),
-        (native.DecisionOwner.RUN, "run:2"),
-        (native.DecisionOwner.COMBAT, "combat:2"),
+        (ModelPurpose.RUN, "run:1"),
+        (ModelPurpose.COMBAT, "combat:1"),
+        (ModelPurpose.RUN, "run:2"),
+        (ModelPurpose.COMBAT, "combat:2"),
     ]
     assert len(campaign.actions) == 5
 
@@ -184,5 +185,123 @@ def test_live_resources_close_when_session_entry_fails(tmp_path: Path) -> None:
         assert archive.manifest.recording_id == "entry-failed"
         assert archive.operations() == ()
         archive.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("first_room,expected", [("monster", "high"), ("elite", "max")])
+def test_effort_is_fixed_by_combat_opening_and_recorded(
+    tmp_path: Path, first_room: str, expected: str
+) -> None:
+    import json
+    from contextlib import closing
+
+    from sts2_harness.journal import Journal
+    from sts2_harness.live_session import live_session
+
+    campaign = Campaign()
+    for index, room in ((1, first_room), (4, "boss")):
+        observation = campaign.states[index]
+        campaign.states[index] = observation.model_copy(
+            update={
+                "state": observation.state.model_copy(
+                    update={
+                        "progress": observation.state.progress.model_copy(
+                            update={"room_type": room}
+                        )
+                    }
+                )
+            }
+        )
+    inspected = False
+    switched = False
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        nonlocal switched
+        if inspected and not switched and campaign.index == 1 and request.url.path == "/state":
+            observation = campaign.states[1]
+            campaign.states[1] = observation.model_copy(
+                update={
+                    "state": observation.state.model_copy(
+                        update={
+                            "progress": observation.state.progress.model_copy(
+                                update={"room_type": "boss"}
+                            )
+                        }
+                    )
+                }
+            )
+            switched = True
+        return campaign.mod(request)
+
+    def model(request: httpx.Request) -> httpx.Response:
+        nonlocal inspected
+        if campaign.index == 1 and not inspected:
+            inspected = True
+            campaign.inputs.append(json.loads(request.content))
+            content = reply(("inspect", "combat_inspect", '{"area":"state"}'))
+        else:
+            content = campaign.model(request).content
+        event = json.loads(content.decode().removeprefix("data: "))
+        event["response"]["usage"] = {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "output_tokens_details": {"reasoning_tokens": 13},
+        }
+        return httpx.Response(
+            200,
+            content=("data: " + json.dumps(event) + "\n\n").encode(),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    async def scenario() -> None:
+        archive = tmp_path / "effort.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="effort",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+            ),
+            archive,
+            model=Llm(
+                configuration(
+                    tmp_path,
+                    LLM_REASONING_EFFORT="minimal",
+                    LLM_REASONING_EFFORT_RUN="low",
+                    LLM_REASONING_EFFORT_COMBAT="high",
+                    LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS="max",
+                ),
+                transport=httpx.MockTransport(model),
+            ),
+        ) as session:
+            await session.run()
+        with closing(Journal.open(archive)) as journal:
+            records = journal.requests()
+            assert switched
+            for record in records:
+                effort = (
+                    expected
+                    if record.stream == "combat:1"
+                    else "max"
+                    if record.stream == "combat:2"
+                    else "low"
+                )
+                response = record.attempts[-1].reply
+                assert response is not None
+                assert response.requested_effort == effort
+                assert response.reasoning_tokens == 13 and response.output_tokens == 20
+            reasoning = [body["reasoning"] for body in campaign.inputs]
+            assert all(isinstance(item, dict) for item in reasoning)
+            assert [item["effort"] for item in reasoning if isinstance(item, dict)] == [
+                record.attempts[-1].reply.requested_effort
+                for record in records
+                if record.attempts[-1].reply is not None
+            ]
 
     asyncio.run(scenario())

@@ -121,3 +121,31 @@ def test_headless_rejects_missing_launch_inputs_without_creating_an_instance(
     assert result.returncode == 2
     assert "Headless startup requires --game and --template." in result.stderr
     assert not (tmp_path / "runs").exists()
+
+
+def test_reasoning_effort_inherits_per_purpose(tmp_path: Path) -> None:
+    from sts2_harness.model_purpose import ModelPurpose
+
+    config = load_configuration(
+        tmp_path / "absent",
+        {},
+        {
+            "LLM_MODEL": "model",
+            "LLM_AUTH": "none",
+            "LLM_REASONING_EFFORT": "low",
+            "LLM_REASONING_EFFORT_DECK": "medium",
+            "LLM_REASONING_EFFORT_COMBAT": "high",
+        },
+    ).model
+    assert config is not None
+    assert config.for_purpose(ModelPurpose.RUN).reasoning_effort == "low"
+    assert config.for_purpose(ModelPurpose.DECK).reasoning_effort == "medium"
+    assert config.for_purpose(ModelPurpose.COMBAT).reasoning_effort == "high"
+    assert config.for_purpose(ModelPurpose.COMBAT_ELITE_BOSS).reasoning_effort == "high"
+    fallback = load_configuration(
+        tmp_path / "absent",
+        {},
+        {"LLM_MODEL": "model", "LLM_AUTH": "none", "LLM_REASONING_EFFORT": "low"},
+    ).model
+    assert fallback is not None
+    assert all(fallback.for_purpose(purpose).reasoning_effort == "low" for purpose in ModelPurpose)

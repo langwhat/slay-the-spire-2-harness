@@ -180,6 +180,7 @@ class Usage:
     output_tokens: int | None = None
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
 
     @property
     def cache_hit_ratio(self) -> float | None:

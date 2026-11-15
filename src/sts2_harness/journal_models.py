@@ -49,6 +49,7 @@ from sts2_harness.knowledge import (
     DocumentView,
     GuidanceContent,
     KnowledgeLookup,
+    MaterialRole,
     SkillList,
     SkillSummary,
     SubjectId,
@@ -198,6 +199,7 @@ class DocumentFields(native.WireModel):
     resources: tuple[ResourceSnapshot, ...]
     resource: str | MISSING = MISSING
     subjects: tuple[SubjectId, ...] | MISSING = MISSING
+    auto_roles: tuple[MaterialRole, ...] | MISSING = MISSING
 
 
 class DocumentSnapshot(DocumentFields):
@@ -210,6 +212,7 @@ class DocumentSnapshot(DocumentFields):
             resources=self.resources,
             resource=self.resource,
             subjects=self.subjects,
+            auto_roles=self.auto_roles,
         )
         if isinstance(info.context, BlobEncoding):
             return DocumentReference(
@@ -234,6 +237,7 @@ class DocumentSnapshot(DocumentFields):
                 "resources": fields.resources,
                 "resource": fields.resource,
                 "subjects": fields.subjects,
+                "auto_roles": fields.auto_roles,
             }
         return value
 
@@ -249,6 +253,7 @@ class DocumentSnapshot(DocumentFields):
             ),
             resource=document.resource,
             subjects=document.subjects if isinstance(document, Document) else MISSING,
+            auto_roles=document.auto_roles if isinstance(document, Document) else MISSING,
         )
 
 
@@ -596,6 +601,7 @@ class ReplySnapshot(NativeSnapshot):
     requested_effort: str
     response_model: str | None
     response_service_tier: str | None
+    reasoning_tokens: int | None = None
 
     @classmethod
     def of(cls, reply: ModelReply) -> "ReplySnapshot":
@@ -606,6 +612,7 @@ class ReplySnapshot(NativeSnapshot):
             output_tokens=reply.usage.output_tokens,
             cache_read_tokens=reply.usage.cache_read_tokens,
             cache_write_tokens=reply.usage.cache_write_tokens,
+            reasoning_tokens=reply.usage.reasoning_tokens,
             requested_model=reply.metadata.requested_model,
             requested_effort=reply.metadata.requested_effort,
             response_model=reply.metadata.response_model,

@@ -19,6 +19,7 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.prompts import PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval._material_boundary import RejectingDocuments, RejectingPrompts
@@ -67,8 +68,8 @@ class SceneSession:
             stop_requested=self._stopped,
         )
 
-        def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
-            recorded = RecordedLlm(model, journal, role=role, stream=stream)
+        def factory(role: ModelPurpose, stream: str) -> ModelClient:
+            recorded = RecordedLlm(model.for_purpose(role), journal, role=role.owner, stream=stream)
 
             class Model:
                 @property

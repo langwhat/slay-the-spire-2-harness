@@ -49,6 +49,7 @@ from sts2_harness.knowledge import (
     Documents,
     DocumentView,
     GuidanceContent,
+    MaterialRole,
 )
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
@@ -593,7 +594,9 @@ async def rebuild_case(
     prompts: PromptReader | None = None,
     variant: DecisionVariant = DecisionVariant.RUN,
 ) -> RebuiltDecision:
-    source_case = case
+    source_observation = next(
+        event.observation for event in reversed(case.events) if isinstance(event, TaskEvent)
+    )
     if variant is DecisionVariant.DECK:
         case = _deck_case(case)
     first = next(event for event in case.events if isinstance(event, TaskEvent))
@@ -630,16 +633,18 @@ async def rebuild_case(
     async def selected(observation: native.Observation) -> tuple[DocumentView, ...]:
         if documents is None or not case.entry_documents_enabled:
             return ()
-        if variant is DecisionVariant.DECK:
-            observation = next(
-                event.observation
-                for event in reversed(source_case.events)
-                if isinstance(event, TaskEvent)
-            )
+        if (
+            variant is DecisionVariant.DECK
+            and observation.map is MISSING
+            and source_observation.map is not MISSING
+            and observation.stamp == source_observation.stamp
+            and observation.location == source_observation.location
+        ):
+            observation = observation.model_copy(update={"map": source_observation.map})
         return await entry_materials(
             execution,
             documents,
-            native.DecisionOwner.RUN,
+            MaterialRole.DECK if variant is DecisionVariant.DECK else MaterialRole.RUN,
             observation,
             case.configured_guidance,
         )
@@ -737,6 +742,7 @@ class MeasuredModel:
                 "output_tokens": usage.output_tokens,
                 "cache_read_tokens": usage.cache_read_tokens,
                 "cache_write_tokens": usage.cache_write_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
             }
         )
         self.calls.extend(
@@ -786,6 +792,7 @@ class _AttemptCapture:
                 "output_tokens": reply.usage.output_tokens,
                 "cache_read_tokens": reply.usage.cache_read_tokens,
                 "cache_write_tokens": reply.usage.cache_write_tokens,
+                "reasoning_tokens": reply.usage.reasoning_tokens,
                 "response_model": reply.metadata.response_model,
                 "response_service_tier": reply.metadata.response_service_tier,
             }

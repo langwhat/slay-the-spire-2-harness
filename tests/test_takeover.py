@@ -34,6 +34,7 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
+from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.session import RunSession, SessionDependencies
@@ -185,8 +186,8 @@ async def source_case(
             ) as model,
         ):
 
-            def factory(role: native.DecisionOwner, stream: str) -> ModelClient:
-                return RecordedLlm(model, journal, role=role, stream=stream)
+            def factory(role: ModelPurpose, stream: str) -> ModelClient:
+                return RecordedLlm(model, journal, role=role.owner, stream=stream)
 
             async with RunSession(
                 manifest,

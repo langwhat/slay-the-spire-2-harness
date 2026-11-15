@@ -46,12 +46,18 @@ class _CacheUsage(BaseModel):
     cache_write_tokens: _TokenCount | None = None
 
 
+class _OutputUsage(BaseModel):
+    model_config = ConfigDict(strict=True)
+    reasoning_tokens: _TokenCount | None = None
+
+
 class _WireUsage(BaseModel):
     # Preserve unknown counts when proxies omit fields declared required by the SDK.
     model_config = ConfigDict(strict=True)
     input_tokens: _TokenCount | None = None
     output_tokens: _TokenCount | None = None
     input_tokens_details: _CacheUsage | None = None
+    output_tokens_details: _OutputUsage | None = None
 
 
 class _CompletedReply(BaseModel):
@@ -240,6 +246,9 @@ class ResponsesAdapter:
                 usage.output_tokens,
                 details.cached_tokens if details else None,
                 details.cache_write_tokens if details else None,
+                usage.output_tokens_details.reasoning_tokens
+                if usage.output_tokens_details
+                else None,
             ),
             ModelMetadata(
                 self._configuration.model,

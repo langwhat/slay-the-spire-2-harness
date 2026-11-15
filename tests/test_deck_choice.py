@@ -383,7 +383,12 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 minimal=minimal,
             ),
             archive,
-            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)),
+            model=Llm(
+                configuration(
+                    tmp_path, LLM_REASONING_EFFORT="low", LLM_REASONING_EFFORT_DECK="medium"
+                ),
+                transport=httpx.MockTransport(game.model),
+            ),
         ) as session:
             ended = await session.run()
             assert ended.reason is RunEndReason.TERMINAL
@@ -407,6 +412,21 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
             stats, _ = session.deck_stats.view(completions[2].after)
             assert stats["added"] == (1 if unknown else 2) and stats["skipped"] == 1
             requests = journal.requests()
+            assert [
+                request.attempts[-1].reply.requested_effort
+                for request in requests
+                if request.attempts[-1].reply is not None
+            ] == ["medium", "medium", "medium", "low", "low", "low"]
+            reasoning = [body["reasoning"] for body in game.inputs]
+            assert all(isinstance(item, dict) for item in reasoning)
+            assert [item["effort"] for item in reasoning if isinstance(item, dict)] == [
+                "medium",
+                "medium",
+                "medium",
+                "low",
+                "low",
+                "low",
+            ]
             assert [r.stream for r in requests] == [
                 "deck:1",
                 "deck:2",
@@ -971,5 +991,151 @@ def test_event_choice_submits_all_selected_cards_once_and_reports_to_run(
             ]
             assert len(reports) == 1
             assert reports[0].content.automatic_progress.reason == "Event addition."
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("has_map", (True, False))
+def test_deck_guidance_uses_only_the_focused_offer_and_its_selection(
+    tmp_path: Path, has_map: bool
+) -> None:
+    from sts2_harness.knowledge import MaterialRole, SubjectId
+    from sts2_harness.materials import DocumentSource, FileDocuments
+
+    game = RewardGame(minimal=False)
+    state = game.observation.state
+    assert isinstance(state, native.RunState)
+    assert game.observation.map is not MISSING
+    public_map = game.observation.map.model_copy(
+        update={"bosses": (native.NamedDefinition(name="Boss", definition_id="ENCOUNTER.BOSS"),)}
+    )
+    game.observation = game.observation.model_copy(
+        update={
+            "state": state.model_copy(
+                update={
+                    "selection": native.Selection(
+                        prompt="Select",
+                        source=None,
+                        min=0,
+                        max=1,
+                        candidates=("local", "regular", "guaranteed"),
+                        selected=(),
+                    )
+                }
+            ),
+            "input_readiness": native.InputReadiness.SELECTION,
+            "map": public_map if has_map else MISSING,
+        }
+    )
+    sources: list[DocumentSource] = []
+    for ref in ("owned", "local", "regular", "guaranteed"):
+        path = tmp_path / ref
+        path.write_text(f"RULE FOR {ref}")
+        sources.append(
+            DocumentSource(
+                ref,
+                ref,
+                ref,
+                path,
+                subjects=(SubjectId(category="card", definition_id=f"CARD.{ref.upper()}"),),
+                auto_roles=(MaterialRole.RUN, MaterialRole.DECK),
+            )
+        )
+    path = tmp_path / "run-only"
+    path.write_text("REWARD PROBABILITY RULE")
+    sources.append(
+        DocumentSource(
+            "run-only",
+            "run-only",
+            "run-only",
+            path,
+            subjects=(SubjectId(category="character", definition_id=state.player.definition_id),),
+            auto_roles=(MaterialRole.RUN,),
+        )
+    )
+    path = tmp_path / "boss"
+    path.write_text("PUBLIC BOSS STRATEGY")
+    sources.append(
+        DocumentSource(
+            "boss",
+            "boss",
+            "boss",
+            path,
+            subjects=(SubjectId(category="encounter", definition_id="ENCOUNTER.BOSS"),),
+            auto_roles=(MaterialRole.RUN, MaterialRole.DECK),
+        )
+    )
+    inputs: list[dict[str, JsonValue]] = []
+    inspections = 0
+
+    class Captured(Exception):
+        pass
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        nonlocal inspections
+        if request.url.path == "/inspect":
+            inspections += 1
+            return httpx.Response(
+                200,
+                content=native.InspectCompleted(
+                    status=native.ResultStatus.COMPLETED,
+                    observation=game.observation,
+                    data=native.MapData(map=public_map),
+                ).to_json(),
+            )
+        return game.mod(request)
+
+    def model(request: httpx.Request) -> httpx.Response:
+        inputs.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+        raise Captured
+
+    async def scenario() -> None:
+        with pytest.raises(Captured):
+            async with live_session(
+                ModClient("http://mod", transport=httpx.MockTransport(mod)),
+                Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=True, act_guidance={}, battle_guidance=()
+                    ),
+                    recording_id="focused",
+                    core_version="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    initial_notes=NotesState(),
+                ),
+                tmp_path / "focused.sqlite",
+                model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+                documents=FileDocuments(tuple(sources)),
+            ) as session:
+                await session.run()
+        body = json.dumps(inputs[0], ensure_ascii=False)
+        assert "RULE FOR owned" in body and "RULE FOR local" in body
+        assert "RULE FOR regular" not in body and "RULE FOR guaranteed" not in body
+        assert "REWARD PROBABILITY RULE" not in body
+        assert "PUBLIC BOSS STRATEGY" in body
+        assert inspections == 0 if has_map else inspections > 0
+        assert "CARD.REGULAR" not in body and "CARD.GUARANTEED" not in body
+        messages = inputs[0]["input"]
+        assert isinstance(messages, list)
+        user = next(
+            message
+            for message in messages
+            if isinstance(message, dict) and message.get("role") == "user"
+        )
+        assert isinstance(user["content"], str)
+        observation = json.loads(user["content"])["observation"]
+        assert "map" not in observation
+        candidates = observation["choice"]["selection"]["candidates"]
+        assert len(candidates) == 1 and candidates[0]["ref"] == "local"
+        with closing(Journal.open(tmp_path / "focused.sqlite")) as journal:
+            from sts2_harness.journal_models import DocumentLookupResult
+
+            lookups = [
+                record.reply
+                for record in journal.materials()
+                if isinstance(record.reply, DocumentLookupResult)
+            ]
+            assert lookups
+            assert all(doc.auto_roles is not MISSING for doc in lookups[0].documents)
 
     asyncio.run(scenario())

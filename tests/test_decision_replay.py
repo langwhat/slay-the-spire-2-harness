@@ -1069,3 +1069,83 @@ def test_fixture_never_relabels_historical_inspection_as_current(tmp_path: Path)
         assert result.outcome.result == current_read.result
 
     asyncio.run(run())
+
+
+def test_rebuilt_deck_keeps_public_map_without_other_offer_materials(tmp_path: Path) -> None:
+    from sts2_harness.entry_materials import EntryMaterials
+    from sts2_harness.journal import SessionMaterials
+    from sts2_harness.knowledge import MaterialRole, SubjectId
+    from sts2_harness.materials import DocumentSource, FileDocuments
+
+    case = decision_case(tmp_path)
+    task = case.events[0]
+    assert isinstance(task, TaskEvent)
+    observation = task.observation
+    state = observation.state
+    assert isinstance(state, native.RunState)
+    other_card = native.CardEntry.model_validate_json(CARD).model_copy(
+        update={"definition_id": "CARD.OTHER"}
+    )
+    other_offer = native.Offer(
+        ref="other",
+        kind=native.OfferKind.CARD,
+        contents=("other-card",),
+        actions=("other-action",),
+        requires_selection=True,
+    )
+    observation = observation.model_copy(
+        update={
+            "state": state.model_copy(update={"offers": (*state.offers, other_offer)}),
+            "objects": {**observation.objects, "other-card": other_card},
+            "map": native.PublicMap(
+                bosses=(native.NamedDefinition(name="Boss", definition_id="ENCOUNTER.BOSS"),),
+                nodes=(),
+                legal_destinations=None,
+            ),
+        }
+    )
+    case = case.model_copy(
+        update={
+            "entry_documents_enabled": True,
+            "events": (task.model_copy(update={"observation": observation}),),
+        }
+    )
+    docs: list[DocumentSource] = []
+    for identity, category, marker in (
+        ("CARD.OTHER", "card", "OTHER OFFER DOC"),
+        ("ENCOUNTER.BOSS", "encounter", "PUBLIC BOSS DOC"),
+    ):
+        path = tmp_path / marker
+        path.write_text(marker)
+        docs.append(
+            DocumentSource(
+                identity,
+                identity,
+                identity,
+                path,
+                subjects=(SubjectId(category=category, definition_id=identity),),
+                auto_roles=(MaterialRole.DECK,),
+            )
+        )
+    provider = FileDocuments(tuple(docs))
+    materials = EntryMaterials(
+        documents=lambda context: provider,
+        settings=SessionMaterials(
+            entry_documents_enabled=True, act_guidance={}, battle_guidance=()
+        ),
+    )
+
+    async def scenario() -> None:
+        async with Llm(configuration(tmp_path)) as client:
+            rebuilt = await rebuild_case(
+                case, client, variant=DecisionVariant.DECK, materials=materials
+            )
+        encoded = json.dumps(rebuilt.prepared.body, ensure_ascii=False)
+        assert "PUBLIC BOSS DOC" in encoded
+        assert "OTHER OFFER DOC" not in encoded and "CARD.OTHER" not in encoded
+        task_message = next(
+            item for item in rebuilt.prepared.input if isinstance(item, TaskMessage)
+        )
+        assert "map" not in json.loads(task_message.text)["observation"]
+
+    asyncio.run(scenario())
