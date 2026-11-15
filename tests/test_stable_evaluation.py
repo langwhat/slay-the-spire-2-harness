@@ -767,9 +767,111 @@ def test_report_compares_different_choices_with_both_reasons(tmp_path: Path) -> 
             )
         }
     )
-    assert "No differing choices observed." in report(
-        plan, (failed, trial("two", "skip", "Second reason"))
-    )
+    unavailable = report(plan, (failed, trial("two", "skip", "Second reason")))
+    assert "could not be compared" in unavailable
+
+
+def test_report_compares_unscored_combat_proposals_and_reasons(tmp_path: Path) -> None:
+    from sts2_harness.game import Inspect
+    from sts2_harness_eval.decision_cases import DecisionSample
+    from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
+
+    async def run() -> None:
+        case = decision_case(tmp_path)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent)
+        observation = native.Observation.model_validate_json(COMBAT)
+        assert isinstance(observation.state, native.CombatState)
+        observation = observation.model_copy(
+            update={
+                "input_readiness": native.InputReadiness.READY,
+                "state": observation.state.model_copy(
+                    update={"screen": native.CombatScreen.COMBAT, "selection": None}
+                ),
+            }
+        )
+        observation = native.Observation.model_validate_json(observation.model_dump_json())
+        history = native.HistoryData(
+            cards_played_this_combat=(), cards_played_this_turn=(), cards_exhausted_this_turn=()
+        )
+        read = NativeRead(
+            request=Inspect(query=native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)),
+            result=native.InspectCompleted(
+                status=native.ResultStatus.COMPLETED, observation=observation, data=history
+            ),
+        )
+        case = case.model_copy(
+            update={
+                "events": (task.model_copy(update={"observation": observation}),),
+                "native_reads": (read,),
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = (
+            '{"steps":[{"kind":"end_turn"}],"reason":"End now."}',
+            '{"steps":[{"kind":"use_potion","potion":"potion"}],"reason":"Use potion."}',
+        )
+
+        async def sample_for(argument: str) -> DecisionSample:
+            requests: list[httpx.Request] = []
+
+            def respond(request: httpx.Request) -> httpx.Response:
+                requests.append(request)
+                return httpx.Response(
+                    200,
+                    content=reply(("action", "combat_act", argument)),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+
+            async with Llm(
+                replace(configuration(tmp_path), extra_retries=0),
+                transport=httpx.MockTransport(respond),
+            ) as client:
+                sample = await sample_fresh(
+                    case, client, catalog=catalog, role=EvaluationRole.COMBAT
+                )
+            assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+            assert sample.proposal is not None and not sample.choices
+            return sample
+
+        samples = [await sample_for(argument) for argument in arguments]
+        plan = EvaluationPlan.model_validate_json(
+            '{"configurations":[{"id":"one","effort":"high","prompt_version":"one"},'
+            '{"id":"two","effort":"high","prompt_version":"two"}],'
+            '"cases":[{"id":"q1","role":"combat","case":"case.json",'
+            '"catalog":"catalog.json","configurations":["one","two"],"repetitions":1}]}'
+        )
+        trials = tuple(
+            Trial(
+                case_id="q1",
+                role=EvaluationRole.COMBAT,
+                configuration=config,
+                repetition=1,
+                prompt_version=config,
+                prompt_digest="digest",
+                input_hashes={},
+                sample=sample,
+                error=None,
+                attempts=(),
+            )
+            for config, sample in zip(("one", "two"), samples, strict=True)
+        )
+        text = report(plan, trials)
+        for sample in samples:
+            assert sample.proposal is not None
+            assert sample.proposal.to_json() in text and sample.reason in text
+        assert text.count("Proposal legality unknown") >= 2 and text.count("unscored") >= 2
+        missing = trials[0].model_copy(
+            update={"sample": samples[0].model_copy(update={"proposal": None})}
+        )
+        incomplete = report(plan, (missing, trials[1]))
+        assert "could not be compared" in incomplete
+        assert "declared" not in incomplete
+
+    asyncio.run(run())
 
 
 def test_old_character_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> None:
@@ -1113,6 +1215,11 @@ def test_invalid_preparatory_response_ends_only_its_trial_and_keeps_usage(
             '"reason":"First.","reason":"Second."}',
             "",
         ),
+        (
+            '{"offer":"offer","choice":"take","card":"candidate",'
+            '"extra":{"reason":"First.","reason":"Second."},"reason":"Top level."}',
+            "Top level.",
+        ),
     ),
 )
 def test_invalid_first_proposal_is_retained_without_execution(
@@ -1226,6 +1333,168 @@ def test_schema_valid_but_illegal_choice_is_not_scored(
         assert sample.error is not None and "Invalid action proposal" in sample.error
         assert sample.proposal is not None and sample.proposal.arguments == arguments
         assert sample.reason == "Try." and not sample.choices
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("destination", (None, "0:1"))
+def test_map_non_navigation_interaction_is_not_rejected_as_travel(
+    tmp_path: Path, destination: str | None
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        state = observation.state
+        assert isinstance(state, native.RunState)
+        action = native.Action(ref="action", label="Interact", enabled=True, subject="candidate")
+        if destination is not None:
+            action = action.model_copy(update={"destination": destination})
+        observation = observation.model_copy(
+            update={
+                "input_readiness": native.InputReadiness.READY,
+                "state": state.model_copy(
+                    update={
+                        "screen": native.RunScreen.MAP,
+                        "selection": None,
+                        "offers": (),
+                        "actions": (action,),
+                    }
+                ),
+            }
+        )
+        observation = native.Observation.model_validate_json(observation.model_dump_json())
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"steps":[{"kind":"interact","action":"action"}],"reason":"Interact."}'
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("action", "run_act", arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+        assert len(requests) == 1 and sample.proposal is not None
+        assert sample.proposal.arguments == arguments and sample.reason == "Interact."
+        if destination is None:
+            assert sample.verdict is DecisionVerdict.PASSED and sample.error is None
+        else:
+            assert sample.verdict is DecisionVerdict.UNSUPPORTED
+            assert sample.error is not None and "Invalid action proposal" in sample.error
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("role", (EvaluationRole.RUN, EvaluationRole.COMBAT))
+@pytest.mark.parametrize(
+    "selection_order", ("first_invalid", "first_valid", "later_invalid", "selection_required")
+)
+def test_only_initial_selection_is_checked_against_frozen_state(
+    tmp_path: Path, role: EvaluationRole, selection_order: str
+) -> None:
+    from sts2_harness.game import Inspect
+
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent)
+        observation = (
+            task.observation
+            if role is EvaluationRole.RUN
+            else native.Observation.model_validate_json(COMBAT)
+        )
+        selection = native.Selection(
+            prompt="Choose", source=None, min=1, max=1, candidates=("candidate",), selected=()
+        )
+        state = observation.state.model_copy(update={"selection": selection})
+        if isinstance(state, native.RunState):
+            state = state.model_copy(update={"screen": native.RunScreen.SELECTION})
+        observation = observation.model_copy(
+            update={
+                "input_readiness": (
+                    native.InputReadiness.READY
+                    if selection_order == "later_invalid"
+                    else native.InputReadiness.SELECTION
+                ),
+                "state": state,
+            }
+        )
+        observation = native.Observation.model_validate_json(observation.model_dump_json())
+        reads: tuple[NativeRead, ...] = ()
+        if role is EvaluationRole.COMBAT:
+            history = native.HistoryData(
+                cards_played_this_combat=(), cards_played_this_turn=(), cards_exhausted_this_turn=()
+            )
+            reads = (
+                NativeRead(
+                    request=Inspect(query=native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)),
+                    result=native.InspectCompleted(
+                        status=native.ResultStatus.COMPLETED, observation=observation, data=history
+                    ),
+                ),
+            )
+        case = case.model_copy(
+            update={
+                "events": (task.model_copy(update={"observation": observation}),),
+                "native_reads": reads,
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        choice = "candidate" if selection_order == "first_valid" else "NOT-A-CANDIDATE"
+        select: dict[str, JsonValue] = {"kind": "select", "refs": [choice]}
+        other: dict[str, JsonValue] = (
+            {"kind": "interact", "action": "open"}
+            if role is EvaluationRole.RUN
+            else {"kind": "end_turn"}
+        )
+        steps = (
+            [other, select]
+            if selection_order in ("later_invalid", "selection_required")
+            else [select, other]
+        )
+        arguments = json.dumps({"steps": steps, "reason": "First and later."})
+        name = "run_act" if role is EvaluationRole.RUN else "combat_act"
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("action", name, arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=role)
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        expected = (
+            "Invalid action proposal"
+            if selection_order in ("first_invalid", "selection_required")
+            else "legality unknown"
+        )
+        assert sample.error is not None and expected in sample.error
+        assert sample.proposal is not None and sample.proposal.arguments == arguments
+        assert sample.reason == "First and later." and not sample.choices
 
     asyncio.run(run())
 
@@ -1353,6 +1622,16 @@ def test_combat_task_and_history_query_use_the_same_frozen_history(
         task = original.events[0]
         assert isinstance(task, TaskEvent)
         observation = native.Observation.model_validate_json(COMBAT)
+        assert isinstance(observation.state, native.CombatState)
+        observation = observation.model_copy(
+            update={
+                "input_readiness": native.InputReadiness.READY,
+                "state": observation.state.model_copy(
+                    update={"screen": native.CombatScreen.COMBAT, "selection": None}
+                ),
+            }
+        )
+        observation = native.Observation.model_validate_json(observation.model_dump_json())
         history = native.HistoryData(
             cards_played_this_combat=(
                 native.NamedDefinition(name="Strike", definition_id="CARD.STRIKE"),
@@ -1670,7 +1949,9 @@ def test_run_next_without_a_plan_is_captured_as_invalid(tmp_path: Path) -> None:
                 role=EvaluationRole.RUN,
             )
         assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
-        assert sample.error is not None and "no_plan" in sample.error
+        from sts2_harness.results import ReasonCode
+
+        assert sample.error is not None and ReasonCode.NO_PLAN.value in sample.error
         assert sample.proposal is not None and sample.proposal.tool is ToolName.RUN_NEXT
         assert sample.proposal.arguments == arguments and sample.reason == "Continue."
 
@@ -1678,11 +1959,11 @@ def test_run_next_without_a_plan_is_captured_as_invalid(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "destination, classification",
-    (("0:0", "Invalid action proposal"), ("0:1", "Proposal legality unknown")),
+    "destination, expected",
+    (("0:0", DecisionVerdict.UNSUPPORTED), ("0:1", DecisionVerdict.UNLABELED)),
 )
-def test_run_plan_uses_frozen_map_to_distinguish_invalid_from_unknown(
-    tmp_path: Path, destination: str, classification: str
+def test_run_plan_uses_frozen_map_to_distinguish_invalid_from_accepted(
+    tmp_path: Path, destination: str, expected: DecisionVerdict
 ) -> None:
     async def run() -> None:
         case = decision_case(tmp_path, multiselect=True)
@@ -1734,8 +2015,12 @@ def test_run_plan_uses_frozen_map_to_distinguish_invalid_from_unknown(
             transport=httpx.MockTransport(respond),
         ) as client:
             sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
-        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
-        assert sample.error is not None and classification in sample.error
+        assert len(requests) == 1 and sample.verdict is expected
+        if expected is DecisionVerdict.UNSUPPORTED:
+            assert sample.error is not None and "Invalid action proposal" in sample.error
+            assert not sample.choices
+        else:
+            assert sample.error is None and destination in sample.choices[0]
         assert sample.proposal is not None and sample.proposal.tool is ToolName.RUN_PLAN
         assert sample.proposal.arguments == arguments and sample.reason == "Plan ahead."
 

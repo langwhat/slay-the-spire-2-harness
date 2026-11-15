@@ -365,27 +365,52 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
         rows.append("None.")
     rows.extend(("", "## Differences between configurations", ""))
     differences = 0
+    incomparable = False
     for index, left in enumerate(trials):
         for right in trials[index + 1 :]:
             if left.case_id != right.case_id or left.configuration == right.configuration:
                 continue
-            if (
-                left.sample is None
-                or right.sample is None
-                or not left.sample.choices
-                or not right.sample.choices
-                or left.sample.choices == right.sample.choices
-            ):
+            first, second = left.sample, right.sample
+            if first is None or second is None:
+                incomparable = True
+                continue
+            if first.choices and second.choices:
+                if first.choices != second.choices:
+                    differences += 1
+                    rows.append(
+                        f"- {_escape(left.case_id)}: {_escape(left.configuration)} "
+                        f"#{left.repetition} "
+                        f"chose {_escape(', '.join(first.choices))}: {_escape(first.reason)}; "
+                        f"{_escape(right.configuration)} #{right.repetition} "
+                        f"chose {_escape(', '.join(second.choices))}: {_escape(second.reason)}."
+                    )
+                continue
+            if first.proposal is None or second.proposal is None:
+                incomparable = True
+                continue
+            if first.proposal == second.proposal:
                 continue
             differences += 1
+            first_status = first.error or first.verdict.value
+            second_status = second.error or second.verdict.value
+            if first.verdict not in (DecisionVerdict.PASSED, DecisionVerdict.FAILED):
+                first_status += "; unscored"
+            if second.verdict not in (DecisionVerdict.PASSED, DecisionVerdict.FAILED):
+                second_status += "; unscored"
             rows.append(
                 f"- {_escape(left.case_id)}: {_escape(left.configuration)} #{left.repetition} "
-                f"chose {_escape(', '.join(left.sample.choices))}: {_escape(left.sample.reason)}; "
+                f"declared {_escape(first.proposal.to_json())}: {_escape(first.reason)} "
+                f"({_escape(first_status)}); "
                 f"{_escape(right.configuration)} #{right.repetition} "
-                f"chose {_escape(', '.join(right.sample.choices))}: {_escape(right.sample.reason)}."
+                f"declared {_escape(second.proposal.to_json())}: {_escape(second.reason)} "
+                f"({_escape(second_status)})."
             )
     if not differences:
-        rows.append("No differing choices observed.")
+        rows.append("No differing comparable choices or proposals observed.")
+    if incomparable:
+        rows.append(
+            "Some trials could not be compared because a choice or proposal is unavailable."
+        )
     rows.extend(
         (
             "",

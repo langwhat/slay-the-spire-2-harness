@@ -168,7 +168,7 @@ class RunProbe(CaptureDecision, RunAgent):
             return
         if isinstance(parameters, RunNext):
             if self._plan is None:
-                raise Captured(call, "No route plan is active (no_plan).")
+                raise Captured(call, f"No route plan is active ({ReasonCode.NO_PLAN.value}).")
             raise Captured(call, "Route travel cannot be verified offline.", unknown=True)
         if isinstance(parameters, RunPlan):
             if not isinstance(observation.state, native.RunState) or observation.map is MISSING:
@@ -182,7 +182,7 @@ class RunProbe(CaptureDecision, RunAgent):
             )
             if update.rejection is not None:
                 raise Captured(call, f"The route plan was rejected: {update.rejection.value}.")
-            raise Captured(call, "Route traversal cannot be verified offline.", unknown=True)
+            return
 
     def focus_observation(self, observation: native.Observation) -> native.Observation:
         return self._reward_view(observation)
@@ -205,6 +205,10 @@ class CombatProbe(CaptureDecision, CombatAgent):
                 not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
             ):
                 raise Captured(call, "The combat state is not ready for an action.")
+            try:
+                _verify_initial_selection(parameters.root.steps[0], observation)
+            except ExtractionError as error:
+                raise Captured(call, str(error)) from error
             raise Captured(call, "Combat action legality cannot be verified offline.", unknown=True)
 
 
@@ -491,10 +495,12 @@ async def sample_fresh(
 
 def _proposal_details(call: ToolCall) -> tuple[CapturedProposal, dict[str, JsonValue], str]:
     proposal = CapturedProposal(tool=ToolName(call.name), arguments=call.arguments)
+    root_fields: list[tuple[str, object]] = []
 
     def report_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        if sum(key == "reason" for key, _ in pairs) > 1:
-            raise ValueError("The proposal has ambiguous reasons.")
+        nonlocal root_fields
+        # The JSON decoder visits child objects before their parent.
+        root_fields = pairs
         return dict(pairs)
 
     try:
@@ -503,8 +509,22 @@ def _proposal_details(call: ToolCall) -> tuple[CapturedProposal, dict[str, JsonV
         )
     except (ValueError, ValidationError):
         arguments = {}
-    value = arguments.get("reason")
+    value = arguments.get("reason") if sum(key == "reason" for key, _ in root_fields) == 1 else None
     return proposal, arguments, value if isinstance(value, str) else ""
+
+
+def _verify_initial_selection(step: native.NativeStep, observation: native.Observation) -> None:
+    if not isinstance(step, native.Select):
+        if observation.input_readiness is native.InputReadiness.SELECTION:
+            raise ExtractionError("The current selection must be completed first.")
+        return
+    selection = observation.state.selection
+    if selection is None:
+        raise ExtractionError("No current selection is available.")
+    if not set(step.refs) <= set(selection.candidates) or not (
+        selection.min <= len(step.refs) <= selection.max
+    ):
+        raise ExtractionError("Selection is not currently legal.")
 
 
 def _verify_run_action(parameters: RunActInput, observation: native.Observation) -> None:
@@ -519,23 +539,15 @@ def _verify_run_action(parameters: RunActInput, observation: native.Observation)
         not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
     ):
         raise ExtractionError("The Run state is not ready for an action.")
+    _verify_initial_selection(steps[0], observation)
     if len(steps) != 1:
         raise SnapshotIncomplete("The frozen state cannot verify this action batch.")
     step = steps[0]
     if isinstance(step, native.Select):
-        selection = state.selection
-        if selection is None:
-            raise ExtractionError("No current selection is available.")
-        if not set(step.refs) <= set(selection.candidates) or not (
-            selection.min <= len(step.refs) <= selection.max
-        ):
-            raise ExtractionError("Selection is not currently legal.")
         return
     if isinstance(step, native.Interact):
         action = next((item for item in state.actions if item.ref == step.action), None)
         if action is None or not action.enabled or action.destination is not MISSING:
-            raise ExtractionError("Interaction is not currently legal.")
-        if state.selection is not None or state.screen is native.RunScreen.MAP:
             raise ExtractionError("Interaction is not currently legal.")
         return
     raise SnapshotIncomplete("The frozen state cannot verify this action.")
