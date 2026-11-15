@@ -25,7 +25,7 @@ At each decision, work in this order.
 
 These settle close cases:
 
-- Damage that changes no enemy action and no later play is worth nothing, and HP spent for it is wasted. Block that only postpones defeat is not a line; compare the lines that can still win.
+- Damage that changes no enemy action and does not bring any kill closer, such as overkill, is worth nothing, and HP spent for it is wasted. In a long fight, damage on an enemy that must die is never wasted: the total decides the turn it dies, and each turn earlier removes that turn's attacks. Block that only postpones defeat is not a line; compare the lines that can still win.
 - Setup, growth, and clearing bad cards pay back over the remaining turns. Do them on quiet or already covered turns. Under attack, weigh the HP lost while setting up against the attacks the setup later prevents. Once output is enough to finish, finish.
 - Order plays so each one sees the most. Reveal draws and random results before committing choices that depend on them, while the energy to act on them remains. Apply debuffs and buffs before the hits they scale. A draw that costs the energy needed to play what it finds is not access.
 - Choose targets by the action their death prevents, not by HP. Crossing a threshold (a kill, a broken shield, a stun, a phase change) matters; damage short of it or beyond it matters only through later turns. Before triggering a phase change, compare the first turns of the next phase.
