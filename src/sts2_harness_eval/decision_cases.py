@@ -124,6 +124,7 @@ class DecisionCase(RecordedDecision):
     candidate_links_enabled: bool = True
     events: Annotated[tuple[HistoryEvent, ...], Field(min_length=1)]
     native_reads: tuple[NativeRead, ...] = ()
+    combat_history: native.HistoryData | None = None
     decision_tool: str
     decision_offer: str | None = None
 
@@ -169,6 +170,11 @@ class RequestSize(native.WireModel):
     digest: str
 
 
+class CapturedProposal(native.WireModel):
+    tool: str
+    arguments: str
+
+
 class DecisionSample(native.WireModel):
     source: DecisionSource
     sample: int
@@ -176,6 +182,7 @@ class DecisionSample(native.WireModel):
     choices: tuple[str, ...]
     reason: str
     error: str | None = None
+    proposal: CapturedProposal | None = None
     requests: tuple[RequestSize, ...] = ()
     usage: tuple[dict[str, int | None], ...] = ()
     elapsed_seconds: float = 0

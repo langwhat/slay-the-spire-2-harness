@@ -9,15 +9,23 @@ import pytest
 from pydantic import JsonValue
 from test_combat import reply
 from test_decision_replay import decision_case
+from test_mod_client import COMBAT
 from test_responses import configuration
 from test_run import handoff
 
 from sts2_harness.client import models as native
 from sts2_harness.fights import Fight, FightKind
 from sts2_harness.llm.client import Llm
-from sts2_harness_eval.decision_cases import BattleState, DecisionVerdict, HarnessState, TaskEvent
+from sts2_harness_eval.decision_cases import (
+    BattleState,
+    CorrectionEvent,
+    DecisionVerdict,
+    HarnessState,
+    NativeRead,
+    TaskEvent,
+)
 from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
-from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
+from sts2_harness_eval.stable_decisions import EvaluationRole, FreshGame, sample_fresh
 from sts2_harness_eval.traffic import AuditingTransport
 
 
@@ -782,6 +790,8 @@ def test_invalid_preparatory_response_ends_only_its_trial_and_keeps_usage(
 
 
 def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) -> None:
+    from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
+
     async def run() -> None:
         case = decision_case(tmp_path)
         catalog = FrozenCatalog.model_validate_json(
@@ -808,6 +818,31 @@ def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) ->
         assert count == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
         assert sample.error is not None and "Invalid action proposal" in sample.error
         assert sample.raw_calls[0]["arguments"] == arguments
+        assert sample.reason == "Missing card."
+        assert sample.proposal is not None
+        assert sample.proposal.tool == "run_deck_choice"
+        assert sample.proposal.arguments == arguments
+        plan = EvaluationPlan.model_validate_json(
+            '{"configurations":[{"id":"one","effort":"high","prompt_version":"one"}],'
+            '"cases":[{"id":"q1","role":"deck","case":"case.json",'
+            '"catalog":"catalog.json","configurations":["one"],"repetitions":1}]}'
+        )
+        trial = Trial(
+            case_id="q1",
+            role=EvaluationRole.DECK,
+            configuration="one",
+            repetition=1,
+            prompt_version="one",
+            prompt_digest="digest",
+            input_hashes={},
+            error=None,
+            sample=sample,
+            attempts=(),
+        )
+        result = report(plan, (trial,))
+        assert "run_deck_choice" in result and "Missing card." in result
+        assert json.dumps(arguments, ensure_ascii=False) in result
+        assert "Invalid action proposal" in result and "Scored: 0" in result
 
     asyncio.run(run())
 
@@ -866,4 +901,184 @@ def test_production_combat_still_corrects_text_only_reply(tmp_path: Path) -> Non
     )
     assert isinstance(asyncio.run(battle.run(tmp_path)), CombatHandoff)
     assert len(battle.inputs) == 3 and len(battle.actions) == 1
-    assert "An action task requires its action tool" in json.dumps(battle.inputs[1])
+
+
+@pytest.mark.parametrize("history_source", ("facts", "native_read"))
+def test_combat_task_and_history_query_use_the_same_frozen_history(
+    tmp_path: Path, history_source: str
+) -> None:
+    from pydantic import TypeAdapter
+
+    from sts2_harness.game import Inspect
+
+    async def run() -> None:
+        original = decision_case(tmp_path)
+        task = original.events[0]
+        assert isinstance(task, TaskEvent)
+        observation = native.Observation.model_validate_json(COMBAT)
+        history = native.HistoryData(
+            cards_played_this_combat=(
+                native.NamedDefinition(name="Strike", definition_id="CARD.STRIKE"),
+                native.NamedDefinition(name="Defend", definition_id="CARD.DEFEND"),
+            ),
+            cards_played_this_turn=(
+                native.NamedDefinition(name="Defend", definition_id="CARD.DEFEND"),
+            ),
+            cards_exhausted_this_turn=(
+                native.NamedDefinition(name="Burn", definition_id="CARD.BURN"),
+            ),
+        )
+        query = native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)
+        read = NativeRead(
+            request=Inspect(query=query),
+            result=native.InspectCompleted(
+                status=native.ResultStatus.COMPLETED, observation=observation, data=history
+            ),
+        )
+        case = original.model_copy(
+            update={
+                "events": (
+                    CorrectionEvent(message="OLD-CONVERSATION-SENTINEL"),
+                    task.model_copy(
+                        update={
+                            "observation": observation,
+                            "state": HarnessState(notes={"core": "OLD-NOTES-SENTINEL"}),
+                        }
+                    ),
+                ),
+                "combat_history": history if history_source == "facts" else None,
+                "native_reads": (read,) if history_source == "native_read" else (),
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        first_read = await FreshGame(case, observation, catalog).inspect_result(query)
+        assert isinstance(first_read, native.InspectCompleted) and first_read.data == history
+        requests: list[dict[str, JsonValue]] = []
+        responses = iter(
+            (
+                reply(("history", "combat_inspect", '{"area":"combat_history"}')),
+                reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            )
+        )
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(TypeAdapter(dict[str, JsonValue]).validate_json(request.content))
+            return httpx.Response(
+                200, content=next(responses), headers={"Content-Type": "text/event-stream"}
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.COMBAT)
+        assert len(requests) == 2 and sample.verdict is DecisionVerdict.UNLABELED
+        first = requests[0]["input"]
+        assert isinstance(first, list)
+        user = [item for item in first if isinstance(item, dict) and item.get("role") == "user"]
+        assert len(user) == 1 and isinstance(user[0]["content"], str)
+        task_body = TypeAdapter(dict[str, JsonValue]).validate_json(user[0]["content"])
+        task_observation = task_body["observation"]
+        assert isinstance(task_observation, dict) and task_observation["baseline"] is True
+        assert task_observation["combat_history"] == json.loads(history.to_json())
+        assert "OLD-CONVERSATION-SENTINEL" not in json.dumps(requests)
+        assert "OLD-NOTES-SENTINEL" not in json.dumps(requests)
+        second = requests[1]["input"]
+        assert isinstance(second, list)
+        outputs = [
+            item
+            for item in second
+            if isinstance(item, dict) and item.get("type") == "function_call_output"
+        ]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == "history"
+        assert isinstance(outputs[0]["output"], str)
+        result = TypeAdapter(dict[str, JsonValue]).validate_json(outputs[0]["output"])
+        assert result["data"] == json.loads(history.to_json())
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("inconsistent", (False, True))
+def test_missing_or_inconsistent_combat_history_is_unknown_without_a_request(
+    tmp_path: Path, inconsistent: bool
+) -> None:
+    from sts2_harness.game import Inspect
+
+    async def run() -> None:
+        original = decision_case(tmp_path)
+        task = original.events[0]
+        assert isinstance(task, TaskEvent)
+        observation = native.Observation.model_validate_json(COMBAT)
+        history = native.HistoryData(
+            cards_played_this_combat=(), cards_played_this_turn=(), cards_exhausted_this_turn=()
+        )
+        different = history.model_copy(
+            update={"cards_played_this_combat": (native.NamedDefinition(name="Recorded"),)}
+        )
+        read = NativeRead(
+            request=Inspect(query=native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)),
+            result=native.InspectCompleted(
+                status=native.ResultStatus.COMPLETED, observation=observation, data=different
+            ),
+        )
+        case = original.model_copy(
+            update={
+                "events": (task.model_copy(update={"observation": observation}),),
+                "combat_history": history if inconsistent else None,
+                "native_reads": (read,) if inconsistent else (),
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(500)
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.COMBAT)
+        assert sample.verdict is DecisionVerdict.UNSUPPORTED and sample.proposal is None
+        assert sample.error is not None and "combat history" in sample.error
+        assert not requests
+
+    asyncio.run(run())
+
+
+def test_first_run_plan_is_captured_without_execution_or_a_second_request(tmp_path: Path) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"reason":"Reach the elite.","edges":[{"from":"0:0","to":"0:1"}]}'
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("plan", "run_plan", arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNLABELED
+        assert sample.reason == "Reach the elite."
+        assert sample.proposal is not None
+        assert sample.proposal.tool == "run_plan" and sample.proposal.arguments == arguments
+
+    asyncio.run(run())

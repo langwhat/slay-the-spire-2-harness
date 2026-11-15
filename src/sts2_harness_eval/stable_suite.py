@@ -325,22 +325,26 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
         f"Unlabeled: {verdicts[DecisionVerdict.UNLABELED]}; "
         f"unsupported: {verdicts[DecisionVerdict.UNSUPPORTED]}; "
         f"deviated: {verdicts[DecisionVerdict.DEVIATED]}.",
+        "Combat trials add frozen current-combat history to the initial task; "
+        "the production task does not include this additional field.",
         "",
-        "| Case | Role | Configuration | Trial | Verdict | Choice | Reason "
+        "| Case | Role | Configuration | Trial | Verdict | Choice | Proposal | Reason "
         "| Input | Output | Cache read | Reasoning | Weighted |",
-        "| --- | --- | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for trial in trials:
         sample = trial.sample
         usage, unknown_usage, reasoning, unknown_reasoning = _totals(trial.attempts)
         reason = sample.reason if sample is not None else trial.error or ""
         choices = ", ".join(sample.choices) if sample is not None else ""
+        proposal = sample.proposal.to_json() if sample is not None and sample.proposal else ""
         verdict = sample.verdict.value if sample is not None else DecisionVerdict.UNSUPPORTED.value
         if sample is not None and sample.error:
             reason = (reason + " " + sample.error).strip()
         rows.append(
             f"| {_escape(trial.case_id)} | {trial.role.value} | {_escape(trial.configuration)} | "
-            f"{trial.repetition} | {verdict} | {_escape(choices)} | {_escape(reason)} | "
+            f"{trial.repetition} | {verdict} | {_escape(choices)} | {_escape(proposal)} | "
+            f"{_escape(reason)} | "
             f"{_token_total(tuple(a.input_tokens for a in trial.attempts))} | "
             f"{_token_total(tuple(a.output_tokens for a in trial.attempts))} | "
             f"{_token_total(tuple(a.cache_read_tokens for a in trial.attempts))} | "
