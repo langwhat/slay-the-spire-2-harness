@@ -7,7 +7,9 @@ import importlib
 import importlib.metadata
 import json
 import socket
+import sqlite3
 import sys
+import zlib
 from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
@@ -30,6 +32,11 @@ def package_digest(path: Path) -> str:
     return result.hexdigest()
 
 
+def archive_wal_clear(archive: Path) -> bool:
+    wal = Path(str(archive) + "-wal")
+    return not wal.exists() or wal.stat().st_size == 0
+
+
 def deny_network(*args: object, **kwargs: object) -> Never:
     raise RuntimeError("Historical source replay does not allow network requests.")
 
@@ -49,7 +56,8 @@ def main() -> None:
 
     sts2_harness_eval.__path__.insert(0, str(args.extractor_directory))
     from sts2_harness.entry_materials import MaterialContext
-    from sts2_harness.journal import Journal
+    from sts2_harness.journal import ArchiveError, Journal
+    from sts2_harness_eval._replay import ReplayRejected
     from sts2_harness_eval.decision_cases import DecisionCase, TaskEvent
     from sts2_harness_eval.decision_extract import ExtractionAudit, extract_case
 
@@ -71,12 +79,15 @@ def main() -> None:
         "python": sys.version,
         "pydantic_version": importlib.metadata.version("pydantic"),
         "archive_sha256_before": archive_before,
+        "archive_wal_clear_before": archive_wal_clear(archive),
         "source_case_sha256": hashlib.sha256(source_bytes).hexdigest(),
         "anchor": source_case.source.model_sequence,
         "network": "socket.connect and connect_ex denied",
     }
     error: Exception | None = None
     try:
+        if not report["archive_wal_clear_before"]:
+            raise ValueError("The archive has a nonempty WAL before replay.")
         if extractor.resolve() != (args.extractor_directory / "decision_extract.py").resolve():
             raise ValueError("The imported extractor differs from the selected source.")
         documents = None
@@ -110,21 +121,41 @@ def main() -> None:
         report["status"] = "verified"
     except Exception as failure:
         error = failure
-        report["error_type"] = type(failure).__name__
     report["audit"] = asdict(audit)
-    report["archive_sha256_after"] = digest(archive)
-    if (
-        report["archive_sha256_after"] != archive_before
-        or args.source_case.read_bytes() != source_bytes
-    ):
+    try:
+        report["archive_sha256_after"] = digest(archive)
+        report["archive_wal_clear_after"] = archive_wal_clear(archive)
+        if (
+            report["archive_sha256_after"] != archive_before
+            or args.source_case.read_bytes() != source_bytes
+        ):
+            report["status"] = "failed"
+            if error is None:
+                error = ValueError("The source archive or case changed during replay.")
+        if not report["archive_wal_clear_after"]:
+            report["status"] = "failed"
+            if error is None:
+                error = ValueError("The archive has a nonempty WAL after replay.")
+    except OSError as failure:
         report["status"] = "failed"
-        error = ValueError("The source archive or case changed during replay.")
+        report["postcheck_error_type"] = type(failure).__name__
+        if error is None:
+            error = failure
+    if error is not None:
+        report["error_type"] = type(error).__name__
     with args.output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, ensure_ascii=False, indent=2)
         stream.write("\n")
     if error is not None:
+        if isinstance(error, (ArchiveError, ReplayRejected)):
+            raise ValueError(f"Source replay failed: {type(error).__name__}.") from error
         raise error
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, ValueError, ImportError, sqlite3.Error, zlib.error) as error:
+        detail = str(error).partition("\n")[0]
+        print(f"Source replay error: {type(error).__name__}: {detail}", file=sys.stderr)
+        raise SystemExit(2) from None

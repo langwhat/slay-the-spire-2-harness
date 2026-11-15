@@ -3,7 +3,9 @@
 import argparse
 import json
 import sqlite3
+import sys
 import zlib
+from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -43,6 +45,8 @@ class ReplayEvidence(BaseModel):
     anchor_cursor: int
     archive_sha256_before: str
     archive_sha256_after: str
+    archive_wal_clear_before: bool
+    archive_wal_clear_after: bool
     source_case_sha256: str
     anchor_semantic_digest: str
     anchor_protocol_digests: tuple[str, ...]
@@ -229,11 +233,15 @@ def enrich_historical_case(
     if _sha(case_bytes) != expected_case_sha256 or _sha(replay_bytes) != expected_replay_sha256:
         raise HistoricalEnrichmentError("A case or replay proof has an unexpected digest.")
     proof = ReplayEvidence.model_validate_json(replay_bytes)
+    if proof.status is not ReplayStatus.VERIFIED:
+        raise HistoricalEnrichmentError("Synthetic replay evidence cannot be used for enrichment.")
     if (
         not proof.case_semantically_equal
         or proof.source_case_sha256 != _sha(source_bytes)
         or proof.anchor not in proof.audit.validated_model_sequences
         or proof.archive_sha256_before != proof.archive_sha256_after
+        or not proof.archive_wal_clear_before
+        or not proof.archive_wal_clear_after
     ):
         raise HistoricalEnrichmentError("The source replay does not verify the source case.")
     original = _OBJECT.validate_json(case_bytes)
@@ -266,6 +274,10 @@ def enrich_historical_case(
         )
     with closing(sqlite3.connect(f"{archive.resolve().as_uri()}?mode=ro", uri=True)) as connection:
         segments, inferred = _archive_segments(connection, case, proof)
+    if wal.exists() and wal.stat().st_size:
+        raise HistoricalEnrichmentError(
+            "An active archive WAL cannot be verified by its file digest."
+        )
     if _sha(archive.read_bytes()) != proof.archive_sha256_before:
         raise HistoricalEnrichmentError("The archive changed during native reconstruction.")
 
@@ -370,7 +382,7 @@ def enrich_historical_case(
     return DerivedFiles(case_result, provenance)
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", type=Path, required=True)
     parser.add_argument("--source-case", type=Path, required=True)
@@ -378,16 +390,22 @@ def main() -> None:
     parser.add_argument("--case-sha256", required=True)
     parser.add_argument("--source-replay-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    enrich_historical_case(
-        args.case,
-        args.source_case,
-        args.source_replay,
-        args.case_sha256,
-        args.source_replay_sha256,
-        args.output,
-    )
+    args = parser.parse_args(argv)
+    try:
+        enrich_historical_case(
+            args.case,
+            args.source_case,
+            args.source_replay,
+            args.case_sha256,
+            args.source_replay_sha256,
+            args.output,
+        )
+    except (OSError, ValueError, sqlite3.Error, zlib.error) as error:
+        detail = str(error).partition("\n")[0]
+        print(f"Historical enrichment error: {type(error).__name__}: {detail}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

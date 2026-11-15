@@ -559,7 +559,12 @@ native blob digests, and writes a new case and provenance in a new directory. It
 the case other than newly established encounters. Missing, conflicting, repeated, or
 interrupted encounter evidence remains unknown. The archive prefix must be complete and
 remain within one game and run; multi-task cases and unverified source replay are unsupported.
-Neither step calls a model or game. Synthetic test evidence is labeled separately.
+Neither step calls a model or game. Replay rejects a nonempty archive WAL before or after
+reading, and enrichment requires both recorded checks and checks again around its own read.
+Use a frozen archive with no writer or a trusted frozen copy: checks before and after reading
+cannot rule out transient concurrent writes. Synthetic replay evidence is
+rejected. The `verified` status is not a cryptographic signature: review the replay evidence
+and its source environment, and use the recorded hashes to bind it to the inputs.
 
 Keep the plan, case files, snapshots, annotations, and output outside this repository.
 A plan is a JSON file such as:

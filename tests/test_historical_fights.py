@@ -1,8 +1,15 @@
 import hashlib
 import json
+import os
+import runpy
+import socket
 import sqlite3
+import subprocess
+import sys
 import zlib
 from pathlib import Path
+from typing import Never
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import MISSING
@@ -10,6 +17,8 @@ from test_lifecycle import Campaign
 
 from sts2_harness.client import models as native
 from sts2_harness.fights import Fight, FightKind
+from sts2_harness.journal import Journal
+from sts2_harness_eval import decision_extract, historical_fights
 from sts2_harness_eval.decision_cases import (
     DecisionCase,
     DecisionLabels,
@@ -17,11 +26,69 @@ from sts2_harness_eval.decision_cases import (
     HarnessState,
     TaskEvent,
 )
-from sts2_harness_eval.historical_fights import HistoricalEnrichmentError, enrich_historical_case
+from sts2_harness_eval.historical_fights import (
+    HistoricalEnrichmentError,
+    enrich_historical_case,
+    main,
+)
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def run_enrichment(
+    case: Path, source: Path, proof: Path, case_hash: str, proof_hash: str, output: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "sts2_harness_eval.historical_fights",
+            "--case",
+            str(case),
+            "--source-case",
+            str(source),
+            "--source-replay",
+            str(proof),
+            "--case-sha256",
+            case_hash,
+            "--source-replay-sha256",
+            proof_hash,
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def run_source_replay(
+    source: Path, output: Path, provider: str, extra_path: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    repository = Path(__file__).resolve().parents[1]
+    environment = os.environ.copy()
+    if extra_path is not None:
+        environment["PYTHONPATH"] = f"{extra_path}:{environment.get('PYTHONPATH', '')}"
+    return subprocess.run(
+        [
+            sys.executable,
+            str(repository / "scripts/replay_source_case.py"),
+            "--source-case",
+            str(source),
+            "--extractor-directory",
+            str(repository / "src/sts2_harness_eval"),
+            "--provider-module",
+            provider,
+            "--output",
+            str(output),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def fixture(tmp_path: Path, scenario: str = "known") -> tuple[Path, Path, Path, str, str]:
@@ -179,12 +246,14 @@ def fixture(tmp_path: Path, scenario: str = "known") -> tuple[Path, Path, Path, 
     proof.write_text(
         json.dumps(
             {
-                "status": "synthetic",
+                "status": "verified",
                 "case_semantically_equal": True,
                 "anchor": anchor,
                 "anchor_cursor": anchor - 1,
                 "archive_sha256_before": archive_hash,
                 "archive_sha256_after": archive_hash,
+                "archive_wal_clear_before": True,
+                "archive_wal_clear_after": True,
                 "source_case_sha256": digest(source_case.read_bytes()),
                 "anchor_semantic_digest": "semantic",
                 "anchor_protocol_digests": ["protocol"],
@@ -206,7 +275,7 @@ def test_frozen_case_is_derived_from_original_native_observations(tmp_path: Path
     assert encounter == {"definition_id": "ENCOUNTER.OLD", "name": "Old enemy"}
     assert derived == json.loads(before)
     assert case.read_bytes() == before
-    assert json.loads(result.provenance_path.read_text())["source_replay"] == "synthetic"
+    assert json.loads(result.provenance_path.read_text())["source_replay"] == "verified"
 
 
 @pytest.mark.parametrize(
@@ -274,6 +343,40 @@ def test_changed_archive_is_rejected_before_output(tmp_path: Path) -> None:
     assert not output.exists()
 
 
+def test_enrichment_rejects_wal_before_read(tmp_path: Path) -> None:
+    case, source, proof, case_hash, proof_hash = fixture(tmp_path)
+    archive = Path(json.loads(case.read_text())["source"]["archive"])
+    Path(str(archive) + "-wal").write_bytes(b"uncheckpointed")
+    output = tmp_path / "derived"
+    with pytest.raises(HistoricalEnrichmentError, match="WAL"):
+        enrich_historical_case(case, source, proof, case_hash, proof_hash, output)
+    assert not output.exists()
+
+
+def test_enrichment_rejects_wal_appearing_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case, source, proof, case_hash, proof_hash = fixture(tmp_path)
+    archive = Path(json.loads(case.read_text())["source"]["archive"])
+    connect = sqlite3.connect
+
+    def connect_with_writer(database: str, *, uri: bool) -> sqlite3.Connection:
+        connection = connect(database, uri=uri)
+
+        def start_writer(statement: str) -> None:
+            if statement.startswith("SELECT sequence FROM records"):
+                Path(str(archive) + "-wal").write_bytes(b"uncheckpointed")
+
+        connection.set_trace_callback(start_writer)
+        return connection
+
+    monkeypatch.setattr(historical_fights.sqlite3, "connect", connect_with_writer)
+    output = tmp_path / "derived"
+    with pytest.raises(HistoricalEnrichmentError, match="WAL"):
+        enrich_historical_case(case, source, proof, case_hash, proof_hash, output)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("field", ("case_semantically_equal", "anchor_protocol_digests"))
 def test_unverified_source_replay_is_rejected(tmp_path: Path, field: str) -> None:
     case, source, proof, case_hash, _ = fixture(tmp_path)
@@ -328,3 +431,209 @@ def test_different_source_task_cannot_be_bound_to_the_frozen_case(tmp_path: Path
     with pytest.raises(HistoricalEnrichmentError):
         enrich_historical_case(case, source, proof, case_hash, digest(proof.read_bytes()), output)
     assert not output.exists()
+
+
+def test_synthetic_proof_cannot_create_a_case_via_api_or_cli(tmp_path: Path) -> None:
+    case, source, proof, case_hash, _ = fixture(tmp_path)
+    evidence = json.loads(proof.read_text())
+    evidence["status"] = "synthetic"
+    proof.write_text(json.dumps(evidence))
+    proof_hash = digest(proof.read_bytes())
+    output = tmp_path / "derived"
+    with pytest.raises(HistoricalEnrichmentError):
+        enrich_historical_case(case, source, proof, case_hash, proof_hash, output)
+    assert not output.exists()
+
+    result = run_enrichment(case, source, proof, case_hash, proof_hash, output)
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "synthetic" in result.stderr.lower()
+    assert not output.exists()
+
+
+def test_enrichment_cli_reports_missing_input_without_traceback(tmp_path: Path) -> None:
+    output = tmp_path / "derived"
+    result = run_enrichment(
+        tmp_path / "missing", tmp_path / "source", tmp_path / "proof", "wrong", "wrong", output
+    )
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert not output.exists()
+
+
+def test_enrichment_cli_reports_corrupt_sqlite_without_traceback(tmp_path: Path) -> None:
+    case, source, proof, case_hash, _ = fixture(tmp_path)
+    archive = Path(json.loads(case.read_text())["source"]["archive"])
+    archive.write_bytes(b"not sqlite")
+    evidence = json.loads(proof.read_text())
+    evidence["archive_sha256_before"] = digest(archive.read_bytes())
+    evidence["archive_sha256_after"] = evidence["archive_sha256_before"]
+    proof.write_text(json.dumps(evidence))
+    output = tmp_path / "derived"
+    result = run_enrichment(case, source, proof, case_hash, digest(proof.read_bytes()), output)
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert not output.exists()
+
+
+def test_source_replay_cli_keeps_failure_evidence_without_traceback(tmp_path: Path) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    output = tmp_path / "replay-failure.json"
+    result = run_source_replay(source, output, "unavailable_fixture_provider")
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["error_type"] == "ModuleNotFoundError"
+    assert evidence["archive_wal_clear_before"] is True
+    assert evidence["archive_wal_clear_after"] is True
+
+
+@pytest.mark.parametrize("field", ("archive_wal_clear_before", "archive_wal_clear_after"))
+@pytest.mark.parametrize("value", (False, None))
+def test_unchecked_source_replay_wal_is_rejected(
+    tmp_path: Path, field: str, value: bool | None
+) -> None:
+    case, source, proof, case_hash, _ = fixture(tmp_path)
+    evidence = json.loads(proof.read_text())
+    if value is None:
+        del evidence[field]
+    else:
+        evidence[field] = value
+    proof.write_text(json.dumps(evidence))
+    output = tmp_path / "derived"
+    with pytest.raises(ValueError):
+        enrich_historical_case(case, source, proof, case_hash, digest(proof.read_bytes()), output)
+    assert not output.exists()
+
+
+def test_source_replay_rejects_existing_nonempty_wal_before_provider(tmp_path: Path) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    archive = Path(json.loads(source.read_text())["source"]["archive"])
+    Path(str(archive) + "-wal").write_bytes(b"uncheckpointed data")
+    output = tmp_path / "replay-wal-before.json"
+    result = run_source_replay(source, output, "unavailable_fixture_provider")
+    assert result.returncode == 2
+    assert "wal" in result.stderr.lower()
+    assert "Traceback" not in result.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["error_type"] == "ValueError"
+    assert evidence["archive_wal_clear_before"] is False
+    assert evidence["archive_wal_clear_after"] is False
+
+
+def test_source_replay_cli_preserves_unexpected_error_and_failure_evidence(tmp_path: Path) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    (tmp_path / "error_fixture_provider.py").write_text(
+        "def entry_materials():\n    raise RuntimeError('unexpected internal error')\n"
+    )
+    output = tmp_path / "replay-internal-failure.json"
+    result = run_source_replay(source, output, "error_fixture_provider", tmp_path)
+    assert result.returncode == 1
+    assert "RuntimeError: unexpected internal error" in result.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["error_type"] == "RuntimeError"
+
+
+def test_source_replay_saves_failure_when_archive_disappears(tmp_path: Path) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    archive = Path(json.loads(source.read_text())["source"]["archive"])
+    (tmp_path / "vanished_fixture_provider.py").write_text(
+        f"from pathlib import Path\nPath({str(archive)!r}).unlink()\n"
+        "def entry_materials():\n    raise RuntimeError('original failure')\n"
+    )
+    output = tmp_path / "replay-vanished.json"
+    result = run_source_replay(source, output, "vanished_fixture_provider", tmp_path)
+    assert result.returncode == 1
+    assert "RuntimeError: original failure" in result.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["error_type"] == "RuntimeError"
+    assert evidence["postcheck_error_type"] == "FileNotFoundError"
+
+
+def test_source_replay_rejects_wal_appearing_during_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, source, _, _, _ = fixture(tmp_path)
+    archive = Path(json.loads(source.read_text())["source"]["archive"])
+    case = DecisionCase.model_validate_json(source.read_bytes())
+    repository = Path(__file__).resolve().parents[1]
+    extractor = repository / "src/sts2_harness_eval/decision_extract.py"
+
+    async def replay_fixture(
+        source: DecisionSource,
+        labels: DecisionLabels,
+        *,
+        source_documents: object = None,
+        audit: decision_extract.ExtractionAudit | None = None,
+    ) -> DecisionCase:
+        assert audit is not None
+        audit.validated_model_sequences.append(source.model_sequence)
+        Path(str(archive) + "-wal").write_bytes(b"uncheckpointed")
+        return case
+
+    replay_fixture.__code__ = replay_fixture.__code__.replace(co_filename=str(extractor))
+    monkeypatch.setattr(decision_extract, "extract_case", replay_fixture)
+    journal = MagicMock()
+    journal.request.return_value.semantic_digest = "semantic"
+    journal.request.return_value.attempts = ()
+    journal.request.return_value.confirmed_operation_cursor = case.source.model_sequence - 1
+
+    def open_fixture(path: Path) -> MagicMock:
+        return journal
+
+    monkeypatch.setattr(Journal, "open", open_fixture)
+    monkeypatch.setattr(socket.socket, "connect", socket.socket.connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", socket.socket.connect_ex)
+    import sts2_harness_eval
+
+    monkeypatch.setattr(sts2_harness_eval, "__path__", list(sts2_harness_eval.__path__))
+    output = tmp_path / "replay-wal-after.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "replay_source_case.py",
+            "--source-case",
+            str(source),
+            "--extractor-directory",
+            str(extractor.parent),
+            "--output",
+            str(output),
+        ],
+    )
+    with pytest.raises(SystemExit) as raised:
+        runpy.run_path(str(repository / "scripts/replay_source_case.py"), run_name="__main__")
+    assert raised.value.code == 2
+    assert "WAL" in capsys.readouterr().err
+    evidence = json.loads(output.read_text())
+    assert evidence["status"] == "failed"
+    assert evidence["archive_wal_clear_before"] is True
+    assert evidence["archive_wal_clear_after"] is False
+
+
+def test_enrichment_cli_does_not_suppress_internal_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(*args: object) -> Never:
+        raise RuntimeError("unexpected internal error")
+
+    monkeypatch.setattr("sts2_harness_eval.historical_fights.enrich_historical_case", fail)
+    with pytest.raises(RuntimeError, match="unexpected internal error"):
+        main(
+            [
+                "--case",
+                "case",
+                "--source-case",
+                "source",
+                "--source-replay",
+                "proof",
+                "--case-sha256",
+                "case-sha",
+                "--source-replay-sha256",
+                "proof-sha",
+                "--output",
+                "output",
+            ]
+        )
