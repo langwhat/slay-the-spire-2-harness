@@ -32,7 +32,7 @@ from sts2_harness.llm.messages import (
 from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PackagedPrompts, PromptReader
-from sts2_harness.results import QueryToolResult
+from sts2_harness.results import QueryToolResult, ReadCompleted
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.user_input import UserInputQueue
@@ -84,6 +84,19 @@ class CaptureDecision(Agent):
         context.set_route_plan(None)
         context.begin_group(observation, NotesView())
 
+    def _close_query(
+        self,
+        context: Context,
+        task: DecisionTask,
+        bound: native.Location,
+        call: ToolCall,
+        result: QueryToolResult,
+    ) -> native.Observation | None:
+        observation = super()._close_query(context, task, bound, call, result)
+        if not isinstance(result.outcome, ReadCompleted):
+            raise NoProposal("The query was rejected or failed; this trial is terminal unknown.")
+        return observation
+
     def _reject_action_layout(
         self, context: Context, calls: tuple[ToolCall, ...], observation: native.Observation
     ) -> None:
@@ -131,9 +144,12 @@ class FreshModel(MeasuredModel):
         self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
     ) -> ModelReply:
         try:
-            return await super().complete_prepared(prepared, preparation=preparation)
+            reply = await super().complete_prepared(prepared, preparation=preparation)
         except CapacityRejected:
             raise ModelUnavailable(FailureKind.CAPACITY) from None
+        if not reply.assistant.tool_calls:
+            raise NoProposal("The response declared no tool; this trial is terminal unknown.")
+        return reply
 
 
 class FreshGame(CaseGame):
@@ -271,8 +287,7 @@ async def sample_fresh(
             raise NoProposal("The decision loop returned without an action proposal.")
         except Captured as captured:
             if captured.error:
-                error = captured.error
-                verdict = DecisionVerdict.DEVIATED
+                error = f"Invalid action proposal: {captured.error}"
             else:
                 arguments = _OBJECT.validate_json(captured.call.arguments)
                 value = arguments.get("reason")

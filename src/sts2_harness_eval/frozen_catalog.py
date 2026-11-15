@@ -30,14 +30,16 @@ class FrozenCatalog(native.WireModel):
             return native.CatalogCompleted(status=native.ResultStatus.COMPLETED, data=self.catalog)
         if isinstance(request, native.LookupQuery):
             index = {entry.definition_id: entry for entry in self.definitions}
-            if any(identity not in index for identity in request.ids):
+            missing = tuple(identity for identity in request.ids if identity not in index)
+            if missing and not self.complete:
                 raise SnapshotIncomplete(
                     "The snapshot does not contain every requested definition."
                 )
             return native.CatalogCompleted(
                 status=native.ResultStatus.COMPLETED,
                 data=native.LookupData(
-                    entries=tuple(index[identity] for identity in request.ids), missing_ids=()
+                    entries=tuple(index[identity] for identity in request.ids if identity in index),
+                    missing_ids=missing,
                 ),
             )
         if not self.complete:

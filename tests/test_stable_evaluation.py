@@ -75,8 +75,15 @@ def test_frozen_catalog_answers_new_queries_and_preserves_unknowns() -> None:
         assert isinstance(search.data, native.SearchData)
         assert search.data.total == 2 and search.data.next_offset == 1
         assert search.data.matches[0].definition_id == "RELIC.ALPHA"
+        mixed = await snapshot.query(
+            native.LookupQuery(mode=native.CatalogMode.LOOKUP, ids=("RELIC.UNKNOWN", "RELIC.ALPHA"))
+        )
+        assert isinstance(mixed, native.CatalogCompleted)
+        assert isinstance(mixed.data, native.LookupData)
+        assert mixed.data.missing_ids == ("RELIC.UNKNOWN",)
+        assert [entry.definition_id for entry in mixed.data.entries] == ["RELIC.ALPHA"]
         with pytest.raises(SnapshotIncomplete):
-            await snapshot.query(
+            await snapshot.model_copy(update={"complete": False}).query(
                 native.LookupQuery(mode=native.CatalogMode.LOOKUP, ids=("RELIC.UNKNOWN",))
             )
         with pytest.raises(SnapshotIncomplete):
@@ -210,7 +217,7 @@ def test_stream_records_terminal_usage_before_late_close() -> None:
     asyncio.run(run())
 
 
-def test_fresh_run_continues_after_text_notes_and_a_new_catalog_query(tmp_path: Path) -> None:
+def test_fresh_run_continues_after_notes_and_a_new_catalog_query(tmp_path: Path) -> None:
     async def run() -> None:
         case = decision_case(tmp_path, multiselect=True)
         task = case.events[0]
@@ -260,7 +267,6 @@ def test_fresh_run_continues_after_text_notes_and_a_new_catalog_query(tmp_path: 
         )
         responses = iter(
             (
-                reply(text="I will inspect first."),
                 reply(("query", "run_knowledge", '{"mode":"lookup","ids":["RELIC.ALPHA"]}')),
                 reply(("notes", "run_notes", '{"mode":"write","other":"Test note."}')),
                 reply(
@@ -288,9 +294,9 @@ def test_fresh_run_continues_after_text_notes_and_a_new_catalog_query(tmp_path: 
             result = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
         assert result.verdict is DecisionVerdict.PASSED, result.error
         assert result.reason == "Select the card."
-        assert len(bodies) == 4
-        assert "Gain strength." in bodies[2]
-        assert "Test note." in bodies[3]
+        assert len(bodies) == 3
+        assert "Gain strength." in bodies[1]
+        assert "Test note." in bodies[2]
         assert all('"task":"act"' in body.replace('\\"', '"') for body in bodies)
 
     asyncio.run(run())
@@ -674,3 +680,190 @@ def test_frozen_documents_preserve_material_identity_and_query_coverage() -> Non
     corrupt = encoded.replace(document.text.version, "forged")
     with pytest.raises(ValidationError, match="version does not match"):
         FrozenDocuments.model_validate_json(corrupt)
+
+
+@pytest.mark.parametrize(
+    "first_reply, expected_error",
+    [
+        (reply(text="I need more information."), "no tool"),
+        (reply(("unknown", "run_missing", "{}")), "rejected or failed"),
+        (reply(("bad-query", "run_knowledge", '{"mode":"lookup","ids":[]}')), "rejected or failed"),
+        (
+            reply(("missing", "run_knowledge", '{"mode":"search","text":"strength"}')),
+            "complete native catalog",
+        ),
+    ],
+)
+def test_invalid_preparatory_response_ends_only_its_trial_and_keeps_usage(
+    tmp_path: Path, first_reply: bytes, expected_error: str
+) -> None:
+    from pydantic import TypeAdapter
+
+    from sts2_harness_eval.stable_suite import EvaluationPlan, evaluate
+
+    case = decision_case(tmp_path, multiselect=True)
+    task = case.events[0]
+    assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+    observation = task.observation
+    assert isinstance(observation.state, native.RunState)
+    state = observation.state.model_copy(
+        update={"screen": native.RunScreen.SELECTION, "offers": (), "actions": ()}
+    )
+    case = case.model_copy(
+        update={
+            "events": (
+                task.model_copy(
+                    update={"observation": observation.model_copy(update={"state": state})}
+                ),
+            )
+        }
+    )
+    tmp_path.joinpath("case.json").write_text(case.model_dump_json())
+    tmp_path.joinpath("catalog.json").write_text(
+        '{"complete":false,"catalog":{"categories":[],"card_filters":'
+        '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+    )
+    plan = EvaluationPlan.model_validate_json(
+        json.dumps(
+            {
+                "configurations": [{"id": "test", "effort": "high", "prompt_version": "test"}],
+                "cases": [
+                    {
+                        "id": "case",
+                        "role": "run",
+                        "case": "case.json",
+                        "catalog": "catalog.json",
+                        "configurations": ["test"],
+                        "repetitions": 2,
+                    }
+                ],
+            }
+        )
+    )
+    event = TypeAdapter(dict[str, JsonValue]).validate_json(first_reply.removeprefix(b"data: "))
+    response = event["response"]
+    assert isinstance(response, dict)
+    response["usage"] = {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "input_tokens_details": {"cached_tokens": 40},
+        "output_tokens_details": {"reasoning_tokens": 12},
+    }
+    first_with_usage = ("data: " + json.dumps(event) + "\n\n").encode()
+    action = '{"steps":[{"kind":"select","refs":["candidate"]}],"reason":"Second trial."}'
+    responses = iter((first_with_usage, reply(("action", "run_act", action))))
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200, content=next(responses), headers={"Content-Type": "text/event-stream"}
+        )
+
+    async def run() -> None:
+        results = await evaluate(
+            plan,
+            tmp_path,
+            tmp_path / "out",
+            configuration(tmp_path),
+            concurrency=1,
+            transport=lambda: httpx.MockTransport(respond),
+        )
+        assert len(requests) == 2 and len(results) == 2
+        first, second = results
+        assert first.sample is not None and first.sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert first.sample.error is not None and expected_error in first.sample.error
+        assert len(first.attempts) == 1 and first.attempts[0].weighted_tokens == 162
+        assert first.attempts[0].reasoning_tokens == 12
+        assert second.sample is not None and second.sample.verdict is DecisionVerdict.PASSED
+        assert second.sample.reason == "Second trial."
+
+    asyncio.run(run())
+
+
+def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path)
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"offer":"offer","choice":"take","reason":"Missing card."}'
+        count = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal count
+            count += 1
+            return httpx.Response(
+                200,
+                content=reply(("bad", "run_deck_choice", arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.DECK)
+        assert count == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "Invalid action proposal" in sample.error
+        assert sample.raw_calls[0]["arguments"] == arguments
+
+    asyncio.run(run())
+
+
+def test_failed_catalog_query_ends_the_trial_without_a_correction(tmp_path: Path) -> None:
+    from sts2_harness.client.http import ClientFailureKind, ClientUnavailable
+
+    class UnavailableCatalog(FrozenCatalog):
+        async def query(
+            self, request: native.CatalogRequest
+        ) -> native.CatalogCompleted | native.CatalogRejected:
+            raise ClientUnavailable(ClientFailureKind.TIMEOUT)
+
+    async def run() -> None:
+        catalog = UnavailableCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("query", "run_knowledge", '{"mode":"catalog"}')),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(
+                decision_case(tmp_path, multiselect=True),
+                client,
+                catalog=catalog,
+                role=EvaluationRole.RUN,
+            )
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "rejected or failed" in sample.error
+
+    asyncio.run(run())
+
+
+def test_production_combat_still_corrects_text_only_reply(tmp_path: Path) -> None:
+    from test_combat import BattleHTTP
+
+    from sts2_harness.decisions import CombatHandoff
+
+    battle = BattleHTTP(
+        [
+            reply(text="I need a moment."),
+            reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            reply(text="Reviewed."),
+        ]
+    )
+    assert isinstance(asyncio.run(battle.run(tmp_path)), CombatHandoff)
+    assert len(battle.inputs) == 3 and len(battle.actions) == 1
+    assert "An action task requires its action tool" in json.dumps(battle.inputs[1])

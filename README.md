@@ -553,7 +553,8 @@ the case did not enable that source. A catalog file uses the `FrozenCatalog` sch
 `catalog` contains the native catalog metadata, `definitions` contains native lookup
 entries, and `complete` asserts the definition set covers the entire native catalog.
 Only a verified complete snapshot can answer arbitrary searches. Partial snapshots can
-answer lookups for included IDs, but missing IDs and searches are unknown. Document
+answer lookups for included IDs, but missing IDs and searches are unknown. A verified
+complete snapshot reports missing lookup IDs as absent from the native catalog. Document
 snapshots use `FrozenDocuments`: declare all covered subjects (or `complete_subjects`)
 and freeze the documents, requested resources, and role skill lists. Candidate-link
 snapshots use `FrozenLinks`, with the exact candidate/owned inputs and result for each
@@ -587,6 +588,9 @@ the evaluator prints estimated trial and request counts and weighted tokens from
 provided per-role, per-effort historical means. Missing means remain unknown. Estimates
 are informational, never a spending limit. Weighted tokens are uncached input plus 5%
 of cache-read input plus five times output; reasoning is already included in output.
+Successful notes and read-only queries continue the current trial; a text-only response,
+unknown tool, or rejected or failed query ends that trial as unknown without a correction
+request. Other scheduled trials continue, and invalid first actions remain recorded.
 
 `report.md` lists every completed trial's choice, reason, verdict, token use, and
 reasoning tokens; unanswered usage is explicitly unknown. Unlabeled choices are not
