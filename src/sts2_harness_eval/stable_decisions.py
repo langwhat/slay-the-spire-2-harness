@@ -1,11 +1,10 @@
 """Evaluate a fresh decision against an immutable observation without game writes."""
 
 import json
-from dataclasses import replace
 from enum import StrEnum
 from time import monotonic
 
-from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
+from pydantic import MISSING, BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.agent import Agent
 from sts2_harness.client import models as native
@@ -30,6 +29,7 @@ from sts2_harness.llm.messages import (
     ModelUnavailable,
     PreparedRequest,
     RequestPreparation,
+    TextMessage,
     ToolCall,
     ToolDefinition,
 )
@@ -37,9 +37,10 @@ from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import Failed, QueryToolResult, ReadCompleted, ReasonCode, Rejected
+from sts2_harness.route_plan import Edge, replace_plan
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
-from sts2_harness.tools.inputs import RunActInput
+from sts2_harness.tools.inputs import CombatActInput, RunActInput, RunNext, RunPlan
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness_eval.decision_cases import (
     CapturedProposal,
@@ -116,7 +117,13 @@ class CaptureDecision(Agent):
         first = next(call for call in calls if call.name in self.all_decisions)
         raise Captured(first, "Invalid action layout.")
 
-    async def _validate_proposal(self, call: ToolCall, task: DecisionTask) -> None:
+    async def _validate_proposal(
+        self,
+        call: ToolCall,
+        task: DecisionTask,
+        observation: native.Observation,
+        parameters: BaseModel | None,
+    ) -> None:
         return None
 
     async def _dispatch(
@@ -126,20 +133,56 @@ class CaptureDecision(Agent):
             definition = next(
                 (item for item in self._tools.definitions if item.name == call.name), None
             )
+            if definition is None or call.name not in self.decision_names:
+                raise Captured(call, "The action is unavailable to this role.")
+            if call.name == ToolName.RUN_DECK_CHOICE:
+                await self._validate_proposal(call, task, observation, None)
+                raise Captured(call)
             try:
-                if definition is None or call.name not in self.decision_names:
-                    raise ValueError("The action is unavailable to this role.")
                 json.loads(call.arguments, object_pairs_hook=unique_fields)
-                definition.parameters.model_validate_json(call.arguments, strict=True)
+                parameters = definition.parameters.model_validate_json(call.arguments, strict=True)
             except (ValueError, ValidationError) as error:
                 raise Captured(call, str(error)) from error
-            await self._validate_proposal(call, task)
+            await self._validate_proposal(call, task, observation, parameters)
             raise Captured(call)
         return await super()._dispatch(call, task, observation)
 
 
 class RunProbe(CaptureDecision, RunAgent):
     decision_names = frozenset((ToolName.RUN_ACT, ToolName.RUN_NEXT, ToolName.RUN_PLAN))
+
+    async def _validate_proposal(
+        self,
+        call: ToolCall,
+        task: DecisionTask,
+        observation: native.Observation,
+        parameters: BaseModel | None,
+    ) -> None:
+        if isinstance(parameters, RunActInput):
+            try:
+                _verify_run_action(parameters, observation)
+            except ExtractionError as error:
+                raise Captured(call, str(error)) from error
+            except SnapshotIncomplete as error:
+                raise Captured(call, str(error), unknown=True) from error
+            return
+        if isinstance(parameters, RunNext):
+            if self._plan is None:
+                raise Captured(call, "No route plan is active (no_plan).")
+            raise Captured(call, "Route travel cannot be verified offline.", unknown=True)
+        if isinstance(parameters, RunPlan):
+            if not isinstance(observation.state, native.RunState) or observation.map is MISSING:
+                raise Captured(call, "Current map facts are unavailable.", unknown=True)
+            update = replace_plan(
+                self._plan,
+                observation.state.progress.position,
+                frozenset(node.position for node in observation.map.nodes),
+                parameters.reason,
+                tuple(Edge(edge.source, edge.destination) for edge in parameters.edges),
+            )
+            if update.rejection is not None:
+                raise Captured(call, f"The route plan was rejected: {update.rejection.value}.")
+            raise Captured(call, "Route traversal cannot be verified offline.", unknown=True)
 
     def focus_observation(self, observation: native.Observation) -> native.Observation:
         return self._reward_view(observation)
@@ -148,11 +191,39 @@ class RunProbe(CaptureDecision, RunAgent):
 class CombatProbe(CaptureDecision, CombatAgent):
     decision_names = frozenset((ToolName.COMBAT_ACT,))
 
+    async def _validate_proposal(
+        self,
+        call: ToolCall,
+        task: DecisionTask,
+        observation: native.Observation,
+        parameters: BaseModel | None,
+    ) -> None:
+        if isinstance(parameters, CombatActInput):
+            if (
+                observation.state.control is not native.StateControl.READY
+                or observation.input_readiness
+                not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
+            ):
+                raise Captured(call, "The combat state is not ready for an action.")
+            raise Captured(call, "Combat action legality cannot be verified offline.", unknown=True)
+
 
 class DeckProbe(CaptureDecision, DeckAgent):
     decision_names = frozenset((ToolName.RUN_DECK_CHOICE,))
 
-    async def _validate_proposal(self, call: ToolCall, task: DecisionTask) -> None:
+    async def _validate_proposal(
+        self,
+        call: ToolCall,
+        task: DecisionTask,
+        observation: native.Observation,
+        parameters: BaseModel | None,
+    ) -> None:
+        if (
+            observation.state.control is not native.StateControl.READY
+            or observation.input_readiness
+            not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
+        ):
+            raise Captured(call, "The card choice is not ready.")
         result = await self._deck_choice(call, task)
         if isinstance(result, QueryToolResult) and isinstance(result.outcome, (Rejected, Failed)):
             reason = result.outcome.reason
@@ -164,6 +235,7 @@ class DeckProbe(CaptureDecision, DeckAgent):
 
 class FreshModel(MeasuredModel):
     history: native.HistoryData | None = None
+    last_calls: tuple[ToolCall, ...] = ()
 
     def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
         if self.history is None:
@@ -177,7 +249,7 @@ class FreshModel(MeasuredModel):
             if not isinstance(observation, dict) or observation.get("baseline") is not True:
                 continue
             observation["combat_history"] = _OBJECT.validate_json(self.history.to_json())
-            enriched[index] = replace(message, value=json.dumps(payload, ensure_ascii=False))
+            enriched[index] = TextMessage(message.role, json.dumps(payload, ensure_ascii=False))
             break
         return super().prepare(tuple(enriched), tools)
 
@@ -188,6 +260,7 @@ class FreshModel(MeasuredModel):
             reply = await super().complete_prepared(prepared, preparation=preparation)
         except CapacityRejected:
             raise ModelUnavailable(FailureKind.CAPACITY) from None
+        self.last_calls = reply.assistant.tool_calls
         if not reply.assistant.tool_calls:
             raise NoProposal("The response declared no tool; this trial is terminal unknown.")
         return reply
@@ -218,6 +291,8 @@ class FreshGame(CaseGame):
             ):
                 continue
             if history_query:
+                if read.result.observation != self.observation:
+                    continue
                 history = self.case.combat_history
                 if (
                     not isinstance(read.result.data, native.HistoryData)
@@ -230,14 +305,10 @@ class FreshGame(CaseGame):
             return read.result.model_copy(update={"observation": self.observation})
         if history_read is not None:
             return history_read.model_copy(update={"observation": self.observation})
-        if history_query and self.case.combat_history is not None:
-            return native.InspectCompleted(
-                status=native.ResultStatus.COMPLETED,
-                observation=self.observation,
-                data=self.case.combat_history,
-            )
         if history_query:
-            raise SnapshotIncomplete("The snapshot has no current combat history.")
+            raise SnapshotIncomplete(
+                "The snapshot has no exactly anchored combat history inspection."
+            )
         raise SnapshotIncomplete("The snapshot has no matching current-state inspection.")
 
     async def catalog(self, request: native.CatalogRequest) -> GameReply[Cataloged]:
@@ -365,16 +436,7 @@ async def sample_fresh(
             await Agent.decide(agent, ActTask(route), observation)
             raise NoProposal("The decision loop returned without an action proposal.")
         except Captured as captured:
-            proposal = CapturedProposal(
-                tool=ToolName(captured.call.name), arguments=captured.call.arguments
-            )
-            try:
-                json.loads(captured.call.arguments, object_pairs_hook=unique_fields)
-                arguments = _OBJECT.validate_json(captured.call.arguments)
-            except (ValueError, ValidationError):
-                arguments = {}
-            value = arguments.get("reason")
-            reason = value if isinstance(value, str) else ""
+            proposal, arguments, reason = _proposal_details(captured.call)
             if captured.error:
                 prefix = (
                     "Proposal legality unknown" if captured.unknown else "Invalid action proposal"
@@ -384,8 +446,6 @@ async def sample_fresh(
                 if captured.call.name in (ToolName.RUN_DECK_CHOICE, ToolName.RUN_ACT) and (
                     case.labels.good or case.labels.bad
                 ):
-                    if captured.call.name == ToolName.RUN_ACT:
-                        _verify_labeled_run_action(captured.call, observation)
                     choices = choices_for(captured.call, observation)
                     verdict = score(case.labels, choices)
                 else:
@@ -400,6 +460,17 @@ async def sample_fresh(
         ModelUnavailable,
     ) as failure:
         error = str(failure)
+        if proposal is None:
+            pending = next(
+                (
+                    call
+                    for call in measured.last_calls
+                    if call.name in CaptureDecision.all_decisions
+                ),
+                None,
+            )
+            if pending is not None:
+                proposal, _, reason = _proposal_details(pending)
     return DecisionSample(
         source=case.source,
         sample=sample,
@@ -418,33 +489,53 @@ async def sample_fresh(
     )
 
 
-def _verify_labeled_run_action(call: ToolCall, observation: native.Observation) -> None:
+def _proposal_details(call: ToolCall) -> tuple[CapturedProposal, dict[str, JsonValue], str]:
+    proposal = CapturedProposal(tool=ToolName(call.name), arguments=call.arguments)
+
+    def report_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        if sum(key == "reason" for key, _ in pairs) > 1:
+            raise ValueError("The proposal has ambiguous reasons.")
+        return dict(pairs)
+
+    try:
+        arguments = _OBJECT.validate_python(
+            json.loads(call.arguments, object_pairs_hook=report_fields), strict=True
+        )
+    except (ValueError, ValidationError):
+        arguments = {}
+    value = arguments.get("reason")
+    return proposal, arguments, value if isinstance(value, str) else ""
+
+
+def _verify_run_action(parameters: RunActInput, observation: native.Observation) -> None:
     state = observation.state
-    steps = RunActInput.model_validate_json(call.arguments, strict=True).root.steps
-    if not isinstance(state, native.RunState) or len(steps) != 1:
-        raise SnapshotIncomplete("The frozen state cannot verify this action batch.")
+    steps = parameters.root.steps
+    if not isinstance(state, native.RunState):
+        raise SnapshotIncomplete("The frozen state cannot verify this action.")
     if (
         observation.location.owner is not native.DecisionOwner.RUN
         or state.control is not native.StateControl.READY
         or observation.input_readiness
         not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
     ):
-        raise SnapshotIncomplete("The frozen state cannot verify a ready Run decision.")
+        raise ExtractionError("The Run state is not ready for an action.")
+    if len(steps) != 1:
+        raise SnapshotIncomplete("The frozen state cannot verify this action batch.")
     step = steps[0]
     if isinstance(step, native.Select):
         selection = state.selection
         if selection is None:
-            raise ExtractionError("Invalid action proposal: no current selection is available.")
+            raise ExtractionError("No current selection is available.")
         if not set(step.refs) <= set(selection.candidates) or not (
             selection.min <= len(step.refs) <= selection.max
         ):
-            raise ExtractionError("Invalid action proposal: selection is not currently legal.")
+            raise ExtractionError("Selection is not currently legal.")
         return
     if isinstance(step, native.Interact):
         action = next((item for item in state.actions if item.ref == step.action), None)
         if action is None or not action.enabled or action.destination is not MISSING:
-            raise ExtractionError("Invalid action proposal: interaction is not currently legal.")
+            raise ExtractionError("Interaction is not currently legal.")
         if state.selection is not None or state.screen is native.RunScreen.MAP:
-            raise ExtractionError("Invalid action proposal: interaction is not currently legal.")
+            raise ExtractionError("Interaction is not currently legal.")
         return
-    raise SnapshotIncomplete("The frozen state cannot verify this labeled action.")
+    raise SnapshotIncomplete("The frozen state cannot verify this action.")

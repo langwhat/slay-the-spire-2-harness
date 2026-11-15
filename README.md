@@ -513,13 +513,13 @@ The stable evaluator runs a fixed set of recorded decisions through the current 
 context assembly. It starts with the current task and observation, with empty notes and no
 past conversation, battle report, or route plan. It serves read-only queries from each
 case's frozen data, applies in-memory note updates, and stops before the first route-plan
-or game-action proposal. No game action is sent. Combat cases provide `combat_history`
-as the native current-combat history, or an exact matching frozen inspect reply. The same
-facts are included in the first full task and served to later history queries; an absent
-or inconsistent history is unsupported. This task field is specific to evaluation and
-is not included in the production task. A missing snapshot fact is reported
-as unknown; an old recording that cannot satisfy the current schema is reported as
-unsupported rather than reconstructed from guesses.
+or game-action proposal. No game action is sent. Combat cases require a frozen history
+inspect reply whose full observation matches the task anchor. An optional `combat_history`
+must agree with that reply. The same facts are included in the first full task and served
+to later history queries; an absent or inconsistent history is unsupported. This task field
+is specific to evaluation and is not included in the production task. A missing snapshot
+fact is reported as unknown; an old recording that cannot satisfy the current schema is
+reported as unsupported rather than reconstructed from guesses.
 At the evaluation-file boundary only, an old Run observation missing `base_orb_slots`
 receives the verified native character default in memory: three for `CHARACTER.DEFECT`
 and zero for `CHARACTER.IRONCLAD`, `CHARACTER.SILENT`, `CHARACTER.REGENT`, and

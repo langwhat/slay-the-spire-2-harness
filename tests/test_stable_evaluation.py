@@ -16,6 +16,7 @@ from test_run import handoff
 from sts2_harness.client import models as native
 from sts2_harness.fights import Fight, FightKind
 from sts2_harness.llm.client import Llm
+from sts2_harness.tools import ToolName
 from sts2_harness_eval.decision_cases import (
     BattleState,
     CorrectionEvent,
@@ -896,6 +897,73 @@ def test_fresh_deck_scores_multiple_chosen_cards(tmp_path: Path) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "control, readiness, expected",
+    (
+        (native.StateControl.READY, native.InputReadiness.READY, DecisionVerdict.PASSED),
+        (native.StateControl.READY, native.InputReadiness.SELECTION, DecisionVerdict.PASSED),
+        (native.StateControl.BUSY, native.InputReadiness.BUSY, DecisionVerdict.UNSUPPORTED),
+        (
+            native.StateControl.UNAVAILABLE,
+            native.InputReadiness.UNAVAILABLE,
+            DecisionVerdict.UNSUPPORTED,
+        ),
+    ),
+)
+def test_deck_choice_requires_ready_control_and_input(
+    tmp_path: Path,
+    control: native.StateControl,
+    readiness: native.InputReadiness,
+    expected: DecisionVerdict,
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        assert isinstance(observation.state, native.RunState)
+        observation = observation.model_copy(
+            update={
+                "input_readiness": readiness,
+                "state": observation.state.model_copy(
+                    update={"control": control, "screen": native.RunScreen.SELECTION}
+                ),
+            }
+        )
+        observation = native.Observation.model_validate_json(observation.model_dump_json())
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"choice":"take","card":"candidate","reason":"Choose it."}'
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("choice", "run_deck_choice", arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.DECK)
+        assert len(requests) == 1 and sample.verdict is expected
+        assert sample.proposal is not None and sample.proposal.arguments == arguments
+        assert sample.reason == "Choose it."
+        if expected is DecisionVerdict.UNSUPPORTED:
+            assert sample.error is not None and "not ready" in sample.error
+            assert not sample.choices
+
+    asyncio.run(run())
+
+
 def test_frozen_documents_preserve_material_identity_and_query_coverage() -> None:
     from pydantic import ValidationError
 
@@ -1031,7 +1099,25 @@ def test_invalid_preparatory_response_ends_only_its_trial_and_keeps_usage(
     asyncio.run(run())
 
 
-def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "arguments, reason",
+    (
+        ('{"offer":"offer","choice":"take","reason":"Missing card."}', "Missing card."),
+        (
+            '{"offer":"offer","choice":"take","card":"candidate","card":"candidate",'
+            '"reason":"Duplicate card."}',
+            "Duplicate card.",
+        ),
+        (
+            '{"offer":"offer","choice":"take","card":"candidate",'
+            '"reason":"First.","reason":"Second."}',
+            "",
+        ),
+    ),
+)
+def test_invalid_first_proposal_is_retained_without_execution(
+    tmp_path: Path, arguments: str, reason: str
+) -> None:
     from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
 
     async def run() -> None:
@@ -1040,7 +1126,6 @@ def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) ->
             '{"complete":false,"catalog":{"categories":[],"card_filters":'
             '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
         )
-        arguments = '{"offer":"offer","choice":"take","reason":"Missing card."}'
         count = 0
 
         def respond(request: httpx.Request) -> httpx.Response:
@@ -1060,9 +1145,9 @@ def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) ->
         assert count == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
         assert sample.error is not None and "Invalid action proposal" in sample.error
         assert sample.raw_calls[0]["arguments"] == arguments
-        assert sample.reason == "Missing card."
+        assert sample.reason == reason
         assert sample.proposal is not None
-        assert sample.proposal.tool == "run_deck_choice"
+        assert sample.proposal.tool is ToolName.RUN_DECK_CHOICE
         assert sample.proposal.arguments == arguments
         plan = EvaluationPlan.model_validate_json(
             '{"configurations":[{"id":"one","effort":"high","prompt_version":"one"}],'
@@ -1082,7 +1167,7 @@ def test_invalid_first_proposal_is_retained_without_execution(tmp_path: Path) ->
             attempts=(),
         )
         result = report(plan, (trial,))
-        assert "run_deck_choice" in result and "Missing card." in result
+        assert "run_deck_choice" in result and reason in result
         assert json.dumps(arguments, ensure_ascii=False) in result
         assert "Invalid action proposal" in result and "Scored: 0" in result
 
@@ -1185,6 +1270,60 @@ def test_failed_catalog_query_ends_the_trial_without_a_correction(tmp_path: Path
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "query, error",
+    (
+        ('{"mode":"lookup","ids":[]}', "rejected or failed"),
+        ('{"mode":"search","text":"strength"}', "complete native catalog"),
+    ),
+)
+def test_failed_query_retains_later_proposal_without_executing_it(
+    tmp_path: Path, query: str, error: str
+) -> None:
+    from pydantic import TypeAdapter
+
+    async def run() -> None:
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"reason":"After the failed query."}'
+        payload = reply(("query", "run_knowledge", query), ("later", "run_next", arguments))
+        event = TypeAdapter(dict[str, JsonValue]).validate_json(payload.removeprefix(b"data: "))
+        response = event["response"]
+        assert isinstance(response, dict)
+        response["usage"] = {"input_tokens": 100, "output_tokens": 20}
+        payload = ("data: " + json.dumps(event) + "\n\n").encode()
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=payload,
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(
+                decision_case(tmp_path, multiselect=True),
+                client,
+                catalog=catalog,
+                role=EvaluationRole.RUN,
+            )
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and error in sample.error
+        assert sample.proposal is not None and sample.proposal.tool is ToolName.RUN_NEXT
+        assert sample.proposal.arguments == arguments and sample.reason == "After the failed query."
+        assert len(sample.raw_calls) == 2 and not sample.choices
+        assert sample.usage[0]["input_tokens"] == 100 and sample.usage[0]["output_tokens"] == 20
+
+    asyncio.run(run())
+
+
 def test_production_combat_still_corrects_text_only_reply(tmp_path: Path) -> None:
     from test_combat import BattleHTTP
 
@@ -1245,7 +1384,7 @@ def test_combat_task_and_history_query_use_the_same_frozen_history(
                     ),
                 ),
                 "combat_history": history if history_source == "facts" else None,
-                "native_reads": (read,) if history_source == "native_read" else (),
+                "native_reads": (read,),
             }
         )
         catalog = FrozenCatalog.model_validate_json(
@@ -1273,7 +1412,8 @@ def test_combat_task_and_history_query_use_the_same_frozen_history(
             transport=httpx.MockTransport(respond),
         ) as client:
             sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.COMBAT)
-        assert len(requests) == 2 and sample.verdict is DecisionVerdict.UNLABELED
+        assert len(requests) == 2 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "legality cannot be verified" in sample.error
         first = requests[0]["input"]
         assert isinstance(first, list)
         user = [item for item in first if isinstance(item, dict) and item.get("role") == "user"]
@@ -1406,6 +1546,202 @@ def test_conflicting_current_history_reads_are_unknown_without_a_request(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("has_stale_read", (False, True))
+def test_combat_history_requires_an_exact_inspect_anchor(
+    tmp_path: Path, has_stale_read: bool
+) -> None:
+    from sts2_harness.game import Inspect
+
+    async def run() -> None:
+        original = decision_case(tmp_path)
+        task = original.events[0]
+        assert isinstance(task, TaskEvent)
+        observation = native.Observation.model_validate_json(COMBAT)
+        history = native.HistoryData(
+            cards_played_this_combat=(), cards_played_this_turn=(), cards_exhausted_this_turn=()
+        )
+        stale_observation = observation.model_copy(
+            update={
+                "stamp": observation.stamp.model_copy(
+                    update={"observation_sequence": observation.stamp.observation_sequence + 1}
+                )
+            }
+        )
+        read = NativeRead(
+            request=Inspect(query=native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)),
+            result=native.InspectCompleted(
+                status=native.ResultStatus.COMPLETED, observation=stale_observation, data=history
+            ),
+        )
+        case = original.model_copy(
+            update={
+                "events": (task.model_copy(update={"observation": observation}),),
+                "combat_history": history,
+                "native_reads": (read,) if has_stale_read else (),
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(500)
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.COMBAT)
+        assert sample.verdict is DecisionVerdict.UNSUPPORTED and sample.proposal is None
+        assert sample.error is not None and "exactly anchored" in sample.error
+        assert not requests
+
+    asyncio.run(run())
+
+
+def test_other_history_anchor_does_not_conflict_with_exact_read(tmp_path: Path) -> None:
+    from sts2_harness.game import Inspect
+
+    async def run() -> None:
+        case = decision_case(tmp_path)
+        observation = native.Observation.model_validate_json(COMBAT)
+        history = native.HistoryData(
+            cards_played_this_combat=(), cards_played_this_turn=(), cards_exhausted_this_turn=()
+        )
+        different = history.model_copy(
+            update={"cards_played_this_combat": (native.NamedDefinition(name="Other"),)}
+        )
+        stale = observation.model_copy(
+            update={
+                "stamp": observation.stamp.model_copy(
+                    update={"observation_sequence": observation.stamp.observation_sequence + 1}
+                )
+            }
+        )
+        query = native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)
+        reads = tuple(
+            NativeRead(
+                request=Inspect(query=query),
+                result=native.InspectCompleted(
+                    status=native.ResultStatus.COMPLETED, observation=anchor, data=data
+                ),
+            )
+            for anchor, data in ((observation, history), (stale, different))
+        )
+        case = case.model_copy(update={"native_reads": reads, "combat_history": history})
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        result = await FreshGame(case, observation, catalog).inspect_result(query)
+        assert isinstance(result, native.InspectCompleted) and result.data == history
+
+    asyncio.run(run())
+
+
+def test_run_next_without_a_plan_is_captured_as_invalid(tmp_path: Path) -> None:
+    async def run() -> None:
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"reason":"Continue."}'
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("next", "run_next", arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(
+                decision_case(tmp_path, multiselect=True),
+                client,
+                catalog=catalog,
+                role=EvaluationRole.RUN,
+            )
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "no_plan" in sample.error
+        assert sample.proposal is not None and sample.proposal.tool is ToolName.RUN_NEXT
+        assert sample.proposal.arguments == arguments and sample.reason == "Continue."
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "destination, classification",
+    (("0:0", "Invalid action proposal"), ("0:1", "Proposal legality unknown")),
+)
+def test_run_plan_uses_frozen_map_to_distinguish_invalid_from_unknown(
+    tmp_path: Path, destination: str, classification: str
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        assert isinstance(observation.state, native.RunState)
+        observation = observation.model_copy(
+            update={
+                "state": observation.state.model_copy(
+                    update={
+                        "progress": observation.state.progress.model_copy(
+                            update={"position": "0:0"}
+                        )
+                    }
+                ),
+                "map": native.PublicMap(
+                    bosses=(),
+                    nodes=(
+                        native.MapNode(position="0:0", room_type="monster", children=("0:1",)),
+                        native.MapNode(position="0:1", room_type="elite", children=()),
+                    ),
+                    legal_destinations=("0:1",),
+                ),
+            }
+        )
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = json.dumps(
+            {"reason": "Plan ahead.", "edges": [{"from": "0:0", "to": destination}]}
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("plan", "run_plan", arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and classification in sample.error
+        assert sample.proposal is not None and sample.proposal.tool is ToolName.RUN_PLAN
+        assert sample.proposal.arguments == arguments and sample.reason == "Plan ahead."
+
+    asyncio.run(run())
+
+
 def test_first_run_plan_is_captured_without_execution_or_a_second_request(tmp_path: Path) -> None:
     async def run() -> None:
         case = decision_case(tmp_path, multiselect=True)
@@ -1429,9 +1765,10 @@ def test_first_run_plan_is_captured_without_execution_or_a_second_request(tmp_pa
             transport=httpx.MockTransport(respond),
         ) as client:
             sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
-        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNLABELED
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and "unknown" in sample.error
         assert sample.reason == "Reach the elite."
         assert sample.proposal is not None
-        assert sample.proposal.tool == "run_plan" and sample.proposal.arguments == arguments
+        assert sample.proposal.tool is ToolName.RUN_PLAN and sample.proposal.arguments == arguments
 
     asyncio.run(run())
