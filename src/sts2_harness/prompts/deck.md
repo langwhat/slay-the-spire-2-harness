@@ -32,7 +32,7 @@ Every added card is drawn in place of the cards already owned for the rest of th
 - While hands already hold more than energy pays for, a card that costs energy is played only instead of another card; its value is the difference between the two.
 - Cards that work only when played in the same turn share a hand far less often than each is drawn, unless something holds or fetches them. A power, or a card that exhausts when played, costs its draw and energy once per fight.
 - A draw card's net gain is the cards it draws minus itself; the cards drawn still need energy. An effect that pays per card or per attack is worth the number the turn's energy pays for, and one that needs a counter to reach a threshold is worth nothing unless owned sources reach it within a fight.
-- A power returns nothing on the turn it is played. Each further power the deck must play before its damage arrives lengthens the turns spent being hit; a deck that relies on several needs block, relics, or potions to cover them.
+- A power may not repay its draw and energy on the turn it is played; count any immediate benefit from its rule. When several powers must be played before damage arrives, account for the setup turns and the block, relics, or potions that cover them.
 - Cards that enemies add during a fight take a larger share of a smaller deck, so a deck that works only while thin is fragile against them.
 - Removing a weak card, or upgrading an owned one, improves every later draw and adds no card.
 
