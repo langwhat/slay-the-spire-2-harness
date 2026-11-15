@@ -44,14 +44,7 @@ def deck_context(
         "\n",
         prompts.read("deck"),
     )
-    state = prompts.read("state-format")
-    # Route and battle history belong to the run role, not a single card reward.
-    relevant = "\n\n".join(
-        paragraph
-        for paragraph in state.body.split("\n\n")
-        if "`ahead`" not in paragraph and "`fights`" not in paragraph
-    )
-    blocks += ("\n", MaterialText.create(state.id, relevant))
+    blocks += ("\n", prompts.read("state-format"))
     system = (
         TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),
         TextMessage(

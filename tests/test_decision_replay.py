@@ -194,7 +194,7 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
             if isinstance(message, TextMessage) and message.role is TextRole.SYSTEM
         )
         assert PackagedPrompts().read("run-notes").body not in "\n".join(system)
-        assert "`fights`" not in "\n".join(system)
+        assert PackagedPrompts().read("state-format").body in "\n".join(system)
         task = next(
             message
             for message in reversed(rebuilt.prepared.input)
@@ -202,7 +202,7 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
         )
         assert isinstance(task.content, RunActContent)
         assert (task.content.observation.notes is MISSING) is minimal
-        assert task.content.observation.fights is MISSING
+        assert task.content.observation.fights == fights
         run_task = next(
             message
             for message in reversed(run_role.prepared.input)

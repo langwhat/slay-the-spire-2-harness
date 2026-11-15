@@ -11,9 +11,9 @@ Bosses decide the run. Later acts' Bosses are stronger, and the final act may re
 - Block that keeps up with the largest hits, or prevention that scales with them, such as weakening the enemy.
 - Growth: damage per turn that keeps rising, so a high-HP Boss dies before its damage outgrows the deck's block.
 
-The fights show which demand is short. A late kill turn is a shortage of damage or growth: the main cards arrive late because the deck is large or draws little, or they do not grow fast enough once in play. Hands that hold too little block for the hits coming are a shortage of block. `fights` measures the same things: a fight that took far more turns or HP than others of its kind names a demand the deck does not meet.
+The fights help identify which demand is short. A late kill turn can mean the main cards arrive late because the deck is large or draws little, or they do not grow fast enough once in play. Hands that hold too little block for the hits coming can indicate a shortage of block. `fights` records turns and entering and leaving HP, including healing at battle end; it does not show hands or damage dealt. A fight that took far more turns or HP than comparable fights is evidence of a gap, not proof of its cause.
 
-When supplied knowledge describes the act's Elites and Boss or the final act's Bosses, play those fights out with the current deck, relics, and potions: which cards, on which turns, bring the enemy's HP to zero, and how much of its damage the same hands block until then. Without it, compare with the turns and HP the hardest fights in `fights` took, and expect a Boss to last several times as long against the same damage and to hit harder. Either way the final act's Bosses need growth and block above all.
+When supplied knowledge describes the act's Elites and Boss or the final act's Bosses, play those fights out with the current deck, relics, and potions: which cards, on which turns, bring the enemy's HP to zero, and how much of its damage the same hands block until then. Without it, use comparable fights in `fights` to estimate the demands of a longer, harder Boss fight. When history is empty or incomparable, state what is unknown and judge from the visible card rules; do not invent exact enemy HP, damage, or kill turns. Either way the final act's Bosses need growth and block above all.
 
 ## What wins fights
 
@@ -37,7 +37,7 @@ Every added card is drawn in place of the cards already owned for the rest of th
 ## The decision
 
 1. Name what the deck will kill the next Boss with now, and the demand most short in the fights left.
-2. For each candidate, name the demand it answers and what it would be played instead of: the best owned card for the same job, or, while basic cards fill the deck, a basic card. It earns a place when it answers the most short demand better than the deck can now, when it completes or multiplies the core, or, before any core exists, when it clearly outplays a basic card at the demand most short. Any other card only dilutes.
+2. For each candidate, name the demand it answers and what it would be played instead of: the best owned card for the same job, or, while basic cards fill the deck, a basic card. Prioritize the most urgent gap, but a card also earns a place when it solves another clear shortfall in an approaching fight, or completes or multiplies the core. Before a core exists, a card must clearly outplay a basic card at an unmet demand. A card that answers no unmet demand and does not improve the core only dilutes.
 3. Skipping is a full choice, compared like any card. A link is a reason to look, not a reason to take: a small bonus, or a pair seldom drawn together, changes nothing. When any number of cards may be chosen, each must pass on its own, and choosing none is valid.
 
 The act changes what a candidate is compared with:

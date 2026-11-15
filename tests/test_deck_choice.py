@@ -16,6 +16,7 @@ from test_run import handoff
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.context.models import RunActContent, RunActHandoffContent
+from sts2_harness.fights import Fight, FightKind
 from sts2_harness.game import RunEnded, RunEndReason
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import AutomaticSnapshot, ResultSnapshot, RunTaskSnapshot
@@ -390,6 +391,8 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
         (tmp_path / "actual-request-bodies.json").write_text(
             json.dumps(game.inputs, ensure_ascii=False, indent=2)
         )
+        for body in game.inputs[:3]:
+            assert "progress.bosses_left" in json.dumps(body, ensure_ascii=False)
         with closing(Journal.open(archive)) as journal:
             completions = journal.card_choices()
             assert len(completions) == 3
@@ -504,6 +507,49 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                     finally:
                         connection.execute("INSERT INTO card_choices VALUES (?,?,?)", row)
                         connection.commit()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("minimal", [False, True])
+def test_reward_http_input_includes_shared_battle_history(tmp_path: Path, minimal: bool) -> None:
+    async def scenario() -> None:
+        game = RewardGame(minimal=minimal)
+        fights = (Fight(floor=1, kind=FightKind.NORMAL, turns=2, hp_in=50, hp_out=46),)
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(game.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="reward-history",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=minimal,
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)),
+        ) as session:
+            session.execution.fights.observe(game.observation)
+            session.execution.fights.recent = fights
+            await session.run()
+        for body in game.inputs[:3]:
+            messages = body["input"]
+            assert isinstance(messages, list)
+            observations: list[dict[str, JsonValue]] = []
+            for message in messages:
+                assert isinstance(message, dict)
+                content = message.get("content")
+                if not isinstance(content, str) or not content.startswith("{"):
+                    continue
+                payload = TypeAdapter(dict[str, JsonValue]).validate_json(content)
+                observation = payload.get("observation")
+                if isinstance(observation, dict):
+                    observations.append(observation)
+            assert observations[-1]["fights"] == [fight.model_dump(mode="json") for fight in fights]
+            assert "progress.bosses_left" in json.dumps(body, ensure_ascii=False)
 
     asyncio.run(scenario())
 

@@ -497,7 +497,7 @@ async def rebuild_case(
         skills=documents,
         minimal=case.minimal,
         focused_deck=variant is DecisionVariant.DECK,
-        fights=execution.fights if variant is DecisionVariant.RUN else None,
+        fights=execution.fights,
     )
 
     async def selected(observation: native.Observation) -> tuple[DocumentView, ...]:

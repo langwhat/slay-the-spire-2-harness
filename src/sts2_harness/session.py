@@ -160,11 +160,7 @@ class RunSession:
             minimal=self._manifest.minimal,
             deck_stats=self.deck_stats,
             focused_deck=focused_deck,
-            fights=(
-                self.execution.fights
-                if role is native.DecisionOwner.RUN and not focused_deck
-                else None
-            ),
+            fights=self.execution.fights if role is native.DecisionOwner.RUN else None,
         )
 
     async def _notes_write_guard(
