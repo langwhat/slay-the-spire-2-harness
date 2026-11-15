@@ -15,13 +15,27 @@ from pathlib import Path
 from typing import Annotated, Self
 
 import httpx2 as httpx
-from pydantic import Field, JsonValue, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError, model_validator
 
 from sts2_harness.client import models as native
 from sts2_harness.config import ConfigurationError, ModelConfiguration, Protocol, load_configuration
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
-from sts2_harness_eval.decision_cases import DecisionCase, DecisionSample, DecisionVerdict
+from sts2_harness.tools import ToolName, unique_fields
+from sts2_harness.tools.inputs import (
+    CombatActInput,
+    RunActInput,
+    RunDeckChoice,
+    RunNext,
+    RunPlan,
+    TakeCard,
+)
+from sts2_harness_eval.decision_cases import (
+    CapturedProposal,
+    DecisionCase,
+    DecisionSample,
+    DecisionVerdict,
+)
 from sts2_harness_eval.frozen_catalog import FrozenCatalog
 from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
 from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
@@ -34,6 +48,14 @@ _BASE_ORB_SLOTS = {
     "CHARACTER.NECROBINDER": 0,
     "CHARACTER.DEFECT": 3,
 }
+_PROPOSAL_INPUTS: dict[ToolName, type[BaseModel]] = {
+    ToolName.RUN_ACT: RunActInput,
+    ToolName.RUN_DECK_CHOICE: RunDeckChoice,
+    ToolName.RUN_PLAN: RunPlan,
+    ToolName.RUN_NEXT: RunNext,
+    ToolName.COMBAT_ACT: CombatActInput,
+}
+_JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
 
 
 class EvaluationConfig(native.WireModel):
@@ -300,6 +322,26 @@ def _token_total(values: tuple[int | None, ...]) -> str:
     return f"{known} ({missing} unknown)"
 
 
+def _proposal_action(proposal: CapturedProposal) -> tuple[ToolName, dict[str, JsonValue]] | None:
+    schema = _PROPOSAL_INPUTS.get(proposal.tool)
+    if schema is None:
+        return None
+    try:
+        json.loads(proposal.arguments, object_pairs_hook=unique_fields)
+        parsed = schema.model_validate_json(proposal.arguments, strict=True)
+        value = (
+            parsed.root
+            if isinstance(parsed, (CombatActInput, RunActInput, RunDeckChoice))
+            else parsed
+        )
+        action = _JSON_OBJECT.validate_json(value.model_dump_json(exclude={"reason"}), strict=True)
+    except (ValueError, ValidationError):
+        return None
+    if isinstance(value, TakeCard):
+        action["card"] = list(value.cards)
+    return proposal.tool, action
+
+
 def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
     expected = estimate(plan)
     all_attempts = tuple(attempt for trial in trials for attempt in trial.attempts)
@@ -388,7 +430,12 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             if first.proposal is None or second.proposal is None:
                 incomparable = True
                 continue
-            if first.proposal == second.proposal:
+            first_action = _proposal_action(first.proposal)
+            second_action = _proposal_action(second.proposal)
+            if first_action is None or second_action is None:
+                incomparable = True
+                continue
+            if first_action == second_action:
                 continue
             differences += 1
             first_status = first.error or first.verdict.value
@@ -409,7 +456,8 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
         rows.append("No differing comparable choices or proposals observed.")
     if incomparable:
         rows.append(
-            "Some trials could not be compared because a choice or proposal is unavailable."
+            "Some trials could not be compared because a choice or proposal is unavailable "
+            "or its arguments could not be safely decoded."
         )
     rows.extend(
         (

@@ -874,6 +874,148 @@ def test_report_compares_unscored_combat_proposals_and_reasons(tmp_path: Path) -
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "first_tool, first_arguments, second_tool, second_arguments, expected",
+    (
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}],"reason":"First."}',
+            ToolName.COMBAT_ACT,
+            '{ "reason": "Second.", "steps": [ { "kind": "end_turn" } ] }',
+            "same",
+        ),
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]}',
+            ToolName.COMBAT_ACT,
+            '{"reason":"Different reason.","steps":[{"kind":"end_turn"}]}',
+            "same",
+        ),
+        (
+            ToolName.RUN_DECK_CHOICE,
+            '{"choice":"take","card":"c1","reason":"First."}',
+            ToolName.RUN_DECK_CHOICE,
+            '{"reason":"Second.","card":["c1"],"choice":"take"}',
+            "same",
+        ),
+        (
+            ToolName.RUN_NEXT,
+            '{"reason":"First."}',
+            ToolName.RUN_NEXT,
+            '{"reason":"Second."}',
+            "same",
+        ),
+        (
+            ToolName.RUN_ACT,
+            '{"steps":[{"kind":"interact","action":"one"}],"reason":"First."}',
+            ToolName.RUN_ACT,
+            '{"reason":"Second.","steps":[{"action":"one","kind":"interact"}]}',
+            "same",
+        ),
+        (
+            ToolName.RUN_PLAN,
+            '{"reason":"First.","edges":[{"from":"0:0","to":"0:1"}]}',
+            ToolName.RUN_PLAN,
+            '{"edges":[{"to":"0:1","from":"0:0"}],"reason":"Second."}',
+            "same",
+        ),
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]}',
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"use_potion","potion":"p1"}]}',
+            "different",
+        ),
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]}',
+            ToolName.RUN_NEXT,
+            '{"reason":"Move."}',
+            "different",
+        ),
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn","kind":"end_turn"}]}',
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]}',
+            "incomparable",
+        ),
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]',
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]}',
+            "incomparable",
+        ),
+        (
+            ToolName.COMBAT_ACT,
+            '{"steps":[]}',
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]}',
+            "incomparable",
+        ),
+        (
+            ToolName.RUN_NOTES,
+            '{"mode":"read"}',
+            ToolName.COMBAT_ACT,
+            '{"steps":[{"kind":"end_turn"}]}',
+            "incomparable",
+        ),
+    ),
+)
+def test_report_compares_proposal_actions_with_strict_schema(
+    tmp_path: Path,
+    first_tool: ToolName,
+    first_arguments: str,
+    second_tool: ToolName,
+    second_arguments: str,
+    expected: str,
+) -> None:
+    from sts2_harness_eval.decision_cases import CapturedProposal, DecisionSample
+    from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
+
+    plan = EvaluationPlan.model_validate_json(
+        '{"configurations":[{"id":"one","effort":"high","prompt_version":"one"},'
+        '{"id":"two","effort":"high","prompt_version":"two"}],'
+        '"cases":[{"id":"q1","role":"combat","case":"case.json",'
+        '"catalog":"catalog.json","configurations":["one","two"],"repetitions":1}]}'
+    )
+    source = decision_case(tmp_path).source
+    proposals = (
+        CapturedProposal(tool=first_tool, arguments=first_arguments),
+        CapturedProposal(tool=second_tool, arguments=second_arguments),
+    )
+    trials = tuple(
+        Trial(
+            case_id="q1",
+            role=EvaluationRole.COMBAT,
+            configuration=config,
+            repetition=1,
+            prompt_version=config,
+            prompt_digest="digest",
+            input_hashes={},
+            sample=DecisionSample(
+                source=source,
+                sample=1,
+                verdict=DecisionVerdict.UNSUPPORTED,
+                choices=(),
+                reason=reason,
+                error="Proposal legality unknown.",
+                proposal=proposal,
+            ),
+            error=None,
+            attempts=(),
+        )
+        for config, reason, proposal in zip(
+            ("one", "two"), ("First.", "Second."), proposals, strict=True
+        )
+    )
+    text = report(plan, trials)
+    assert all(proposal.to_json() in text for proposal in proposals)
+    assert ("declared" in text) == (expected == "different")
+    assert ("could not be compared" in text) == (expected == "incomparable")
+
+
 def test_old_character_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> None:
     from sts2_harness_eval.stable_suite import CasePlan, prepare_case
 
@@ -1495,6 +1637,79 @@ def test_only_initial_selection_is_checked_against_frozen_state(
         assert sample.error is not None and expected in sample.error
         assert sample.proposal is not None and sample.proposal.arguments == arguments
         assert sample.reason == "First and later." and not sample.choices
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("role", (EvaluationRole.RUN, EvaluationRole.COMBAT))
+def test_missing_selection_respects_combat_auto_selection_uncertainty(
+    tmp_path: Path, role: EvaluationRole
+) -> None:
+    from sts2_harness.game import Inspect
+
+    async def run() -> None:
+        case = decision_case(tmp_path)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent)
+        observation = (
+            task.observation
+            if role is EvaluationRole.RUN
+            else native.Observation.model_validate_json(COMBAT)
+        )
+        state = observation.state.model_copy(update={"selection": None})
+        observation = observation.model_copy(
+            update={"input_readiness": native.InputReadiness.READY, "state": state}
+        )
+        observation = native.Observation.model_validate_json(observation.model_dump_json())
+        reads: tuple[NativeRead, ...] = ()
+        if role is EvaluationRole.COMBAT:
+            history = native.HistoryData(
+                cards_played_this_combat=(), cards_played_this_turn=(), cards_exhausted_this_turn=()
+            )
+            reads = (
+                NativeRead(
+                    request=Inspect(query=native.MapQuery(area=native.InspectArea.COMBAT_HISTORY)),
+                    result=native.InspectCompleted(
+                        status=native.ResultStatus.COMPLETED, observation=observation, data=history
+                    ),
+                ),
+            )
+        case = case.model_copy(
+            update={
+                "events": (task.model_copy(update={"observation": observation}),),
+                "native_reads": reads,
+            }
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"steps":[{"kind":"select","refs":["c1"]}],"reason":"Select."}'
+        name = "run_act" if role is EvaluationRole.RUN else "combat_act"
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=reply(("action", name, arguments)),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=role)
+        expected = (
+            "Proposal legality unknown"
+            if role is EvaluationRole.COMBAT
+            else "Invalid action proposal"
+        )
+        assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.error is not None and expected in sample.error
+        assert sample.proposal is not None and sample.proposal.arguments == arguments
+        assert sample.reason == "Select." and not sample.choices
 
     asyncio.run(run())
 

@@ -209,6 +209,8 @@ class CombatProbe(CaptureDecision, CombatAgent):
                 _verify_initial_selection(parameters.root.steps[0], observation)
             except ExtractionError as error:
                 raise Captured(call, str(error)) from error
+            except SnapshotIncomplete as error:
+                raise Captured(call, str(error), unknown=True) from error
             raise Captured(call, "Combat action legality cannot be verified offline.", unknown=True)
 
 
@@ -520,6 +522,9 @@ def _verify_initial_selection(step: native.NativeStep, observation: native.Obser
         return
     selection = observation.state.selection
     if selection is None:
+        if isinstance(observation.state, native.CombatState):
+            # The Mod can accept a matching previously auto-resolved selection.
+            raise SnapshotIncomplete("The frozen snapshot has no auto-selection state.")
         raise ExtractionError("No current selection is available.")
     if not set(step.refs) <= set(selection.candidates) or not (
         selection.min <= len(step.refs) <= selection.max
