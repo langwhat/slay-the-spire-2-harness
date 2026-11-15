@@ -86,7 +86,7 @@ def test_combat_task_queries_executes_ordered_batch_and_reviews_in_same_context(
                     "run_id": opening.location.run_id,
                     "node_id": "after-battle",
                 }
-            )
+            ),
         }
     )
     path = tmp_path / "battle.txt"
