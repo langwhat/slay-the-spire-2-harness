@@ -36,10 +36,11 @@ from sts2_harness_eval.decision_cases import (
     DecisionCase,
     DecisionSample,
     DecisionVerdict,
+    ProposalStatus,
 )
 from sts2_harness_eval.frozen_catalog import FrozenCatalog
 from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
-from sts2_harness_eval.stable_decisions import INVALID_PROPOSAL_PREFIX, EvaluationRole, sample_fresh
+from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
 from sts2_harness_eval.traffic import AuditingTransport, HttpAttempt, ReceiptUsage
 
 _BASE_ORB_SLOTS = {
@@ -388,9 +389,10 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
         "Combat trials add frozen current-combat history to the initial task; "
         "the production task does not include this additional field.",
         "",
-        "| Case | Role | Configuration | Trial | Verdict | Choice | Proposal | Reason "
-        "| Input | Output | Cache read | Reasoning | Weighted |",
-        "| --- | --- | --- | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Case | Role | Configuration | Trial | Verdict | Choice | Proposal | "
+        "Proposal status | Reason | Input | Output | Cache read | Reasoning | Weighted |",
+        "| --- | --- | --- | ---: | --- | --- | --- | --- | --- | ---: | "
+        "---: | ---: | ---: | ---: |",
     ]
     for trial in trials:
         sample = trial.sample
@@ -398,12 +400,16 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
         reason = sample.reason if sample is not None else trial.error or ""
         choices = ", ".join(sample.choices) if sample is not None else ""
         proposal = sample.proposal.to_json() if sample is not None and sample.proposal else ""
+        proposal_status = (
+            sample.proposal_status.value if sample is not None and sample.proposal_status else ""
+        )
         verdict = sample.verdict.value if sample is not None else DecisionVerdict.UNSUPPORTED.value
         if sample is not None and sample.error:
             reason = (reason + " " + sample.error).strip()
         rows.append(
             f"| {_escape(trial.case_id)} | {trial.role.value} | {_escape(trial.configuration)} | "
             f"{trial.repetition} | {verdict} | {_escape(choices)} | {_escape(proposal)} | "
+            f"{proposal_status} | "
             f"{_escape(reason)} | "
             f"{_token_total(tuple(a.input_tokens for a in trial.attempts))} | "
             f"{_token_total(tuple(a.output_tokens for a in trial.attempts))} | "
@@ -439,8 +445,7 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             if any(
                 sample.proposal is not None
                 and sample.proposal.tool is ToolName.RUN_PLAN
-                and sample.error is not None
-                and sample.error.startswith(f"{INVALID_PROPOSAL_PREFIX}:")
+                and sample.proposal_status in (None, ProposalStatus.INVALID)
                 for sample in (first, second)
             ):
                 incomparable = True

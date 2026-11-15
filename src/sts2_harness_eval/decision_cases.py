@@ -2,9 +2,9 @@
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from sts2_harness.client import models as native
 from sts2_harness.context.models import AutomaticProgress
@@ -139,6 +139,12 @@ class DecisionVerdict(StrEnum):
     UNSUPPORTED = "unsupported"
 
 
+class ProposalStatus(StrEnum):
+    VALID = "valid"
+    INVALID = "invalid"
+    UNKNOWN = "unknown"
+
+
 class DecisionVariant(StrEnum):
     RUN = "run"
     DECK = "deck"
@@ -184,6 +190,7 @@ class DecisionSample(native.WireModel):
     reason: str
     error: str | None = None
     proposal: CapturedProposal | None = None
+    proposal_status: ProposalStatus | None = None
     requests: tuple[RequestSize, ...] = ()
     usage: tuple[dict[str, int | None], ...] = ()
     elapsed_seconds: float = 0
@@ -192,3 +199,9 @@ class DecisionSample(native.WireModel):
     request_bodies: tuple[dict[str, JsonValue], ...] = ()
     model_replies: tuple[str, ...] = ()
     attempts: tuple[dict[str, JsonValue], ...] = ()
+
+    @model_validator(mode="after")
+    def require_proposal_for_status(self) -> Self:
+        if self.proposal is None and self.proposal_status is not None:
+            raise ValueError("A proposal status requires a captured proposal.")
+        return self

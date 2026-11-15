@@ -23,6 +23,7 @@ from sts2_harness_eval.decision_cases import (
     DecisionVerdict,
     HarnessState,
     NativeRead,
+    ProposalStatus,
     TaskEvent,
 )
 from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
@@ -835,6 +836,7 @@ def test_report_compares_unscored_combat_proposals_and_reasons(tmp_path: Path) -
                 )
             assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
             assert sample.proposal is not None and not sample.choices
+            assert sample.proposal_status is ProposalStatus.UNKNOWN
             return sample
 
         samples = [await sample_for(argument) for argument in arguments]
@@ -865,7 +867,9 @@ def test_report_compares_unscored_combat_proposals_and_reasons(tmp_path: Path) -
             assert sample.proposal.to_json() in text and sample.reason in text
         assert text.count("Proposal legality unknown") >= 2 and text.count("unscored") >= 2
         missing = trials[0].model_copy(
-            update={"sample": samples[0].model_copy(update={"proposal": None})}
+            update={
+                "sample": samples[0].model_copy(update={"proposal": None, "proposal_status": None})
+            }
         )
         incomplete = report(plan, (missing, trials[1]))
         assert "could not be compared" in incomplete
@@ -1051,6 +1055,7 @@ def test_report_compares_proposal_actions_with_strict_schema(
                 reason=reason,
                 error="Proposal legality unknown.",
                 proposal=proposal,
+                proposal_status=ProposalStatus.UNKNOWN,
             ),
             error=None,
             attempts=(),
@@ -1066,6 +1071,8 @@ def test_report_compares_proposal_actions_with_strict_schema(
 
 
 def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: Path) -> None:
+    from pydantic import TypeAdapter
+
     from sts2_harness_eval.decision_cases import CapturedProposal, DecisionSample
     from sts2_harness_eval.stable_suite import EvaluationPlan, Trial, report
 
@@ -1140,9 +1147,19 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
             sample.verdict is DecisionVerdict.UNLABELED and sample.choices
             for sample in (first, reordered, different)
         )
+        assert all(
+            sample.proposal_status is ProposalStatus.VALID
+            for sample in (first, reordered, different)
+        )
+        assert (
+            DecisionSample.model_validate_json(first.model_dump_json()).proposal_status
+            is ProposalStatus.VALID
+        )
         assert first.choices != reordered.choices
         assert invalid.error is not None and "Invalid action proposal" in invalid.error
         assert duplicate.error is not None and "Invalid action proposal" in duplicate.error
+        assert invalid.proposal_status is ProposalStatus.INVALID
+        assert duplicate.proposal_status is ProposalStatus.INVALID
         plan = EvaluationPlan.model_validate_json(
             '{"configurations":[{"id":"one","effort":"high","prompt_version":"one"},'
             '{"id":"two","effort":"high","prompt_version":"two"}],'
@@ -1171,16 +1188,32 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
         assert "chose" in different_text and "First route." in different_text
         assert "Other route." in different_text
         raw_first = first.model_copy(
-            update={"choices": (), "verdict": DecisionVerdict.UNSUPPORTED, "error": "unknown"}
+            update={
+                "choices": (),
+                "verdict": DecisionVerdict.UNSUPPORTED,
+                "error": "unknown",
+                "proposal_status": ProposalStatus.UNKNOWN,
+            }
         )
         raw_reordered = reordered.model_copy(
-            update={"choices": (), "verdict": DecisionVerdict.UNSUPPORTED, "error": "unknown"}
+            update={
+                "choices": (),
+                "verdict": DecisionVerdict.UNSUPPORTED,
+                "error": "unknown",
+                "proposal_status": ProposalStatus.UNKNOWN,
+            }
         )
         raw_different = different.model_copy(
-            update={"choices": (), "verdict": DecisionVerdict.UNSUPPORTED, "error": "unknown"}
+            update={
+                "choices": (),
+                "verdict": DecisionVerdict.UNSUPPORTED,
+                "error": "unknown",
+                "proposal_status": ProposalStatus.UNKNOWN,
+            }
         )
         raw_same = report(plan, (trial("one", raw_first), trial("two", raw_reordered)))
         assert "No differing comparable" in raw_same
+        assert "Proposal status" in raw_same
         raw_diff = report(plan, (trial("one", raw_first), trial("two", raw_different)))
         assert "declared" in raw_diff and "First route." in raw_diff and "Other route." in raw_diff
         for rejected in (invalid, duplicate):
@@ -1199,12 +1232,52 @@ def test_report_compares_run_plan_graphs_after_production_acceptance(tmp_path: P
                     "choices": (),
                     "verdict": DecisionVerdict.UNSUPPORTED,
                     "error": "unknown",
+                    "proposal_status": ProposalStatus.UNKNOWN,
                 }
             )
             text = report(plan, (trial("one", other_tool), trial("two", rejected)))
             assert "could not be compared" in text
 
+        reworded = invalid.model_copy(update={"error": "A differently worded diagnostic."})
+        text = report(plan, (trial("one", first), trial("two", reworded)))
+        assert "could not be compared" in text and "differently worded diagnostic" in text
+        misleading = raw_reordered.model_copy(
+            update={"error": "Invalid action proposal: unrelated text"}
+        )
+        text = report(plan, (trial("one", raw_first), trial("two", misleading)))
+        assert "No differing comparable" in text and "could not be compared" not in text
+        legacy_data = TypeAdapter(dict[str, JsonValue]).validate_json(reordered.model_dump_json())
+        legacy_data.pop("proposal_status")
+        legacy = DecisionSample.model_validate_json(json.dumps(legacy_data))
+        assert legacy.proposal_status is None and legacy.proposal == reordered.proposal
+        text = report(plan, (trial("one", first), trial("two", legacy)))
+        assert "could not be compared" in text
+
     asyncio.run(run())
+
+
+def test_proposal_status_is_not_inferred_for_historical_or_missing_proposals(
+    tmp_path: Path,
+) -> None:
+    from pydantic import ValidationError
+
+    from sts2_harness_eval.decision_cases import DecisionSample
+    from sts2_harness_eval.decision_replay import recorded
+
+    case = decision_case(tmp_path)
+    historical = recorded(case)
+    assert historical.proposal is None and historical.proposal_status is None
+    restored = DecisionSample.model_validate_json(historical.to_json())
+    assert restored.proposal is None and restored.proposal_status is None
+    with pytest.raises(ValidationError, match="requires a captured proposal"):
+        DecisionSample(
+            source=case.source,
+            sample=1,
+            verdict=DecisionVerdict.UNSUPPORTED,
+            choices=(),
+            reason="",
+            proposal_status=ProposalStatus.VALID,
+        )
 
 
 def test_old_character_orb_slots_are_inferred_only_in_memory(tmp_path: Path) -> None:
@@ -1526,9 +1599,11 @@ def test_invalid_preparatory_response_ends_only_its_trial_and_keeps_usage(
         first, second = results
         assert first.sample is not None and first.sample.verdict is DecisionVerdict.UNSUPPORTED
         assert first.sample.error is not None and expected_error in first.sample.error
+        assert first.sample.proposal is None and first.sample.proposal_status is None
         assert len(first.attempts) == 1 and first.attempts[0].weighted_tokens == 162
         assert first.attempts[0].reasoning_tokens == 12
         assert second.sample is not None and second.sample.verdict is DecisionVerdict.PASSED
+        assert second.sample.proposal_status is ProposalStatus.VALID
         assert second.sample.reason == "Second trial."
 
     asyncio.run(run())
@@ -1587,6 +1662,7 @@ def test_invalid_first_proposal_is_retained_without_execution(
         assert sample.raw_calls[0]["arguments"] == arguments
         assert sample.reason == reason
         assert sample.proposal is not None
+        assert sample.proposal_status is ProposalStatus.INVALID
         assert sample.proposal.tool is ToolName.RUN_DECK_CHOICE
         assert sample.proposal.arguments == arguments
         plan = EvaluationPlan.model_validate_json(
@@ -1941,6 +2017,7 @@ def test_failed_catalog_query_ends_the_trial_without_a_correction(tmp_path: Path
             )
         assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
         assert sample.error is not None and "rejected or failed" in sample.error
+        assert sample.proposal is None and sample.proposal_status is None
 
     asyncio.run(run())
 
@@ -1956,6 +2033,8 @@ def test_failed_query_retains_later_proposal_without_executing_it(
     tmp_path: Path, query: str, error: str
 ) -> None:
     from pydantic import TypeAdapter
+
+    from sts2_harness_eval.decision_cases import DecisionSample
 
     async def run() -> None:
         catalog = FrozenCatalog.model_validate_json(
@@ -1992,9 +2071,71 @@ def test_failed_query_retains_later_proposal_without_executing_it(
         assert len(requests) == 1 and sample.verdict is DecisionVerdict.UNSUPPORTED
         assert sample.error is not None and error in sample.error
         assert sample.proposal is not None and sample.proposal.tool is ToolName.RUN_NEXT
+        assert sample.proposal_status is ProposalStatus.UNKNOWN
+        assert (
+            DecisionSample.model_validate_json(sample.model_dump_json()).proposal_status
+            is ProposalStatus.UNKNOWN
+        )
         assert sample.proposal.arguments == arguments and sample.reason == "After the failed query."
         assert len(sample.raw_calls) == 2 and not sample.choices
         assert sample.usage[0]["input_tokens"] == 100 and sample.usage[0]["output_tokens"] == 20
+
+    asyncio.run(run())
+
+
+def test_rejected_action_layout_keeps_unchecked_proposal_unknown(tmp_path: Path) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        observation = task.observation
+        assert isinstance(observation.state, native.RunState)
+        observation = observation.model_copy(
+            update={
+                "state": observation.state.model_copy(update={"screen": native.RunScreen.SELECTION})
+            }
+        )
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        catalog = FrozenCatalog.model_validate_json(
+            '{"complete":false,"catalog":{"categories":[],"card_filters":'
+            '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+        )
+        arguments = '{"steps":[{"kind":"select","refs":["candidate"]}],"reason":"Take."}'
+        responses = iter(
+            (
+                reply(
+                    ("action", "run_act", arguments),
+                    ("later", "run_notes", '{"mode":"read"}'),
+                ),
+                reply(("action", "run_act", arguments)),
+            )
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                content=next(responses),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            sample = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+            assert len(requests) == 1
+            control = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+        assert len(requests) == 2 and sample.verdict is DecisionVerdict.UNSUPPORTED
+        assert sample.proposal is not None and sample.proposal.arguments == arguments
+        assert sample.proposal_status is ProposalStatus.UNKNOWN and not sample.choices
+        assert sample.error is not None and "action layout" in sample.error
+        assert control.proposal is not None and control.proposal.arguments == arguments
+        assert control.proposal_status is ProposalStatus.VALID
+        assert control.verdict is DecisionVerdict.PASSED
 
     asyncio.run(run())
 

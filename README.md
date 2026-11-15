@@ -520,6 +520,9 @@ to later history queries; an absent or inconsistent history is unsupported. This
 is specific to evaluation and is not included in the production task. Missing facts and
 unverifiable proposal legality are reported as `unsupported` with the unknown cause; old
 recordings that cannot satisfy the current schema are also unsupported, without guessing.
+Proposal status records local validation as `valid`, `invalid`, or `unknown`; `valid` does
+not mean the action was executed. A missing status means none was recorded, including
+historical samples and trials without a captured proposal.
 At the evaluation-file boundary only, an old Run observation missing `base_orb_slots`
 receives the verified native character default in memory: three for `CHARACTER.DEFECT`
 and zero for `CHARACTER.IRONCLAD`, `CHARACTER.SILENT`, `CHARACTER.REGENT`, and

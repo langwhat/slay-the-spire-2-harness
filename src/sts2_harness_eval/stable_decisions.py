@@ -47,6 +47,7 @@ from sts2_harness_eval.decision_cases import (
     DecisionCase,
     DecisionSample,
     DecisionVerdict,
+    ProposalStatus,
     TaskEvent,
     score,
 )
@@ -56,7 +57,6 @@ from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
 from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
-INVALID_PROPOSAL_PREFIX = "Invalid action proposal"
 
 
 class EvaluationRole(StrEnum):
@@ -70,10 +70,10 @@ class NoProposal(RuntimeError):
 
 
 class Captured(Exception):
-    def __init__(self, call: ToolCall, error: str | None = None, *, unknown: bool = False) -> None:
+    def __init__(self, call: ToolCall, status: ProposalStatus, error: str | None = None) -> None:
         self.call = call
+        self.status = status
         self.error = error
-        self.unknown = unknown
         super().__init__(error or "First proposal captured before execution.")
 
 
@@ -116,7 +116,7 @@ class CaptureDecision(Agent):
         self, context: Context, calls: tuple[ToolCall, ...], observation: native.Observation
     ) -> None:
         first = next(call for call in calls if call.name in self.all_decisions)
-        raise Captured(first, "Invalid action layout.")
+        raise Captured(first, ProposalStatus.UNKNOWN, "Invalid action layout.")
 
     async def _validate_proposal(
         self,
@@ -135,17 +135,19 @@ class CaptureDecision(Agent):
                 (item for item in self._tools.definitions if item.name == call.name), None
             )
             if definition is None or call.name not in self.decision_names:
-                raise Captured(call, "The action is unavailable to this role.")
+                raise Captured(
+                    call, ProposalStatus.INVALID, "The action is unavailable to this role."
+                )
             if call.name == ToolName.RUN_DECK_CHOICE:
                 await self._validate_proposal(call, task, observation, None)
-                raise Captured(call)
+                raise Captured(call, ProposalStatus.VALID)
             try:
                 json.loads(call.arguments, object_pairs_hook=unique_fields)
                 parameters = definition.parameters.model_validate_json(call.arguments, strict=True)
             except (ValueError, ValidationError) as error:
-                raise Captured(call, str(error)) from error
+                raise Captured(call, ProposalStatus.INVALID, str(error)) from error
             await self._validate_proposal(call, task, observation, parameters)
-            raise Captured(call)
+            raise Captured(call, ProposalStatus.VALID)
         return await super()._dispatch(call, task, observation)
 
 
@@ -163,17 +165,21 @@ class RunProbe(CaptureDecision, RunAgent):
             try:
                 _verify_run_action(parameters, observation)
             except ExtractionError as error:
-                raise Captured(call, str(error)) from error
+                raise Captured(call, ProposalStatus.INVALID, str(error)) from error
             except SnapshotIncomplete as error:
-                raise Captured(call, str(error), unknown=True) from error
+                raise Captured(call, ProposalStatus.UNKNOWN, str(error)) from error
             return
         if isinstance(parameters, RunNext):
             if self._plan is None:
-                raise Captured(call, f"No route plan is active ({ReasonCode.NO_PLAN.value}).")
-            raise Captured(call, "Route travel cannot be verified offline.", unknown=True)
+                raise Captured(
+                    call,
+                    ProposalStatus.INVALID,
+                    f"No route plan is active ({ReasonCode.NO_PLAN.value}).",
+                )
+            raise Captured(call, ProposalStatus.UNKNOWN, "Route travel cannot be verified offline.")
         if isinstance(parameters, RunPlan):
             if not isinstance(observation.state, native.RunState) or observation.map is MISSING:
-                raise Captured(call, "Current map facts are unavailable.", unknown=True)
+                raise Captured(call, ProposalStatus.UNKNOWN, "Current map facts are unavailable.")
             update = replace_plan(
                 self._plan,
                 observation.state.progress.position,
@@ -182,7 +188,11 @@ class RunProbe(CaptureDecision, RunAgent):
                 tuple(Edge(edge.source, edge.destination) for edge in parameters.edges),
             )
             if update.rejection is not None:
-                raise Captured(call, f"The route plan was rejected: {update.rejection.value}.")
+                raise Captured(
+                    call,
+                    ProposalStatus.INVALID,
+                    f"The route plan was rejected: {update.rejection.value}.",
+                )
             return
 
     def focus_observation(self, observation: native.Observation) -> native.Observation:
@@ -205,14 +215,18 @@ class CombatProbe(CaptureDecision, CombatAgent):
                 or observation.input_readiness
                 not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
             ):
-                raise Captured(call, "The combat state is not ready for an action.")
+                raise Captured(
+                    call, ProposalStatus.INVALID, "The combat state is not ready for an action."
+                )
             try:
                 _verify_initial_selection(parameters.root.steps[0], observation)
             except ExtractionError as error:
-                raise Captured(call, str(error)) from error
+                raise Captured(call, ProposalStatus.INVALID, str(error)) from error
             except SnapshotIncomplete as error:
-                raise Captured(call, str(error), unknown=True) from error
-            raise Captured(call, "Combat action legality cannot be verified offline.", unknown=True)
+                raise Captured(call, ProposalStatus.UNKNOWN, str(error)) from error
+            raise Captured(
+                call, ProposalStatus.UNKNOWN, "Combat action legality cannot be verified offline."
+            )
 
 
 class DeckProbe(CaptureDecision, DeckAgent):
@@ -230,11 +244,16 @@ class DeckProbe(CaptureDecision, DeckAgent):
             or observation.input_readiness
             not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
         ):
-            raise Captured(call, "The card choice is not ready.")
+            raise Captured(call, ProposalStatus.INVALID, "The card choice is not ready.")
         result = await self._deck_choice(call, task)
         if isinstance(result, QueryToolResult) and isinstance(result.outcome, (Rejected, Failed)):
             reason = result.outcome.reason
-            raise Captured(call, reason.message, unknown=reason.code is ReasonCode.QUERY_FAILED)
+            status = (
+                ProposalStatus.UNKNOWN
+                if reason.code is ReasonCode.QUERY_FAILED
+                else ProposalStatus.INVALID
+            )
+            raise Captured(call, status, reason.message)
 
     def focus_observation(self, observation: native.Observation) -> native.Observation:
         return self._reward_view(observation)
@@ -346,6 +365,7 @@ async def sample_fresh(
     choices: tuple[str, ...] = ()
     reason, error = "", None
     proposal: CapturedProposal | None = None
+    proposal_status: ProposalStatus | None = None
     verdict = DecisionVerdict.UNSUPPORTED
     try:
         task_event = next(event for event in reversed(case.events) if isinstance(event, TaskEvent))
@@ -444,9 +464,12 @@ async def sample_fresh(
             raise NoProposal("The decision loop returned without an action proposal.")
         except Captured as captured:
             proposal, arguments, reason = _proposal_details(captured.call)
+            proposal_status = captured.status
             if captured.error:
                 prefix = (
-                    "Proposal legality unknown" if captured.unknown else INVALID_PROPOSAL_PREFIX
+                    "Proposal legality unknown"
+                    if captured.status is ProposalStatus.UNKNOWN
+                    else "Invalid action proposal"
                 )
                 error = f"{prefix}: {captured.error}"
             else:
@@ -478,6 +501,7 @@ async def sample_fresh(
             )
             if pending is not None:
                 proposal, _, reason = _proposal_details(pending)
+                proposal_status = ProposalStatus.UNKNOWN
     return DecisionSample(
         source=case.source,
         sample=sample,
@@ -486,6 +510,7 @@ async def sample_fresh(
         reason=reason,
         error=error,
         proposal=proposal,
+        proposal_status=proposal_status,
         requests=tuple(measured.sizes),
         usage=tuple(measured.usage),
         elapsed_seconds=round(monotonic() - started, 3),
