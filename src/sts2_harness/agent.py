@@ -332,7 +332,7 @@ class Agent(ABC):
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
     ) -> ActionProposal | QueryToolResult | LocalProgress:
         if call.name == self._tools.action_name:
-            return self._tools.dispatch_action(call, task)
+            return await self._tools.dispatch_action(call, task)
         return await self._tools.dispatch(call)
 
     def _reject_action_layout(

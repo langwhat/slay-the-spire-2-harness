@@ -62,6 +62,7 @@ class ModelConfiguration:
     reasoning_effort_deck: str = field(default="", repr=False)
     reasoning_effort_combat: str = field(default="", repr=False)
     reasoning_effort_combat_elite_boss: str = field(default="", repr=False)
+    prompt_cache_key: str | None = field(default=None, repr=False)
 
     def for_purpose(self, purpose: ModelPurpose) -> "ModelConfiguration":
         combat = self.reasoning_effort_combat or self.reasoning_effort

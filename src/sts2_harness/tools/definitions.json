@@ -652,7 +652,7 @@
   },
   {
     "name": "run_act",
-    "description": "Perform non-combat operations other than travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Travel goes through run_plan and run_next.",
+    "description": "Perform non-combat operations other than travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Optional notes replaces the supplied plan, core, and other strategy-note fields and keeps the others, using the same fields and limits as run_notes mode=write, without mode. Notes are written before any step; if writing fails, no step runs. Include note updates with the action when both are ready. Use run_next for travel; run_plan is available when only replacing the route.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -748,13 +748,54 @@
         "reason": {
           "type": "string",
           "description": "One short line: what was chosen and why, using names, not refs."
+        },
+        "notes": {
+          "type": "object",
+          "properties": {
+            "plan": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "other": {
+              "type": "string"
+            },
+            "core": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxItems": 5,
+              "uniqueItems": true
+            }
+          },
+          "minProperties": 1,
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "core"
+              ]
+            },
+            {
+              "required": [
+                "plan"
+              ]
+            },
+            {
+              "required": [
+                "other"
+              ]
+            }
+          ]
         }
       },
       "required": [
         "steps"
       ],
       "additionalProperties": false
-    }
+    },
+    "minimal_description": "Perform non-combat operations other than travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Travel goes through run_plan and run_next."
   },
   {
     "name": "run_deck_choice",
@@ -922,7 +963,7 @@
   },
   {
     "name": "run_next",
-    "description": "Enter the next node of the current plan. It fails without moving when a pending choice or the game blocks travel; resolve the choice or replace the plan.",
+    "description": "Enter the next node of the current plan. Optional stretches first replaces the remaining route with an ordered list beginning at a destination in map.next and continuing through connected stretches, using the same rules as run_plan. It may stop before the Boss; a node ID in map.next enters that stretch at the specified room. If the route is rejected, no movement occurs. Optional notes replaces the supplied plan, core, and other strategy-note fields and keeps the others, using the same fields and limits as run_notes mode=write, without mode. Notes are written before replacing the route or moving; if writing fails, neither occurs. Include note and route updates with this call when ready to travel. It fails without moving when a pending choice or the game blocks travel; resolve the choice or replace the plan.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -930,12 +971,61 @@
           "type": "string",
           "minLength": 1,
           "description": "One short line."
+        },
+        "notes": {
+          "type": "object",
+          "properties": {
+            "plan": {
+              "type": "string",
+              "maxLength": 300
+            },
+            "other": {
+              "type": "string"
+            },
+            "core": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxItems": 5,
+              "uniqueItems": true
+            }
+          },
+          "minProperties": 1,
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "required": [
+                "core"
+              ]
+            },
+            {
+              "required": [
+                "plan"
+              ]
+            },
+            {
+              "required": [
+                "other"
+              ]
+            }
+          ]
+        },
+        "stretches": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       },
       "required": [
         "reason"
       ],
       "additionalProperties": false
-    }
+    },
+    "minimal_description": "Enter the next node of the current plan. Optional stretches first replaces the remaining route with an ordered list beginning at a destination in map.next and continuing through connected stretches, using the same rules as run_plan. It may stop before the Boss; a node ID in map.next enters that stretch at the specified room. If the route is rejected, no movement occurs. It fails without moving when a pending choice or the game blocks travel; resolve the choice or replace the plan."
   }
 ]

@@ -24,6 +24,7 @@ class Definition(native.WireModel):
     name: str
     description: str
     input_schema: dict[str, JsonValue]
+    minimal_description: str | None = None
 
 
 DEFINITIONS = TypeAdapter(tuple[Definition, ...]).validate_json(
@@ -115,12 +116,31 @@ class CombatActInput(RootModel[CombatAct]):
         return dict(next(item.input_schema for item in DEFINITIONS if item.name == "combat_act"))
 
 
+class NotesPatch(native.WireModel):
+    core: Annotated[tuple[native.Nonempty, ...], Field(max_length=5)] | MISSING = MISSING
+    plan: Annotated[str, Field(max_length=300)] | MISSING = MISSING
+    other: str | MISSING = MISSING
+
+    @model_validator(mode="after")
+    def valid_core(self) -> Self:
+        if self.core is not MISSING:
+            NotesState(core=self.core)
+        return self
+
+    @model_validator(mode="after")
+    def supplied_fields(self) -> Self:
+        if not self.model_fields_set - {"mode"}:
+            raise ValueError("Supply at least one strategy field to replace.")
+        return self
+
+
 class RunAct(native.WireModel):
     steps: Annotated[
         tuple[native.Interact | native.UsePotion | native.DiscardPotion | native.Select, ...],
         Field(min_length=1),
     ]
     reason: str | MISSING = MISSING
+    notes: NotesPatch | MISSING = MISSING
 
 
 class RunActInput(RootModel[RunAct]):
@@ -129,6 +149,14 @@ class RunActInput(RootModel[RunAct]):
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
         return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_act"))
+
+
+class MinimalRunActInput(RunActInput):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return _without_notes(super().__get_pydantic_json_schema__(core_schema, handler))
 
 
 class DeckChoice(StrEnum):
@@ -176,12 +204,30 @@ class RunPlan(native.WireModel):
 
 class RunNext(native.WireModel):
     reason: native.Nonempty
+    notes: NotesPatch | MISSING = MISSING
+    stretches: Annotated[tuple[native.Nonempty, ...], Field(min_length=1)] | MISSING = MISSING
 
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
         return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_next"))
+
+
+class MinimalRunNext(RunNext):
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        return _without_notes(super().__get_pydantic_json_schema__(core_schema, handler))
+
+
+def _without_notes(schema: JsonSchemaValue) -> JsonSchemaValue:
+    return schema | {
+        "properties": {
+            name: value for name, value in schema["properties"].items() if name != "notes"
+        }
+    }
 
 
 class NotesMode(StrEnum):
@@ -193,23 +239,8 @@ class NotesReadInput(native.WireModel):
     mode: Literal[NotesMode.READ]
 
 
-class NotesWriteInput(native.WireModel):
+class NotesWriteInput(NotesPatch):
     mode: Literal[NotesMode.WRITE]
-    core: Annotated[tuple[native.Nonempty, ...], Field(max_length=5)] | MISSING = MISSING
-    plan: Annotated[str, Field(max_length=300)] | MISSING = MISSING
-    other: str | MISSING = MISSING
-
-    @model_validator(mode="after")
-    def valid_core(self) -> Self:
-        if self.core is not MISSING:
-            NotesState(core=self.core)
-        return self
-
-    @model_validator(mode="after")
-    def supplied_fields(self) -> Self:
-        if self.model_fields_set == {"mode"}:
-            raise ValueError("Supply at least one strategy field to replace.")
-        return self
 
 
 class NotesInput(RootModel[NotesReadInput | NotesWriteInput]):

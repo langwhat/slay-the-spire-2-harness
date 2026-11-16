@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from types import TracebackType
 from typing import Self
 
@@ -68,22 +69,32 @@ class Llm:
         self._configuration = configuration
         self._transport = transport
         self._sleep = sleep
-        self._purpose_clients: dict[str, Llm] = {}
+        self._purpose_clients: dict[tuple[str, str | None], Llm] = {}
 
-    def for_purpose(self, purpose: ModelPurpose) -> "Llm":
+    def for_purpose(self, purpose: ModelPurpose, *, recording_id: str | None = None) -> "Llm":
         configuration = self._configuration.for_purpose(purpose)
         effort = configuration.reasoning_effort
-        if effort == self._configuration.reasoning_effort:
+        role = ModelPurpose.COMBAT if purpose is ModelPurpose.COMBAT_ELITE_BOSS else purpose
+        cache_key = (
+            f"{recording_id}:{role.value}"
+            if recording_id is not None and configuration.protocol is Protocol.RESPONSES
+            else self._configuration.prompt_cache_key
+        )
+        if (
+            effort == self._configuration.reasoning_effort
+            and cache_key == self._configuration.prompt_cache_key
+        ):
             return self
-        if effort not in self._purpose_clients:
-            self._purpose_clients[effort] = Llm(
-                configuration,
+        identity = (effort, cache_key)
+        if identity not in self._purpose_clients:
+            self._purpose_clients[identity] = Llm(
+                replace(configuration, prompt_cache_key=cache_key),
                 transport=(
                     _BorrowedTransport(self._transport) if self._transport is not None else None
                 ),
                 sleep=self._sleep,
             )
-        return self._purpose_clients[effort]
+        return self._purpose_clients[identity]
 
     @staticmethod
     def validate_configuration(configuration: ModelConfiguration) -> None:
@@ -121,6 +132,11 @@ class Llm:
 
     def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
         body = self._adapter.prepare(input, tools)
+        if (
+            self._configuration.protocol is Protocol.RESPONSES
+            and self._configuration.prompt_cache_key is not None
+        ):
+            body["prompt_cache_key"] = self._configuration.prompt_cache_key
         return PreparedRequest(input, tools, measure(body, self._configuration.protocol), body)
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None:

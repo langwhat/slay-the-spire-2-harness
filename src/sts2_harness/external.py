@@ -291,9 +291,9 @@ class ExternalBackend:
                 owner=owner,
             )
         )
-        proposal = tools.dispatch_action(call, task)
+        proposal = await tools.dispatch_action(call, task, observation)
         if isinstance(proposal, QueryToolResult):
-            return _reply(QueryToolResult(proposal.outcome, observation))
+            return _reply(proposal)
         source = _SubmittedDecision(proposal)
         unit = await current.execution.run_unit(source, task)
         if source.feedback is not None:

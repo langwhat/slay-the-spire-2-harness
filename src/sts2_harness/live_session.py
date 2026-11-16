@@ -62,7 +62,7 @@ async def live_session(
         if model is not None:
             await resources.enter_async_context(model)
             for purpose in ModelPurpose:
-                models[purpose] = model.for_purpose(purpose)
+                models[purpose] = model.for_purpose(purpose, recording_id=manifest.recording_id)
         journal = Journal.create(archive_path, manifest, diagnostics=diagnostics)
 
         def close_recording() -> None:

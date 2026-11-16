@@ -1,10 +1,14 @@
 import json
 
+import pytest
+
 from sts2_harness.client import models as native
 
 
+@pytest.mark.parametrize("replacement_tool", ["run_plan", "run_next"])
 def test_planning_keeps_previous_route_after_rejection_and_travels_to_unique_next(
     tmp_path: object,
+    replacement_tool: str,
 ) -> None:
     import asyncio
     from pathlib import Path
@@ -40,7 +44,7 @@ def test_planning_keeps_previous_route_after_rejection_and_travels_to_unique_nex
             reply(
                 (
                     "bad",
-                    "run_plan",
+                    replacement_tool,
                     '{"reason":"disconnected", "stretches":["s3","s2"]}',
                 )
             ),

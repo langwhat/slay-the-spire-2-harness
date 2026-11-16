@@ -334,7 +334,7 @@ class RunAgent(Agent):
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
     ) -> ActionProposal | QueryToolResult | LocalProgress:
         if call.name == ToolName.RUN_ACT:
-            result = self._tools.dispatch_action(call, task)
+            result = await self._tools.dispatch_action(call, task)
             return (
                 replace(result, allow_map_travel=False)
                 if isinstance(result, ActionProposal)
@@ -367,6 +367,8 @@ class RunAgent(Agent):
                 next_call = None
             else:
                 next_call = RunNext.model_validate_json(call.arguments, strict=True)
+                if self._tools.minimal and next_call.notes is not MISSING:
+                    raise ValueError("Strategy notes are unavailable in minimal mode.")
                 proposed = None
         except (ValueError, ValidationError):
             return self._route_rejected(
@@ -375,95 +377,31 @@ class RunAgent(Agent):
                 current,
                 plan=call.name == ToolName.RUN_PLAN,
             )
-        if call.name == ToolName.RUN_PLAN:
-            assert proposed is not None
-            if current.location.owner is not native.DecisionOwner.RUN or current.map is MISSING:
+        if next_call is not None:
+            if not isinstance(task, ActTask):
                 return self._route_rejected(
-                    ReasonCode.QUERY_FAILED,
-                    "Current map facts are unavailable.",
-                    current,
-                    plan=True,
+                    ReasonCode.WRONG_ROLE, "This task cannot travel.", current
                 )
-            try:
-                update = replace_stretches(
-                    self._plan,
-                    current.map,
-                    current.state.progress.position,
-                    proposed.reason,
-                    proposed.stretches,
-                )
-            except MapUnavailable:
+            if next_call.notes is not MISSING:
+                written = await self._tools.write_notes(next_call.notes, current)
+                if not isinstance(written.outcome, ReadCompleted):
+                    return written
+            if next_call.stretches is not MISSING:
+                proposed = RunPlan(reason=next_call.reason, stretches=next_call.stretches)
+        if proposed is not None:
+            planned = await self._replace_plan(proposed, current)
+            if next_call is None or not isinstance(planned.outcome, ReadCompleted):
+                return planned
+            current = planned.observation
+            if current is None:
                 return self._route_rejected(
-                    ReasonCode.QUERY_FAILED,
-                    "Current map facts are incomplete.",
-                    current,
-                    plan=True,
+                    ReasonCode.QUERY_FAILED, "Current map observation is unavailable.", None
                 )
-            if update.rejection is not None:
+            assert isinstance(task, ActTask)
+            if current.location != native.Location.model_validate(task.expected_route.model_dump()):
                 return self._route_rejected(
-                    ReasonCode(update.rejection.value),
-                    f"The route plan was rejected: {update.rejection.value}.",
-                    current,
-                    plan=True,
+                    ReasonCode.ROLE_CHANGED, "The action route changed.", current
                 )
-            self._plan = update.plan
-            assert self._plan is not None and self._plan.next_destination is not None
-            assert self._context is not None
-            self._context.set_route_plan(self._plan)
-            location = current.location
-            assert location.run_id is not None and location.node_id is not None
-            route = native.RouteKey(
-                game_instance_id=location.game_instance_id,
-                run_id=location.run_id,
-                node_id=location.node_id,
-                owner=native.DecisionOwner.RUN,
-            )
-            edges = tuple(
-                native.PresentationEdge.model_validate(
-                    {"from": edge.source, "to": edge.destination}
-                )
-                for edge in self._plan.edges
-                if edge.source is not None
-            )
-            try:
-                presented = await self._tools.present(route, edges)
-            except (ClientUnavailable, GameReadError):
-                presented = None
-                display = PlanPresentation(status=PlanPresentationStatus.UNKNOWN)
-                restoration = PlanRestoration(status=PlanRestorationStatus.UNKNOWN)
-                current = None
-            else:
-                receipt = presented.receipt if presented is not None else None
-                if presented is None:
-                    display = PlanPresentation(status=PlanPresentationStatus.NOT_AVAILABLE)
-                    restoration = PlanRestoration()
-                elif isinstance(receipt, (native.PresentationRejected, native.InvalidRequestReply)):
-                    display = PlanPresentation(status=PlanPresentationStatus.NOT_ATTEMPTED)
-                    restoration = PlanRestoration()
-                    current = await self._tools.current()
-                elif isinstance(receipt, native.PresentationCompleted):
-                    display = PlanPresentation(status=PlanPresentationStatus(receipt.drawing.value))
-                    restoration = PlanRestoration(
-                        status=PlanRestorationStatus(receipt.restoration.value)
-                    )
-                    current = (
-                        await self._tools.current()
-                        if receipt.gate is native.PresentationGate.OPEN
-                        else None
-                    )
-                else:
-                    display = PlanPresentation(status=PlanPresentationStatus.UNKNOWN)
-                    restoration = PlanRestoration(status=PlanRestorationStatus.UNKNOWN)
-                    current = None
-            return QueryToolResult(
-                ReadCompleted(),
-                current,
-                PlanData(
-                    plan=PlanAccepted(next=proposed.stretches[0]),
-                    presentation=display,
-                    restoration=restoration,
-                ),
-            )
         if not isinstance(task, ActTask):
             return self._route_rejected(ReasonCode.WRONG_ROLE, "This task cannot travel.", current)
         if self._plan is None:
@@ -516,6 +454,96 @@ class RunAgent(Agent):
             )
         assert next_call is not None
         return ActionProposal((ActionStep(ActionKind.INTERACT, action.ref),), next_call.reason)
+
+    async def _replace_plan(
+        self, proposed: RunPlan, current: native.Observation
+    ) -> QueryToolResult:
+        if current.location.owner is not native.DecisionOwner.RUN or current.map is MISSING:
+            return self._route_rejected(
+                ReasonCode.QUERY_FAILED,
+                "Current map facts are unavailable.",
+                current,
+                plan=True,
+            )
+        try:
+            update = replace_stretches(
+                self._plan,
+                current.map,
+                current.state.progress.position,
+                proposed.reason,
+                proposed.stretches,
+            )
+        except MapUnavailable:
+            return self._route_rejected(
+                ReasonCode.QUERY_FAILED,
+                "Current map facts are incomplete.",
+                current,
+                plan=True,
+            )
+        if update.rejection is not None:
+            return self._route_rejected(
+                ReasonCode(update.rejection.value),
+                f"The route plan was rejected: {update.rejection.value}.",
+                current,
+                plan=True,
+            )
+        self._plan = update.plan
+        assert self._plan is not None and self._plan.next_destination is not None
+        assert self._context is not None
+        self._context.set_route_plan(self._plan)
+        location = current.location
+        assert location.run_id is not None and location.node_id is not None
+        route = native.RouteKey(
+            game_instance_id=location.game_instance_id,
+            run_id=location.run_id,
+            node_id=location.node_id,
+            owner=native.DecisionOwner.RUN,
+        )
+        edges = tuple(
+            native.PresentationEdge.model_validate({"from": edge.source, "to": edge.destination})
+            for edge in self._plan.edges
+            if edge.source is not None
+        )
+        restored: native.Observation | None = current
+        try:
+            presented = await self._tools.present(route, edges)
+        except (ClientUnavailable, GameReadError):
+            presented = None
+            display = PlanPresentation(status=PlanPresentationStatus.UNKNOWN)
+            restoration = PlanRestoration(status=PlanRestorationStatus.UNKNOWN)
+            restored = None
+        else:
+            receipt = presented.receipt if presented is not None else None
+            if presented is None:
+                display = PlanPresentation(status=PlanPresentationStatus.NOT_AVAILABLE)
+                restoration = PlanRestoration()
+            elif isinstance(receipt, (native.PresentationRejected, native.InvalidRequestReply)):
+                display = PlanPresentation(status=PlanPresentationStatus.NOT_ATTEMPTED)
+                restoration = PlanRestoration()
+                restored = await self._tools.current()
+            elif isinstance(receipt, native.PresentationCompleted):
+                display = PlanPresentation(status=PlanPresentationStatus(receipt.drawing.value))
+                restoration = PlanRestoration(
+                    status=PlanRestorationStatus(receipt.restoration.value)
+                )
+                restored = (
+                    await self._tools.current()
+                    if receipt.gate is native.PresentationGate.OPEN
+                    else None
+                )
+            else:
+                display = PlanPresentation(status=PlanPresentationStatus.UNKNOWN)
+                restoration = PlanRestoration(status=PlanRestorationStatus.UNKNOWN)
+                restored = None
+        return QueryToolResult(
+            ReadCompleted(),
+            restored,
+            PlanData(
+                plan=PlanAccepted(next=proposed.stretches[0]),
+                presentation=display,
+                restoration=restoration,
+            ),
+        )
 
     def _close_query(
         self,

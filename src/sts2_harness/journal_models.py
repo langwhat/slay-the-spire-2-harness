@@ -562,6 +562,7 @@ class ConfigurationSnapshot(native.WireModel):
     timeout_seconds: float
     extra_retries: int
     capacity_policy: CapacityPolicy = CapacityPolicy()
+    prompt_cache_key: str | None = None
 
     def for_offline_preparation(self) -> ModelConfiguration:
         return ModelConfiguration(
@@ -575,6 +576,7 @@ class ConfigurationSnapshot(native.WireModel):
             timeout_seconds=self.timeout_seconds,
             extra_retries=self.extra_retries,
             context_window=self.capacity_policy.context_window,
+            prompt_cache_key=self.prompt_cache_key,
         )
 
     @classmethod
@@ -589,6 +591,7 @@ class ConfigurationSnapshot(native.WireModel):
             timeout_seconds=config.timeout_seconds,
             extra_retries=config.extra_retries,
             capacity_policy=capacity_policy,
+            prompt_cache_key=config.prompt_cache_key,
         )
 
 

@@ -51,8 +51,12 @@ from sts2_harness.tools.inputs import (
     CombatActInput,
     CombatInspectInput,
     KnowledgeInput,
+    MinimalRunActInput,
+    MinimalRunNext,
     NotesInput,
+    NotesPatch,
     NotesReadInput,
+    RunAct,
     RunActInput,
     RunDeckChoice,
     RunInspectInput,
@@ -156,10 +160,10 @@ class ToolCatalog:
         self._supplements = supplements
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
-            ToolName.RUN_ACT: RunActInput,
+            ToolName.RUN_ACT: MinimalRunActInput if minimal else RunActInput,
             ToolName.RUN_DECK_CHOICE: RunDeckChoice,
             ToolName.RUN_PLAN: RunPlan,
-            ToolName.RUN_NEXT: RunNext,
+            ToolName.RUN_NEXT: MinimalRunNext if minimal else RunNext,
             ToolName.COMBAT_ACT: CombatActInput,
             ToolName.RUN_NOTES: NotesInput,
             ToolName.RUN_INSPECT: RunInspectInput,
@@ -174,7 +178,9 @@ class ToolCatalog:
                 item.name,
                 MaterialText.create(
                     f"tool:{item.name}:description",
-                    item.description,
+                    item.minimal_description
+                    if minimal and item.minimal_description is not None
+                    else item.description,
                 ),
                 inputs[ToolName(item.name)],
             )
@@ -203,12 +209,15 @@ class ToolCatalog:
     def notes(self) -> Notes | None:
         return self._notes_owner
 
-    def dispatch_action(
-        self, call: ToolCall, task: DecisionTask
+    async def dispatch_action(
+        self,
+        call: ToolCall,
+        task: DecisionTask,
+        observation: native.Observation | None = None,
     ) -> ActionProposal | QueryToolResult:
         if call.name != self.action_name or call.name not in self._names:
             return QueryToolResult(
-                _problem(ReasonCode.WRONG_ROLE, "This action tool is not available."), None
+                _problem(ReasonCode.WRONG_ROLE, "This action tool is not available."), observation
             )
         if not isinstance(task, ActTask):
             return QueryToolResult(
@@ -226,7 +235,7 @@ class ToolCatalog:
                         ),
                     ),
                 ),
-                None,
+                observation,
             )
         try:
             json.loads(call.arguments, object_pairs_hook=unique_fields)
@@ -235,13 +244,26 @@ class ToolCatalog:
                 if self._role is native.DecisionOwner.COMBAT
                 else RunActInput.model_validate_json(call.arguments, strict=True).root
             )
+            if self.minimal and isinstance(query, RunAct) and query.notes is not MISSING:
+                raise ValueError("Strategy notes are unavailable in minimal mode.")
         except (ValueError, ValidationError):
             return QueryToolResult(
                 _problem(
                     ReasonCode.INVALID_ARGUMENTS, "The action does not match the tool schema."
                 ),
-                None,
+                observation,
             )
+        if isinstance(query, RunAct) and query.notes is not MISSING:
+            current = await self._current()
+            if current is not None and current.location != native.Location.model_validate(
+                task.expected_route.model_dump()
+            ):
+                return QueryToolResult(
+                    _problem(ReasonCode.ROLE_CHANGED, "The action route changed."), current
+                )
+            written = await self.write_notes(query.notes, current)
+            if not isinstance(written.outcome, ReadCompleted):
+                return written
         steps: list[ActionStep | SelectStep] = []
         for step in query.steps:
             if isinstance(step, native.Select):
@@ -283,6 +305,12 @@ class ToolCatalog:
         assert self.notes is not None
         if isinstance(query, NotesReadInput):
             return QueryToolResult(ReadCompleted(), observation, NotesText(notes=self.notes.read()))
+        return await self.write_notes(query, observation)
+
+    async def write_notes(
+        self, query: NotesPatch, observation: native.Observation | None
+    ) -> QueryToolResult:
+        assert self.notes is not None
         if observation is None or observation.state.control is not native.StateControl.READY:
             return QueryToolResult(
                 _problem(ReasonCode.BUSY, "Current writable run state is unavailable."), observation

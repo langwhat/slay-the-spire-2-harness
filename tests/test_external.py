@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx2 as httpx
+import pytest
 from test_interactive import ready_run
 from test_mod_client import COMBAT
 
@@ -237,5 +238,63 @@ def test_shutdown_waits_for_accepted_call_after_http_waiter_is_cancelled() -> No
             mod.state_release.set()
             stop.set()
             await asyncio.wait_for(owner, 2)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_combined_action_refusal_returns_the_newly_observed_state(unavailable: bool) -> None:
+    class NodeChangingMod(FakeMod):
+        reads = 0
+        change = False
+
+        async def respond(self, request: httpx.Request) -> httpx.Response:
+            if self.change and request.url.path == "/state":
+                self.reads += 1
+                if self.reads == 2:
+                    if unavailable:
+                        raise httpx.ConnectError("The current state is unavailable.")
+                    self.observation = self.observation.model_copy(
+                        update={
+                            "location": self.observation.location.model_copy(
+                                update={"node_id": "new-node"}
+                            ),
+                            "state": self.observation.state.model_copy(
+                                update={
+                                    "player": self.observation.state.player.model_copy(
+                                        update={"hp": 17}
+                                    )
+                                }
+                            ),
+                        }
+                    )
+            return await super().respond(request)
+
+    async def run() -> None:
+        mod = NodeChangingMod()
+        async with ExternalBackend(mod.client()) as backend:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app(backend)), base_url="http://tools"
+            ) as caller:
+                await caller.post("/tools/run_inspect", json={"area": "state"})
+                mod.control = native.ControlIntent.RUNNING
+                mod.change = True
+                response = await caller.post(
+                    "/tools/run_act",
+                    json={
+                        "steps": [{"kind": "interact", "action": "travel"}],
+                        "notes": {"other": "Updated plan"},
+                    },
+                )
+                value = json.loads(response.content)
+                if unavailable:
+                    assert value["outcome"]["reason"]["code"] == "busy"
+                    assert value["state"] is None
+                else:
+                    assert value["outcome"]["reason"]["code"] == "role_changed"
+                    assert value["state"]["player"]["hp"] == 17
+                assert mod.actions == []
+                notes = await caller.post("/tools/run_notes", json={"mode": "read"})
+                assert json.loads(notes.content)["data"]["notes"]["other"] == ""
 
     asyncio.run(run())

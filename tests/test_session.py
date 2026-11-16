@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import httpx2 as httpx
@@ -11,6 +12,7 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.game import LiveGame, RunEndReason
 from sts2_harness.journal import Manifest, SessionMaterials
+from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
@@ -18,6 +20,53 @@ from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import RunSession, SessionDependencies
+
+
+def test_live_cache_keys_follow_recording_and_role_across_contexts(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        for recording in ("first", "second"):
+            campaign = Campaign()
+            async with live_session(
+                ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
+                Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                    ),
+                    recording_id=recording,
+                    core_version="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    initial_notes=NotesState(),
+                ),
+                tmp_path / f"{recording}.sqlite",
+                model=Llm(
+                    replace(
+                        configuration(tmp_path),
+                        reasoning_effort_run="max",
+                        reasoning_effort_combat="high",
+                    ),
+                    transport=httpx.MockTransport(campaign.model),
+                ),
+            ) as session:
+                assert (await session.run()).reason is RunEndReason.TERMINAL
+            assert [body.get("prompt_cache_key") for body in campaign.inputs] == [
+                f"{recording}:run",
+                f"{recording}:run",
+                f"{recording}:combat",
+                f"{recording}:combat",  # The battle review stays in the combat context.
+                f"{recording}:run",
+                f"{recording}:run",
+                f"{recording}:run",
+                f"{recording}:run",
+                f"{recording}:combat",
+            ]
+            assert [body["reasoning"] for body in campaign.inputs] == [
+                {"effort": effort}
+                for effort in ("max", "max", "high", "high", "max", "max", "max", "max", "high")
+            ]
+            assert all("prompt_cache_retention" not in body for body in campaign.inputs)
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("change", ["terminal", "run", "instance"])

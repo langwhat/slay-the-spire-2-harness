@@ -398,6 +398,14 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
         )
         for body in game.inputs[:3]:
             assert "progress.bosses_left" in json.dumps(body, ensure_ascii=False)
+        assert [body.get("prompt_cache_key") for body in game.inputs] == [
+            "rewards:deck",
+            "rewards:deck",
+            "rewards:deck",
+            "rewards:run",
+            "rewards:run",
+            "rewards:run",
+        ]
         with closing(Journal.open(archive)) as journal:
             completions = journal.card_choices()
             assert len(completions) == 3

@@ -22,6 +22,7 @@ from sts2_harness.llm.messages import (
     Usage,
 )
 from sts2_harness.material_text import MaterialText
+from sts2_harness.model_purpose import ModelPurpose
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,52 @@ class InspectArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reference: str
     detail: str | None = None
+
+
+@pytest.mark.parametrize("protocol", list(Protocol))
+def test_cache_routing_only_changes_responses_and_shares_combat_role(
+    tmp_path: Path, protocol: Protocol
+) -> None:
+    from test_compaction_full_replay import response
+
+    requests: list[dict[str, JsonValue]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=response(protocol, text="Done."),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    async def scenario() -> None:
+        async with Llm(
+            configuration(
+                tmp_path,
+                LLM_PROTOCOL=protocol.value,
+                LLM_REASONING_EFFORT="high",
+                LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS="max",
+            ),
+            transport=httpx.MockTransport(handler),
+        ) as model:
+            for purpose in (ModelPurpose.COMBAT, ModelPurpose.COMBAT_ELITE_BOSS):
+                client = model.for_purpose(purpose, recording_id="game-one")
+                await client.complete((TextMessage(TextRole.USER, "Act."),), ())
+            await model.for_purpose(ModelPurpose.RUN, recording_id="game-one").complete(
+                (TextMessage(TextRole.USER, "Travel."),), ()
+            )
+        expected = (
+            ["game-one:combat", "game-one:combat", "game-one:run"]
+            if protocol is Protocol.RESPONSES
+            else [None, None, None]
+        )
+        assert [body.get("prompt_cache_key") for body in requests] == expected
+        assert all("prompt_cache_retention" not in body for body in requests)
+        if protocol is Protocol.RESPONSES:
+            assert requests[0]["reasoning"] == {"effort": "high"}
+            assert requests[1]["reasoning"] == {"effort": "max"}
+
+    asyncio.run(scenario())
 
 
 OUTPUT: list[dict[str, JsonValue]] = [
