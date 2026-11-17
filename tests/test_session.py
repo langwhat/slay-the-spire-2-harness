@@ -238,10 +238,8 @@ def test_live_resources_close_when_session_entry_fails(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("first_room,expected", [("monster", "high"), ("elite", "max")])
-def test_effort_is_fixed_by_combat_opening_and_recorded(
-    tmp_path: Path, first_room: str, expected: str
-) -> None:
+@pytest.mark.parametrize("first_room", ["monster", "elite"])
+def test_every_combat_uses_combat_effort_and_is_recorded(tmp_path: Path, first_room: str) -> None:
     import json
     from contextlib import closing
 
@@ -262,35 +260,9 @@ def test_effort_is_fixed_by_combat_opening_and_recorded(
                 )
             }
         )
-    inspected = False
-    switched = False
-
-    def mod(request: httpx.Request) -> httpx.Response:
-        nonlocal switched
-        if inspected and not switched and campaign.index == 1 and request.url.path == "/state":
-            observation = campaign.states[1]
-            campaign.states[1] = observation.model_copy(
-                update={
-                    "state": observation.state.model_copy(
-                        update={
-                            "progress": observation.state.progress.model_copy(
-                                update={"room_type": "boss"}
-                            )
-                        }
-                    )
-                }
-            )
-            switched = True
-        return campaign.mod(request)
 
     def model(request: httpx.Request) -> httpx.Response:
-        nonlocal inspected
-        if campaign.index == 1 and not inspected:
-            inspected = True
-            campaign.inputs.append(json.loads(request.content))
-            content = reply(("inspect", "combat_inspect", '{"area":"state"}'))
-        else:
-            content = campaign.model(request).content
+        content = campaign.model(request).content
         event = json.loads(content.decode().removeprefix("data: "))
         event["response"]["usage"] = {
             "input_tokens": 100,
@@ -306,7 +278,7 @@ def test_effort_is_fixed_by_combat_opening_and_recorded(
     async def scenario() -> None:
         archive = tmp_path / "effort.sqlite"
         async with live_session(
-            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
             Manifest(
                 materials=SessionMaterials(
                     entry_documents_enabled=False, act_guidance={}, battle_guidance=()
@@ -324,7 +296,6 @@ def test_effort_is_fixed_by_combat_opening_and_recorded(
                     LLM_REASONING_EFFORT="minimal",
                     LLM_REASONING_EFFORT_RUN="low",
                     LLM_REASONING_EFFORT_COMBAT="high",
-                    LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS="max",
                 ),
                 transport=httpx.MockTransport(model),
             ),
@@ -332,15 +303,9 @@ def test_effort_is_fixed_by_combat_opening_and_recorded(
             await session.run()
         with closing(Journal.open(archive)) as journal:
             records = journal.requests()
-            assert switched
+            assert {record.stream for record in records} >= {"combat:1", "combat:2"}
             for record in records:
-                effort = (
-                    expected
-                    if record.stream == "combat:1"
-                    else "max"
-                    if record.stream == "combat:2"
-                    else "low"
-                )
+                effort = "high" if record.stream.startswith("combat:") else "low"
                 response = record.attempts[-1].reply
                 assert response is not None
                 assert response.requested_effort == effort

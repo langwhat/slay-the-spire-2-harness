@@ -9,7 +9,6 @@ class ModelPurpose(StrEnum):
     RUN = "run"
     DECK = "deck"
     COMBAT = "combat"
-    COMBAT_ELITE_BOSS = "combat_elite_boss"
 
     @property
     def owner(self) -> DecisionOwner:

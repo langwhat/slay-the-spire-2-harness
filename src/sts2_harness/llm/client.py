@@ -74,9 +74,8 @@ class Llm:
     def for_purpose(self, purpose: ModelPurpose, *, recording_id: str | None = None) -> "Llm":
         configuration = self._configuration.for_purpose(purpose)
         effort = configuration.reasoning_effort
-        role = ModelPurpose.COMBAT if purpose is ModelPurpose.COMBAT_ELITE_BOSS else purpose
         cache_key = (
-            f"{recording_id}:{role.value}"
+            f"{recording_id}:{purpose.value}"
             if recording_id is not None and configuration.protocol is Protocol.RESPONSES
             else self._configuration.prompt_cache_key
         )

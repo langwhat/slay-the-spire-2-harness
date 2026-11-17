@@ -40,7 +40,7 @@ class InspectArguments(BaseModel):
 
 
 @pytest.mark.parametrize("protocol", list(Protocol))
-def test_cache_routing_only_changes_responses_and_shares_combat_role(
+def test_cache_routing_only_changes_responses_and_follows_purpose(
     tmp_path: Path, protocol: Protocol
 ) -> None:
     from test_compaction_full_replay import response
@@ -61,26 +61,24 @@ def test_cache_routing_only_changes_responses_and_shares_combat_role(
                 tmp_path,
                 LLM_PROTOCOL=protocol.value,
                 LLM_REASONING_EFFORT="high",
-                LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS="max",
+                LLM_REASONING_EFFORT_COMBAT="max",
             ),
             transport=httpx.MockTransport(handler),
         ) as model:
-            for purpose in (ModelPurpose.COMBAT, ModelPurpose.COMBAT_ELITE_BOSS):
-                client = model.for_purpose(purpose, recording_id="game-one")
-                await client.complete((TextMessage(TextRole.USER, "Act."),), ())
+            await model.for_purpose(ModelPurpose.COMBAT, recording_id="game-one").complete(
+                (TextMessage(TextRole.USER, "Act."),), ()
+            )
             await model.for_purpose(ModelPurpose.RUN, recording_id="game-one").complete(
                 (TextMessage(TextRole.USER, "Travel."),), ()
             )
         expected = (
-            ["game-one:combat", "game-one:combat", "game-one:run"]
-            if protocol is Protocol.RESPONSES
-            else [None, None, None]
+            ["game-one:combat", "game-one:run"] if protocol is Protocol.RESPONSES else [None, None]
         )
         assert [body.get("prompt_cache_key") for body in requests] == expected
         assert all("prompt_cache_retention" not in body for body in requests)
         if protocol is Protocol.RESPONSES:
-            assert requests[0]["reasoning"] == {"effort": "high"}
-            assert requests[1]["reasoning"] == {"effort": "max"}
+            assert requests[0]["reasoning"] == {"effort": "max"}
+            assert requests[1]["reasoning"] == {"effort": "high"}
 
     asyncio.run(scenario())
 

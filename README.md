@@ -54,7 +54,6 @@ names in the local file fail validation; unrelated process environment keys are 
 | `LLM_HEADERS` | Custom headers, one `Name: value` per line; last case-insensitive duplicate wins |
 | `LLM_REASONING_EFFORT`, `LLM_SERVICE_TIER` | Optional provider-specific settings |
 | `LLM_REASONING_EFFORT_RUN`, `LLM_REASONING_EFFORT_DECK`, `LLM_REASONING_EFFORT_COMBAT` | Optional per-purpose effort; empty inherits `LLM_REASONING_EFFORT` |
-| `LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS` | Optional elite and boss effort; empty inherits the combat effort |
 | `LLM_REQUEST_TIMEOUT_S` | `3600`, positive finite per-attempt timeout |
 | `LLM_EXTRA_RETRIES` | `25`, nonnegative additional attempts |
 | `LLM_CONTEXT_WINDOW` | `300000`, positive input accounting window |

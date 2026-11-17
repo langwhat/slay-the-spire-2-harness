@@ -61,16 +61,13 @@ class ModelConfiguration:
     reasoning_effort_run: str = field(default="", repr=False)
     reasoning_effort_deck: str = field(default="", repr=False)
     reasoning_effort_combat: str = field(default="", repr=False)
-    reasoning_effort_combat_elite_boss: str = field(default="", repr=False)
     prompt_cache_key: str | None = field(default=None, repr=False)
 
     def for_purpose(self, purpose: ModelPurpose) -> "ModelConfiguration":
-        combat = self.reasoning_effort_combat or self.reasoning_effort
         effort = {
             ModelPurpose.RUN: self.reasoning_effort_run or self.reasoning_effort,
             ModelPurpose.DECK: self.reasoning_effort_deck or self.reasoning_effort,
-            ModelPurpose.COMBAT: combat,
-            ModelPurpose.COMBAT_ELITE_BOSS: self.reasoning_effort_combat_elite_boss or combat,
+            ModelPurpose.COMBAT: self.reasoning_effort_combat or self.reasoning_effort,
         }[purpose]
         return replace(self, reasoning_effort=effort)
 
@@ -93,7 +90,6 @@ _KEYS = frozenset(
         "REASONING_EFFORT_RUN",
         "REASONING_EFFORT_DECK",
         "REASONING_EFFORT_COMBAT",
-        "REASONING_EFFORT_COMBAT_ELITE_BOSS",
         "SERVICE_TIER",
         "AUTH",
         "API_KEY",
@@ -252,7 +248,6 @@ def load_configuration(
             get("REASONING_EFFORT_RUN"),
             get("REASONING_EFFORT_DECK"),
             get("REASONING_EFFORT_COMBAT"),
-            get("REASONING_EFFORT_COMBAT_ELITE_BOSS"),
         ),
         user_input,
         minimal,

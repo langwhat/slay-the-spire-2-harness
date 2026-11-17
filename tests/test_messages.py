@@ -127,13 +127,13 @@ def test_role_clients_share_injected_transport_without_closing_it_twice(tmp_path
                 LLM_PROTOCOL="messages",
                 LLM_REASONING_EFFORT="low",
                 LLM_REASONING_EFFORT_DECK="medium",
-                LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS="high",
+                LLM_REASONING_EFFORT_COMBAT="high",
             ),
             transport=transport,
         ) as llm:
             await llm.complete((), ())
             await llm.for_purpose(ModelPurpose.DECK).complete((), ())
-            await llm.for_purpose(ModelPurpose.COMBAT_ELITE_BOSS).complete((), ())
+            await llm.for_purpose(ModelPurpose.COMBAT).complete((), ())
             assert transport.closes == 0
         assert transport.closes == 1
 

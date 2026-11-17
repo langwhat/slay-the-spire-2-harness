@@ -17,7 +17,6 @@ from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.fights import FightKind, fight_kind
 from sts2_harness.game import GameIO, GameLifetimeEnded, RunEnded
 from sts2_harness.journal import Manifest
 from sts2_harness.knowledge import CandidateLinks, Documents, DocumentView, MaterialRole
@@ -228,13 +227,8 @@ class RunSession:
         if self._combat_factory is not None:
             return self._combat_factory(self.execution, self.recovery, opening, notes)
         self._combat_stream += 1
-        purpose = (
-            ModelPurpose.COMBAT_ELITE_BOSS
-            if fight_kind(opening.state.progress.room_type) in (FightKind.ELITE, FightKind.BOSS)
-            else ModelPurpose.COMBAT
-        )
         return CombatAgent(
-            self._dependencies.model(purpose, f"combat:{self._combat_stream}"),
+            self._dependencies.model(ModelPurpose.COMBAT, f"combat:{self._combat_stream}"),
             self._tools(native.DecisionOwner.COMBAT),
             self.recovery,
             opening_notes=notes,

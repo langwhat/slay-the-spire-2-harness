@@ -141,7 +141,6 @@ def test_reasoning_effort_inherits_per_purpose(tmp_path: Path) -> None:
     assert config.for_purpose(ModelPurpose.RUN).reasoning_effort == "low"
     assert config.for_purpose(ModelPurpose.DECK).reasoning_effort == "medium"
     assert config.for_purpose(ModelPurpose.COMBAT).reasoning_effort == "high"
-    assert config.for_purpose(ModelPurpose.COMBAT_ELITE_BOSS).reasoning_effort == "high"
     fallback = load_configuration(
         tmp_path / "absent",
         {},
@@ -157,7 +156,6 @@ def test_reasoning_effort_inherits_per_purpose(tmp_path: Path) -> None:
         "LLM_REASONING_EFFORT_RUN",
         "LLM_REASONING_EFFORT_DECK",
         "LLM_REASONING_EFFORT_COMBAT",
-        "LLM_REASONING_EFFORT_COMBAT_ELITE_BOSS",
     ],
 )
 def test_check_config_rejects_invalid_role_effort_before_startup(
