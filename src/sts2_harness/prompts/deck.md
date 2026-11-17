@@ -19,7 +19,7 @@ Relics count toward the demands. A relic that blocks, prevents damage, or gives 
 
 ## Reading the fights
 
-`fights` records turns and HP on entering and leaving each recent battle, including healing at battle end; it does not show hands or damage dealt. A fight that took far more turns or HP than comparable fights is evidence of a gap, not proof of its cause:
+`fights` lists this run's most recent battles, oldest first: floor, room kind, turns, and HP on entering and on leaving, which includes healing granted when the battle ends. It does not show hands or damage dealt. A fight that took far more turns or HP than comparable fights is evidence of a gap, not proof of its cause:
 
 - A late kill turn: the main cards arrive late because the deck is large or draws little, or they do not grow fast enough once in play.
 - HP lost although the fight ended on time: block is short on the turns the enemy hits hardest.
@@ -99,5 +99,3 @@ When the choice generates, retains, removes, or replaces cards:
 - Which card blocks a critical draw at the worst time, and which weak card can existing effects already handle? What job does an early transition card still do?
 
 Removal usually starts with basic Strikes and Defends. Exhausting them in battle is a gain, not a cost: they stop entering later shuffles, so stronger cards cycle more often. Count a loss only when their output or a specific synergy is still needed.
-
-`fights` lists this run's most recent battles, oldest first: floor, room kind, turns, and HP on entering and on leaving, which includes healing granted when the battle ends.

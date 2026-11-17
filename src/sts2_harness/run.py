@@ -715,7 +715,7 @@ class RunAgent(Agent):
             self._prompts.read("run-task-rules"),
             "\n",
             self._prompts.read("state-format"),
-            "\n\n",
+            "\n",
             self._prompts.read("run-observations"),
             "\n",
             self._prompts.read("deck"),
