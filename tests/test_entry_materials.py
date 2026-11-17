@@ -4,7 +4,9 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
+from pydantic import MISSING
 from test_combat import reply
+from test_deck_choice import RewardGame
 from test_mod_client import CARD, COMBAT, RUN
 from test_responses import configuration
 
@@ -16,11 +18,13 @@ from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
+from sts2_harness.journal import Manifest, SessionMaterials
 from sts2_harness.knowledge import DocumentView, MaterialRole, SkillRead, SkillSummary, SubjectId
+from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.materials import DocumentSource, FileDocuments
-from sts2_harness.note_values import NotesView
+from sts2_harness.note_values import NotesState, NotesView
 from sts2_harness.tools import ToolCatalog
 
 
@@ -364,3 +368,121 @@ def test_documents_default_to_every_role_and_honor_explicit_audiences(tmp_path: 
                 )
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("role", (MaterialRole.RUN, MaterialRole.DECK))
+@pytest.mark.parametrize("has_map", (True, False))
+def test_run_and_deck_send_stable_guidance_before_current_choices(
+    tmp_path: Path, role: MaterialRole, has_map: bool
+) -> None:
+    game = RewardGame(minimal=False)
+    state = game.observation.state
+    assert isinstance(state, native.RunState)
+    assert game.observation.map is not MISSING
+    public_map = game.observation.map.model_copy(
+        update={"bosses": (native.NamedDefinition(name="Boss", definition_id="ENCOUNTER.BOSS"),)}
+    )
+    if role is MaterialRole.RUN:
+        state = state.model_copy(
+            update={
+                "screen": native.RunScreen.SHOP,
+                "offers": (),
+                "actions": (native.Action(ref="leave", label="Leave", enabled=True),),
+            }
+        )
+    game.observation = game.observation.model_copy(
+        update={"state": state, "map": public_map if has_map else MISSING}
+    )
+    character = SubjectId(category="character", definition_id=state.player.definition_id)
+    owned = SubjectId(category="card", definition_id="CARD.OWNED")
+    candidate = SubjectId(category="card", definition_id="CARD.LOCAL")
+    boss = SubjectId(category="encounter", definition_id="ENCOUNTER.BOSS")
+    registrations = (
+        ("candidate-a", (candidate,)),
+        ("owned-b", (owned,)),
+        ("mixed-owned-current", (candidate, owned)),
+        ("character-b", (character,)),
+        ("mixed-character-owned", (owned, character)),
+        ("boss", (boss,)),
+        ("configured", (candidate,)),
+        ("owned-a", (owned,)),
+        ("candidate-b", (candidate,)),
+    )
+    sources: list[DocumentSource] = []
+    for identity, subjects in registrations:
+        path = tmp_path / identity
+        path.write_text(f"Facts for {identity}.")
+        sources.append(
+            DocumentSource(
+                identity,
+                identity,
+                "Facts",
+                path,
+                subjects=subjects,
+                auto_roles=(MaterialRole.RUN, MaterialRole.DECK),
+            )
+        )
+    inputs: list[bytes] = []
+
+    class Captured(Exception):
+        pass
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/inspect":
+            return httpx.Response(
+                200,
+                content=native.InspectCompleted(
+                    status=native.ResultStatus.COMPLETED,
+                    observation=game.observation,
+                    data=native.MapData(map=public_map),
+                ).to_json(),
+            )
+        return game.mod(request)
+
+    def model(request: httpx.Request) -> httpx.Response:
+        inputs.append(request.content)
+        raise Captured
+
+    async def scenario() -> None:
+        with pytest.raises(Captured):
+            async with live_session(
+                ModClient("http://mod", transport=httpx.MockTransport(mod)),
+                Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=True,
+                        act_guidance={1: ("configured",)},
+                        battle_guidance=(),
+                    ),
+                    recording_id="stable-guidance",
+                    core_version="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    initial_notes=NotesState(),
+                ),
+                tmp_path / "archive.sqlite",
+                model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+                documents=FileDocuments(tuple(sources)),
+            ) as session:
+                await session.run()
+
+    asyncio.run(scenario())
+    guidance = [
+        json.loads(message["content"])["guidance"]
+        for message in json.loads(inputs[0])["input"]
+        if message.get("role") == "system" and message["content"].startswith('{"guidance":')
+    ]
+    assert len(guidance) == 1
+    assert [document["id"] for document in guidance[0]] == [
+        "configured",
+        "character-b",
+        "mixed-character-owned",
+        "boss",
+        "owned-b",
+        "mixed-owned-current",
+        "owned-a",
+        "candidate-a",
+        "candidate-b",
+    ]
+    assert {document["id"]: document["text"] for document in guidance[0]} == {
+        identity: f"Facts for {identity}." for identity, _ in registrations
+    }

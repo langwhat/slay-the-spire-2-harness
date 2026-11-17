@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import IntEnum
 
 from pydantic import MISSING
 
@@ -13,6 +14,7 @@ from sts2_harness.game import GameLifetimeEnded, GameReadError
 from sts2_harness.journal import SessionMaterials
 from sts2_harness.knowledge import (
     CandidateLinks,
+    Document,
     Documents,
     DocumentView,
     MaterialRole,
@@ -37,6 +39,42 @@ class EntryMaterials:
     candidate_links: Callable[[MaterialContext], CandidateLinks] | None = None
 
 
+class _Stability(IntEnum):
+    ACT = 0
+    OWNED = 1
+    CURRENT = 2
+
+
+def _stable_documents(
+    documents: tuple[Document, ...],
+    act_subjects: tuple[SubjectId, ...],
+    observation: native.Observation,
+) -> tuple[Document, ...]:
+    owned: list[SubjectId] = []
+    state = observation.state
+    if isinstance(state, native.RunState):
+        for ref in (*state.deck, *state.relics, *state.potions):
+            entry = observation.objects.get(ref)
+            if isinstance(entry, native.CardEntry):
+                category = native.NativeCategory.CARD
+            elif isinstance(entry, native.RelicEntry):
+                category = native.NativeCategory.RELIC
+            elif isinstance(entry, native.PotionEntry):
+                category = native.NativeCategory.POTION
+            else:
+                continue
+            owned.append(SubjectId(category=category, definition_id=entry.definition_id))
+
+    def stability(document: Document) -> _Stability:
+        if any(subject in act_subjects for subject in document.subjects):
+            return _Stability.ACT
+        if any(subject in owned for subject in document.subjects):
+            return _Stability.OWNED
+        return _Stability.CURRENT
+
+    return tuple(sorted(documents, key=stability))
+
+
 async def entry_materials(
     execution: Execution,
     documents: Documents,
@@ -52,6 +90,7 @@ async def entry_materials(
                 view = await documents.read(SkillRead(identity))
                 selected[view.id] = view
         subjects: list[SubjectId] = []
+        act_subjects: tuple[SubjectId, ...] = ()
         progress = observation.state.progress
         if role in (MaterialRole.RUN, MaterialRole.DECK):
             subjects.append(
@@ -95,6 +134,7 @@ async def entry_materials(
                 for boss in map_.bosses
                 if isinstance(boss.definition_id, str)
             )
+            act_subjects = tuple(subjects)
             if role is MaterialRole.RUN:
                 subjects.extend(
                     SubjectId(
@@ -128,6 +168,8 @@ async def entry_materials(
             subjects.extend(combat_subjects(observation, native.DecisionOwner.COMBAT))
         unique = {(subject.category, subject.definition_id): subject for subject in subjects}
         matches = await documents.lookup(tuple(unique.values()))
+        if role in (MaterialRole.RUN, MaterialRole.DECK):
+            matches = _stable_documents(matches, act_subjects, observation)
         if role is MaterialRole.DECK:
             for identity in configured:
                 match = next(
