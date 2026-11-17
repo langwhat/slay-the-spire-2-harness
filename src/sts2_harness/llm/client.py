@@ -30,6 +30,7 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     ToolDefinition,
@@ -129,14 +130,37 @@ class Llm:
             await client.__aexit__(exc_type, exc_value, traceback)
         await self._adapter.close()
 
-    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
+    def prepare(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        usage_anchor: ModelUsageAnchor | None = None,
+    ) -> PreparedRequest:
         body = self._adapter.prepare(input, tools)
         if (
             self._configuration.protocol is Protocol.RESPONSES
             and self._configuration.prompt_cache_key is not None
         ):
             body["prompt_cache_key"] = self._configuration.prompt_cache_key
-        return PreparedRequest(input, tools, measure(body, self._configuration.protocol), body)
+        if (
+            usage_anchor is not None
+            and usage_anchor.usage.input_tokens is not None
+            and usage_anchor.usage.output_tokens is not None
+            and usage_anchor.assistant.native.protocol is self._configuration.protocol
+        ):
+            assistant_body = self._adapter.prepare((usage_anchor.assistant,), ())
+            measurement = measure(
+                body,
+                self._configuration.protocol,
+                previous_body=usage_anchor.request_body,
+                assistant_body=assistant_body,
+                input_tokens=usage_anchor.usage.input_tokens,
+                output_tokens=usage_anchor.usage.output_tokens,
+            )
+        else:
+            measurement = measure(body, self._configuration.protocol)
+        return PreparedRequest(input, tools, measurement, body)
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None:
         return None

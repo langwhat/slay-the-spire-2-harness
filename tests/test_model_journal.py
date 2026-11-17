@@ -11,6 +11,7 @@ from pydantic import JsonValue, TypeAdapter
 from test_combat import BattleHTTP, reply
 from test_responses import OUTPUT, completed, configuration
 
+from sts2_harness.capacity import measure
 from sts2_harness.cli import main
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
@@ -362,8 +363,8 @@ def test_recorded_request_accounts_for_each_attempt_and_wire_input(tmp_path: Pat
         assert len(record.attempts) == 2
         body = bodies[0]
         assert isinstance(body["input"], list) and isinstance(body["tools"], list)
-        expected = 23
-        assert archive.manifest.capacity_policy.estimator_id == "input_characters_v1"
+        expected = measure(body, config.protocol).estimated_input_tokens
+        assert archive.manifest.capacity_policy.estimator_id == "reported_usage_bytes_v1"
         assert bodies[0] == bodies[1]
         assert record.attempts[0].input_digest == record.attempts[1].input_digest
         assert record.attempts[0].input_digest is not None

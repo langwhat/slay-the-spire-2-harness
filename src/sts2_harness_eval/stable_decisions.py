@@ -28,6 +28,7 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     TextMessage,
@@ -311,9 +312,15 @@ class FreshModel(MeasuredModel):
     history: native.HistoryData | None = None
     last_calls: tuple[ToolCall, ...] = ()
 
-    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
+    def prepare(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        usage_anchor: ModelUsageAnchor | None = None,
+    ) -> PreparedRequest:
         if self.history is None:
-            return super().prepare(input, tools)
+            return super().prepare(input, tools, usage_anchor=usage_anchor)
         enriched = list(input)
         for index, message in enumerate(enriched):
             if not isinstance(message, TaskMessage) or message.observation is None:

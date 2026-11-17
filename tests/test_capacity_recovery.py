@@ -37,6 +37,7 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     ResponsesReply,
     ToolDefinition,
@@ -208,12 +209,17 @@ def test_confirmed_rejection_retries_once_with_smaller_request(
             original_prepare = llm.prepare
             prepare_calls = 0
 
-            def prepare(input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
+            def prepare(
+                input: ModelInput,
+                tools: tuple[ToolDefinition, ...],
+                *,
+                usage_anchor: ModelUsageAnchor | None = None,
+            ) -> PreparedRequest:
                 nonlocal prepare_calls
                 prepare_calls += 1
                 if prepare_calls == 2:
                     raise ValueError("synthetic invalid candidate")
-                return original_prepare(input, tools)
+                return original_prepare(input, tools, usage_anchor=usage_anchor)
 
             fault = (
                 patch.object(llm, "prepare", side_effect=prepare)

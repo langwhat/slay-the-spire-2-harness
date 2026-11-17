@@ -47,6 +47,7 @@ from sts2_harness.llm.messages import (
     ModelClient,
     ModelInput,
     ModelReply,
+    PreparedRequest,
     RequestPreparation,
     TextMessage,
     TextRole,
@@ -206,10 +207,11 @@ class _SourceModel(ReplayModel):
         tools: tuple[ToolDefinition, ...],
         *,
         preparation: RequestPreparation | None = None,
+        prepared: PreparedRequest | None = None,
     ) -> ModelReply:
         sequence = self._next_record().sequence
         try:
-            reply = await super().complete(input, tools, preparation=preparation)
+            reply = await super().complete(input, tools, preparation=preparation, prepared=prepared)
         except _Captured:
             self.audit.validated_model_sequences.append(sequence)
             raise

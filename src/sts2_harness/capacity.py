@@ -15,7 +15,6 @@ from sts2_harness.config import ModelConfiguration, Protocol
 class CompactionDecision(StrEnum):
     UNCHANGED = "unchanged"
     COMPACTED = "compacted"
-    MINIMUM_EXCEEDS_WINDOW = "minimum_exceeds_window"
     INVALID_CANDIDATE = "invalid_candidate"
 
 
@@ -29,7 +28,6 @@ class RecoveryComparison(StrEnum):
     STRICTLY_SMALLER = "strictly_smaller"
     UNCHANGED = "unchanged"
     INVALID = "invalid"
-    OVER_WINDOW = "over_window"
 
 
 class RecoveryDecision(StrEnum):
@@ -86,7 +84,9 @@ class CapacityPolicy(native.WireModel):
     context_window: Annotated[int, Field(gt=0, strict=True)] = 300_000
     trigger_numerator: Literal[9] = 9
     trigger_denominator: Literal[10] = 10
-    estimator_id: Literal["input_characters_v1"] = "input_characters_v1"
+    estimator_id: Literal["input_characters_v1", "reported_usage_bytes_v1"] = (
+        "reported_usage_bytes_v1"
+    )
     compaction_policy_id: Literal["latest_complete_group_v1"] = "latest_complete_group_v1"
     capacity_classifier_id: CapacityClassifierId = CapacityClassifierId.UNVERIFIED
     capacity_classifier_config: CapacityClassifierConfig = CapacityClassifierConfig()
@@ -130,19 +130,8 @@ class Measurement:
     encoded_bytes: int
 
 
-def _input_structure(value: JsonValue, strings: list[str]) -> JsonValue:
-    if isinstance(value, str):
-        strings.append(value)
-        return ""
-    if isinstance(value, list):
-        return [_input_structure(item, strings) for item in value]
-    if isinstance(value, dict):
-        return {key: _input_structure(item, strings) for key, item in value.items()}
-    return value
-
-
-def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
-    names = (
+def _request_field_names(protocol: Protocol) -> tuple[str, ...]:
+    return (
         ("messages", "tools")
         if protocol is Protocol.CHAT_COMPLETIONS
         else (
@@ -151,24 +140,91 @@ def measure(body: dict[str, JsonValue], protocol: Protocol) -> Measurement:
             else ("system", "messages", "tools")
         )
     )
-    input_fields: dict[str, JsonValue] = {}
-    items = 0
+
+
+def _request_fields(
+    body: dict[str, JsonValue], names: tuple[str, ...]
+) -> dict[str, list[JsonValue]]:
+    fields: dict[str, list[JsonValue]] = {}
     for name in names:
         value = body.get(name)
         if not isinstance(value, list):
             raise ValueError("Expected an array in the encoded model request.")
-        input_fields[name] = value
-        items += len(value)
-    strings: list[str] = []
-    structure = json.dumps(
-        _input_structure(input_fields, strings),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+        fields[name] = value
+    return fields
+
+
+def _json_bytes(value: JsonValue) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
     )
-    # Count decoded characters once, including opaque continuation, without HTTP escaping.
-    characters = len(structure) + sum(len(value) for value in strings)
-    tokens = (characters + 2) // 3 + 3 * items
+
+
+def _incremental_bytes(
+    current: dict[str, list[JsonValue]],
+    previous: dict[str, list[JsonValue]],
+    assistant: dict[str, list[JsonValue]],
+) -> int | None:
+    if current.keys() != previous.keys() or current.keys() != assistant.keys():
+        return None
+
+    added_bytes = 0
+    for name, current_items in current.items():
+        previous_items = previous[name]
+        if name == "tools":
+            if current_items != previous_items:
+                return None
+            continue
+        if (
+            len(previous_items) > len(current_items)
+            or current_items[: len(previous_items)] != previous_items
+        ):
+            return None
+
+        appended = current_items[len(previous_items) :]
+        assistant_items = assistant[name]
+        if assistant_items and appended[: len(assistant_items)] == assistant_items:
+            appended = appended[len(assistant_items) :]
+            preceding_items = len(previous_items) + len(assistant_items)
+        else:
+            preceding_items = len(previous_items)
+        if not appended:
+            continue
+
+        added_bytes += sum(len(_json_bytes(item)) for item in appended)
+        added_bytes += len(appended) - 1
+        if preceding_items:
+            added_bytes += 1
+    return added_bytes
+
+
+def measure(
+    body: dict[str, JsonValue],
+    protocol: Protocol,
+    *,
+    previous_body: dict[str, JsonValue] | None = None,
+    assistant_body: dict[str, JsonValue] | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> Measurement:
+    names = _request_field_names(protocol)
+    input_fields = _request_fields(body, names)
+    input_json: dict[str, JsonValue] = {name: items for name, items in input_fields.items()}
+    if (
+        previous_body is not None
+        and assistant_body is not None
+        and input_tokens is not None
+        and output_tokens is not None
+    ):
+        previous_fields = _request_fields(previous_body, names)
+        assistant_fields = _request_fields(assistant_body, names)
+        additional_bytes = _incremental_bytes(input_fields, previous_fields, assistant_fields)
+        if additional_bytes is not None:
+            tokens = input_tokens + output_tokens + (additional_bytes + 3) // 4
+        else:
+            tokens = (len(_json_bytes(input_json)) + 3) // 4
+    else:
+        tokens = (len(_json_bytes(input_json)) + 3) // 4
     text = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     encoded = text.encode()
     return Measurement(sha256(encoded).hexdigest(), tokens, len(encoded))

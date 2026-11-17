@@ -629,12 +629,17 @@ class AttemptCause(StrEnum):
     CAPACITY_RETRY = "capacity_retry"
 
 
+type ArchivedEstimatorId = Literal["input_characters_v1", "reported_usage_bytes_v1"]
+type ArchivedCompactionDecision = CompactionDecision | Literal["minimum_exceeds_window"]
+type ArchivedRecoveryComparison = RecoveryComparison | Literal["over_window"]
+
+
 class ModelAttempt(native.WireModel):
     index: int
     input_digest: str | None = None
     protocol_encoding_digest: str | None = None
     estimated_input_tokens: int | None = None
-    estimator_id: Literal["input_characters_v1"] = "input_characters_v1"
+    estimator_id: ArchivedEstimatorId = "input_characters_v1"
     cause: AttemptCause = AttemptCause.INITIAL
     recovery_of: ModelAttemptReference | None = None
     capacity_signal: str | None = None
@@ -647,7 +652,7 @@ class PreparationEvidence(native.WireModel):
     baseline: MessageSnapshot | None
     input_before: tuple[MessageSnapshot, ...]
     estimate_before: int
-    decision: CompactionDecision
+    decision: ArchivedCompactionDecision
     input_after: tuple[MessageSnapshot, ...] | None
     estimate_after: int | None
     retained_complete_group_id: int | None
@@ -667,7 +672,7 @@ class RecoveryRecord(native.WireModel):
     candidate_input_ref: str | None
     candidate_input_digest: str | None
     candidate_estimate: int | None
-    comparison: RecoveryComparison
+    comparison: ArchivedRecoveryComparison
     decision: RecoveryDecision
     retry_sequence: int | None = None
 
@@ -685,7 +690,7 @@ class PreparationReferences(native.WireModel):
     baseline_ref: str | None
     input_before_ref: str
     estimate_before: int
-    decision: CompactionDecision
+    decision: ArchivedCompactionDecision
     input_after_ref: str | None
     estimate_after: int | None
     retained_complete_group_id: int | None
@@ -755,20 +760,17 @@ class VariantPrefixPreparation(PreparationReferences):
             )
         ):
             raise ValueError("The preparation after evidence is inconsistent.")
-        expected_validation = {
-            CompactionDecision.UNCHANGED: CompactionValidation.NOT_NEEDED,
-            CompactionDecision.COMPACTED: CompactionValidation.PASSED,
-            CompactionDecision.MINIMUM_EXCEEDS_WINDOW: CompactionValidation.PASSED,
-            CompactionDecision.INVALID_CANDIDATE: CompactionValidation.FAILED,
-        }[self.decision]
-        interrupted = self.decision in (
-            CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
-            CompactionDecision.INVALID_CANDIDATE,
-        )
-        if self.validation is not expected_validation or interrupted != (
-            self.outcome is VariantPrefixOutcome.INTERRUPTED
-        ):
-            raise ValueError("The preparation outcome is inconsistent.")
+        if self.decision != "minimum_exceeds_window":
+            expected_validation = {
+                CompactionDecision.UNCHANGED: CompactionValidation.NOT_NEEDED,
+                CompactionDecision.COMPACTED: CompactionValidation.PASSED,
+                CompactionDecision.INVALID_CANDIDATE: CompactionValidation.FAILED,
+            }[self.decision]
+            interrupted = self.decision is CompactionDecision.INVALID_CANDIDATE
+            if self.validation is not expected_validation or interrupted != (
+                self.outcome is VariantPrefixOutcome.INTERRUPTED
+            ):
+                raise ValueError("The preparation outcome is inconsistent.")
         if (self.source_reply_sequence is not None) != (
             self.outcome is VariantPrefixOutcome.SOURCE_REPLY
         ):

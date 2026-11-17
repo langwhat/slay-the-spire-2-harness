@@ -99,7 +99,7 @@ def test_run_variant_preserves_notes_and_plan_with_own_compaction(
                 if item.role is native.DecisionOwner.RUN and item.confirmed_operation_cursor == 3
             )
             assert measured.preparation is not None
-            threshold = measured.preparation.estimate_before + (100 if longer else -100)
+            threshold = measured.preparation.estimate_before + 100 if longer else 300_000
         config = configuration(
             tmp_path, LLM_PROTOCOL=protocol.value, LLM_CONTEXT_WINDOW=str(threshold * 10 // 9)
         )

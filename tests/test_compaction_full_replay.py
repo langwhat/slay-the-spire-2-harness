@@ -15,7 +15,7 @@ from test_messages import events, sse
 from test_replay import record_campaign
 from test_responses import configuration
 
-from sts2_harness.capacity import CapacityPolicy, CompactionDecision, measure
+from sts2_harness.capacity import CapacityPolicy, CompactionDecision
 from sts2_harness.client import models as native
 from sts2_harness.client.models import DecisionOwner
 from sts2_harness.config import Protocol
@@ -61,7 +61,7 @@ def response(protocol: Protocol, *calls: tuple[str, str, str], text: str | None 
             {
                 "type": "message_delta",
                 "delta": {"stop_reason": "tool_use" if calls else "end_turn"},
-                "usage": {"output_tokens": 5},
+                "usage": {"input_tokens": 10_000, "output_tokens": 5},
             },
             {"type": "message_stop"},
         ]
@@ -69,7 +69,7 @@ def response(protocol: Protocol, *calls: tuple[str, str, str], text: str | None 
     return sse(stream)
 
 
-def campaign_with_history(protocol: Protocol) -> Campaign:
+def campaign_with_history(protocol: Protocol, *, note_size: int = 6000) -> Campaign:
     campaign = Campaign()
     # Keep the Run decisions in one native node to exercise capacity fallback.
     campaign.states[3] = run_state(1, "next-room")
@@ -98,7 +98,7 @@ def campaign_with_history(protocol: Protocol) -> Campaign:
         campaign.states[index] = observation.model_copy(
             update={"location": observation.location.model_copy(update={"node_id": "shared-event"})}
         )
-    random_text = "".join(random.Random(2026).choices(string.ascii_letters, k=6000))
+    random_text = "".join(random.Random(2026).choices(string.ascii_letters, k=note_size))
     campaign.responses = iter(
         [
             response(
@@ -156,31 +156,40 @@ def test_run_compaction_replays_without_repeating_game_or_notes(
     tmp_path: Path, protocol: Protocol
 ) -> None:
     async def scenario() -> None:
-        calibration = campaign_with_history(protocol)
-        with patch(
-            "test_replay.configuration",
-            return_value=configuration(tmp_path, LLM_PROTOCOL=protocol.value),
-        ):
-            await record_campaign(tmp_path / "calibration.sqlite", calibration)
-        with closing(Journal.open(tmp_path / "calibration.sqlite")) as journal:
-            calibration_records = journal.requests()
-        # Select a window from measured complete protocol requests: the third Run group
-        # crosses the threshold, while all earlier Run requests remain under it.
-        target = next(
-            index
-            for index, record in enumerate(calibration_records)
-            if record.role is DecisionOwner.RUN and record.confirmed_operation_cursor == 3
-        )
-        estimate = measure(calibration.inputs[target], protocol).estimated_input_tokens
-        previous = max(
-            measure(calibration.inputs[index], protocol).estimated_input_tokens
-            for index, record in enumerate(calibration_records[:target])
-            if record.role is DecisionOwner.RUN
-        )
-        window = estimate * 10 // 9
-        assert previous * 10 < window * 9 <= estimate * 10
+        if protocol is Protocol.MESSAGES:
+            # Keep the same reported input usage as the provider's complete Messages reply,
+            # so the post-group request reaches the compaction threshold.
+            window = 10_000
+            note_size = 6000
+        else:
+            calibration = campaign_with_history(protocol)
+            with patch(
+                "test_replay.configuration",
+                return_value=configuration(tmp_path, LLM_PROTOCOL=protocol.value),
+            ):
+                await record_campaign(tmp_path / "calibration.sqlite", calibration)
+            with closing(Journal.open(tmp_path / "calibration.sqlite")) as journal:
+                calibration_records = journal.requests()
+            # Select a window from measured complete protocol requests: the third Run group
+            # crosses the threshold, while all earlier Run requests remain under it.
+            target = next(
+                index
+                for index, record in enumerate(calibration_records)
+                if record.role is DecisionOwner.RUN and record.confirmed_operation_cursor == 3
+            )
+            target_preparation = calibration_records[target].preparation
+            assert target_preparation is not None
+            estimate = target_preparation.estimate_before
+            previous = max(
+                record.preparation.estimate_before
+                for record in calibration_records[:target]
+                if record.role is DecisionOwner.RUN and record.preparation is not None
+            )
+            window = estimate * 10 // 9
+            assert previous * 10 < window * 9 <= estimate * 10
+            note_size = 6000
 
-        campaign = campaign_with_history(protocol)
+        campaign = campaign_with_history(protocol, note_size=note_size)
         path = tmp_path / "recording.sqlite"
         config = replace(
             configuration(tmp_path, LLM_PROTOCOL=protocol.value), context_window=window
@@ -208,7 +217,8 @@ def test_run_compaction_replays_without_repeating_game_or_notes(
         preparation = compressed.preparation
         assert preparation is not None
         assert preparation.estimate_before * 10 >= window * 9
-        assert preparation.estimate_after is not None and preparation.estimate_after < window
+        assert preparation.estimate_after is not None
+        assert preparation.input_after != preparation.input_before
         assert preparation.active_group_id is not None
         assert preparation.retained_complete_group_id is not None
         # The retained edit is non-idempotent: replaying it twice would duplicate this phrase
@@ -234,5 +244,32 @@ def test_run_compaction_replays_without_repeating_game_or_notes(
         assert path.read_bytes() == source
         with closing(Journal.open(path)) as journal:
             assert journal.operations() == operations
+
+    asyncio.run(scenario())
+
+
+def test_estimates_above_context_window_still_reach_fake_http(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        campaign = campaign_with_history(Protocol.RESPONSES)
+        config = replace(configuration(tmp_path), context_window=1)
+
+        def manifest_with_capacity(**kwargs: object) -> Manifest:
+            return Manifest.model_validate(
+                {**kwargs, "capacity_policy": CapacityPolicy(context_window=1)}
+            )
+
+        with (
+            patch("test_replay.configuration", return_value=config),
+            patch("test_replay.Manifest", side_effect=manifest_with_capacity),
+        ):
+            await record_campaign(tmp_path / "over-window.sqlite", campaign)
+
+        with closing(Journal.open(tmp_path / "over-window.sqlite")) as journal:
+            first = journal.requests()[0]
+        assert first.preparation is not None
+        assert first.preparation.estimate_before > 1
+        assert first.preparation.decision is CompactionDecision.UNCHANGED
+        assert first.delivered
+        assert campaign.inputs
 
     asyncio.run(scenario())

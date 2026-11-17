@@ -26,6 +26,7 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     ToolDefinition,
@@ -231,9 +232,13 @@ class SampleHost:
                     return client.capacity_policy
 
                 def prepare(
-                    self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+                    self,
+                    input: ModelInput,
+                    tools: tuple[ToolDefinition, ...],
+                    *,
+                    usage_anchor: ModelUsageAnchor | None = None,
                 ) -> PreparedRequest:
-                    return client.prepare(input, tools)
+                    return client.prepare(input, tools, usage_anchor=usage_anchor)
 
                 async def record_recovery(self, recovery: CapacityRecovery) -> None:
                     await client.record_recovery(recovery)

@@ -90,6 +90,7 @@ from sts2_harness.llm.messages import (
     ModelMetadata,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     ToolDefinition,
@@ -519,14 +520,21 @@ class ReplayModel:
     def capacity_policy(self) -> CapacityPolicy:
         return self._next_configuration().capacity_policy
 
-    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
-        return self._encode(input, tools, self._next_configuration())
+    def prepare(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        usage_anchor: ModelUsageAnchor | None = None,
+    ) -> PreparedRequest:
+        return self._encode(input, tools, self._next_configuration(), usage_anchor)
 
     def _encode(
         self,
         input: ModelInput,
         tools: tuple[ToolDefinition, ...],
         configuration: ConfigurationSnapshot,
+        usage_anchor: ModelUsageAnchor | None = None,
     ) -> PreparedRequest:
         # Snapshots are mutable Pydantic values, so identify preparers by their serialized value.
         key = configuration.model_dump_json()
@@ -534,7 +542,7 @@ class ReplayModel:
         if preparer is None:
             preparer = Llm(configuration.for_offline_preparation())
             self._preparers[key] = preparer
-        return preparer.prepare(input, tools)
+        return preparer.prepare(input, tools, usage_anchor=usage_anchor)
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None:
         record = self._rejected_record
@@ -590,16 +598,28 @@ class ReplayModel:
         if expected is None:
             _different(record.sequence, InputComponent.MODEL_INPUT)
         actual = _preparation_evidence(preparation)
-        if actual != PreparationEvidence.model_validate(
+        archived = PreparationEvidence.model_validate(
             expected.model_dump(include=set(PreparationEvidence.model_fields))
+        )
+        if record.attempts and all(
+            attempt.estimator_id == "input_characters_v1" for attempt in record.attempts
         ):
+            archived = archived.model_copy(
+                update={
+                    "estimate_before": actual.estimate_before,
+                    "estimate_after": actual.estimate_after,
+                }
+            )
+        if actual != archived:
             _different(record.sequence, InputComponent.MODEL_INPUT)
 
     async def complete_prepared(
         self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
     ) -> ModelReply:
         self._check_preparation(self._next_record(), preparation)
-        return await self.complete(prepared.input, prepared.tools, preparation=preparation)
+        return await self.complete(
+            prepared.input, prepared.tools, preparation=preparation, prepared=prepared
+        )
 
     async def interrupt_preparation(
         self,
@@ -641,6 +661,7 @@ class ReplayModel:
         tools: tuple[ToolDefinition, ...],
         *,
         preparation: RequestPreparation | None = None,
+        prepared: PreparedRequest | None = None,
     ) -> ModelReply:
         record = self._timeline.take(DependencyKind.MODEL)
         assert isinstance(record, ModelRecord)
@@ -668,11 +689,16 @@ class ReplayModel:
         if tuple(ToolSnapshot.of(tool) for tool in tools) != expected_tools:
             _different(record.sequence, InputComponent.TOOLS)
         if not treated and record.attempts:
-            measurement = self._encode(input, tools, record.configuration).measurement
+            measurement = (
+                prepared.measurement
+                if prepared is not None
+                else self._encode(input, tools, record.configuration).measurement
+            )
             if any(
                 attempt.protocol_encoding_digest is not None
                 and attempt.protocol_encoding_digest != measurement.digest
                 or attempt.estimated_input_tokens is not None
+                and attempt.estimator_id == "reported_usage_bytes_v1"
                 and attempt.estimated_input_tokens != measurement.estimated_input_tokens
                 for attempt in record.attempts
             ):
@@ -784,11 +810,17 @@ async def _run(
                 return historical.capacity_policy
 
             def prepare(
-                self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+                self,
+                input: ModelInput,
+                tools: tuple[ToolDefinition, ...],
+                *,
+                usage_anchor: ModelUsageAnchor | None = None,
             ) -> PreparedRequest:
                 materials = timeline.materials
                 return historical.prepare(
-                    input, materials.tools(tools) if materials is not None else tools
+                    input,
+                    materials.tools(tools) if materials is not None else tools,
+                    usage_anchor=usage_anchor,
                 )
 
             async def record_recovery(self, recovery: CapacityRecovery) -> None:

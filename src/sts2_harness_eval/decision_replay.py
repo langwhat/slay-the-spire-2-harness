@@ -60,6 +60,7 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     TextMessage,
@@ -716,8 +717,14 @@ class MeasuredModel:
     def capacity_policy(self) -> CapacityPolicy:
         return self.client.capacity_policy
 
-    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
-        return self.client.prepare(input, tools)
+    def prepare(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        usage_anchor: ModelUsageAnchor | None = None,
+    ) -> PreparedRequest:
+        return self.client.prepare(input, tools, usage_anchor=usage_anchor)
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None:
         await self.client.record_recovery(recovery)

@@ -2,6 +2,7 @@
 
 import hashlib
 import time
+from typing import Literal
 
 from sts2_harness.capacity import CapacityPolicy, Measurement, ModelAttemptReference
 from sts2_harness.client import models as native
@@ -54,6 +55,7 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     ToolDefinition,
@@ -70,6 +72,7 @@ class _Attempts:
         role: native.DecisionOwner,
         input_digest: str,
         recovery_of: ModelAttemptReference | None,
+        estimator_id: Literal["input_characters_v1", "reported_usage_bytes_v1"],
     ) -> None:
         self._journal = journal
         self._sequence = sequence
@@ -77,6 +80,7 @@ class _Attempts:
         self._role = role
         self._input_digest = input_digest
         self._recovery_of = recovery_of
+        self._estimator_id: Literal["input_characters_v1", "reported_usage_bytes_v1"] = estimator_id
         self._failures = 0
         self._last_failure: FailureKind | None = None
         self._started = time.monotonic()
@@ -85,6 +89,7 @@ class _Attempts:
         self._attempt = ModelAttempt(
             index=index,
             input_digest=self._input_digest,
+            estimator_id=self._estimator_id,
             cause=(
                 AttemptCause.TRANSPORT_RETRY
                 if index != 1
@@ -171,8 +176,14 @@ class RecordedLlm:
     async def complete(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> ModelReply:
         return await self._complete(input, tools, None)
 
-    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest:
-        return self._live.prepare(input, tools)
+    def prepare(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        usage_anchor: ModelUsageAnchor | None = None,
+    ) -> PreparedRequest:
+        return self._live.prepare(input, tools, usage_anchor=usage_anchor)
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None:
         reference = recovery.rejected.reference
@@ -274,7 +285,14 @@ class RecordedLlm:
         recovery_of = preparation.recovery_of if preparation is not None else None
         if recovery_of is not None:
             self._journal.link_model_recovery(recovery_of, sequence)
-        attempts = _Attempts(self._journal, sequence, self._role, input_digest, recovery_of)
+        attempts = _Attempts(
+            self._journal,
+            sequence,
+            self._role,
+            input_digest,
+            recovery_of,
+            self._live.capacity_policy.estimator_id,
+        )
         self._journal.diagnostics.started_model(self._role, sequence)
         try:
             if prepared is None:

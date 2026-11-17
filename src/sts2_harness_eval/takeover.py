@@ -53,6 +53,7 @@ from sts2_harness.llm.messages import (
     ModelInput,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     ToolDefinition,
@@ -598,12 +599,18 @@ class _Takeover:
                     return historical.capacity_policy
 
                 def prepare(
-                    self, input: ModelInput, tools: tuple[ToolDefinition, ...]
+                    self,
+                    input: ModelInput,
+                    tools: tuple[ToolDefinition, ...],
+                    *,
+                    usage_anchor: ModelUsageAnchor | None = None,
                 ) -> PreparedRequest:
                     treated_tools = materials.tools(tools) if materials is not None else tools
                     if switch.live:
-                        return switch.current.model(role, stream).prepare(input, treated_tools)
-                    return historical.prepare(input, treated_tools)
+                        return switch.current.model(role, stream).prepare(
+                            input, treated_tools, usage_anchor=usage_anchor
+                        )
+                    return historical.prepare(input, treated_tools, usage_anchor=usage_anchor)
 
                 async def record_recovery(self, recovery: CapacityRecovery) -> None:
                     if switch.live:

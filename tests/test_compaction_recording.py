@@ -2,7 +2,7 @@ from pathlib import Path
 
 from test_responses import configuration
 
-from sts2_harness.capacity import CapacityPolicy, CompactionDecision, CompactionValidation
+from sts2_harness.capacity import CapacityPolicy, CompactionValidation
 from sts2_harness.client import models as native
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import (
@@ -38,7 +38,7 @@ def test_failed_preparation_records_candidate_but_no_attempt(tmp_path: Path) -> 
         baseline=None,
         input_before=before,
         estimate_before=400_000,
-        decision=CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
+        decision="minimum_exceeds_window",
         input_after=candidate,
         estimate_after=320_000,
         retained_complete_group_id=None,

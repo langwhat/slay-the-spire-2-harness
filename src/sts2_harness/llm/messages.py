@@ -240,6 +240,13 @@ class ModelReply:
     metadata: ModelMetadata
 
 
+@dataclass(frozen=True, slots=True)
+class ModelUsageAnchor:
+    request_body: dict[str, JsonValue]
+    assistant: AssistantMessage
+    usage: Usage
+
+
 class FailureKind(StrEnum):
     CONNECTION = "connection"
     TIMEOUT = "timeout"
@@ -293,7 +300,13 @@ class ModelClient(Protocol):
     @property
     def capacity_policy(self) -> CapacityPolicy: ...
 
-    def prepare(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> PreparedRequest: ...
+    def prepare(
+        self,
+        input: ModelInput,
+        tools: tuple[ToolDefinition, ...],
+        *,
+        usage_anchor: ModelUsageAnchor | None = None,
+    ) -> PreparedRequest: ...
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None: ...
 

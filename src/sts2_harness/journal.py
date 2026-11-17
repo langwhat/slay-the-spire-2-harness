@@ -764,11 +764,6 @@ class Journal:
                         digest = hashlib.sha256(b"[" + b",".join(encoded) + b"]").hexdigest()
                         if digest != value.semantic_digest:
                             raise ArchiveError("Variant semantic evidence is inconsistent.")
-                    if value.estimate_after is not None and (
-                        (value.estimate_after >= configuration.capacity_policy.context_window)
-                        != (value.decision is CompactionDecision.MINIMUM_EXCEEDS_WINDOW)
-                    ):
-                        raise ArchiveError("Variant capacity evidence is inconsistent.")
                     result.append(
                         RecordedVariantPrefixPreparation(
                             **value.model_dump(),

@@ -32,6 +32,7 @@ from sts2_harness.llm.messages import (
     ModelClient,
     ModelReply,
     ModelUnavailable,
+    ModelUsageAnchor,
     PreparedRequest,
     RequestPreparation,
     ToolCall,
@@ -78,6 +79,7 @@ class Agent(ABC):
         self._materials = materials
         self._context: Context | None = None
         self._pending_call: ToolCall | None = None
+        self._usage_anchor: ModelUsageAnchor | None = None
 
     @abstractmethod
     def _initial_context(
@@ -121,7 +123,9 @@ class Agent(ABC):
         assert self._llm is not None
         prepared, evidence = await self.compact(context)
         try:
-            return await self._llm.complete_prepared(prepared, preparation=evidence)
+            reply = await self._llm.complete_prepared(prepared, preparation=evidence)
+            self._remember_usage(prepared, reply)
+            return reply
         except CapacityRejected as rejected:
             candidate, baseline = context.compaction_input()
             try:
@@ -134,16 +138,7 @@ class Agent(ABC):
                     )
                 )
                 raise ModelUnavailable(FailureKind.CAPACITY) from None
-            if (
-                compacted.measurement.estimated_input_tokens
-                >= self._llm.capacity_policy.context_window
-            ):
-                comparison = RecoveryComparison.OVER_WINDOW
-            elif (
-                compacted.measurement.encoded_bytes >= prepared.measurement.encoded_bytes
-                or compacted.measurement.estimated_input_tokens
-                >= prepared.measurement.estimated_input_tokens
-            ):
+            if compacted.measurement.encoded_bytes >= prepared.measurement.encoded_bytes:
                 comparison = RecoveryComparison.UNCHANGED
             else:
                 comparison = RecoveryComparison.STRICTLY_SMALLER
@@ -160,6 +155,7 @@ class Agent(ABC):
             complete_id, active_id = context.group_ids
             group_id = active_id or complete_id
             assert group_id is not None
+            self._usage_anchor = None
             context.install_compaction(candidate)
             recovery = RequestPreparation(
                 group_id,
@@ -174,14 +170,16 @@ class Agent(ABC):
                 CompactionValidation.PASSED,
                 rejected.reference,
             )
-            return await self._llm.complete_prepared(compacted, preparation=recovery)
+            reply = await self._llm.complete_prepared(compacted, preparation=recovery)
+            self._remember_usage(compacted, reply)
+            return reply
 
     async def compact(self, context: Context) -> tuple[PreparedRequest, RequestPreparation]:
         assert self._llm is not None
         client = self._llm
         tools = self._tools.definitions
         before = context.model_input()
-        prepared = client.prepare(before, tools)
+        prepared = client.prepare(before, tools, usage_anchor=self._usage_anchor)
         estimate = prepared.measurement.estimated_input_tokens
         complete_id, active_id = context.group_ids
         group_id = active_id or complete_id
@@ -191,7 +189,7 @@ class Agent(ABC):
         below_trigger = (
             estimate * policy.trigger_denominator < policy.context_window * policy.trigger_numerator
         )
-        already_minimal = candidate == before and estimate < policy.context_window
+        already_minimal = candidate == before
         if below_trigger or already_minimal:
             evidence = RequestPreparation(
                 group_id,
@@ -226,22 +224,22 @@ class Agent(ABC):
             raise failure from None
         compacted = client.prepare(candidate, tools)
         after = compacted.measurement.estimated_input_tokens
-        if after >= policy.context_window:
+        if compacted.measurement.encoded_bytes >= prepared.measurement.encoded_bytes:
             evidence = RequestPreparation(
                 group_id,
                 baseline,
                 before,
                 estimate,
-                CompactionDecision.MINIMUM_EXCEEDS_WINDOW,
-                candidate,
-                after,
+                CompactionDecision.UNCHANGED,
+                before,
+                estimate,
                 complete_id,
                 active_id,
-                CompactionValidation.PASSED,
+                CompactionValidation.NOT_NEEDED,
             )
-            failure = ModelUnavailable(FailureKind.CAPACITY)
-            await client.interrupt_preparation(evidence, tools, failure)
-            raise failure
+            return prepared, evidence
+
+        self._usage_anchor = None
         context.install_compaction(candidate)
         evidence = RequestPreparation(
             group_id,
@@ -256,6 +254,9 @@ class Agent(ABC):
             CompactionValidation.PASSED,
         )
         return compacted, evidence
+
+    def _remember_usage(self, prepared: PreparedRequest, reply: ModelReply) -> None:
+        self._usage_anchor = ModelUsageAnchor(prepared.body, reply.assistant, reply.usage)
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         if self._pending_call is not None:
