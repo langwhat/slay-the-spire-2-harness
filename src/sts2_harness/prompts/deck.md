@@ -24,6 +24,8 @@ Relics count toward the demands. A relic that blocks, prevents damage, or gives 
 - A late kill turn: the main cards arrive late because the deck is large or draws little, or they do not grow fast enough once in play.
 - HP lost although the fight ended on time: block is short on the turns the enemy hits hardest.
 
+`use.observed_plays` counts each owned card definition's plays in the sampled recent battles. Chosen cards with few plays while basic cards are still played show hands that hold more than they can play; another card of that job joins the unplayed.
+
 When supplied knowledge describes the act's Elites and Boss or the final act's Bosses, play those fights out with the current deck, relics, and potions: which cards, on which turns, bring the enemy's HP to zero, and how much of its damage the same hands block until then. Without it, use comparable fights in `fights` to estimate a longer, harder Boss fight. When history is empty or incomparable, say what is unknown and judge from the visible card rules; do not invent enemy HP, damage, or kill turns.
 
 ## What a deck is made of
@@ -38,58 +40,42 @@ A group with one half is not a core. A debuff, draw, cycling, or energy with not
 
 The core is the current best answer, not a commitment. When an offered card is itself a source or a payoff, work out the group it would form with owned cards and at most one card the rewards ahead can plausibly supply, and compare that group's damage with the core's against the Bosses ahead. Take it when clearly higher; once its group is the stronger one, the old group's cards are transition cards. A card that is neither a source nor a payoff is never a reason to change core.
 
-## What a card costs
+## What a turn plays
 
-Every added card is drawn in place of the cards already owned, for the rest of the run. One more circulating card makes each owned card arrive N/(N+1) as often, where N is the circulating deck (`deck_stats.circulating`). `added` and `skipped` count this act's completed card reward choices.
+A turn draws `base_draw` cards and plays only what its energy pays for; the rest are discarded unplayed. A deck is as strong as what its usual hand plays, and a card matters only on the turns it is played.
 
-- While hands already hold more than energy pays for, a card that costs energy is played only instead of another card; its value is the difference between the two.
+- An added card takes its draw from whichever card would have come instead, the deck's best cards as often as its basic ones. With N circulating cards (`deck_stats.circulating`), each card is in hand once every N/`base_draw` turns: drawing five, a card in a 15-card deck comes twice in a six-turn fight, in a 30-card deck once.
+- In hand, a card that costs energy adds no play. It is played instead of the weakest card that hand would have paid for and is worth the difference; when it is no better, it is discarded and its draw bought nothing.
+- So what a candidate must beat depends on what the usual hand holds. Count the circulating cards better than a basic card by job (damage, block or prevention, draw, energy); the usual hand holds `base_draw`/N of each count. A different way of doing an owned job is the same job. A turn that also blocks pays for fewer damage cards than its energy alone would: once the usual hand holds as many chosen damage cards as that turn pays for, a new damage card competes with them, not with a basic Strike, while the same hand may still block with basic Defends. Each job fills separately, and damage fills first.
+- Energy, 0-cost cards, and draw that nets cards enlarge the turn instead of competing for it. A draw card nets the cards it draws minus itself, and they still need energy: where hands already hold more than energy pays for, draw adds choice and energy adds plays. An effect that pays per card or per attack is worth the number the energy pays for.
+- A second copy competes for the same play as the first. It adds only on turns where the hand would play both ahead of its next card, and nothing while the first copy's effect still lasts, as with a debuff or a setup. Upgrades and removals are few, so one strong card for a job, upgraded, does more than several.
+- A card is first drawn on turn (N/`base_draw` + 1)/2 on average. A power or setup pays only on the turns after it is played, less the play its energy displaced; like a card that exhausts when played, it costs its draw and energy once per fight. Count any immediate benefit, and the turns spent being hit when several must be played before damage arrives.
 - Cards that work only when played in the same turn share a hand far less often than each is drawn, unless something holds or fetches them. A chain that needs to keep drawing cards of one kind stalls when those cards are already in hand or spent.
-- A draw card's net gain is the cards it draws minus itself, and the cards drawn still need energy. An effect that pays per card or per attack is worth the number the turn's energy pays for; one that needs a counter to reach a threshold is worth nothing unless owned sources reach it within a fight.
-- A power, or a card that exhausts when played, costs its draw and energy once per fight. A power may return nothing on the turn it is played; count any immediate benefit from its rule. When several powers must be played before damage arrives, count the setup turns spent being hit and the block, relics, or potions that cover them.
+- A card with a condition is worth its numbers on the turns the condition holds. Count what the deck already supplies toward it in an ordinary fight, including cards that exhaust themselves. Short by one piece of a kind this character's rewards and shops offer routinely, it is the scarce half of a pair: take the scarce half when it appears. Short by several pieces, or a rare one, it is a plan, not yet a card.
 - Cards that enemies add during a fight take a larger share of a smaller deck, so a deck that works only while thin is fragile against them. A small deck is not a problem in itself; a small deck without strong numbers is.
 - A character with base_orb_slots 0 gains one orb slot when it channels an orb while its current orb capacity is 0; channeling into a full, nonempty queue first evokes its front orb.
-- Removing a weak card, or upgrading an owned one, improves every later draw and adds no card.
+- Removing a weak card, or upgrading an owned one, improves every later hand and adds no card.
+
+Nearly every offer holds a card that beats a basic card and has some use ahead; so will every offer left in the run. A ground for taking that is true of all of them builds the deck that takes them all, in which every owned card, the core included, arrives far less often by the final Bosses. Judge the ground by that deck. `added` and `skipped` count this act's completed card reward choices.
 
 ## The decision
 
-1. Name what the deck will kill the next Boss with now, and the demand most short in the fights left.
-2. For each candidate, name the demand it answers and what it would be drawn and played instead of: the existing providers of that effect and the key cards whose draws it takes, not only a weak basic card. Being stronger than a basic card, cheap, or compatible with one owned bonus is not enough on its own.
-3. Take a card that answers the most urgent unmet demand clearly better than the deck already does, that solves another clear shortfall in an approaching fight, or that completes or multiplies the core. A card that answers no unmet demand and does not improve the core only dilutes.
-4. Skipping is a full choice, compared like any card. A link is a reason to look, not a reason to take: a small bonus, or a pair seldom drawn together, changes nothing. When any number of cards may be chosen, each must pass on its own, and choosing none is valid.
+1. From the deck alone, before weighing any candidate: what a usual hand plays against the next Boss; for damage and for block, the weakest card that hand still pays for; and what limits the turn: energy (cards left unplayed), cards (energy left over), arrival (the core comes late), or the numbers of the cards played.
+2. Put each candidate into that hand in place of a card drawn at random, not in place of its worst card.
+   - It enlarges the turn, or does a job no owned card does and the fights ahead require (damage to several enemies, block for the largest hit, a source or a payoff): judge it by the turn it is drawn on.
+   - It does a job owned cards do: it earns its draw only when that hand plays it ahead of the card found in step 1. A card equal to an owned one is not ahead of it. When it is ahead, the card it beats is the next removal.
+   - It starts, completes, or multiplies a core: judge the group as under "What a deck is made of".
+3. Skipping keeps every owned card arriving as often as now; later offers, removals, and upgrades remain. When any number of cards may be chosen, place each after the ones already chosen; choosing none is valid.
 
-The reason states what the deck gains over skipping, after the draws the card takes; a skip states why the best candidate's gain is not worth them.
+The reason names the owned card the candidate is played ahead of, or the job no owned card does; a skip names the owned card that already does the candidate's job.
 
-The act changes what a candidate competes with:
+The act changes what the usual hand holds:
 
-- First act: most of the deck is basic cards, so a strong card is played instead of a basic one, and the deck must first beat this act's Elites and Boss. Take what works the turn it is drawn: early damage, damage to several enemies, block the fights show short, a card that an owned card triggers and that grows, or a source or payoff strong enough to carry a deck before its partners are owned. Two or three such starts can be owned at once. Do not give up present power for a plan that needs cards not yet owned. A further card for a demand the deck already meets is skipped unless it makes the coming Elites clearly easier.
-- Later acts: draws now hold chosen cards, and each offer competes with those. Take the missing half of the core, a card that multiplies it, or a card for the demand the fights show short that outdoes what the deck has for it. A transition card taken now is drawn in place of the core for the rest of the run.
-- Final act: few fights are left in which a new card is drawn. Take a card only when it changes how the remaining Boss fights go, ahead of the cards the deck already owns; otherwise skip. Removal and upgrades often do more.
+- First act: hands are mostly basic cards, so the first strong cards of each job are played at once, and the deck must first beat this act's Elites and Boss. Take early damage, damage to several enemies, block better than a basic Defend for the hits the fights show, draw and energy, and a source or payoff that starts a core; two or three starts can be owned at once. While HP covers the next fights, a scarce half is worth a few weaker turns now. By the Boss the usual hand should no longer pay for a basic Strike; from then on more damage has to beat chosen damage.
+- Later acts: hands hold chosen cards, and each offer competes with those. Take the missing half of the core, a card that multiplies it, a card that enlarges the turn, or one that beats the owned card of its job on the turns the fights show short. A transition card taken now is drawn in place of the core for the rest of the run.
+- Final act: few fights are left in which a new card is drawn. Take a card only when it changes how the remaining Boss fights go, ahead of the cards the deck already owns; spare gold is not a ground, since a bought card still costs its draw and energy in every hand left. Removal and upgrades often do more.
 
-## Questions for the offer
-
-Ask the questions that fit the offer. They direct attention; they are not a form to fill. Compare a plausible turn with and without each serious candidate against the same fights.
-
-- Is the needed effect missing, or too small, too late, too costly, or unreliable on the dangerous turn?
-- Are damage, block, and draw all relying on the same card or combination? What still works when that card arrives late?
-- What does the candidate change before the core is in play and after? Does its main function still matter once the core runs?
-- Does its output match the size and duration of the actual gap?
-
-When the candidate depends on setup or repeated use:
-
-- Is the problem reaching setup, or lacking output after it? Which of those does this card fix?
-- What can it do before the core arrives? Does it make the most dangerous opening turn harder or delay the only core card?
-- Which cards must arrive together and be paid for in order, and is the result ready before the enemy's deadline?
-- Is its cost paid once or on every use? How many uses beat a one-time alternative, and can draw, energy, and retrieval supply them before the fight is decided?
-- Is the bottleneck a resource, or a playable way to spend it? Is more draw needed, or room to hold the needed cards together?
-
-When the candidate adds damage, block, or another copy:
-
-- Which owned damage or block cards receive the proposed bonus, and how often before it matters?
-- Does the next threat need faster damage, more targets, or a particular hit pattern? Can the current damage already win it?
-- Does the deck still have a way to beat each Boss it can meet?
-- Does another copy stack, share a counter, improve access, or only repeat a role that already works? Which later, stronger card would it also dilute?
-
-An existing damage bonus does not justify every compatible attack, and an existing defensive effect does not rule out another source that compounds it.
+## Choices that change the piles
 
 When the choice generates, retains, removes, or replaces cards:
 
