@@ -31,7 +31,7 @@ from sts2_harness.deck import (
 )
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.knowledge import CandidateLinks, DocumentView
+from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.messages import ModelClient, ToolCall
 from sts2_harness.prompts import PromptReader
 from sts2_harness.results import (
@@ -83,7 +83,6 @@ class DeckAgent(RunAgent):
         stream: str = "deck:replay",
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
-        candidate_links: CandidateLinks | None = None,
         completion: Callable[[CardChoiceCompletion], None] | None = None,
         user_input: UserInputSource | None = None,
         diagnostics: Diagnostics | None = None,
@@ -94,7 +93,6 @@ class DeckAgent(RunAgent):
             recovery,
             prompts=prompts,
             materials=materials,
-            candidate_links=candidate_links,
             user_input=user_input,
             diagnostics=diagnostics,
         )

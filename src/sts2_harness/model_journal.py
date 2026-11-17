@@ -12,8 +12,6 @@ from sts2_harness.journal_models import (
     AttemptCause,
     BlobCollector,
     BlobEncoding,
-    CandidateLinkLookup,
-    CandidateLinkResult,
     ConfigurationSnapshot,
     DocumentLookup,
     DocumentLookupResult,
@@ -37,8 +35,6 @@ from sts2_harness.journal_models import (
     archive_input,
 )
 from sts2_harness.knowledge import (
-    CandidateLink,
-    CandidateLinks,
     Document,
     Documents,
     DocumentView,
@@ -332,29 +328,6 @@ class RecordedPrompts:
             sequence, PromptReadResult(prompt=MaterialSnapshot.of(material))
         )
         return material
-
-
-class RecordedCandidateLinks:
-    def __init__(self, live: CandidateLinks, journal: Journal) -> None:
-        self._live = live
-        self._journal = journal
-
-    async def links(
-        self, candidate_ids: tuple[str, ...], owned_ids: tuple[str, ...]
-    ) -> dict[str, tuple[CandidateLink, ...]]:
-        sequence = self._journal.begin_material(
-            CandidateLinkLookup(candidate_ids=candidate_ids, owned_ids=owned_ids)
-        )
-        try:
-            links = await self._live.links(candidate_ids, owned_ids)
-        except (MaterialUnavailable, OSError) as error:
-            self._journal.finish_material(
-                sequence,
-                MaterialFailed(failure=MaterialFailure.UNAVAILABLE, message=str(error)),
-            )
-            raise MaterialUnavailable(str(error)) from error
-        self._journal.finish_material(sequence, CandidateLinkResult(links=links))
-        return links
 
 
 class RecordedDocuments:

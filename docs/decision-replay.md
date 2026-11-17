@@ -82,7 +82,7 @@ or game calls. It checks the original inputs, tools and encoded request digest.
 Cases retain raw native replies and harness-owned semantic state/history,
 including original assistant native replies needed to reconstruct earlier
 interactions within the node. They do not retain rendered prompts, tools,
-projections, knowledge bodies or candidate links. Labels never enter the model
+projections or knowledge bodies. Labels never enter the model
 input. Because history may include actual model text, store cases according to
 the private repository's artifact policy.
 

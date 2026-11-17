@@ -32,11 +32,10 @@ from sts2_harness.decisions import (
     LocalProgress,
     TaskComplete,
 )
-from sts2_harness.deck import adding_selection
 from sts2_harness.diagnostics import AutoFinished, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.game import GameReadError
-from sts2_harness.knowledge import CandidateLinks, DocumentView, GuidanceContent
+from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import (
     ModelClient,
     TextMessage,
@@ -178,7 +177,6 @@ class RunAgent(Agent):
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
         user_input: UserInputSource | None = None,
-        candidate_links: CandidateLinks | None = None,
         card_reports: list[tuple[AutomaticProgress, ActionToolResult]] | None = None,
     ) -> None:
         if tools.notes is None:
@@ -202,7 +200,6 @@ class RunAgent(Agent):
         self._shop_strategy_node: native.Location | None = None
         self._plan: RoutePlan | None = None
         self._plan_identity: tuple[str, str | None, int | None] | None = None
-        self._candidate_links = candidate_links
         self._card_reports = card_reports if card_reports is not None else []
 
     def _reward_view(self, observation: native.Observation) -> native.Observation:
@@ -218,51 +215,6 @@ class RunAgent(Agent):
         if self._tools.deck_stats is not None and isinstance(observation.state, native.RunState):
             stats, use = self._tools.deck_stats.view(observation)
             context.set_deck_stats(stats, use)
-        if self._candidate_links is None or self._tools.minimal:
-            return
-        state = observation.state
-        if not isinstance(state, native.RunState):
-            context.set_candidate_links({})
-            return
-        owned_ids = tuple(
-            sorted(
-                {
-                    entry.definition_id
-                    for ref in (*state.deck, *state.relics)
-                    if (entry := observation.objects.get(ref)) is not None
-                    and entry.definition_id is not MISSING
-                }
-            )
-        )
-        candidate_refs = {ref for offer in state.offers for ref in offer.contents}
-        selection = adding_selection(observation)
-        if selection is not None:
-            candidate_refs.update(selection.candidates)
-        candidate_ids = tuple(
-            sorted(
-                {
-                    entry.definition_id
-                    for ref in candidate_refs
-                    if isinstance(entry := observation.objects.get(ref), native.CardEntry)
-                }
-            )
-        )
-        if not candidate_ids:
-            context.set_candidate_links({})
-            return
-        try:
-            links = await self._candidate_links.links(candidate_ids, owned_ids)
-        except MaterialUnavailable as error:
-            raise DecisionInterrupted(
-                Reason(code=ReasonCode.CONTENT_UNAVAILABLE, message=str(error)),
-                self._recovery.record_failure(),
-            ) from error
-        context.set_candidate_links(
-            {
-                key: tuple(_JSON_OBJECT.validate_json(link.to_json()) for link in values)
-                for key, values in links.items()
-            }
-        )
 
     def _sync_notes(self, context: Context) -> None:
         if self._tools.minimal:

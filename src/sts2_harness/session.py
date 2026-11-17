@@ -19,7 +19,7 @@ from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import GameIO, GameLifetimeEnded, RunEnded
 from sts2_harness.journal import Manifest
-from sts2_harness.knowledge import CandidateLinks, Documents, DocumentView, MaterialRole
+from sts2_harness.knowledge import Documents, DocumentView, MaterialRole
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.loop import CombatFactory, DefaultFlow, RunFlow
 from sts2_harness.model_purpose import ModelPurpose
@@ -48,7 +48,6 @@ class SessionDependencies:
     prompts: PromptReader
     documents: Documents
     model: ModelFactory
-    candidate_links: CandidateLinks | None = None
     card_completion: Callable[[CardChoiceCompletion], None] | None = None
 
 
@@ -124,7 +123,6 @@ class RunSession:
                 materials=self._materials(MaterialRole.RUN),
                 diagnostics=self._diagnostics,
                 user_input=self._user_input,
-                candidate_links=self._dependencies.candidate_links,
                 card_reports=self._card_reports,
             )
         )
@@ -186,7 +184,6 @@ class RunSession:
             stream=stream,
             prompts=self._dependencies.prompts,
             materials=self._materials(MaterialRole.DECK),
-            candidate_links=self._dependencies.candidate_links,
             completion=self._dependencies.card_completion,
             diagnostics=self._diagnostics,
             user_input=self._user_input,

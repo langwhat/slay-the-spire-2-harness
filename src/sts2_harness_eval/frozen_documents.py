@@ -8,7 +8,6 @@ from pydantic import MISSING, JsonValue, model_validator
 
 from sts2_harness.client import models as native
 from sts2_harness.knowledge import (
-    CandidateLink,
     Document,
     DocumentView,
     SkillRead,
@@ -22,31 +21,6 @@ from sts2_harness_eval.frozen_catalog import SnapshotIncomplete
 class FrozenSkillList(native.WireModel):
     role: native.DecisionOwner
     skills: tuple[SkillSummary, ...]
-
-
-class FrozenLinkRead(native.WireModel):
-    candidates: tuple[str, ...]
-    owned: tuple[str, ...]
-    result: dict[str, tuple[CandidateLink, ...]]
-
-
-class FrozenLinks(native.WireModel):
-    reads: tuple[FrozenLinkRead, ...]
-
-    async def links(
-        self, candidate_ids: tuple[str, ...], owned_ids: tuple[str, ...]
-    ) -> dict[str, tuple[CandidateLink, ...]]:
-        read = next(
-            (
-                item
-                for item in self.reads
-                if item.candidates == candidate_ids and item.owned == owned_ids
-            ),
-            None,
-        )
-        if read is None:
-            raise SnapshotIncomplete("The snapshot does not cover these candidate links.")
-        return read.result.copy()
 
 
 class FrozenDocuments(native.WireModel):

@@ -112,9 +112,6 @@ class RunDelivery:
     deck_stats: dict[str, JsonValue] | None = None
     fights: tuple[Fight, ...] = ()
     deck_use: dict[str, int] = field(default_factory=lambda: dict[str, int]())
-    candidate_links: dict[str, tuple[dict[str, JsonValue], ...]] = field(
-        default_factory=lambda: dict[str, tuple[dict[str, JsonValue], ...]]()
-    )
 
     notes: NotesView | None = None
 
@@ -226,8 +223,6 @@ class RunDelivery:
                     row["rarity"] = obj.rarity
                 if obj.definition_id in self.deck_use and not actionable:
                     row["use"] = {"observed_plays": self.deck_use[obj.definition_id]}
-                if actionable and obj.definition_id in self.candidate_links:
-                    row["links"] = list(self.candidate_links[obj.definition_id])
             else:
                 for field_name, value in definition.items():
                     if field_name not in ("id", "name") and known.get(field_name) != value:

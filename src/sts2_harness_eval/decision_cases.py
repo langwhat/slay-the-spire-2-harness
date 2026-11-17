@@ -122,7 +122,8 @@ class DecisionCase(RecordedDecision):
     viewer: bool = True
     entry_documents_enabled: bool = True
     configured_guidance: tuple[str, ...] = ()
-    candidate_links_enabled: bool = True
+    # Existing cases may record this; replays deliver no candidate links.
+    candidate_links_enabled: bool = False
     events: Annotated[tuple[HistoryEvent, ...], Field(min_length=1)]
     native_reads: tuple[NativeRead, ...] = ()
     combat_history: native.HistoryData | None = None

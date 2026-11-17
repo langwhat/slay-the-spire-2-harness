@@ -2,7 +2,7 @@
 
 A deck change is judged by what the deck can do in the fights ahead, worked out from the cards' rules as shown and how they play together in a turn, in numbers rather than printed values or habit. Card offers are separate decisions: decide each after the earlier ones have changed the deck.
 
-Supplied knowledge, when present, adds exact rules for owned and offered objects, the HP, powers, and intents of the act's Elites and Boss and of the final act's Bosses, and cores known for this character. A core it lists is a candidate with conditions, not an order. Candidate `links`, when present, list event connections to owned objects as a cross-check; read connections from the card text yourself as well.
+Supplied knowledge, when present, adds exact rules for owned and offered objects, the HP, powers, and intents of the act's Elites and Boss and of the final act's Bosses, and cores known for this character. A core it lists is a candidate with conditions, not an order.
 
 ## What the deck must answer
 

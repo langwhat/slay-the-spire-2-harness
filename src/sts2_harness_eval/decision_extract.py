@@ -818,7 +818,6 @@ async def extract_case(
             ReplayPrompts(timeline),
             documents,
             model,
-            documents if journal.manifest.materials.candidate_links_enabled else None,
         )
         viewer = any(
             isinstance(record.request, PromptRead) and record.request.name == "viewer-input"
@@ -900,7 +899,6 @@ async def extract_case(
             configured_guidance=journal.manifest.materials.act_guidance.get(act, ())
             if act is not None
             else (),
-            candidate_links_enabled=journal.manifest.materials.candidate_links_enabled,
             events=events,
             native_reads=tuple(reads),
             decision_tool=action.name,

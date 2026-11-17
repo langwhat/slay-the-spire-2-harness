@@ -9,6 +9,7 @@ from typing import Annotated, Literal, Self
 from pydantic import (
     MISSING,
     BeforeValidator,
+    ConfigDict,
     Field,
     JsonValue,
     PlainSerializer,
@@ -44,7 +45,6 @@ from sts2_harness.context.models import (
     TaskMessage,
 )
 from sts2_harness.knowledge import (
-    CandidateLink,
     Document,
     DocumentView,
     GuidanceContent,
@@ -854,7 +854,22 @@ class DocumentLookup(native.WireModel):
     subjects: tuple[SubjectId, ...]
 
 
+class LinkDirection(StrEnum):
+    OWNED_TRIGGERS_CANDIDATE = "owned_triggers_candidate"
+    CANDIDATE_TRIGGERS_OWNED = "candidate_triggers_owned"
+
+
+class CandidateLink(native.WireModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+    with_: native.Nonempty = Field(alias="with")
+    event: native.Nonempty
+    direction: LinkDirection
+
+
 class CandidateLinkLookup(native.WireModel):
+    """A candidate event-connection read kept in existing archives."""
+
     kind: Literal[MaterialKind.LINKS] = MaterialKind.LINKS
     candidate_ids: tuple[str, ...]
     owned_ids: tuple[str, ...]

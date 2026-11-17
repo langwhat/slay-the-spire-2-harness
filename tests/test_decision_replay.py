@@ -111,7 +111,6 @@ def decision_case(tmp_path: Path, *, multiselect: bool = False) -> DecisionCase:
         ),
         labels=DecisionLabels(good=(card.definition_id,), comment="PRIVATE-LABEL-DO-NOT-SEND"),
         entry_documents_enabled=False,
-        candidate_links_enabled=False,
         viewer=False,
         events=(TaskEvent(observation=observation, state=HarnessState()),),
         decision_tool="run_act" if multiselect else "run_deck_choice",

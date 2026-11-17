@@ -13,7 +13,6 @@ from sts2_harness.execution.recovery import DecisionInterrupted
 from sts2_harness.game import GameLifetimeEnded, GameReadError
 from sts2_harness.journal import SessionMaterials
 from sts2_harness.knowledge import (
-    CandidateLinks,
     Document,
     Documents,
     DocumentView,
@@ -36,7 +35,6 @@ class MaterialContext:
 class EntryMaterials:
     documents: Callable[[MaterialContext], Documents]
     settings: SessionMaterials
-    candidate_links: Callable[[MaterialContext], CandidateLinks] | None = None
 
 
 class _Stability(IntEnum):

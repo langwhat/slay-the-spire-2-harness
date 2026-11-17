@@ -38,7 +38,7 @@ from sts2_harness_eval.decision_cases import (
     ProposalStatus,
 )
 from sts2_harness_eval.frozen_catalog import FrozenCatalog
-from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
+from sts2_harness_eval.frozen_documents import FrozenDocuments
 from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
 from sts2_harness_eval.traffic import AuditingTransport, HttpAttempt, ReceiptUsage
 
@@ -72,6 +72,7 @@ class CasePlan(native.WireModel):
     case: Path
     catalog: Path
     documents: Path | None = None
+    # Existing plans may name a link snapshot; evaluations deliver no candidate links.
     candidate_links: Path | None = None
     configurations: Annotated[tuple[native.Nonempty, ...], Field(min_length=1)]
     repetitions: Annotated[int, Field(ge=1)]
@@ -175,7 +176,6 @@ class PreparedCase:
     case: DecisionCase | None
     catalog: FrozenCatalog
     documents: FrozenDocuments | None
-    candidate_links: FrozenLinks | None
     error: str | None
     hashes: dict[str, str]
     inferred: tuple["InferredValue", ...]
@@ -225,12 +225,9 @@ def prepare_case(plan: CasePlan, root: Path) -> PreparedCase:
     data = _read(plan.case, root)
     catalog = _read(plan.catalog, root)
     documents = _read(plan.documents, root) if plan.documents is not None else None
-    links = _read(plan.candidate_links, root) if plan.candidate_links is not None else None
     hashes = {"case": sha256(data).hexdigest(), "catalog": sha256(catalog).hexdigest()}
     if documents is not None:
         hashes["documents"] = sha256(documents).hexdigest()
-    if links is not None:
-        hashes["candidate_links"] = sha256(links).hexdigest()
     inferred: list[InferredValue] = []
     try:
         recorded = TypeAdapter(dict[str, JsonValue]).validate_json(data)
@@ -247,7 +244,6 @@ def prepare_case(plan: CasePlan, root: Path) -> PreparedCase:
         case=case,
         catalog=FrozenCatalog.model_validate_json(catalog),
         documents=FrozenDocuments.model_validate_json(documents) if documents is not None else None,
-        candidate_links=FrozenLinks.model_validate_json(links) if links is not None else None,
         error=error,
         hashes=hashes,
         inferred=tuple(inferred),
@@ -595,7 +591,6 @@ async def evaluate(
                             role=case.plan.role,
                             sample=repetition,
                             documents=case.documents,
-                            candidate_links=case.candidate_links,
                             prompts=prompts[config.id],
                         )
                 except Exception as failure:

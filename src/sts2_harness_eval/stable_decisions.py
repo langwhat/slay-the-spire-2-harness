@@ -57,7 +57,7 @@ from sts2_harness_eval.decision_cases import (
 from sts2_harness_eval.decision_extract import ExtractionError, choices_for, decision_input
 from sts2_harness_eval.decision_replay import CaseGame, CaseStatistics, MeasuredModel
 from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
-from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
+from sts2_harness_eval.frozen_documents import FrozenDocuments
 
 _OBJECT = TypeAdapter(dict[str, JsonValue])
 
@@ -410,7 +410,6 @@ async def sample_fresh(
     role: EvaluationRole,
     sample: int = 1,
     documents: FrozenDocuments | None = None,
-    candidate_links: FrozenLinks | None = None,
     prompts: PromptReader | None = None,
 ) -> DecisionSample:
     if client.configuration.extra_retries:
@@ -431,8 +430,6 @@ async def sample_fresh(
             raise SnapshotIncomplete("The observation has no run identity.")
         if case.entry_documents_enabled and documents is None:
             raise SnapshotIncomplete("The case requires a frozen document snapshot.")
-        if case.candidate_links_enabled and candidate_links is None:
-            raise SnapshotIncomplete("The case requires a frozen candidate-link snapshot.")
         owner = (
             native.DecisionOwner.COMBAT
             if role is EvaluationRole.COMBAT
@@ -494,7 +491,6 @@ async def sample_fresh(
                 tools,
                 ToolRecoveryBudget(),
                 offer_ref=case.decision_offer,
-                candidate_links=candidate_links,
                 user_input=UserInputQueue() if case.viewer else None,
                 prompts=selected_prompts,
                 materials=materials,
@@ -504,7 +500,6 @@ async def sample_fresh(
                 lambda: measured,
                 tools,
                 ToolRecoveryBudget(),
-                candidate_links=candidate_links,
                 user_input=UserInputQueue() if case.viewer else None,
                 prompts=selected_prompts,
                 materials=materials,

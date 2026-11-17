@@ -299,8 +299,8 @@ precedence over all three. Use `--set STS2_MINIMAL=false` to disable an environm
 `check-config` reports the resolved mode. Both modes share gameplay and state-reading rules.
 Ordinary mode adds deck construction and battle review instructions, notes, and query tools.
 Minimal gameplay exposes only actions and route planning, skips model battle reviews and
-standalone report-processing calls, and supplies no notes or candidate event links. Automatic
-knowledge injection, measured deck statistics, and automatic progression remain available.
+standalone report-processing calls, and supplies no notes. Automatic knowledge injection,
+measured deck statistics, and automatic progression remain available.
 Minimal gameplay targets lower total usage cost; fewer input tokens alone do not establish
 savings when cached input is discounted. The archive records the mode so offline replay
 uses the same behavior. Ordinary gameplay is the default.
@@ -488,12 +488,10 @@ card grants; declined immediate grants stay unclaimed until the reward screen is
 
 State delivery replaces complete named sections and sends stable-ID definitions once per
 context. Run deck rows aggregate identical native instances with their actual card text.
-`deck_stats` describes the current deck using native base draw and energy; its baseline
-cycle, hand-cost, and unplayed-card estimates exclude conditional combat and relic effects.
+`deck_stats` counts the current deck and reports native base draw and energy.
 Reward takes and skips are counted per act; shop purchases do not change those counters.
 `use.observed_plays` describes the last five sampled battle-history prefixes;
-they omit unmeasured draw, damage, block, and energy statistics. Optional private candidate
-links describe potential event connections whose conditions still require the native rules.
+they omit unmeasured draw, damage, block, and energy statistics.
 
 Notes are authoritative
 in memory. Reads return the full text; replacement permits clearing; an edit requires one
@@ -578,7 +576,6 @@ A plan is a JSON file such as:
       "id": "q1506", "role": "deck", "case": "cases/q1506.json",
       "catalog": "snapshots/q1506-catalog.json",
       "documents": "snapshots/q1506-documents.json",
-      "candidate_links": "snapshots/q1506-links.json",
       "configurations": ["current-high"], "repetitions": 2
     }
   ],
@@ -597,17 +594,16 @@ uses these fields before display text is rendered, so rendered lookup data canno
 them. Results expose only rendered definitions. Search supports ASCII and common Chinese
 ideographs and punctuation when all IDs are printable ASCII; other text is unknown
 because native ordinal matching and ordering may differ from Python's Unicode behavior.
-Roles are `run`, `deck`, and `combat`. Omit `documents` or `candidate_links` only when
-the case did not enable that source. A catalog file uses the `FrozenCatalog` schema:
+Roles are `run`, `deck`, and `combat`. Omit `documents` only when the case did not
+enable entry documents. A catalog file uses the `FrozenCatalog` schema:
 `catalog` contains the native catalog metadata, `definitions` contains native lookup
 entries, and `complete` asserts the definition set covers the entire native catalog.
 Only a verified complete snapshot can answer arbitrary searches. Partial snapshots can
 answer lookups for included IDs, but missing IDs and searches are unknown. A verified
 complete snapshot reports missing lookup IDs as absent from the native catalog. Document
 snapshots use `FrozenDocuments`: declare all covered subjects (or `complete_subjects`)
-and freeze the documents, requested resources, and role skill lists. Candidate-link
-snapshots use `FrozenLinks`, with the exact candidate/owned inputs and result for each
-covered assembly. Inspect queries are answered only by matching native reads in the case.
+and freeze the documents, requested resources, and role skill lists. Inspect queries are
+answered only by matching native reads in the case.
 The snapshot schemas are in `sts2_harness_eval.frozen_catalog` and `frozen_documents`.
 Use `FrozenDocuments.snapshot_json()` to save document snapshots: it preserves material
 IDs, content hashes, and bodies rather than the model-visible text-only serialization.

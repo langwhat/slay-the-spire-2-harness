@@ -676,11 +676,6 @@ async def run_headless(
                     )
                     if materials is not None
                     else None,
-                    candidate_links=materials.candidate_links(
-                        MaterialContext(options.recipe.ascension, configuration.minimal)
-                    )
-                    if materials is not None and materials.candidate_links is not None
-                    else None,
                     diagnostics=diagnostics,
                     stop_requested=stop_requested.is_set,
                     user_input=user_input,

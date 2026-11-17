@@ -144,6 +144,7 @@ class SessionMaterials(native.WireModel):
     entry_documents_enabled: bool
     act_guidance: dict[int, tuple[str, ...]]
     battle_guidance: tuple[str, ...]
+    # Existing manifests may record this; sessions deliver no candidate links.
     candidate_links_enabled: bool = False
 
 

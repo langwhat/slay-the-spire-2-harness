@@ -177,9 +177,6 @@ class Context:
         self._run_delivery.deck_stats = stats
         self._run_delivery.deck_use = use
 
-    def set_candidate_links(self, links: dict[str, tuple[dict[str, JsonValue], ...]]) -> None:
-        self._run_delivery.candidate_links = links
-
     def set_notes(self, notes: NotesView) -> None:
         if not self._minimal:
             self._run_delivery.notes = notes

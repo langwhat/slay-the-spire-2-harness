@@ -9,12 +9,11 @@ from sts2_harness.client import ModClient
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.game import LiveGame
 from sts2_harness.journal import ArchiveError, Journal, Manifest, RecordedGame
-from sts2_harness.knowledge import CandidateLinks, Documents
+from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.materials import FileDocuments
 from sts2_harness.model_journal import (
-    RecordedCandidateLinks,
     RecordedDocuments,
     RecordedLlm,
     RecordedPrompts,
@@ -39,7 +38,6 @@ async def live_session(
     *,
     model: Llm | None = None,
     documents: Documents | None = None,
-    candidate_links: CandidateLinks | None = None,
     run_factory: RunFactory | None = None,
     combat_factory: RoleFactory | None = None,
     flow_factory: FlowFactory | None = None,
@@ -96,9 +94,6 @@ async def live_session(
             RecordedPrompts(PackagedPrompts(), journal),
             RecordedDocuments(documents if documents is not None else FileDocuments(), journal),
             model_client,
-            RecordedCandidateLinks(candidate_links, journal)
-            if candidate_links is not None
-            else None,
             journal.record_card_choice,
         )
         async with RunSession(

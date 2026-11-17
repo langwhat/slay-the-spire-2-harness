@@ -45,7 +45,6 @@ from sts2_harness.game import (
     Settlement,
 )
 from sts2_harness.knowledge import (
-    CandidateLinks,
     Documents,
     DocumentView,
     GuidanceContent,
@@ -613,11 +612,6 @@ async def rebuild_case(
     )
     material_context = MaterialContext(first.observation.run_rules.ascension, case.minimal)
     documents = materials.documents(material_context) if materials is not None else None
-    links: CandidateLinks | None = (
-        materials.candidate_links(material_context)
-        if materials is not None and materials.candidate_links is not None
-        else None
-    )
     notes = Notes(_notes_state(first.state))
     tools = ToolCatalog(
         native.DecisionOwner.RUN,
@@ -658,7 +652,6 @@ async def rebuild_case(
         recovery,
         prompts=prompts if prompts is not None else PackagedPrompts(),
         materials=selected,
-        candidate_links=links if case.candidate_links_enabled else None,
         user_input=UserInputQueue() if case.viewer else None,
     )
     tools.definitions = definitions

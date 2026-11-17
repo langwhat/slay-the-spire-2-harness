@@ -208,11 +208,6 @@ async def run_interactive(
                         )
                         if materials is not None
                         else None,
-                        candidate_links=materials.candidate_links(
-                            MaterialContext(status.ascension, configuration.minimal)
-                        )
-                        if materials is not None and materials.candidate_links is not None
-                        else None,
                         diagnostics=diagnostics,
                         stop_requested=stop_requested.is_set,
                         wait=wait,
