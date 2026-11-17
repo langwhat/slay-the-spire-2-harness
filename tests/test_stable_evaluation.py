@@ -619,7 +619,7 @@ def test_plan_estimate_failure_usage_and_report(
             plan,
             tmp_path,
             tmp_path / "results",
-            configuration(tmp_path, LLM_REASONING_EFFORT_DECK="low"),
+            configuration(tmp_path, LLM_REASONING_EFFORT="low"),
             concurrency=1,
             transport=lambda: httpx.MockTransport(respond),
         )

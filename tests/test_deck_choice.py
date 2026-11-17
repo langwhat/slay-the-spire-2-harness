@@ -397,9 +397,7 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
             ),
             archive,
             model=Llm(
-                configuration(
-                    tmp_path, LLM_REASONING_EFFORT="low", LLM_REASONING_EFFORT_DECK="medium"
-                ),
+                configuration(tmp_path, LLM_REASONING_EFFORT="low"),
                 transport=httpx.MockTransport(game.model),
             ),
         ) as session:
@@ -437,13 +435,13 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 request.attempts[-1].reply.requested_effort
                 for request in requests
                 if request.attempts[-1].reply is not None
-            ] == ["medium", "medium", "medium", "low", "low", "low"]
+            ] == ["low", "low", "low", "low", "low", "low"]
             reasoning = [body["reasoning"] for body in game.inputs]
             assert all(isinstance(item, dict) for item in reasoning)
             assert [item["effort"] for item in reasoning if isinstance(item, dict)] == [
-                "medium",
-                "medium",
-                "medium",
+                "low",
+                "low",
+                "low",
                 "low",
                 "low",
                 "low",

@@ -1,6 +1,5 @@
 import asyncio
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import httpx2 as httpx
@@ -42,11 +41,7 @@ def test_live_cache_keys_follow_recording_and_role_across_contexts(tmp_path: Pat
                 ),
                 tmp_path / f"{recording}.sqlite",
                 model=Llm(
-                    replace(
-                        configuration(tmp_path),
-                        reasoning_effort_run="max",
-                        reasoning_effort_combat="high",
-                    ),
+                    configuration(tmp_path, LLM_REASONING_EFFORT="high"),
                     transport=httpx.MockTransport(campaign.model),
                 ),
             ) as session:
@@ -62,10 +57,7 @@ def test_live_cache_keys_follow_recording_and_role_across_contexts(tmp_path: Pat
                 f"{recording}:run",
                 f"{recording}:combat",
             ]
-            assert [body["reasoning"] for body in campaign.inputs] == [
-                {"effort": effort}
-                for effort in ("max", "max", "high", "high", "max", "max", "max", "max", "high")
-            ]
+            assert all(body["reasoning"] == {"effort": "high"} for body in campaign.inputs)
             assert all("prompt_cache_retention" not in body for body in campaign.inputs)
 
     asyncio.run(scenario())
@@ -241,7 +233,7 @@ def test_live_resources_close_when_session_entry_fails(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("first_room", ["monster", "elite"])
-def test_every_combat_uses_combat_effort_and_is_recorded(tmp_path: Path, first_room: str) -> None:
+def test_every_role_uses_shared_effort_and_is_recorded(tmp_path: Path, first_room: str) -> None:
     import json
     from contextlib import closing
 
@@ -295,9 +287,7 @@ def test_every_combat_uses_combat_effort_and_is_recorded(tmp_path: Path, first_r
             model=Llm(
                 configuration(
                     tmp_path,
-                    LLM_REASONING_EFFORT="minimal",
-                    LLM_REASONING_EFFORT_RUN="low",
-                    LLM_REASONING_EFFORT_COMBAT="high",
+                    LLM_REASONING_EFFORT="high",
                 ),
                 transport=httpx.MockTransport(model),
             ),
@@ -307,10 +297,9 @@ def test_every_combat_uses_combat_effort_and_is_recorded(tmp_path: Path, first_r
             records = journal.requests()
             assert {record.stream for record in records} >= {"combat:1", "combat:2"}
             for record in records:
-                effort = "high" if record.stream.startswith("combat:") else "low"
                 response = record.attempts[-1].reply
                 assert response is not None
-                assert response.requested_effort == effort
+                assert response.requested_effort == "high"
                 assert response.reasoning_tokens == 13 and response.output_tokens == 20
             reasoning = [body["reasoning"] for body in campaign.inputs]
             assert all(isinstance(item, dict) for item in reasoning)

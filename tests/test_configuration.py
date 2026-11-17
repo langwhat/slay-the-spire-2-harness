@@ -123,33 +123,6 @@ def test_headless_rejects_missing_launch_inputs_without_creating_an_instance(
     assert not (tmp_path / "runs").exists()
 
 
-def test_reasoning_effort_inherits_per_purpose(tmp_path: Path) -> None:
-    from sts2_harness.model_purpose import ModelPurpose
-
-    config = load_configuration(
-        tmp_path / "absent",
-        {},
-        {
-            "LLM_MODEL": "model",
-            "LLM_AUTH": "none",
-            "LLM_REASONING_EFFORT": "low",
-            "LLM_REASONING_EFFORT_DECK": "medium",
-            "LLM_REASONING_EFFORT_COMBAT": "high",
-        },
-    ).model
-    assert config is not None
-    assert config.for_purpose(ModelPurpose.RUN).reasoning_effort == "low"
-    assert config.for_purpose(ModelPurpose.DECK).reasoning_effort == "medium"
-    assert config.for_purpose(ModelPurpose.COMBAT).reasoning_effort == "high"
-    fallback = load_configuration(
-        tmp_path / "absent",
-        {},
-        {"LLM_MODEL": "model", "LLM_AUTH": "none", "LLM_REASONING_EFFORT": "low"},
-    ).model
-    assert fallback is not None
-    assert all(fallback.for_purpose(purpose).reasoning_effort == "low" for purpose in ModelPurpose)
-
-
 @pytest.mark.parametrize(
     "setting",
     [
@@ -158,9 +131,14 @@ def test_reasoning_effort_inherits_per_purpose(tmp_path: Path) -> None:
         "LLM_REASONING_EFFORT_COMBAT",
     ],
 )
-def test_check_config_rejects_invalid_role_effort_before_startup(
-    tmp_path: Path, setting: str
+@pytest.mark.parametrize("source", ["override", "defaults"])
+def test_check_config_rejects_removed_role_effort_before_startup(
+    tmp_path: Path, setting: str, source: str
 ) -> None:
+    arguments = ("--set", f"{setting}=high")
+    if source == "defaults":
+        (tmp_path / ".env").write_text(f"{setting}=high\n")
+        arguments = ()
     result = cli(
         tmp_path,
         "check-config",
@@ -172,8 +150,7 @@ def test_check_config_rejects_invalid_role_effort_before_startup(
         "LLM_AUTH=none",
         "--set",
         "LLM_REASONING_EFFORT=low",
-        "--set",
-        f"{setting}=invalid",
+        *arguments,
     )
     assert result.returncode == 2
-    assert "Configuration error:" in result.stderr
+    assert "Unknown" in result.stderr

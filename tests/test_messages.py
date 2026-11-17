@@ -126,8 +126,6 @@ def test_role_clients_share_injected_transport_without_closing_it_twice(tmp_path
                 tmp_path,
                 LLM_PROTOCOL="messages",
                 LLM_REASONING_EFFORT="low",
-                LLM_REASONING_EFFORT_DECK="medium",
-                LLM_REASONING_EFFORT_COMBAT="high",
             ),
             transport=transport,
         ) as llm:

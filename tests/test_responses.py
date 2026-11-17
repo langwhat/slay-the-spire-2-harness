@@ -61,7 +61,6 @@ def test_cache_routing_only_changes_responses_and_follows_purpose(
                 tmp_path,
                 LLM_PROTOCOL=protocol.value,
                 LLM_REASONING_EFFORT="high",
-                LLM_REASONING_EFFORT_COMBAT="max",
             ),
             transport=httpx.MockTransport(handler),
         ) as model:
@@ -71,14 +70,18 @@ def test_cache_routing_only_changes_responses_and_follows_purpose(
             await model.for_purpose(ModelPurpose.RUN, recording_id="game-one").complete(
                 (TextMessage(TextRole.USER, "Travel."),), ()
             )
+            await model.for_purpose(ModelPurpose.DECK, recording_id="game-one").complete(
+                (TextMessage(TextRole.USER, "Choose."),), ()
+            )
         expected = (
-            ["game-one:combat", "game-one:run"] if protocol is Protocol.RESPONSES else [None, None]
+            ["game-one:combat", "game-one:run", "game-one:deck"]
+            if protocol is Protocol.RESPONSES
+            else [None, None, None]
         )
         assert [body.get("prompt_cache_key") for body in requests] == expected
         assert all("prompt_cache_retention" not in body for body in requests)
         if protocol is Protocol.RESPONSES:
-            assert requests[0]["reasoning"] == {"effort": "max"}
-            assert requests[1]["reasoning"] == {"effort": "high"}
+            assert all(body["reasoning"] == {"effort": "high"} for body in requests)
 
     asyncio.run(scenario())
 

@@ -70,31 +70,26 @@ class Llm:
         self._configuration = configuration
         self._transport = transport
         self._sleep = sleep
-        self._purpose_clients: dict[tuple[str, str | None], Llm] = {}
+        self._purpose_clients: dict[str | None, Llm] = {}
 
     def for_purpose(self, purpose: ModelPurpose, *, recording_id: str | None = None) -> "Llm":
-        configuration = self._configuration.for_purpose(purpose)
-        effort = configuration.reasoning_effort
+        configuration = self._configuration
         cache_key = (
             f"{recording_id}:{purpose.value}"
             if recording_id is not None and configuration.protocol is Protocol.RESPONSES
             else self._configuration.prompt_cache_key
         )
-        if (
-            effort == self._configuration.reasoning_effort
-            and cache_key == self._configuration.prompt_cache_key
-        ):
+        if cache_key == configuration.prompt_cache_key:
             return self
-        identity = (effort, cache_key)
-        if identity not in self._purpose_clients:
-            self._purpose_clients[identity] = Llm(
+        if cache_key not in self._purpose_clients:
+            self._purpose_clients[cache_key] = Llm(
                 replace(configuration, prompt_cache_key=cache_key),
                 transport=(
                     _BorrowedTransport(self._transport) if self._transport is not None else None
                 ),
                 sleep=self._sleep,
             )
-        return self._purpose_clients[identity]
+        return self._purpose_clients[cache_key]
 
     @staticmethod
     def validate_configuration(configuration: ModelConfiguration) -> None:
@@ -106,8 +101,6 @@ class Llm:
             raise ModelUnavailable(FailureKind.CONFIGURATION)
         if configuration.protocol is Protocol.MESSAGES:
             MessagesAdapter.request_options(configuration)
-            for purpose in ModelPurpose:
-                MessagesAdapter.request_options(configuration.for_purpose(purpose))
 
     @property
     def configuration(self) -> ModelConfiguration:

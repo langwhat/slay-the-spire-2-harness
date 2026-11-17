@@ -24,7 +24,6 @@ from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ResponsesReply, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.model_journal import RecordedLlm
-from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.results import (
@@ -122,12 +121,9 @@ def decision_case(tmp_path: Path, *, multiselect: bool = False) -> DecisionCase:
     )
 
 
-@pytest.mark.parametrize(
-    ("variant", "expected"),
-    ((DecisionVariant.RUN, "low"), (DecisionVariant.DECK, "high")),
-)
-def test_replay_cli_and_journal_use_variant_effort(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: DecisionVariant, expected: str
+@pytest.mark.parametrize("variant", [DecisionVariant.RUN, DecisionVariant.DECK])
+def test_replay_cli_and_journal_use_shared_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: DecisionVariant
 ) -> None:
     bodies: list[dict[str, JsonValue]] = []
 
@@ -154,9 +150,7 @@ def test_replay_cli_and_journal_use_variant_effort(
 
     config = configuration(
         tmp_path,
-        LLM_REASONING_EFFORT="minimal",
-        LLM_REASONING_EFFORT_RUN="low",
-        LLM_REASONING_EFFORT_DECK="high",
+        LLM_REASONING_EFFORT="high",
     )
 
     def fake_configuration(*_args: object) -> Configuration:
@@ -186,7 +180,7 @@ def test_replay_cli_and_journal_use_variant_effort(
         )
         == 0
     )
-    assert bodies[0]["reasoning"] == {"effort": expected}
+    assert bodies[0]["reasoning"] == {"effort": "high"}
     results = json.loads((tmp_path / "results" / "results.json").read_text())
     assert results[0]["verdict"] == "passed"
 
@@ -201,11 +195,8 @@ def test_replay_cli_and_journal_use_variant_effort(
             run_id="run",
             initial_notes=NotesState(),
         )
-        purpose = ModelPurpose.DECK if variant is DecisionVariant.DECK else ModelPurpose.RUN
         with closing(Journal.create(tmp_path / "record.sqlite", manifest)) as journal:
-            async with Llm(
-                config.for_purpose(purpose), transport=httpx.MockTransport(respond)
-            ) as live:
+            async with Llm(config, transport=httpx.MockTransport(respond)) as live:
                 client = RecordedLlm(
                     live, journal, role=native.DecisionOwner.RUN, stream=variant.value
                 )
@@ -213,8 +204,8 @@ def test_replay_cli_and_journal_use_variant_effort(
             assert sample.verdict is DecisionVerdict.PASSED
             records = journal.requests()
             recorded_reply = records[0].attempts[-1].reply
-            assert recorded_reply is not None and recorded_reply.requested_effort == expected
-        assert bodies[1]["reasoning"] == {"effort": expected}
+            assert recorded_reply is not None and recorded_reply.requested_effort == "high"
+        assert bodies[1]["reasoning"] == {"effort": "high"}
 
     asyncio.run(journal_sample())
 
