@@ -6,7 +6,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from hashlib import sha256
 
-from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
+from pydantic import MISSING, BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.capacity import CompactionDecision
 from sts2_harness.client import models as native
@@ -64,6 +64,8 @@ from sts2_harness.results import (
 )
 from sts2_harness.run import run_observation
 from sts2_harness.session import RunSession, SessionDependencies
+from sts2_harness.tools import ToolName
+from sts2_harness.tools import inputs as tool_inputs
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness_eval._replay import (
     ReplayDocuments,
@@ -104,22 +106,61 @@ class _Captured(Exception):
         self.tools = tools
 
 
+type DecisionInput = tool_inputs.RunAct | tool_inputs.TakeCard | tool_inputs.SkipCard
+
+
+def decision_input(call: ToolCall) -> DecisionInput:
+    """Decode a labeled game decision call into its typed tool input."""
+    try:
+        match call.name:
+            case ToolName.RUN_DECK_CHOICE:
+                return tool_inputs.RunDeckChoice.model_validate_json(
+                    call.arguments, strict=True
+                ).root
+            case ToolName.RUN_ACT:
+                return tool_inputs.RunActInput.model_validate_json(call.arguments, strict=True).root
+            case _:
+                raise ExtractionError("A different game action deviated from the labeled decision.")
+    except ValidationError:
+        raise ExtractionError(
+            f"The {call.name} arguments do not match its labeled decision input."
+        ) from None
+
+
+# Baseline content keeps every recorded field; only the fields used to order definitions are typed.
+class _BaselineDefinition(BaseModel):
+    model_config = ConfigDict(strict=True, extra="allow")
+    id: str
+
+
+class _BaselineObservation(BaseModel):
+    model_config = ConfigDict(strict=True, extra="allow")
+    defs: list[_BaselineDefinition]
+
+
+class _BaselineEnvelope(BaseModel):
+    model_config = ConfigDict(strict=True, extra="allow")
+    observation: _BaselineObservation
+
+
+class _BaselineContent(BaseModel):
+    model_config = ConfigDict(strict=True, extra="allow")
+    context_baseline: _BaselineEnvelope
+
+
 def _baseline_content(value: JsonValue) -> JsonValue:
     decoded = TypeAdapter(dict[str, JsonValue]).validate_python(value, strict=True)
-    envelope = decoded.get("context_baseline")
-    if not isinstance(envelope, dict):
+    try:
+        content = _BaselineContent.model_validate(decoded)
+    except ValidationError:
         return decoded
-    observation = envelope.get("observation")
-    if not isinstance(observation, dict):
+    observation = content.context_baseline.observation
+    if len({item.id for item in observation.defs}) != len(observation.defs):
         return decoded
-    definitions = observation.get("defs")
-    if not isinstance(definitions, list) or any(not isinstance(item, dict) for item in definitions):
-        return decoded
-    ids = [item.get("id") for item in definitions if isinstance(item, dict)]
-    if any(not isinstance(identity, str) for identity in ids) or len(set(ids)) != len(ids):
-        return decoded
-    observation["defs"] = sorted(definitions, key=lambda item: json.dumps(item, sort_keys=True))
-    return decoded
+    observation.defs = sorted(
+        observation.defs, key=lambda item: json.dumps(item.model_dump(), sort_keys=True)
+    )
+    return content.model_dump()
 
 
 def unused_baseline_permutation(actual: PreparationEvidence, expected: PreparationEvidence) -> bool:
@@ -227,45 +268,27 @@ class _SourceModel(ReplayModel):
             )
 
 
-def choices_for(call: ToolCall, observation: native.Observation) -> tuple[str, ...]:
+def choices_for(decision: DecisionInput, observation: native.Observation) -> tuple[str, ...]:
     """Resolve native instance refs without guessing from localized labels."""
-    arguments = TypeAdapter(dict[str, JsonValue]).validate_json(call.arguments)
     refs: list[str] = []
-    if call.name == "run_deck_choice":
-        if arguments.get("choice") == "skip":
+    match decision:
+        case tool_inputs.SkipCard():
             return ("skip",)
-        card = arguments.get("card")
-        if isinstance(card, str):
-            refs.append(card)
-        elif isinstance(card, list) and card and all(isinstance(ref, str) for ref in card):
-            refs.extend(ref for ref in card if isinstance(ref, str))
-        else:
-            raise ExtractionError("The deck choice has no card reference.")
-    elif call.name == "run_act":
-        steps = arguments.get("steps")
-        if not isinstance(steps, list):
-            raise ExtractionError("The action has no native steps.")
-        for step in steps:
-            if not isinstance(step, dict):
-                raise ExtractionError("The action step is invalid.")
-            if step.get("kind") == "select":
-                selected = step.get("refs")
-                if not isinstance(selected, list) or any(
-                    not isinstance(ref, str) for ref in selected
-                ):
-                    raise ExtractionError("The selection has no native references.")
-                refs.extend(ref for ref in selected if isinstance(ref, str))
-            elif step.get("kind") == "interact":
-                action_ref = step.get("action")
-                state = observation.state
-                action = next((a for a in state.actions if a.ref == action_ref), None)
-                if action is None or not isinstance(action.subject, str):
-                    raise ExtractionError("The event action exposes no native subject.")
-                refs.append(action.subject)
-            else:
-                raise ExtractionError("The action is not a labeled native decision.")
-    else:
-        raise ExtractionError("A different game action deviated from the labeled decision.")
+        case tool_inputs.TakeCard():
+            refs.extend(decision.cards)
+        case tool_inputs.RunAct():
+            for step in decision.steps:
+                match step:
+                    case native.Select():
+                        refs.extend(step.refs)
+                    case native.Interact():
+                        state = observation.state
+                        action = next((a for a in state.actions if a.ref == step.action), None)
+                        if action is None or not isinstance(action.subject, str):
+                            raise ExtractionError("The event action exposes no native subject.")
+                        refs.append(action.subject)
+                    case _:
+                        raise ExtractionError("The action is not a labeled native decision.")
     if not refs:
         return ("skip",)
     identities: list[str] = []
@@ -592,24 +615,37 @@ def _deck_count(observation: native.Observation, identity: str) -> int:
     )
 
 
-def _recorded_completion(
-    journal: Journal,
-    source: DecisionSource,
-    call: ToolCall,
-    observation: native.Observation,
-    tools: tuple[ToolDefinition, ...],
-) -> dict[str, JsonValue]:
+def _source_decision(call: ToolCall, tools: tuple[ToolDefinition, ...]) -> DecisionInput:
     schema = next((tool.parameters for tool in tools if tool.name == call.name), None)
     if schema is None:
         raise ExtractionError("The recorded decision has no source tool schema.")
     try:
-        schema.model_validate_json(call.arguments, strict=True)
+        validated = schema.model_validate_json(call.arguments, strict=True)
     except (ValueError, ValidationError):
         raise ExtractionError(
             "The recorded decision was rejected by its source tool schema."
         ) from None
-    arguments = TypeAdapter(dict[str, JsonValue]).validate_json(call.arguments)
-    chosen = arguments.get("card")
+    if not isinstance(validated, (tool_inputs.RunActInput, tool_inputs.RunDeckChoice)):
+        raise ExtractionError("The recorded decision has no labeled decision input.")
+    return validated.root
+
+
+def _decision_offer(decision: DecisionInput) -> str | None:
+    if isinstance(decision, tool_inputs.RunAct) or decision.offer is MISSING:
+        return None
+    return decision.offer
+
+
+def _recorded_completion(
+    journal: Journal,
+    source: DecisionSource,
+    call: ToolCall,
+    decision: DecisionInput,
+    observation: native.Observation,
+) -> dict[str, JsonValue]:
+    chosen = decision.card if isinstance(decision, tool_inputs.TakeCard) else None
+    choice = None if isinstance(decision, tool_inputs.RunAct) else decision.choice
+    offer_ref = _decision_offer(decision)
     record = journal.request(source.model_sequence)
     completion = next(
         (
@@ -617,11 +653,11 @@ def _recorded_completion(
             for item in journal.card_choices()
             if item.stream == record.stream
             and item.call_id == call.id
-            and item.offer_ref == arguments.get("offer")
+            and item.offer_ref == offer_ref
         ),
         None,
     )
-    if call.name == "run_deck_choice" and completion is None:
+    if not isinstance(decision, tool_inputs.RunAct) and completion is None:
         raise ExtractionError("The card decision has no exact typed completion evidence.")
     if completion is not None:
         state = completion.before.state
@@ -641,7 +677,7 @@ def _recorded_completion(
         # Native publication numbers advance every frame, including unchanged reads.
         before = completion.before.model_copy(update={"stamp": observation.stamp})
         if (
-            completion.choice.value != arguments.get("choice")
+            completion.choice.value != choice
             or completion.card_ref != chosen
             or offer is None
             or source_offer is None
@@ -668,18 +704,17 @@ def _recorded_completion(
             }
         if not isinstance(completion.outcome, ActionCompleted):
             raise ExtractionError("The recorded card action was not confirmed complete.")
-    if call.name == "run_act":
-        steps = arguments.get("steps")
-        if not isinstance(steps, list) or len(steps) != 1 or not isinstance(steps[0], dict):
+    if isinstance(decision, tool_inputs.RunAct):
+        if len(decision.steps) != 1 or not isinstance(decision.steps[0], native.Select):
             raise ExtractionError("The recorded decision is not one native selection.")
-        step = native.Select.model_validate_json(json.dumps(steps[0]))
+        step = decision.steps[0]
     else:
         step = native.Select(
             kind=native.StepKind.SELECT, refs=(chosen,) if isinstance(chosen, str) else ()
         )
         state = observation.state
         offer = (
-            next((offer for offer in state.offers if offer.ref == arguments.get("offer")), None)
+            next((offer for offer in state.offers if offer.ref == offer_ref), None)
             if isinstance(state, native.RunState)
             else None
         )
@@ -704,7 +739,7 @@ def _recorded_completion(
             completed = (
                 isinstance(message.outcome, ActionCompleted) and message.outcome.completed_steps > 0
             )
-            skipped = arguments.get("choice") == "skip" and isinstance(
+            skipped = isinstance(decision, tool_inputs.SkipCard) and isinstance(
                 message.outcome, ReadCompleted
             )
             if not completed and not skipped:
@@ -823,23 +858,26 @@ async def extract_case(
             for call in calls
             if call.name
             in (
-                "run_deck_choice",
-                "run_act",
-                "run_next",
-                "run_plan",
+                ToolName.RUN_DECK_CHOICE,
+                ToolName.RUN_ACT,
+                ToolName.RUN_NEXT,
+                ToolName.RUN_PLAN,
             )
         )
-        if len(actions) != 1 or actions[0].name not in ("run_deck_choice", "run_act"):
+        if len(actions) != 1 or actions[0].name not in (
+            ToolName.RUN_DECK_CHOICE,
+            ToolName.RUN_ACT,
+        ):
             raise ExtractionError("The source reply must contain one labeled game decision.")
         action = actions[0]
+        decision = _source_decision(action, captured_tools)
         evidence.recorded_completion = _recorded_completion(
             journal,
             source,
             action,
+            decision,
             last_task.observation,
-            captured_tools,
         )
-        arguments = json.loads(action.arguments)
         reads: list[NativeRead] = []
         for operation in journal.operations(stop=source.model_sequence):
             if operation.reply is None:
@@ -864,7 +902,7 @@ async def extract_case(
             events=events,
             native_reads=tuple(reads),
             decision_tool=action.name,
-            decision_offer=arguments.get("offer"),
-            recorded_choices=choices_for(action, last_task.observation),
-            recorded_reason=arguments.get("reason", ""),
+            decision_offer=_decision_offer(decision),
+            recorded_choices=choices_for(decision, last_task.observation),
+            recorded_reason="" if decision.reason is MISSING else decision.reason,
         )

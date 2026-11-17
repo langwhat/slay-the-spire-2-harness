@@ -3,12 +3,19 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from time import monotonic
+from typing import Annotated
 
 import httpx2 as httpx
-from pydantic import JsonValue, TypeAdapter, ValidationError
-
-_OBJECT = TypeAdapter(dict[str, JsonValue])
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    WrapValidator,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,25 +37,63 @@ class ReceiptUsage:
         return self.input_tokens - self.cache_read_tokens * 0.95 + self.output_tokens * 5
 
 
-def _tokens(value: JsonValue) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
-
-
-def _object(value: JsonValue) -> dict[str, JsonValue]:
-    return value if isinstance(value, dict) else {}
-
-
-def _usage(value: JsonValue) -> ReceiptUsage | None:
-    if not isinstance(value, dict):
+def _absent_when_invalid(value: object, handler: ValidatorFunctionWrapHandler) -> object:
+    try:
+        return handler(value)
+    except ValidationError:
         return None
-    input_details = _object(value.get("input_tokens_details"))
-    output_details = _object(value.get("output_tokens_details"))
+
+
+# Each receipt field is read independently; a malformed field is treated as absent.
+type _Lenient[T] = Annotated[T | None, WrapValidator(_absent_when_invalid)]
+
+
+class _Receipt(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+
+class _InputDetails(_Receipt):
+    cached_tokens: _Lenient[Annotated[int, Field(ge=0)]] = None
+    cache_write_tokens: _Lenient[Annotated[int, Field(ge=0)]] = None
+
+
+class _OutputDetails(_Receipt):
+    reasoning_tokens: _Lenient[Annotated[int, Field(ge=0)]] = None
+
+
+class _Usage(_Receipt):
+    input_tokens: _Lenient[Annotated[int, Field(ge=0)]] = None
+    output_tokens: _Lenient[Annotated[int, Field(ge=0)]] = None
+    input_tokens_details: _Lenient[_InputDetails] = None
+    output_tokens_details: _Lenient[_OutputDetails] = None
+
+
+class _UsageCarrier(_Receipt):
+    usage: _Lenient[_Usage] = None
+
+
+class _TerminalEvent(StrEnum):
+    COMPLETED = "response.completed"
+    FAILED = "response.failed"
+    INCOMPLETE = "response.incomplete"
+
+
+class _StreamEvent(_Receipt):
+    type: _Lenient[_TerminalEvent] = None
+    response: _Lenient[_UsageCarrier] = None
+
+
+def _usage(value: _Usage | None) -> ReceiptUsage | None:
+    if value is None:
+        return None
+    input_details = value.input_tokens_details or _InputDetails()
+    output_details = value.output_tokens_details or _OutputDetails()
     return ReceiptUsage(
-        input_tokens=_tokens(value.get("input_tokens")),
-        output_tokens=_tokens(value.get("output_tokens")),
-        cache_read_tokens=_tokens(input_details.get("cached_tokens")),
-        cache_write_tokens=_tokens(input_details.get("cache_write_tokens")),
-        reasoning_tokens=_tokens(output_details.get("reasoning_tokens")),
+        input_tokens=value.input_tokens,
+        output_tokens=value.output_tokens,
+        cache_read_tokens=input_details.cached_tokens,
+        cache_write_tokens=input_details.cache_write_tokens,
+        reasoning_tokens=output_details.reasoning_tokens,
     )
 
 
@@ -75,29 +120,25 @@ class HttpAttempt:
             if not parts or parts == [b"[DONE]"]:
                 continue
             try:
-                event = _OBJECT.validate_json(b"\n".join(parts))
+                event = _StreamEvent.model_validate_json(b"\n".join(parts))
             except ValidationError:
                 continue
-            kind = event.get("type")
-            if kind not in ("response.completed", "response.failed", "response.incomplete"):
+            if event.type is None or self.terminal_event is not None:
                 continue
-            if self.terminal_event is not None:
-                continue
-            self.terminal_event = str(kind)
-            if kind == "response.completed":
+            self.terminal_event = event.type.value
+            if event.type is _TerminalEvent.COMPLETED:
                 self.completed_seconds = monotonic() - self.started_clock
-            response = _object(event.get("response"))
-            self.usage = _usage(response.get("usage"))
+            self.usage = _usage(event.response.usage if event.response is not None else None)
 
     def closed(self) -> None:
         if self.closed_seconds is None:
             self.closed_seconds = monotonic() - self.started_clock
         if self.usage is None and self.raw:
             try:
-                payload = _OBJECT.validate_json(bytes(self.raw))
+                payload = _UsageCarrier.model_validate_json(bytes(self.raw))
             except ValidationError:
                 return
-            self.usage = _usage(payload.get("usage"))
+            self.usage = _usage(payload.usage)
 
 
 class _AuditingStream(httpx.AsyncByteStream):

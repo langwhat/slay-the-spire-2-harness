@@ -53,7 +53,7 @@ from sts2_harness_eval.decision_cases import (
     TaskEvent,
     score,
 )
-from sts2_harness_eval.decision_extract import ExtractionError, choices_for
+from sts2_harness_eval.decision_extract import ExtractionError, choices_for, decision_input
 from sts2_harness_eval.decision_replay import CaseGame, CaseStatistics, MeasuredModel
 from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
 from sts2_harness_eval.frozen_documents import FrozenDocuments, FrozenLinks
@@ -523,7 +523,7 @@ async def sample_fresh(
                 if captured.call.name in (ToolName.RUN_DECK_CHOICE, ToolName.RUN_ACT) and (
                     case.labels.good or case.labels.bad
                 ):
-                    choices = choices_for(captured.call, observation)
+                    choices = choices_for(decision_input(captured.call), observation)
                     verdict = score(case.labels, choices)
                 else:
                     action = {key: value for key, value in arguments.items() if key != "reason"}

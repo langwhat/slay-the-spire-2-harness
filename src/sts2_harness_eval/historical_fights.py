@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
+from typing import Annotated, Literal
 
-from pydantic import MISSING, BaseModel, ConfigDict, JsonValue, TypeAdapter
+from pydantic import MISSING, BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.client import models as native
 from sts2_harness.fights import Fight, FightHistory
@@ -57,6 +58,44 @@ class HistoricalEnrichmentError(ValueError):
     """The input cannot be bound to a verified native archive prefix."""
 
 
+class _ArchivedInput(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    semantic_digest: str | None = None
+
+
+class _ArchivedAttempt(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    protocol_encoding_digest: str | None = None
+
+
+class _ArchivedReply(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    observations: tuple[str, ...]
+
+
+class _RecordedState(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    fights: list[JsonValue] | None = None
+
+
+# Case files from other source versions are compared as recorded JSON, not as current models.
+class _RecordedTask(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    kind: Literal["task"]
+    observation: JsonValue = None
+    state: _RecordedState | None = None
+
+
+class _RecordedEvent(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+
+class _RecordedCase(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True)
+    source: JsonValue = None
+    events: list[Annotated[_RecordedTask | _RecordedEvent, Field(union_mode="left_to_right")]]
+
+
 @dataclass(frozen=True, slots=True)
 class DerivedFiles:
     case_path: Path
@@ -88,6 +127,13 @@ def _sha(data: bytes) -> str:
     return sha256(data).hexdigest()
 
 
+def _decode[T: BaseModel](model: type[T], data: bytes, reason: str) -> T:
+    try:
+        return model.model_validate_json(data)
+    except ValidationError:
+        raise HistoricalEnrichmentError(reason) from None
+
+
 def _blob(connection: sqlite3.Connection, digest: str) -> bytes:
     row = connection.execute("SELECT content FROM blobs WHERE digest = ?", (digest,)).fetchone()
     if row is None:
@@ -105,12 +151,9 @@ def _old_observation(
     return native.Observation.model_validate_json(json.dumps(value))
 
 
-def _last_source_task(source: dict[str, JsonValue]) -> dict[str, JsonValue]:
-    events = source.get("events")
-    if not isinstance(events, list):
-        raise HistoricalEnrichmentError("The replayed source case has no events.")
-    for event in reversed(events):
-        if isinstance(event, dict) and event.get("kind") == "task":
+def _last_source_task(source: _RecordedCase) -> _RecordedTask:
+    for event in reversed(source.events):
+        if isinstance(event, _RecordedTask):
             return event
     raise HistoricalEnrichmentError("The replayed source case has no task.")
 
@@ -138,18 +181,20 @@ def _archive_segments(
     ).fetchone()
     if row is None or row[0] != proof.anchor_cursor:
         raise HistoricalEnrichmentError("The replayed model anchor does not match the archive.")
-    model_input = _OBJECT.validate_json(_blob(connection, row[1]))
-    if model_input.get("semantic_digest") != proof.anchor_semantic_digest:
-        raise HistoricalEnrichmentError("The replayed semantic digest does not match the archive.")
+    reason = "The replayed semantic digest does not match the archive."
+    model_input = _decode(_ArchivedInput, _blob(connection, row[1]), reason)
+    if model_input.semantic_digest != proof.anchor_semantic_digest:
+        raise HistoricalEnrichmentError(reason)
     attempts = connection.execute(
         "SELECT value FROM model_attempts WHERE sequence = ? ORDER BY attempt", (anchor,)
     ).fetchall()
+    reason = "The replayed request digests do not match the archive."
     protocols = tuple(
-        _OBJECT.validate_json(_blob(connection, item[0])).get("protocol_encoding_digest")
+        _decode(_ArchivedAttempt, _blob(connection, item[0]), reason).protocol_encoding_digest
         for item in attempts
     )
     if not protocols or protocols != proof.anchor_protocol_digests:
-        raise HistoricalEnrichmentError("The replayed request digests do not match the archive.")
+        raise HistoricalEnrichmentError(reason)
 
     event = case.events[0]
     assert isinstance(event, TaskEvent)
@@ -168,15 +213,10 @@ def _archive_segments(
     ):
         if reply is None or cursor > proof.anchor_cursor:
             raise HistoricalEnrichmentError("A native operation in the prefix is incomplete.")
-        recorded = _OBJECT.validate_json(reply)
-        observation_hashes = recorded.get("observations")
-        if not isinstance(observation_hashes, list):
-            raise HistoricalEnrichmentError("A native reply has no observation list.")
+        recorded = _decode(_ArchivedReply, reply, "A native reply has no observation digest list.")
         if OperationKind(kind) in (OperationKind.SETTLE, OperationKind.PRESENT):
             pending_change = True
-        for digest in observation_hashes:
-            if not isinstance(digest, str):
-                raise HistoricalEnrichmentError("A native observation has no digest.")
+        for digest in recorded.observations:
             raw = _OBJECT.validate_json(_blob(connection, digest))
             observation = _old_observation(
                 raw, inferred, f"records[{sequence}].observations[{digest}]"
@@ -244,19 +284,12 @@ def enrich_historical_case(
         or not proof.archive_wal_clear_after
     ):
         raise HistoricalEnrichmentError("The source replay does not verify the source case.")
-    original = _OBJECT.validate_json(case_bytes)
-    source = _OBJECT.validate_json(source_bytes)
-    events = original.get("events")
-    if (
-        not isinstance(events, list)
-        or len(events) != 1
-        or not isinstance(events[0], dict)
-        or events[0].get("kind") != "task"
-    ):
-        raise HistoricalEnrichmentError("Only a single-task frozen case can be enriched.")
-    if original.get("source") != source.get("source") or events[0].get("observation") != (
-        _last_source_task(source).get("observation")
-    ):
+    single_task = "Only a single-task frozen case can be enriched."
+    frozen = _decode(_RecordedCase, case_bytes, single_task)
+    if len(frozen.events) != 1 or not isinstance(task := frozen.events[0], _RecordedTask):
+        raise HistoricalEnrichmentError(single_task)
+    source = _decode(_RecordedCase, source_bytes, "The replayed source case has no events.")
+    if frozen.source != source.source or task.observation != _last_source_task(source).observation:
         raise HistoricalEnrichmentError("The frozen case is not the replayed source task.")
     parsed = _OBJECT.validate_json(case_bytes)
     case_inferences: list[InferredValue] = []
@@ -281,10 +314,15 @@ def enrich_historical_case(
     if _sha(archive.read_bytes()) != proof.archive_sha256_before:
         raise HistoricalEnrichmentError("The archive changed during native reconstruction.")
 
-    state = events[0].get("state")
-    if not isinstance(state, dict) or not isinstance(state.get("fights"), list):
+    if task.state is None or task.state.fights is None:
         raise HistoricalEnrichmentError("The frozen task has no recorded fight list.")
     fights = case.events[0].state.fights
+    # The derived case is the frozen JSON as written, with encounter fields filled in place.
+    original = _OBJECT.validate_json(case_bytes)
+    events = original["events"]
+    assert isinstance(events, list) and isinstance(events[0], dict)
+    state = events[0]["state"]
+    assert isinstance(state, dict)
     raw_fights = state["fights"]
     assert isinstance(raw_fights, list)
     positions = [

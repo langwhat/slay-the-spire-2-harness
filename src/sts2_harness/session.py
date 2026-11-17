@@ -17,6 +17,7 @@ from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
+from sts2_harness.fights import FightKind, fight_kind
 from sts2_harness.game import GameIO, GameLifetimeEnded, RunEnded
 from sts2_harness.journal import Manifest
 from sts2_harness.knowledge import CandidateLinks, Documents, DocumentView, MaterialRole
@@ -229,7 +230,7 @@ class RunSession:
         self._combat_stream += 1
         purpose = (
             ModelPurpose.COMBAT_ELITE_BOSS
-            if opening.state.progress.room_type in ("elite", "boss")
+            if fight_kind(opening.state.progress.room_type) in (FightKind.ELITE, FightKind.BOSS)
             else ModelPurpose.COMBAT
         )
         return CombatAgent(

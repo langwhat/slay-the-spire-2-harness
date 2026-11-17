@@ -102,7 +102,7 @@ from sts2_harness_eval.decision_cases import (
     TaskEvent,
     score,
 )
-from sts2_harness_eval.decision_extract import ExtractionError, choices_for
+from sts2_harness_eval.decision_extract import ExtractionError, choices_for, decision_input
 
 _JSON = TypeAdapter(dict[str, JsonValue])
 
@@ -221,7 +221,7 @@ class DecisionRun(DeckAgent):
                 or not selection.min <= len(step.refs) <= selection.max
             ):
                 raise DecisionDeviation("The selection violates the current native menu.")
-        raise _ChoiceMade(call, choices_for(call, observation))
+        raise _ChoiceMade(call, choices_for(decision_input(call), observation))
 
     case: DecisionCase
     variant: DecisionVariant = DecisionVariant.RUN
