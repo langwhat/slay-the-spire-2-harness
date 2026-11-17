@@ -41,6 +41,7 @@ from sts2_harness.knowledge import (
     DocumentView,
     KnowledgeEntry,
     KnowledgeLookup,
+    MaterialRole,
     Resource,
     SkillList,
     SkillRead,
@@ -411,6 +412,7 @@ class VariantDocuments:
                     resources=view.resources,
                     resource=view.resource,
                     subjects=document.subjects,
+                    auto_roles=(MaterialRole.RUN, MaterialRole.COMBAT),
                 )
             )
         return tuple(result)

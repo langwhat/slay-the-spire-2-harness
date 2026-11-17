@@ -35,7 +35,11 @@ class DocumentSource:
     path: Path
     resources: tuple[ResourceSource, ...] = ()
     subjects: tuple[SubjectId, ...] = ()
-    auto_roles: tuple[MaterialRole, ...] = (MaterialRole.RUN, MaterialRole.COMBAT)
+    auto_roles: tuple[MaterialRole, ...] = (
+        MaterialRole.RUN,
+        MaterialRole.COMBAT,
+        MaterialRole.DECK,
+    )
 
 
 class FileDocuments:

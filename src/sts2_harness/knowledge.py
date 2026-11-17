@@ -76,6 +76,7 @@ class Document(DocumentView):
     auto_roles: tuple[MaterialRole, ...] = (
         MaterialRole.RUN,
         MaterialRole.COMBAT,
+        MaterialRole.DECK,
     )
 
     def view(self) -> DocumentView:

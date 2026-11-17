@@ -1,10 +1,7 @@
-"""Deck arithmetic under explicit native base draw and energy assumptions."""
+"""Current deck counts, native base resources, and observed card use."""
 
 from collections import Counter
 from enum import StrEnum
-from itertools import combinations
-from math import comb
-from random import Random
 
 from pydantic import MISSING, JsonValue
 
@@ -85,30 +82,8 @@ class DeckStatistics:
         draw, energy = state.player.base_draw, state.player.base_energy
         if draw is not MISSING:
             stats["base_draw"] = draw
-            if draw > 0:
-                stats["baseline_cycle_turns"] = round(circulating / draw, 1)
         if energy is not MISSING:
             stats["base_energy"] = energy
-        if draw is not MISSING and energy is not MISSING:
-            costs = [
-                None if _Keyword.UNPLAYABLE in words else _energy_cost(card, energy)
-                for card, words in zip(cards, keywords, strict=True)
-            ]
-            unknown_cost = any(
-                cost is None and _Keyword.UNPLAYABLE not in words
-                for cost, words in zip(costs, keywords, strict=True)
-            )
-            if not unknown_cost:
-                costs.sort(key=lambda cost: cost if cost is not None else float("inf"))
-                hand_size = min(draw, len(costs))
-                stats["baseline_hand_cost"] = (
-                    round(
-                        sum(cost for cost in costs if cost is not None) * hand_size / len(costs), 1
-                    )
-                    if costs
-                    else 0.0
-                )
-                stats["baseline_unplayed_per_hand"] = _unplayed(costs, hand_size, energy)
         counts = Counter(
             card.definition_id
             for plays in self._battles.values()
@@ -116,34 +91,3 @@ class DeckStatistics:
             if card.definition_id is not MISSING
         )
         return stats, dict(counts)
-
-
-def _energy_cost(card: native.CardEntry, energy: int) -> int | None:
-    cost = card.cost.energy
-    if cost is native.CostSymbol.X:
-        return energy
-    if cost is native.CostSymbol.NONE:
-        return 0
-    return cost if isinstance(cost, int) else None
-
-
-def _unplayed(costs: list[int | None], draw: int, energy: int) -> float:
-    if draw == 0:
-        return 0.0
-    rng = Random(0)
-    hands = (
-        combinations(costs, draw)
-        if comb(len(costs), draw) <= 2000
-        else (tuple(rng.sample(costs, draw)) for _ in range(2000))
-    )
-    total, samples = 0, 0
-    for hand in hands:
-        remaining, played = energy, 0
-        for cost in sorted(cost for cost in hand if cost is not None):
-            if cost > remaining:
-                break
-            remaining -= cost
-            played += 1
-        total += sum(cost is not None for cost in hand) - played
-        samples += 1
-    return round(total / samples, 1)

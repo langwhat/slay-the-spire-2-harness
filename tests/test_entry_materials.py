@@ -311,3 +311,56 @@ def test_combat_appends_new_or_changed_knowledge_before_the_next_request(tmp_pat
     assert [message.get("role") for message in wire[2][len(wire[1]) :]] == [None, None, "user"]
     assert wire[3][1]["role"] == "system"
     assert json.loads(wire[3][1]["content"]) == additions[0]
+
+
+def test_documents_default_to_every_role_and_honor_explicit_audiences(tmp_path: Path) -> None:
+    path = tmp_path / "rules.md"
+    path.write_text("Current card rules.")
+    subject = SubjectId(category="card", definition_id="CARD.ONE")
+    documents = ObjectDocuments(
+        (
+            DocumentSource("default", "Default", "Rules", path, subjects=(subject,)),
+            DocumentSource(
+                "run-only",
+                "Run",
+                "Rules",
+                path,
+                subjects=(subject,),
+                auto_roles=(MaterialRole.RUN,),
+            ),
+        )
+    )
+    combat = native.Observation.model_validate_json(COMBAT)
+    run = native.Observation.model_validate_json(RUN)
+    assert isinstance(run.state, native.RunState)
+    run = run.model_copy(
+        update={
+            "map": combat.map,
+            "objects": combat.objects,
+            "state": run.state.model_copy(update={"deck": ("c1",)}),
+        }
+    )
+
+    async def scenario() -> None:
+        def unexpected(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("The current observation supplies all required identities.")
+
+        async with ModClient("http://mod", transport=httpx.MockTransport(unexpected)) as client:
+            execution = Execution(
+                LiveGame(client, namespace="test", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
+            for role in MaterialRole:
+                found = await entry_materials(
+                    execution,
+                    documents,
+                    role,
+                    combat if role is MaterialRole.COMBAT else run,
+                    (),
+                )
+                assert {item.id for item in found} == (
+                    {"default", "run-only"} if role is MaterialRole.RUN else {"default"}
+                )
+
+    asyncio.run(scenario())

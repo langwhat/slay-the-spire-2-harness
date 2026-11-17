@@ -40,7 +40,7 @@ The core is the current best answer, not a commitment. When an offered card is i
 
 ## What a card costs
 
-Every added card is drawn in place of the cards already owned, for the rest of the run. One more circulating card makes each owned card arrive N/(N+1) as often, where N is the circulating deck. `deck_stats` gives the turns one pass through the deck takes (`baseline_cycle_turns`), the energy an average hand needs (`baseline_hand_cost`), and how many of its playable cards energy cannot pay for (`baseline_unplayed_per_hand`). `added` and `skipped` count this act's completed card reward choices.
+Every added card is drawn in place of the cards already owned, for the rest of the run. One more circulating card makes each owned card arrive N/(N+1) as often, where N is the circulating deck (`deck_stats.circulating`). `added` and `skipped` count this act's completed card reward choices.
 
 - While hands already hold more than energy pays for, a card that costs energy is played only instead of another card; its value is the difference between the two.
 - Cards that work only when played in the same turn share a hand far less often than each is drawn, unless something holds or fetches them. A chain that needs to keep drawing cards of one kind stalls when those cards are already in hand or spent.
@@ -99,3 +99,5 @@ When the choice generates, retains, removes, or replaces cards:
 - Which card blocks a critical draw at the worst time, and which weak card can existing effects already handle? What job does an early transition card still do?
 
 Removal usually starts with basic Strikes and Defends. Exhausting them in battle is a gain, not a cost: they stop entering later shuffles, so stronger cards cycle more often. Count a loss only when their output or a specific synergy is still needed.
+
+`fights` lists this run's most recent battles, oldest first: floor, room kind, turns, and HP on entering and on leaving, which includes healing granted when the battle ends.
