@@ -13,16 +13,6 @@ class FightKind(StrEnum):
     BOSS = "boss"
 
 
-def fight_kind(room_type: str | None) -> FightKind:
-    match room_type:
-        case "elite":
-            return FightKind.ELITE
-        case "boss":
-            return FightKind.BOSS
-        case _:
-            return FightKind.NORMAL
-
-
 class FightEncounter(native.WireModel):
     definition_id: str
     name: str
@@ -91,7 +81,13 @@ class FightHistory:
         if state.progress.floor != opening.progress.floor:
             self._reset_opening()
             return
-        kind = fight_kind(opening.progress.room_type)
+        match opening.progress.room_type:
+            case "elite":
+                kind = FightKind.ELITE
+            case "boss":
+                kind = FightKind.BOSS
+            case _:
+                kind = FightKind.NORMAL
         encounter = None
         if len(self._encounters) == len(self._encounter_names) == 1 and not self._ambiguous:
             definition_id, name = next(iter(self._encounters))
