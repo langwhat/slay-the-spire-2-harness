@@ -1,4 +1,5 @@
 import asyncio
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,10 +13,11 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.game import LiveGame, RunEndReason
 from sts2_harness.journal import Manifest, SessionMaterials
+from sts2_harness.knowledge import MaterialRole, SubjectId
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
-from sts2_harness.materials import FileDocuments
+from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
@@ -317,5 +319,74 @@ def test_every_combat_uses_combat_effort_and_is_recorded(tmp_path: Path, first_r
                 for record in records
                 if record.attempts[-1].reply is not None
             ]
+
+    asyncio.run(scenario())
+
+
+def test_session_shares_document_order_across_roles_and_resets_for_a_new_run(
+    tmp_path: Path,
+) -> None:
+    shared = tmp_path / "shared.txt"
+    shared.write_text("Shared facts.")
+    newcomer = tmp_path / "newcomer.txt"
+    newcomer.write_text("Battle facts.")
+    enemy = SubjectId(category=native.NativeCategory.ENEMY, definition_id="ENEMY.ONE")
+    character = SubjectId(category=native.NativeCategory.CHARACTER, definition_id="CHARACTER.TEST")
+
+    async def scenario() -> None:
+        for index, roles in enumerate((tuple(MaterialRole), (MaterialRole.COMBAT,))):
+            campaign = Campaign()
+            documents = FileDocuments(
+                (
+                    DocumentSource("newcomer", "Newcomer", "Battle", newcomer, subjects=(enemy,)),
+                    DocumentSource(
+                        "shared",
+                        "Shared",
+                        "Facts",
+                        shared,
+                        subjects=(character, enemy),
+                        auto_roles=roles,
+                    ),
+                )
+            )
+            async with live_session(
+                ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
+                Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=True, act_guidance={}, battle_guidance=()
+                    ),
+                    recording_id=f"order-{index}",
+                    core_version="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    initial_notes=NotesState(),
+                ),
+                tmp_path / f"order-{index}.sqlite",
+                model=Llm(configuration(tmp_path), transport=httpx.MockTransport(campaign.model)),
+                documents=documents,
+            ) as session:
+                assert (await session.run()).reason is RunEndReason.TERMINAL
+            combat_inputs = [
+                body
+                for body in campaign.inputs
+                if str(body.get("prompt_cache_key", "")).endswith(":combat")
+            ]
+            assert len(combat_inputs) == 3
+            expected = ["shared", "newcomer"] if index == 0 else ["newcomer", "shared"]
+            for body in combat_inputs:
+                messages = json.loads(json.dumps(body))["input"]
+                guidance = [
+                    json.loads(message["content"])["guidance"]
+                    for message in messages
+                    if message.get("role") == "system"
+                    and isinstance(message.get("content"), str)
+                    and message["content"].startswith('{"guidance":')
+                ]
+                assert len(guidance) == 1
+                assert [document["id"] for document in guidance[0]] == expected
+                assert {document["id"]: document["text"] for document in guidance[0]} == {
+                    "shared": "Shared facts.",
+                    "newcomer": "Battle facts.",
+                }
 
     asyncio.run(scenario())

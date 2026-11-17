@@ -78,6 +78,7 @@ class RunSession:
         self._run_stream = 0
         self._combat_stream = 0
         self._deck_stream = 0
+        self._document_order: dict[str, int] = {}
         self._card_reports: list[tuple[AutomaticProgress, ActionToolResult]] = []
         self._flow: RunFlow | None = None
 
@@ -213,7 +214,12 @@ class RunSession:
                     else ()
                 )
             return await entry_materials(
-                self.execution, self._dependencies.documents, role, observation, configured
+                self.execution,
+                self._dependencies.documents,
+                role,
+                observation,
+                configured,
+                document_order=self._document_order,
             )
 
         return read

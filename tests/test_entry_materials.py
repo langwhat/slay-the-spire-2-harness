@@ -486,3 +486,139 @@ def test_run_and_deck_send_stable_guidance_before_current_choices(
     assert {document["id"]: document["text"] for document in guidance[0]} == {
         identity: f"Facts for {identity}." for identity, _ in registrations
     }
+
+
+@pytest.mark.parametrize("role", tuple(MaterialRole))
+def test_entry_documents_keep_first_seen_order_within_each_tier(
+    tmp_path: Path, role: MaterialRole
+) -> None:
+    base = RewardGame(minimal=False).observation
+    card = native.CardEntry.model_validate_json(CARD)
+    sources: list[DocumentSource] = []
+    for identity in ("new-owned", "new-candidate", "owned-b", "owned-a", "candidate", "boss"):
+        path = tmp_path / identity
+        path.write_text(f"Facts for {identity}.")
+        sources.append(
+            DocumentSource(
+                identity,
+                identity,
+                "Facts",
+                path,
+                subjects=(
+                    SubjectId(
+                        category=(
+                            native.NativeCategory.ENCOUNTER
+                            if identity == "boss"
+                            else native.NativeCategory.CARD
+                        ),
+                        definition_id=identity,
+                    ),
+                ),
+            )
+        )
+    documents = FileDocuments(tuple(sources))
+
+    def observation(owned: tuple[str, ...], candidates: tuple[str, ...]) -> native.Observation:
+        objects = {
+            identity: card.model_copy(update={"definition_id": identity})
+            for identity in (*owned, *candidates)
+        }
+        if role is MaterialRole.COMBAT:
+            combat = native.Observation.model_validate_json(COMBAT)
+            assert isinstance(combat.state, native.CombatState)
+            return combat.model_copy(
+                update={
+                    "objects": objects,
+                    "encounter": native.NamedDefinition(name="Boss", definition_id="boss"),
+                    "state": combat.state.model_copy(
+                        update={
+                            "piles": combat.state.piles.model_copy(
+                                update={
+                                    "hand": (*owned, *candidates),
+                                    "draw": (),
+                                    "discard": (),
+                                    "exhaust": (),
+                                    "other": (),
+                                }
+                            ),
+                            "selection": None,
+                            "relics": (),
+                            "potions": (),
+                        }
+                    ),
+                }
+            )
+        return base.model_copy(
+            update={
+                "objects": objects,
+                "map": native.PublicMap(
+                    bosses=(native.NamedDefinition(name="Boss", definition_id="boss"),),
+                    nodes=(),
+                    legal_destinations=None,
+                ),
+                "state": base.state.model_copy(
+                    update={
+                        "deck": owned,
+                        "relics": (),
+                        "potions": (),
+                        "selection": None,
+                        "offers": (
+                            native.Offer(
+                                ref="offer",
+                                kind=native.OfferKind.CARD,
+                                contents=candidates,
+                                actions=(),
+                            ),
+                        ),
+                    }
+                ),
+            }
+        )
+
+    def unexpected(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Guidance identities are already in the observation.")
+
+    async def scenario() -> None:
+        async with ModClient("http://mod", transport=httpx.MockTransport(unexpected)) as client:
+            execution = Execution(
+                LiveGame(client, namespace="order", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+            )
+            order: dict[str, int] = {}
+
+            async def select(current: native.Observation) -> tuple[str, ...]:
+                found = await entry_materials(
+                    execution, documents, role, current, (), document_order=order
+                )
+                assert all(doc.text.body == f"Facts for {doc.id}." for doc in found)
+                return tuple(doc.id for doc in found)
+
+            opening = observation(("owned-a", "owned-b"), ("candidate",))
+            first = ("owned-b", "owned-a", "candidate", "boss")
+            if role is not MaterialRole.COMBAT:
+                first = ("boss", "owned-b", "owned-a", "candidate")
+            assert await select(opening) == first
+            assert await select(opening) == first
+            later = observation(("owned-a", "new-owned", "owned-b"), ("new-candidate",))
+            expected = ("owned-b", "owned-a", "boss", "new-owned", "new-candidate")
+            if role is not MaterialRole.COMBAT:
+                expected = ("boss", "owned-b", "owned-a", "new-owned", "new-candidate")
+            assert await select(later) == expected
+            assert await select(observation(("owned-a", "new-owned"), ("new-candidate",))) == tuple(
+                identity for identity in expected if identity != "owned-b"
+            )
+            assert await select(later) == expected
+            promoted = observation(("owned-a", "new-owned", "candidate"), ("new-candidate",))
+            promoted_order = ("owned-a", "candidate", "boss", "new-owned", "new-candidate")
+            if role is not MaterialRole.COMBAT:
+                promoted_order = ("boss", "owned-a", "candidate", "new-owned", "new-candidate")
+            assert await select(promoted) == promoted_order
+            fresh = await entry_materials(execution, documents, role, later, ())
+            assert tuple(doc.id for doc in fresh) == (
+                ("new-owned", "new-candidate", "owned-b", "owned-a", "boss")
+                if role is MaterialRole.COMBAT
+                else ("boss", "new-owned", "owned-b", "owned-a", "new-candidate")
+            )
+
+    asyncio.run(scenario())

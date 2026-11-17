@@ -79,8 +79,10 @@ async def entry_materials(
     role: MaterialRole,
     observation: native.Observation,
     configured: tuple[str, ...],
+    *,
+    document_order: dict[str, int] | None = None,
 ) -> tuple[DocumentView, ...]:
-    """Select configured guidance and documents for current public identities."""
+    """Select current guidance, retaining run-wide order when history is supplied."""
     selected: dict[str, DocumentView] = {}
     try:
         if role is not MaterialRole.DECK:
@@ -166,18 +168,20 @@ async def entry_materials(
             subjects.extend(combat_subjects(observation, native.DecisionOwner.COMBAT))
         unique = {(subject.category, subject.definition_id): subject for subject in subjects}
         matches = await documents.lookup(tuple(unique.values()))
+        matches = tuple(document for document in matches if role in document.auto_roles)
+        if document_order is not None:
+            for identity in (*selected, *(document.id for document in matches)):
+                if identity not in document_order:
+                    document_order[identity] = len(document_order)
+            matches = tuple(sorted(matches, key=lambda document: document_order[document.id]))
         if role in (MaterialRole.RUN, MaterialRole.DECK):
             matches = _stable_documents(matches, act_subjects, observation)
         if role is MaterialRole.DECK:
             for identity in configured:
-                match = next(
-                    (doc for doc in matches if doc.id == identity and role in doc.auto_roles), None
-                )
+                match = next((doc for doc in matches if doc.id == identity), None)
                 if match is not None:
                     selected[match.id] = match.view()
         for document in matches:
-            if role not in document.auto_roles:
-                continue
             selected[document.id] = document.view()
     except UnknownDocument as error:
         raise MaterialUnavailable(str(error)) from error
