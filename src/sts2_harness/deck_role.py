@@ -140,12 +140,22 @@ class DeckAgent(RunAgent):
         documents: tuple[DocumentView, ...],
         observation: native.Observation,
     ) -> Context:
-        return deck_context(self._prompts, documents, observation, minimal=self._tools.minimal)
+        return deck_context(
+            self._prompts,
+            documents,
+            observation,
+            minimal=self._tools.minimal,
+            viewer_input=self._user_input is not None,
+        )
+
+    def _append_task(
+        self, context: Context, task: DecisionTask, observation: native.Observation
+    ) -> None:
+        context.begin_group(observation, self._notes.read(), None)
+        super()._append_task(context, task, observation)
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         observation = self._reward_view(observation)
-        context = await self._prepare(observation)
-        context.begin_group(observation, self._notes.read(), None)
         decision = await Agent.decide(self, task, observation)
         return (
             replace(decision, handoff_processed=False)
