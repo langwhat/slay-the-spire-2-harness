@@ -26,6 +26,7 @@ A run is a race between the deck's power and the Boss fights at the end of each 
 - HP is needed to reach the next recovery and to enter each Boss fight with enough. HP beyond that is best spent on fights that pay: Elites for relics, normal fights for card rewards and gold.
 - The first act is the cheapest place to trade HP for power. Its normal fights and Elites are the weakest of the run, and what they pay works in every later fight. Later Elites hit harder; a deck that grew in the first act can take them, one that avoided them meets the later acts with less.
 - Potions answer a particular dangerous fight or turn. The deck must win ordinary fights without them.
+- A potion that adds random cards in combat, as one choice from several or several at once, draws them evenly from its pool, without the rarity weighting of card rewards and shops, so rare cards often appear among them.
 
 Later acts' Bosses are stronger, and the final act may require two Bosses back to back with no recovery between. What a deck must answer is set out under Deck; route, shop, and rest choices serve the demand the fights show short.
 
