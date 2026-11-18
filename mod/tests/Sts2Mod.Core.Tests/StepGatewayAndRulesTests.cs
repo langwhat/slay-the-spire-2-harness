@@ -128,7 +128,14 @@ public sealed class StepGatewayAndRulesTests
             return null;
         });
         gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 7, _ => null);
-        Assert.IsType<UnknownStep>(gateway.Status().Receipt);
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+        Assert.Equal(NativeInputReadiness.Busy, gateway.Status().InputReadiness);
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 7, _ => null);
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+        gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: 8, _ => null);
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 9, _ => null);
+        Assert.Equal("op-interact", Assert.IsType<UnknownStep>(gateway.Status().Receipt).OperationId);
     }
 
     [Fact]
@@ -208,6 +215,23 @@ public sealed class StepGatewayAndRulesTests
 
         gateway.Advance(new StepLocation("game-1", "run-1", "node-2", ObservationOwner.Run), NativeInputReadiness.Ready, sequence: 5, _ => null);
         Assert.Null(gateway.Presentation);
+
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 6, _ => null);
+        gateway.Submit(ActionJson("op-uncertain", RunRoute, "{\"kind\":\"interact\",\"action\":\"interaction:1:1\"}"));
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 6, request =>
+            new UnknownStep(request.OperationId, new StepCause(StepErrorCode.ExecutionUncertain, "Read the fresh observation.")));
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+        Assert.IsType<FailedStateRead>(gateway.Project(publication).Reply);
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 7, _ => null);
+        Assert.IsType<UnknownStep>(gateway.Status().Receipt);
+        Assert.IsType<FailedStateRead>(gateway.Project(publication).Reply);
+        var original = Assert.IsType<CompletedStateRead>(publication.Reply).Observation;
+        var newer = publication with
+        {
+            Reply = new CompletedStateRead(original with { Stamp = new ObservationStamp("game-1", 7) }),
+        };
+        var fresh = Assert.IsType<CompletedStateRead>(gateway.Project(newer).Reply);
+        Assert.Equal(NativeInputReadiness.Ready, fresh.Observation.InputReadiness);
     }
 
     [Fact]

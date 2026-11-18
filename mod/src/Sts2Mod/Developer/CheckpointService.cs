@@ -31,7 +31,8 @@ namespace Sts2Mod.Developer;
 internal sealed class CheckpointService(
     bool enabled,
     AgentControlState control,
-    Func<NativeStepStatus> readStepStatus)
+    Func<NativeStepStatus> readStepStatus,
+    object admissionLock)
 {
     private static readonly FieldInfo SaveStoreField =
         typeof(SaveManager).GetField("_saveStore", BindingFlags.Instance | BindingFlags.NonPublic)
@@ -48,7 +49,6 @@ internal sealed class CheckpointService(
         public DateTimeOffset StartedAt { get; } = DateTimeOffset.UtcNow;
     }
 
-    private readonly object _admissionLock = new();
     private readonly CheckpointCommandStore _commands = new();
     private readonly ConcurrentQueue<CheckpointRequest> _pendingQueue = new();
     private ActiveOperation? _active;
@@ -68,7 +68,7 @@ internal sealed class CheckpointService(
         return new HttpReply(200, ObservationHub.ReadCheckpointIdentityJson());
     }
 
-    public HttpReply Submit(string body, bool otherDeveloperWorkBusy)
+    public HttpReply Submit(string body, Func<bool> otherDeveloperWorkBusy)
     {
         if (!enabled)
         {
@@ -93,7 +93,7 @@ internal sealed class CheckpointService(
                     new CheckpointCause(CheckpointErrorCode.InvalidRequest, "The request does not match the checkpoint contract.")));
         }
 
-        lock (_admissionLock)
+        lock (admissionLock)
         {
             if (request is CheckpointStatusRequest)
                 return StatusReply(request.CommandId);
@@ -122,7 +122,7 @@ internal sealed class CheckpointService(
 
             var status = readStepStatus();
             if (_ownsInput
-                || otherDeveloperWorkBusy
+                || otherDeveloperWorkBusy()
                 || _commands.HasNonTerminalOtherThan(request.CommandId)
                 || control.Mode != AgentControlMode.Paused
                 || status.Receipt is PendingStep or UnknownStep

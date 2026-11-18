@@ -187,7 +187,8 @@ internal sealed class MapInkPresenter
         public bool Drawing;
         public bool Returning;
         public bool Closed;
-        public bool IdentityLost;
+        public bool OpenedMap;
+        public bool AbandonRestore;
         public PresentationDrawing Outcome = PresentationDrawing.Shown;
     }
 
@@ -198,7 +199,7 @@ internal sealed class MapInkPresenter
     private readonly ConcurrentQueue<Action> _requests = new();
     private ActiveDisplay? _display;
     private SurfaceCapture? _capture;
-    private bool _restorationUncertain;
+    private bool _returnNeeded;
 
     public MapInkPresenter(StepGateway gateway)
     {
@@ -223,15 +224,16 @@ internal sealed class MapInkPresenter
         catch (Exception exception)
         {
             GD.PrintErr($"[sts2agent] Map presentation failed: {exception}");
-            _restorationUncertain = true;
             display.OpeningBarrier = null;
             display.Outcome = PresentationDrawing.Failed;
             display.Returning = true;
             StopDrawingSafely(display);
-            RemoveQuillVisual(display);
             try
             {
-                Finish(display);
+                if (!display.AbandonRestore && _gateway.IsPresentationIdentityCurrent(display.Request.OperationId))
+                    Finish(display);
+                else
+                    AbortUncertain(display);
             }
             catch (Exception cleanupError)
             {
@@ -260,10 +262,10 @@ internal sealed class MapInkPresenter
                 }
 
                 _capture = captured!;
-                _restorationUncertain = false;
+                _returnNeeded = false;
                 var display = _display = new(request, captured!);
-                captured!.Map.MouseFilter = Control.MouseFilterEnum.Ignore;
                 _gateway.TrackPresentationWorker(request.OperationId, display.Worker.Task);
+                captured!.Map.MouseFilter = Control.MouseFilterEnum.Ignore;
                 response.SetResult(new HttpReply(200, JsonContract.Serialize(new PendingStep(request.OperationId))));
 
                 if (!ViewerPacing.IsInteractiveGui && !captured.WasOpen)
@@ -278,6 +280,7 @@ internal sealed class MapInkPresenter
 
                 try
                 {
+                    _returnNeeded = display.OpenedMap = true;
                     captured.Map.Open(isOpenedFromTopBar: true);
                     captured.Animations.Busy();
                     display.OpeningBarrier = new(true);
@@ -285,7 +288,6 @@ internal sealed class MapInkPresenter
                 catch (Exception exception)
                 {
                     GD.PrintErr($"[sts2agent] Map presentation open failed: {exception}");
-                    _restorationUncertain = true;
                     display.OpeningBarrier = null;
                     display.Outcome = PresentationDrawing.Failed;
                     display.Returning = true;
@@ -318,8 +320,8 @@ internal sealed class MapInkPresenter
                 var result = PresentationRestoration.Unknown;
                 try
                 {
-                    if (!_restorationUncertain && IsRestored(_capture))
-                        result = RestorationOutcome(_capture!);
+                    if (IsRestored(_capture))
+                        result = RestorationOutcome();
                 }
                 catch (Exception exception)
                 {
@@ -420,7 +422,7 @@ internal sealed class MapInkPresenter
             scroll?.ScrollHorizontal ?? 0,
             scroll?.ScrollVertical ?? 0,
             pan,
-            pan.Position,
+            map.IsOpen ? scrollTarget.Original : pan.Position,
             scrollTarget,
             animations,
             points,
@@ -435,67 +437,46 @@ internal sealed class MapInkPresenter
 
     private void AdvanceDisplay(ActiveDisplay display)
     {
-        if (display.IdentityLost)
-            return;
-
-        if (!_gateway.IsPresentationIdentityCurrent(display.Request.OperationId))
+        if (display.AbandonRestore
+            || !_gateway.IsPresentationIdentityCurrent(display.Request.OperationId)
+            || !HasMapSurface(display.Capture))
         {
-            _restorationUncertain = true;
-            display.IdentityLost = true;
-            RemoveQuillVisual(display);
+            AbortUncertain(display);
             return;
         }
 
+        var capture = display.Capture;
         if (display.OpeningBarrier is { } barrier)
         {
-            var settling = AnimationsBusy(display)
-                           || (display.Capture.Map.IsOpen
-                               && display.Capture.ScrollTarget.IsBound
-                               && display.Capture.Pan.Position != display.Capture.ScrollTarget.Current);
+            var settling = capture.Animations.Busy()
+                           || (capture.Map.IsOpen && capture.Pan.Position != capture.ScrollTarget.Current);
             if (!barrier.Advance(settling))
                 return;
 
             display.OpeningBarrier = null;
-            if (display.Capture.WasOpen)
+            if (barrier.TimedOut)
+            {
+                AbortUncertain(display);
+                return;
+            }
+            if (capture.WasOpen)
             {
                 var error = CaptureSurface(display.Request, requireSettledScroll: true, out var settled);
                 if (error is not null
                     || settled is null
-                    || !ReferenceEquals(settled.Map, display.Capture.Map)
+                    || !ReferenceEquals(settled.Map, capture.Map)
                     || !settled.WasOpen
-                    || settled.SerializedState != display.Capture.SerializedState)
+                    || settled.SerializedState != capture.SerializedState)
                 {
                     GD.PrintErr($"[sts2agent] Map opening recapture failed: {error?.Message ?? "The captured map surface changed."}");
-                    _restorationUncertain = true;
-                    RemoveQuillVisual(display);
-                    display.Worker.TrySetResult();
-                    _gateway.SettlePresentation(
-                        display.Request.OperationId,
-                        PresentationDrawing.Failed,
-                        PresentationRestoration.Unknown);
-                    _display = null;
+                    AbortUncertain(display);
                     return;
                 }
-                settled = settled with { MouseFilter = display.Capture.MouseFilter };
-                display.Capture = settled;
-                _capture = settled;
-            }
-            if (barrier.TimedOut)
-            {
-                display.Outcome = PresentationDrawing.Failed;
-                display.Returning = true;
+                display.Capture = capture = settled with { MouseFilter = capture.MouseFilter, Focus = capture.Focus };
+                _capture = capture;
             }
         }
-
-        var capture = display.Capture;
-        if (!capture.ScrollTarget.IsBound)
-        {
-            _restorationUncertain = true;
-            display.IdentityLost = true;
-            RemoveQuillVisual(display);
-            return;
-        }
-        if (AnimationsBusy(display))
+        if (capture.Animations.Busy())
             return;
         if (display.Returning)
         {
@@ -541,6 +522,7 @@ internal sealed class MapInkPresenter
             if (!onScreen || (display.Edge == 0 && !centeredEnough && display.FollowFrame < 20))
             {
                 var moved = FollowVertical(capture, startScreen);
+                _returnNeeded |= moved;
                 display.FollowFrame++;
                 if (!onScreen)
                 {
@@ -559,7 +541,7 @@ internal sealed class MapInkPresenter
         var start = ScreenEndpoint(from);
         var end = ScreenEndpoint(to);
         var target = start.Lerp(end, display.Progress);
-        FollowVertical(capture, target);
+        _returnNeeded |= FollowVertical(capture, target);
 
         // Recompute canvas coordinates after vertical map pan so the stroke and quill align with the nodes.
         start = ScreenEndpoint(from);
@@ -640,13 +622,12 @@ internal sealed class MapInkPresenter
     {
         RemoveQuillVisual(display);
         var capture = display.Capture;
-        if (!capture.ScrollTarget.IsBound)
+        if (!HasMapSurface(capture))
         {
-            _restorationUncertain = true;
-            display.IdentityLost = true;
+            AbortUncertain(display);
             return;
         }
-        if (AnimationsBusy(display))
+        if (capture.Animations.Busy())
             return;
 
         if (display.Drawing)
@@ -718,10 +699,10 @@ internal sealed class MapInkPresenter
             capture.ScrollTarget.Set(capture.ScrollTarget.Original);
 
         RestoreInputAndFocus(capture);
-        display.Worker.TrySetResult();
-        var restoration = !_restorationUncertain && IsRestored(capture)
-            ? RestorationOutcome(capture)
+        var restoration = IsRestored(capture)
+            ? RestorationOutcome()
             : PresentationRestoration.Unknown;
+        display.Worker.TrySetResult();
         _gateway.SettlePresentation(display.Request.OperationId, display.Outcome, restoration);
         _display = null;
     }
@@ -736,9 +717,10 @@ internal sealed class MapInkPresenter
         if (ReferenceEquals(currentFocus, capture.Focus))
             return;
 
-        if (capture.Focus is { FocusMode: not Control.FocusModeEnum.None } focus
+        if (capture.Focus is { } focus
             && GodotObject.IsInstanceValid(focus)
-            && focus.IsInsideTree())
+            && focus.IsInsideTree()
+            && focus.FocusMode != Control.FocusModeEnum.None)
         {
             focus.GrabFocus();
         }
@@ -820,8 +802,7 @@ internal sealed class MapInkPresenter
 
     private static bool IsRestored(SurfaceCapture? capture) =>
         capture is not null
-        && GodotObject.IsInstanceValid(capture.Map)
-        && capture.Map.IsInsideTree()
+        && HasMapSurface(capture)
         && !capture.Animations.Busy()
         && !capture.Map.Drawings.IsLocalDrawing()
         && capture.Map.IsOpen == capture.WasOpen
@@ -835,9 +816,7 @@ internal sealed class MapInkPresenter
             || (GodotObject.IsInstanceValid(capture.Scroll)
                 && capture.Scroll.ScrollHorizontal == capture.ScrollX
                 && capture.Scroll.ScrollVertical == capture.ScrollY))
-        && GodotObject.IsInstanceValid(capture.Pan)
         && capture.Pan.Position == capture.PanPosition
-        && capture.ScrollTarget.IsBound
         && capture.ScrollTarget.Current == capture.ScrollTarget.Original
         && capture.Controls.All(control =>
             GodotObject.IsInstanceValid(control)
@@ -853,30 +832,42 @@ internal sealed class MapInkPresenter
         && RunManager.Instance.ActionExecutor.CurrentlyRunningAction is null
         && !capture.Map.GetTree().Paused;
 
-    private static PresentationRestoration RestorationOutcome(SurfaceCapture capture) =>
-        capture.WasOpen ? PresentationRestoration.NotNeeded : PresentationRestoration.Restored;
+    private static bool HasMapSurface(SurfaceCapture capture) =>
+        GodotObject.IsInstanceValid(capture.Map)
+        && capture.Map.IsInsideTree()
+        && ReferenceEquals(NMapScreen.Instance, capture.Map)
+        && GodotObject.IsInstanceValid(capture.Pan)
+        && capture.Pan.IsInsideTree()
+        && capture.ScrollTarget.IsBound;
 
-    private bool AnimationsBusy(ActiveDisplay display)
-    {
-        try
-        {
-            return display.Capture.Animations.Busy();
-        }
-        catch (Exception exception)
-        {
-            GD.PrintErr($"[sts2agent] Map animation state unavailable: {exception}");
-            AbortUncertain(display);
-            return true;
-        }
-    }
+    private PresentationRestoration RestorationOutcome() =>
+        _returnNeeded ? PresentationRestoration.Restored : PresentationRestoration.NotNeeded;
 
     private void AbortUncertain(ActiveDisplay display)
     {
-        _restorationUncertain = true;
-        display.OpeningBarrier = null;
-        StopDrawingSafely(display);
-        RemoveQuillVisual(display);
-        RestoreInputAndFocus(display.Capture);
+        var capture = display.Capture;
+        if (!display.AbandonRestore)
+        {
+            display.AbandonRestore = true;
+            display.OpeningBarrier = null;
+            StopDrawingSafely(display);
+            try
+            {
+                RemoveQuillVisual(display);
+            }
+            finally
+            {
+                if (GodotObject.IsInstanceValid(capture.Map) && capture.Map.IsInsideTree())
+                    capture.Map.MouseFilter = capture.MouseFilter;
+            }
+        }
+        // A native animation started by this display still owns its work until it stops.
+        if (display.OpenedMap && GodotObject.IsInstanceValid(capture.Map) && capture.Map.IsInsideTree()
+            && capture.Animations.Busy())
+        {
+            return;
+        }
+
         display.Worker.TrySetResult();
         _gateway.SettlePresentation(
             display.Request.OperationId,
@@ -943,6 +934,6 @@ internal sealed class MapInkPresenter
         next.Y = Math.Clamp(next.Y, NativeScrollLimitBottom, NativeScrollLimitTop);
         capture.ScrollTarget.Set(next);
         pan.Position = next;
-        return MathF.Abs(next.Y - previousPos.Y) >= 0.5f;
+        return next != previousPos;
     }
 }

@@ -21,6 +21,9 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
     private long? _nativeCompletionObservedSequence;
     private StepReceipt? _receipt;
     private long? _dispatchedSequence;
+    private long _latestObservationSequence = -1;
+    private long _uncertainThroughSequence = -1;
+    private bool _awaitingObservationAfterUncertain;
     private StepLocation _location = new(gameInstanceId, null, null, null);
     private NativeInputReadiness _readiness = NativeInputReadiness.Unavailable;
     private int? _ascension;
@@ -216,6 +219,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         lock (_sync)
         {
             var readiness = _pending is not null
+                            || _awaitingObservationAfterUncertain
                             || _presentation is { Phase: PresentationPhase.Running or PresentationPhase.Verifying }
                             || _externalInputBusy?.Invoke() == true
                 ? NativeInputReadiness.Busy
@@ -223,7 +227,10 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
                     ? NativeInputReadiness.Unavailable
                     : _readiness;
 
-            return new(_location, control.Mode, readiness, _receipt)
+            var receipt = _awaitingObservationAfterUncertain && _receipt is { } uncertain
+                ? new PendingStep(uncertain.OperationId)
+                : _receipt;
+            return new(_location, control.Mode, readiness, receipt)
             {
                 Ascension = _ascension,
                 Presentation = _pending is null ? _presentation : null,
@@ -235,6 +242,18 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
     {
         lock (_sync)
         {
+            if (publication.Reply is CompletedStateRead published
+                && (_awaitingObservationAfterUncertain
+                    || published.Observation.Stamp.ObservationSequence <= _uncertainThroughSequence))
+            {
+                return publication with
+                {
+                    Reply = new FailedStateRead(new ReadCause(
+                        NativeReadError.ReadUnavailable,
+                        "Waiting for a trusted native observation after an uncertain step.")),
+                };
+            }
+
             var externalBusy = _externalInputBusy?.Invoke() == true;
             if ((_pending is null && _presentation is not { Gate: PresentationGate.Locked } && !externalBusy)
                 || publication.Reply is not CompletedStateRead completed)
@@ -292,6 +311,13 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
                 _presentation = null;
             _ascension = location.RunId is null ? null : ascension;
             _readiness = readiness;
+            _latestObservationSequence = Math.Max(sequence, _latestObservationSequence);
+            if (_awaitingObservationAfterUncertain
+                && sequence > _uncertainThroughSequence
+                && readiness is NativeInputReadiness.Ready or NativeInputReadiness.Selection or NativeInputReadiness.Terminal)
+            {
+                _awaitingObservationAfterUncertain = false;
+            }
 
             if (_dispatching || _pending is not { } request)
                 return;
@@ -390,6 +416,8 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
                 if (result is not RejectedStep)
                     _presentation = null;
                 _receipt = result;
+                if (result is UnknownStep)
+                    WaitForObservationAfterUncertain();
             }
 
             _pending = null;
@@ -434,6 +462,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         {
             if (_pending is not { } request || (operationId is not null && request.OperationId != operationId))
                 return;
+            WaitForObservationAfterUncertain();
             _receipt = new UnknownStep(
                 request.OperationId,
                 new StepCause(
@@ -450,12 +479,21 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
             if (_pending is not null)
                 return;
             _receipt = null;
+            _awaitingObservationAfterUncertain = false;
+            if (_presentation is { Gate: PresentationGate.Locked })
+                return;
             _presentation = null;
             _presentationRoute = null;
             _presentationWorker = null;
             _presentationVerifier = null;
             _presentationIdentityLost = false;
         }
+    }
+
+    private void WaitForObservationAfterUncertain()
+    {
+        _uncertainThroughSequence = _latestObservationSequence;
+        _awaitingObservationAfterUncertain = true;
     }
 
     public static RejectedStep Reject(StepRequest request, StepErrorCode code, string message) =>
@@ -473,7 +511,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         {
             if (_receipt?.OperationId == request.OperationId || _presentation?.OperationId == request.OperationId)
                 return Reject(request, StepErrorCode.DuplicateOperation, "This operation ID is already current.");
-            if (_pending is not null || _externalInputBusy?.Invoke() == true)
+            if (_pending is not null || _awaitingObservationAfterUncertain || _externalInputBusy?.Invoke() == true)
                 return Reject(request, StepErrorCode.NativeBusy, "A native operation still owns input.");
             if (_presentation is { Gate: PresentationGate.Locked })
                 return Reject(request, StepErrorCode.NativeBusy, "A map presentation still owns input.");

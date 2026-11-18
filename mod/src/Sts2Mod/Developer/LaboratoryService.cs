@@ -22,11 +22,11 @@ internal sealed class LaboratoryService(
     bool enabled,
     AgentControlState control,
     GameCatalogProvider catalog,
-    Func<NativeStepStatus> readStepStatus)
+    Func<NativeStepStatus> readStepStatus,
+    object admissionLock)
 {
     private sealed record MainThreadWork(Action Run, TaskCompletionSource Completion);
 
-    private readonly object _admissionLock = new();
     private readonly ConcurrentQueue<MainThreadWork> _workQueue = new();
     private DevConsole? _console;
     private volatile bool _active;
@@ -50,7 +50,7 @@ internal sealed class LaboratoryService(
         }
     }
 
-    public async Task<HttpReply> PrepareScenarioAsync(string body, bool checkpointBusy)
+    public async Task<HttpReply> PrepareScenarioAsync(string body, Func<bool> otherDeveloperWorkBusy)
     {
         CombatEvalScenario recipe;
         try
@@ -85,14 +85,13 @@ internal sealed class LaboratoryService(
         }
 
         long expectedRunInstanceId;
-        IReadOnlyList<CombatEvalStep> steps;
-        lock (_admissionLock)
+        lock (admissionLock)
         {
             var status = readStepStatus();
             var current = ObservationHub.Current.Reply as CompletedStateRead;
             if (_active
                 || _ownsInput
-                || checkpointBusy
+                || otherDeveloperWorkBusy()
                 || control.Mode != AgentControlMode.Paused
                 || status.InputReadiness != NativeInputReadiness.Ready
                 || status.Receipt is PendingStep or UnknownStep
@@ -109,25 +108,6 @@ internal sealed class LaboratoryService(
                     "Laboratory setup requires a ready, paused single-player map without pending input.");
             }
 
-            LaboratoryPlayerState? initialState = null;
-            try
-            {
-                initialState = CapturePlayerStateOnGameThreadAsync().GetAwaiter().GetResult();
-                if (initialState is null)
-                {
-                    return Reply(
-                        200,
-                        LaboratoryOutcome.Rejected,
-                        LaboratoryErrorCode.NativeBusy,
-                        "Native run state is unavailable for laboratory setup.");
-                }
-                steps = recipe.Prepare(initialState);
-            }
-            catch (ArgumentException error)
-            {
-                return Reply(200, LaboratoryOutcome.Rejected, LaboratoryErrorCode.InvalidRecipe, error.Message);
-            }
-
             expectedRunInstanceId = ObservationHub.CurrentRunInstanceId;
             _active = true;
             _ownsInput = true;
@@ -137,6 +117,25 @@ internal sealed class LaboratoryService(
         NativeObservation? prepared = null;
         try
         {
+            var initialState = await CapturePlayerStateOnGameThreadAsync().ConfigureAwait(false);
+            if (initialState is null || ObservationHub.CurrentRunInstanceId != expectedRunInstanceId)
+            {
+                return Reply(
+                    200,
+                    LaboratoryOutcome.Rejected,
+                    LaboratoryErrorCode.NativeBusy,
+                    "Native run state is unavailable for laboratory setup.");
+            }
+            IReadOnlyList<CombatEvalStep> steps;
+            try
+            {
+                steps = recipe.Prepare(initialState);
+            }
+            catch (ArgumentException error)
+            {
+                return Reply(200, LaboratoryOutcome.Rejected, LaboratoryErrorCode.InvalidRecipe, error.Message);
+            }
+
             var valid = await catalog.ValidateScenarioAsync(recipe)
                 .WaitAsync(TimeSpan.FromSeconds(30))
                 .ConfigureAwait(false);
@@ -149,11 +148,17 @@ internal sealed class LaboratoryService(
                     "A recipe definition ID is missing from its native object category; no native step was started.");
             }
 
+            void MarkMutated() => mutated = true;
+
             foreach (var step in steps)
             {
-                mutated = true;
-                if (!await ExecuteStepAsync(step, expectedRunInstanceId, waitReady: true).ConfigureAwait(false))
-                    return Unknown(LaboratoryErrorCode.NativeIncomplete, prepared);
+                if (!await ExecuteStepAsync(step, expectedRunInstanceId, waitReady: true, MarkMutated).ConfigureAwait(false))
+                {
+                    return mutated
+                        ? Unknown(LaboratoryErrorCode.NativeIncomplete, prepared)
+                        : Reply(200, LaboratoryOutcome.Rejected, LaboratoryErrorCode.NativeBusy,
+                            "The native run changed before laboratory setup.");
+                }
             }
 
             var midState = await CapturePlayerStateOnGameThreadAsync().ConfigureAwait(false);
@@ -165,7 +170,7 @@ internal sealed class LaboratoryService(
             }
 
             var fill = recipe.FillHealth(midState);
-            if (!await ExecuteStepAsync(fill, expectedRunInstanceId, waitReady: true).ConfigureAwait(false))
+            if (!await ExecuteStepAsync(fill, expectedRunInstanceId, waitReady: true, MarkMutated).ConfigureAwait(false))
                 return Unknown(LaboratoryErrorCode.NativeIncomplete, prepared);
 
             prepared = await WaitSettledObservationAsync(expectedRunInstanceId, ObservationOwner.Run).ConfigureAwait(false);
@@ -173,7 +178,7 @@ internal sealed class LaboratoryService(
             if (prepared is null || afterFill is null || !recipe.MatchesResources(afterFill))
                 return Unknown(LaboratoryErrorCode.NativeConflict, prepared);
 
-            if (!await ExecuteStepAsync(recipe.Fight(), expectedRunInstanceId, waitReady: false).ConfigureAwait(false))
+            if (!await ExecuteStepAsync(recipe.Fight(), expectedRunInstanceId, waitReady: false, MarkMutated).ConfigureAwait(false))
                 return Unknown(LaboratoryErrorCode.NativeIncomplete, prepared);
 
             var combatObservation = await WaitSettledObservationAsync(expectedRunInstanceId, ObservationOwner.Combat).ConfigureAwait(false);
@@ -187,13 +192,14 @@ internal sealed class LaboratoryService(
                 return Unknown(LaboratoryErrorCode.NativeConflict, prepared);
             }
 
-            _ownsInput = false;
             var completedJson = JsonContract.Serialize(new LaboratoryReply(
                 LaboratoryOutcome.Completed,
                 Error: null,
                 PreparedObservation: prepared,
                 Observation: combatObservation));
-            return new HttpReply(200, SemanticText.Json(completedJson, combatObservation.GameLanguage));
+            var reply = new HttpReply(200, SemanticText.Json(completedJson, combatObservation.GameLanguage));
+            _ownsInput = false;
+            return reply;
         }
         catch (Exception error)
         {
@@ -218,19 +224,36 @@ internal sealed class LaboratoryService(
         }
     }
 
-    private async Task<bool> ExecuteStepAsync(CombatEvalStep step, long expectedRunInstanceId, bool waitReady)
+    private async Task<bool> ExecuteStepAsync(
+        CombatEvalStep step,
+        long expectedRunInstanceId,
+        bool waitReady,
+        Action markMutated)
     {
         Task? commandTask = null;
         string? failure = null;
+        var invoked = false;
         await RunOnGameThreadAsync(() =>
         {
+            if (!ObservationHub.IsRunActive
+                || ObservationHub.CurrentRunInstanceId != expectedRunInstanceId
+                || control.Mode != AgentControlMode.Paused)
+            {
+                return;
+            }
+
+            invoked = true;
             _console ??= new DevConsole(shouldAllowDebugCommands: true);
+            markMutated();
             var result = _console.ProcessCommand(step.Command);
             if (!result.success)
                 failure = result.msg;
             else
                 commandTask = result.task;
         }).ConfigureAwait(false);
+
+        if (!invoked)
+            return false;
 
         if (failure is not null)
         {

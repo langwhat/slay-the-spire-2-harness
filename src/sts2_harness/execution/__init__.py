@@ -1,14 +1,13 @@
 """Admit and close one model-independent decision and its ordered actions."""
 
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import dataclass
 
 from pydantic import MISSING, ValidationError
 
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
-from sts2_harness.client.http import CatalogResult, InspectResult
+from sts2_harness.client.http import CatalogResult, DisplayResult, InspectResult
 from sts2_harness.decisions import (
     ActionKind,
     ActionProposal,
@@ -88,7 +87,7 @@ class Execution:
         run_id: str,
         recovery: ToolRecoveryBudget | None = None,
         diagnostics: Diagnostics | None = None,
-        display: Callable[[str], Awaitable[object]] | None = None,
+        display: Callable[[str], Awaitable[DisplayResult]] | None = None,
     ) -> None:
         self._diagnostics = diagnostics
         self._game = game
@@ -106,8 +105,11 @@ class Execution:
         text = reason.strip()
         if not text or text == self._last_displayed_reason:
             return
-        with suppress(Exception):
-            await self._display(text)
+        try:
+            reply = await self._display(text)
+        except ClientUnavailable:
+            return
+        if isinstance(reply, native.DisplayReply):
             self._last_displayed_reason = text
 
     def end_reason(self, location: native.Location | None) -> RunEndReason:

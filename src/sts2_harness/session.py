@@ -6,6 +6,7 @@ from types import TracebackType
 from typing import Self
 
 from sts2_harness.agent import MaterialReader
+from sts2_harness.client import DisplayResult
 from sts2_harness.client import models as native
 from sts2_harness.combat import CombatAgent
 from sts2_harness.context.models import AutomaticProgress
@@ -49,7 +50,7 @@ class SessionDependencies:
     documents: Documents
     model: ModelFactory
     card_completion: Callable[[CardChoiceCompletion], None] | None = None
-    display: Callable[[str], Awaitable[object]] | None = None
+    display: Callable[[str], Awaitable[DisplayResult]] | None = None
 
 
 class RunSession:

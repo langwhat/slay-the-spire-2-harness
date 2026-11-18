@@ -49,6 +49,7 @@ internal sealed class GameStepDispatcher
     private Task? _visualPresentation;
     private object? _submittedChoice;
     private Node? _confirmationScreen;
+    private Func<bool>? _confirmationStillValid;
     private ulong _confirmationNotBeforeMsec;
     private readonly HashSet<NConfirmButton> _pressedConfirmations = new(ReferenceEqualityComparer.Instance);
     private bool _touched;
@@ -100,6 +101,7 @@ internal sealed class GameStepDispatcher
             if (!ReferenceEquals(NOverlayStack.Instance?.Peek(), screen))
             {
                 _confirmationScreen = null;
+                _confirmationStillValid = null;
             }
             else
             {
@@ -112,6 +114,8 @@ internal sealed class GameStepDispatcher
                 {
                     GD.PrintErr($"[sts2agent] Selection confirmation continuation failed: {error}");
                     _confirmationScreen = null;
+                    _confirmationStillValid = null;
+                    readiness = NativeInputReadiness.Busy;
                     _submittedChoice = null;
                     _gateway.ReportUncertain();
                 }
@@ -194,6 +198,7 @@ internal sealed class GameStepDispatcher
         {
             _submittedChoice = null;
             _confirmationScreen = null;
+            _confirmationStillValid = null;
         }
         return result;
     }
@@ -621,10 +626,21 @@ internal sealed class GameStepDispatcher
 
         var callback = grid.GetType().GetMethod("OnCardClicked", PrivateInstance)
             ?? throw new InvalidOperationException("The native selection callback is unavailable.");
-        var current = grid.GetType().GetField("_selectedCards", PrivateInstance)?.GetValue(grid) as IEnumerable<CardModel>
+        var selectedCards = grid.GetType().GetField("_selectedCards", PrivateInstance)
             ?? throw new InvalidOperationException("The native selected cards are unavailable.");
+        var selected = ReadSelectedCards();
 
-        var selected = current.ToArray();
+        CardModel[] ReadSelectedCards() => selectedCards.GetValue(grid) is IEnumerable<CardModel> current
+            ? current.ToArray()
+            : throw new InvalidOperationException("The native selected cards are unavailable.");
+
+        bool SelectionMatches(CardModel[] expected)
+        {
+            var actual = ReadSelectedCards();
+            return expected.Length == actual.Length
+                   && expected.All(card => actual.Contains(card, ReferenceEqualityComparer.Instance));
+        }
+
         var toggles = selected
             .Where(card => !cards.Contains(card, ReferenceEqualityComparer.Instance))
             .Concat(cards.Where(card => !selected.Contains(card, ReferenceEqualityComparer.Instance)))
@@ -640,13 +656,15 @@ internal sealed class GameStepDispatcher
                     holder,
                     () => ReferenceEquals(NOverlayStack.Instance?.Peek(), screen)
                           && GodotObject.IsInstanceValid(holder)
-                          && holder.IsVisibleInTree(),
+                          && holder.IsVisibleInTree()
+                          && ReferenceEquals(holder.CardModel, toggles[0])
+                          && SelectionMatches(selected),
                     focusSeconds: 0.22,
                     () =>
                     {
                         callback.Invoke(grid, [toggles[0]]);
                         if (ReferenceEquals(NOverlayStack.Instance?.Peek(), screen))
-                            BeginConfirmation(screen, holdMs: 180);
+                            BeginConfirmation(screen, holdMs: 180, () => SelectionMatches(cards));
                     },
                     trackGatewayTask: true);
             }
@@ -661,7 +679,7 @@ internal sealed class GameStepDispatcher
         }
 
         if (ReferenceEquals(NOverlayStack.Instance?.Peek(), screen))
-            BeginConfirmation(screen, holdMs: 260);
+            BeginConfirmation(screen, holdMs: 260, () => SelectionMatches(cards));
         return null;
     }
 
@@ -815,17 +833,9 @@ internal sealed class GameStepDispatcher
         Action submit)
     {
         var tree = focusNode.GetTree();
-        var usedRealFocus = false;
-        focusNode.GetViewport()?.GuiReleaseFocus();
-        if (focusNode.FocusMode != Control.FocusModeEnum.None)
-        {
-            focusNode.GrabFocus();
-            usedRealFocus = true;
-        }
-        else
-        {
+        var showCue = !focusNode.HasFocus();
+        if (showCue)
             focusNode.EmitSignal(Control.SignalName.FocusEntered);
-        }
 
         try
         {
@@ -833,18 +843,8 @@ internal sealed class GameStepDispatcher
         }
         finally
         {
-            if (GodotObject.IsInstanceValid(focusNode) && focusNode.IsInsideTree())
-            {
-                if (usedRealFocus)
-                {
-                    if (ReferenceEquals(focusNode.GetViewport()?.GuiGetFocusOwner(), focusNode))
-                        focusNode.ReleaseFocus();
-                }
-                else
-                {
-                    focusNode.EmitSignal(Control.SignalName.FocusExited);
-                }
-            }
+            if (showCue && GodotObject.IsInstanceValid(focusNode) && focusNode.IsInsideTree() && !focusNode.HasFocus())
+                focusNode.EmitSignal(Control.SignalName.FocusExited);
         }
 
         if (!_control.IsRunning || !stillValid())
@@ -915,9 +915,10 @@ internal sealed class GameStepDispatcher
         }
     }
 
-    private void BeginConfirmation(Node screen, ulong holdMs = 0)
+    private void BeginConfirmation(Node screen, ulong holdMs = 0, Func<bool>? stillValid = null)
     {
         _confirmationScreen = screen;
+        _confirmationStillValid = stillValid;
         _confirmationNotBeforeMsec = ViewerPacing.IsInteractiveGui && holdMs > 0
             ? Time.GetTicksMsec() + holdMs
             : 0;
@@ -934,7 +935,17 @@ internal sealed class GameStepDispatcher
             .FirstOrDefault(button => IsControlUsable(button) && !_pressedConfirmations.Contains(button));
         if (confirm is null)
             return false;
+        if (_confirmationStillValid?.Invoke() == false)
+        {
+            _confirmationScreen = null;
+            _confirmationStillValid = null;
+            _submittedChoice = null;
+            _gateway.ReportUncertain();
+            return true;
+        }
+
         _pressedConfirmations.Add(confirm);
+        _confirmationStillValid = null;
         _confirmationNotBeforeMsec = 0;
         confirm.EmitSignal(NClickableControl.SignalName.Released, confirm);
         return true;

@@ -122,8 +122,9 @@ public static class ModEntry
                                          || HeadlessStarter.IsActive);
             ObservationHub.ProjectForRead = steps.Project;
             _steps = steps;
-            _checkpoints = new CheckpointService(developerEnabled, ControlState, steps.CurrentStatus);
-            _laboratory = new LaboratoryService(developerEnabled, ControlState, Catalog, steps.CurrentStatus);
+            var developerAdmission = new object();
+            _checkpoints = new CheckpointService(developerEnabled, ControlState, steps.CurrentStatus, developerAdmission);
+            _laboratory = new LaboratoryService(developerEnabled, ControlState, Catalog, steps.CurrentStatus, developerAdmission);
 
             var handlers = new ModHttpRouter(steps, _checkpoints, _laboratory);
             server = new LoopbackHttpServer(port, handlers);
@@ -207,9 +208,9 @@ public static class ModEntry
             checkpoints.ReadIdentity();
 
         public HttpReply SubmitCheckpoint(string body) =>
-            checkpoints.Submit(body, otherDeveloperWorkBusy: laboratory.OwnsInput || HeadlessStarter.IsActive);
+            checkpoints.Submit(body, () => laboratory.OwnsInput || HeadlessStarter.IsActive);
 
         public Task<HttpReply> PrepareLaboratoryScenario(string body) =>
-            laboratory.PrepareScenarioAsync(body, checkpointBusy: checkpoints.OwnsInput || HeadlessStarter.IsActive);
+            laboratory.PrepareScenarioAsync(body, () => checkpoints.OwnsInput || HeadlessStarter.IsActive);
     }
 }

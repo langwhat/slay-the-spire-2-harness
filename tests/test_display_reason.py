@@ -82,6 +82,11 @@ def test_mod_client_display_validates_contract_and_execution_display_is_best_eff
             mode = "rejected"
             rejected = await client.display("x")
             assert isinstance(rejected, native.InvalidRequestReply)
+            await execution.display_reason("Retry after rejection.")
+            mode = "ok"
+            await execution.display_reason("Retry after rejection.")
+            await execution.display_reason("Retry after rejection.")
+            assert seen[-2:] == ["Retry after rejection.", "Retry after rejection."]
 
             mode = "timeout"
             await execution.display_reason("Timeout should be ignored.")
@@ -207,8 +212,9 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
         async def accept(self, outcome: ActionToolResult) -> None:
             assert outcome.outcome.status is OutcomeStatus.STOPPED
 
-    async def record_display(text: str) -> None:
+    async def record_display(text: str) -> native.DisplayReply:
         published.append(text)
+        return native.DisplayReply(status=native.DisplayStatus.SHOWN)
 
     responses = iter(
         (
