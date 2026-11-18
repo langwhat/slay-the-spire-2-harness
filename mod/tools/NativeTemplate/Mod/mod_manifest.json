@@ -1,0 +1,11 @@
+{
+  "id": "sts2agent_template",
+  "name": "Slay the Spire 2 Native Template Generator",
+  "author": "sts2-harness",
+  "description": "Developer-only native profile initialization in an explicitly isolated headless instance.",
+  "version": "0.1.0",
+  "has_dll": true,
+  "has_pck": false,
+  "dependencies": [],
+  "affects_gameplay": true
+}

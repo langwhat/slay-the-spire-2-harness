@@ -1,0 +1,11 @@
+{
+  "id": "sts2agent",
+  "name": "Slay the Spire 2 Agent Harness",
+  "author": "sts2-harness",
+  "description": "Local loopback HTTP bridge for the Slay the Spire 2 agent harness.",
+  "version": "0.1.0",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": true
+}
