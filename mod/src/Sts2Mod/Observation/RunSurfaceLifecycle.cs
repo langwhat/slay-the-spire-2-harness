@@ -32,7 +32,7 @@ internal static class RunSurfaceLifecycle
 
     internal sealed record NativeCardChoice(IReadOnlyList<CardModel> Cards, bool CanSkip);
 
-    internal sealed record NativeRewardChoice(IReadOnlyList<CardCreationResult> Cards);
+    internal sealed record NativeRewardChoice(IReadOnlyList<CardCreationResult> Cards, ulong PresentedAtMsec);
 
     private sealed class InteractionRegistration(NativeInteractionBinding binding, NodeObjectRegistry registry)
     {
@@ -127,7 +127,7 @@ internal static class RunSurfaceLifecycle
     public static void RegisterCardRewardPresentation(NCardRewardSelectionScreen screen, IReadOnlyList<CardCreationResult> cards)
     {
         RewardChoices.Remove(screen);
-        RewardChoices.Add(screen, new NativeRewardChoice(cards));
+        RewardChoices.Add(screen, new NativeRewardChoice(cards, Time.GetTicksMsec()));
         RegisterCardRewards(cards);
         RegisterSurface(screen);
         if (ObservationHub.Identities?.Registry is not { } registry)

@@ -42,6 +42,7 @@ namespace Sts2Mod.Execution;
 internal sealed class GameStepDispatcher
 {
     private static readonly BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
+    private const double CardRewardReadSeconds = 1.5;
 
     private readonly AgentControlState _control;
     private readonly StepGateway _gateway;
@@ -464,9 +465,10 @@ internal sealed class GameStepDispatcher
 
         TrackInteractionAcceptance(request, button);
         if (NOverlayStack.Instance?.Peek() is NCardRewardSelectionScreen rewardChoice
-            && ReferenceEquals(button, NodeHierarchy.FindRewardSkipButton(rewardChoice)))
+            && (ReferenceEquals(button, NodeHierarchy.FindRewardSkipButton(rewardChoice))
+                || button is NCardRewardAlternativeButton))
         {
-            return PresentOverlaySkip(request, rewardChoice, button, trackGatewayTask: false);
+            return PresentOverlayButton(request, rewardChoice, button, trackGatewayTask: false);
         }
 
         switch (button)
@@ -572,7 +574,7 @@ internal sealed class GameStepDispatcher
                 var skip = bundleScreen.GetNodeOrNull<NClickableControl>("%SkipButton");
                 if (skip is null || !IsControlUsable(skip))
                     return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native skip control is unavailable.");
-                return PresentOverlaySkip(request, bundleScreen, skip, trackGatewayTask: true);
+                return PresentOverlayButton(request, bundleScreen, skip, trackGatewayTask: true);
             }
 
             var bundle = NodeHierarchy.Descendants(bundleScreen)
@@ -609,7 +611,7 @@ internal sealed class GameStepDispatcher
                     : NodeHierarchy.FindRewardSkipButton((NCardRewardSelectionScreen)screen);
                 if (skip is null || !IsControlUsable(skip))
                     return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native skip control is unavailable.");
-                return PresentOverlaySkip(request, screen, skip, trackGatewayTask: true);
+                return PresentOverlayButton(request, screen, skip, trackGatewayTask: true);
             }
 
             var holder = NodeHierarchy.Descendants(screen)
@@ -766,34 +768,61 @@ internal sealed class GameStepDispatcher
         AutoResolvedCardSelectionPatch.Resolved = null;
     }
 
-    private StepReceipt? PresentOverlaySkip(
+    private StepReceipt? PresentOverlayButton(
         StepRequest request,
         Node screen,
-        NClickableControl skip,
-        bool trackGatewayTask) =>
-        PresentFocusAndSubmit(
+        NClickableControl button,
+        bool trackGatewayTask)
+    {
+        var presentation = GetCardRewardPresentation(screen);
+        return PresentFocusAndSubmit(
             request,
-            skip,
-            () => ReferenceEquals(NOverlayStack.Instance?.Peek(), screen) && IsControlUsable(skip),
-            focusSeconds: 0.24,
-            () => skip.EmitSignal(NClickableControl.SignalName.Released, skip),
+            button,
+            () => IsOverlayPresentationCurrent(screen, presentation) && IsControlUsable(button),
+            focusSeconds: CardRewardFocusSeconds(presentation, 0.24),
+            () => button.EmitSignal(NClickableControl.SignalName.Released, button),
             trackGatewayTask);
+    }
 
     private StepReceipt? PresentOverlayCardHolder(
         StepRequest request,
         Node screen,
         NCardHolder holder,
-        bool trackGatewayTask) =>
-        PresentFocusAndSubmit(
+        bool trackGatewayTask)
+    {
+        var presentation = GetCardRewardPresentation(screen);
+        return PresentFocusAndSubmit(
             request,
             holder,
-            () => ReferenceEquals(NOverlayStack.Instance?.Peek(), screen)
+            () => IsOverlayPresentationCurrent(screen, presentation)
                   && GodotObject.IsInstanceValid(holder)
                   && holder.IsVisibleInTree()
                   && IsControlUsable(holder.Hitbox),
-            focusSeconds: 0.28,
+            focusSeconds: CardRewardFocusSeconds(presentation, 0.28),
             () => holder.EmitSignal(NCardHolder.SignalName.Pressed, holder),
             trackGatewayTask);
+    }
+
+    private static RunSurfaceLifecycle.NativeRewardChoice? GetCardRewardPresentation(Node screen) =>
+        ViewerPacing.IsInteractiveGui
+        && screen is NCardRewardSelectionScreen reward
+        && RunSurfaceLifecycle.TryGetRewardChoice(reward, out var presentation)
+            ? presentation
+            : null;
+
+    // A reward refresh can recycle a holder while leaving the overlay itself open.
+    private static bool IsOverlayPresentationCurrent(Node screen, RunSurfaceLifecycle.NativeRewardChoice? presentation) =>
+        ReferenceEquals(NOverlayStack.Instance?.Peek(), screen)
+        && ReferenceEquals(GetCardRewardPresentation(screen), presentation);
+
+    private static double CardRewardFocusSeconds(RunSurfaceLifecycle.NativeRewardChoice? presentation, double focusSeconds)
+    {
+        if (presentation is null)
+            return focusSeconds;
+
+        var elapsedSeconds = (Time.GetTicksMsec() - presentation.PresentedAtMsec) / 1000.0;
+        return Math.Max(focusSeconds, CardRewardReadSeconds - elapsedSeconds);
+    }
 
     private StepReceipt? PresentFocusAndSubmit(
         StepRequest request,
