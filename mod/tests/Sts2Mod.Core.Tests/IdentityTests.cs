@@ -48,15 +48,29 @@ public sealed class IdentityTests
     }
 
     [Fact]
-    public async Task NodeObjectRegistry_RejectsOffThreadAccess()
+    public void NodeObjectRegistry_RejectsOffThreadAccess()
     {
         var registry = new NodeObjectRegistry();
         registry.EnterNode(new object());
         var item = new DummyCard();
         registry.Register(item, PublicObjectKind.Card);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            Task.Run(() => _ = registry.GetRef(item)));
+        Exception? captured = null;
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                _ = registry.GetRef(item);
+            }
+            catch (Exception error)
+            {
+                captured = error;
+            }
+        });
+        worker.Start();
+        worker.Join();
+
+        Assert.IsType<InvalidOperationException>(captured);
     }
 
     [Fact]
