@@ -59,7 +59,7 @@ public static class ObservationReader
             ? SemanticText.Json(JsonContract.Serialize(publication.Reply), completed.Observation.GameLanguage)
             : JsonContract.Serialize(publication.Reply);
 
-    public static (int StatusCode, string Json) Inspect(NativeReadPublication publication, string body)
+    public static HttpReply Inspect(NativeReadPublication publication, string body)
     {
         NativeInspectQuery query;
         try
@@ -68,7 +68,7 @@ public static class ObservationReader
         }
         catch (JsonException)
         {
-            return (400, JsonContract.Serialize(new
+            return new HttpReply(400, JsonContract.Serialize(new
             {
                 status = ReadOutcome.Rejected,
                 error = new InspectionCause(
@@ -85,7 +85,7 @@ public static class ObservationReader
             var error = failed.Error.Code == NativeReadError.NoRun
                 ? new ReadCause(NativeReadError.ReadUnavailable, "No native observation is available outside a run.")
                 : failed.Error;
-            return (200, JsonContract.Serialize(new
+            return new HttpReply(200, JsonContract.Serialize(new
             {
                 status = ReadOutcome.Failed,
                 observation = (NativeObservation?)null,
@@ -144,7 +144,7 @@ public static class ObservationReader
         var upgrades = publication.InspectionUpgrades;
         if (query.Upgrade == true && cards.Any(reference => !upgrades.ContainsKey(reference)))
         {
-            return (200, SemanticText.Json(JsonContract.Serialize(new
+            return new HttpReply(200, SemanticText.Json(JsonContract.Serialize(new
             {
                 status = ReadOutcome.Failed,
                 observation,
@@ -253,14 +253,14 @@ public static class ObservationReader
             .Where(pair => selected.Contains(pair.Key, StringComparer.Ordinal))
             .ToImmutableDictionary(StringComparer.Ordinal);
 
-    private static (int StatusCode, string Json) Completed<T>(NativeObservation observation, T data)
+    private static HttpReply Completed<T>(NativeObservation observation, T data)
         where T : InspectionData =>
-        (200, SemanticText.Json(
+        new(200, SemanticText.Json(
             JsonContract.Serialize(new { status = ReadOutcome.Completed, observation, data }),
             observation.GameLanguage));
 
-    private static (int StatusCode, string Json) Rejected(NativeObservation observation, InspectionCause error) =>
-        (200, SemanticText.Json(
+    private static HttpReply Rejected(NativeObservation observation, InspectionCause error) =>
+        new(200, SemanticText.Json(
             JsonContract.Serialize(new { status = ReadOutcome.Rejected, observation, error }),
             observation.GameLanguage));
 }

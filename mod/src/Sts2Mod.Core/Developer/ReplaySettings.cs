@@ -19,32 +19,15 @@ public static class ReplayPresentation
 
 public sealed class ReplayPresentationLifecycle(bool enabled)
 {
-    private Action? _restore;
-
     public bool Enabled { get; } = enabled;
     public bool Active { get; private set; }
-    public bool Restored { get; private set; }
 
-    public bool Activate(Action activate, Action restore)
+    public bool Activate(Action activate)
     {
-        if (!Enabled || Active || Restored)
+        if (!Enabled || Active)
             return false;
         activate();
-        _restore = restore;
         Active = true;
-        return true;
-    }
-
-    public bool Restore()
-    {
-        if (Restored)
-            return true;
-        if (!Active)
-            return false;
-        _restore!();
-        Active = false;
-        Restored = true;
-        _restore = null;
         return true;
     }
 }

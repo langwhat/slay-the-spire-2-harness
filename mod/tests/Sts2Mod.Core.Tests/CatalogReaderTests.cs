@@ -98,7 +98,7 @@ public sealed class CatalogReaderTests
         Assert.Equal("completed", metaDoc.RootElement.GetProperty("status").GetString());
         Assert.Equal(4, metaDoc.RootElement.GetProperty("data").GetProperty("categories").GetArrayLength());
 
-        // Search ranks exact name ("Strike" after BBCode? Note: raw record.Name is "[gold]Strike[/gold]", so test exact name on "Whirlwind" vs text match, and "Strike" ranking).
+        // Search orders ID/name matches ahead of description-only matches and strips BBCode tags.
         var (searchCode, searchJson) = CatalogReader.Read(
             "{\"mode\":\"search\",\"text\":\"Strike\",\"limit\":2,\"offset\":0}",
             () => SampleCatalog(),

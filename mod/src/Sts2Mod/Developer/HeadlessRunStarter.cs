@@ -155,9 +155,10 @@ internal sealed class HeadlessRunStarter
             return;
         }
 
-        var charButton = Descendants(screen)
+        var expectedEntry = CharacterEntry(config.Character);
+        var charButton = NodeHierarchy.Descendants(screen)
             .OfType<NCharacterSelectButton>()
-            .FirstOrDefault(button => !button.IsRandom && button.Character?.Id.Entry == config.Character);
+            .FirstOrDefault(button => !button.IsRandom && button.Character?.Id.Entry == expectedEntry);
         if (charButton is null)
             return;
         if (charButton.IsLocked)
@@ -224,7 +225,7 @@ internal sealed class HeadlessRunStarter
         {
             if (!_stages.HasFlag(Stage.AscensionFtueDismissed))
             {
-                var confirm = Descendants(ascensionFtue).OfType<NConfirmButton>().FirstOrDefault(b => b.Visible && b.IsEnabled);
+                var confirm = NodeHierarchy.Descendants(ascensionFtue).OfType<NConfirmButton>().FirstOrDefault(b => b.Visible && b.IsEnabled);
                 if (confirm is not null)
                 {
                     _stages |= Stage.AscensionFtueDismissed;
@@ -237,6 +238,16 @@ internal sealed class HeadlessRunStarter
         return false;
     }
 
+    private static string CharacterEntry(StandardCharacter character) => character switch
+    {
+        StandardCharacter.Ironclad => "IRONCLAD",
+        StandardCharacter.Silent => "SILENT",
+        StandardCharacter.Regent => "REGENT",
+        StandardCharacter.Necrobinder => "NECROBINDER",
+        StandardCharacter.Defect => "DEFECT",
+        _ => throw new ArgumentOutOfRangeException(nameof(character)),
+    };
+
     private static void ValidateAscensionUnlocked(SaveManager saveManager, HeadlessRunConfiguration config)
     {
         if (config.Ascension == 0)
@@ -244,11 +255,11 @@ internal sealed class HeadlessRunStarter
 
         var (characterId, epochRevealed) = config.Character switch
         {
-            "IRONCLAD" => (ModelDb.GetId<Ironclad>(), saveManager.IsEpochRevealed<Ironclad4Epoch>()),
-            "SILENT" => (ModelDb.GetId<Silent>(), saveManager.IsEpochRevealed<Silent4Epoch>()),
-            "REGENT" => (ModelDb.GetId<Regent>(), saveManager.IsEpochRevealed<Regent4Epoch>()),
-            "NECROBINDER" => (ModelDb.GetId<Necrobinder>(), saveManager.IsEpochRevealed<Necrobinder4Epoch>()),
-            "DEFECT" => (ModelDb.GetId<Defect>(), saveManager.IsEpochRevealed<Defect4Epoch>()),
+            StandardCharacter.Ironclad => (ModelDb.GetId<Ironclad>(), saveManager.IsEpochRevealed<Ironclad4Epoch>()),
+            StandardCharacter.Silent => (ModelDb.GetId<Silent>(), saveManager.IsEpochRevealed<Silent4Epoch>()),
+            StandardCharacter.Regent => (ModelDb.GetId<Regent>(), saveManager.IsEpochRevealed<Regent4Epoch>()),
+            StandardCharacter.Necrobinder => (ModelDb.GetId<Necrobinder>(), saveManager.IsEpochRevealed<Necrobinder4Epoch>()),
+            StandardCharacter.Defect => (ModelDb.GetId<Defect>(), saveManager.IsEpochRevealed<Defect4Epoch>()),
             _ => (ModelId.none, false),
         };
 
@@ -261,18 +272,8 @@ internal sealed class HeadlessRunStarter
     }
 
     private static T? FindVisibleNode<T>(Node root) where T : CanvasItem =>
-        Descendants(root).OfType<T>().FirstOrDefault(node => node.IsVisibleInTree());
+        NodeHierarchy.Descendants(root).OfType<T>().FirstOrDefault(node => node.IsVisibleInTree());
 
     private static T? FindNamedNode<T>(Node root, string name) where T : Node =>
-        Descendants(root).OfType<T>().FirstOrDefault(node => node.Name == name);
-
-    private static IEnumerable<Node> Descendants(Node node)
-    {
-        foreach (var child in node.GetChildren())
-        {
-            yield return child;
-            foreach (var nested in Descendants(child))
-                yield return nested;
-        }
-    }
+        NodeHierarchy.Descendants(root).OfType<T>().FirstOrDefault(node => node.Name == name);
 }

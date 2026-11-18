@@ -25,7 +25,6 @@ internal static class ReplayPresentationPatch
 {
     private static ReplayPresentationLifecycle _lifecycle = new(false);
     private static readonly ConditionalWeakTable<Tween, object> CardTweens = new();
-    private static int _presentationTasks;
     private static int _cardTweenCompletions;
     private static int _cardFlights;
     private static int _hitStops;
@@ -49,7 +48,6 @@ internal static class ReplayPresentationPatch
     {
         if (!Enabled
             || Active
-            || _lifecycle.Restored
             || !runInProgress
             || ModEntry.ControlState.Mode != AgentControlMode.Running)
         {
@@ -58,20 +56,13 @@ internal static class ReplayPresentationPatch
 
         OriginalFastMode = SaveManager.Instance.PrefsSave.FastMode;
         var originalFps = Engine.MaxFps;
-        var originalMode = OriginalFastMode;
-        _lifecycle.Activate(
-            () =>
-            {
-                SaveManager.Instance.PrefsSave.FastMode = FastModeType.Instant;
-                Engine.MaxFps = 0;
-            },
-            () =>
-            {
-                SaveManager.Instance.PrefsSave.FastMode = originalMode;
-                Engine.MaxFps = originalFps;
-            });
+        _lifecycle.Activate(() =>
+        {
+            SaveManager.Instance.PrefsSave.FastMode = FastModeType.Instant;
+            Engine.MaxFps = 0;
+        });
 
-        GD.Print($"[sts2agent] Replay presentation active: original_fast_mode={originalMode}, fps={originalFps}->0.");
+        GD.Print($"[sts2agent] Replay presentation active: original_fast_mode={OriginalFastMode}, fps={originalFps}->0.");
     }
 
     internal static void RecordSummary()
@@ -79,21 +70,9 @@ internal static class ReplayPresentationPatch
         if (!Enabled)
             return;
         GD.Print(
-            $"[sts2agent] Replay presentation summary: active={Active}, restored={_lifecycle.Restored}, " +
+            $"[sts2agent] Replay presentation summary: active={Active}, " +
             $"fast_mode={SaveManager.Instance.PrefsSave.FastMode}, fps={Engine.MaxFps}, " +
             $"card_tweens={_cardTweenCompletions}, card_flights={_cardFlights}, hit_stops={_hitStops}.");
-    }
-
-    private static void TrackPresentationTask(Task task)
-    {
-        if (!Active || task.IsCompleted)
-            return;
-        Interlocked.Increment(ref _presentationTasks);
-        _ = task.ContinueWith(
-            _ => Interlocked.Decrement(ref _presentationTasks),
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
     }
 
     [HarmonyPatch(typeof(NGame), nameof(NGame.DoHitStop))]
@@ -156,7 +135,7 @@ internal static class ReplayPresentationPatch
     {
         private static bool Prepare() => Enabled;
 
-        private static void Postfix(Tween tween, Node owner, Task __result)
+        private static void Postfix(Tween tween, Node owner)
         {
             if (!Active
                 || !CardTweens.TryGetValue(tween, out _)
@@ -169,7 +148,6 @@ internal static class ReplayPresentationPatch
                 return;
             }
 
-            TrackPresentationTask(__result);
             tween.FastForwardToCompletion();
             _cardTweenCompletions++;
         }
@@ -187,8 +165,6 @@ internal static class ReplayPresentationPatch
             ____duration = 0.000001f;
             _cardFlights++;
         }
-
-        private static void Postfix(Task __result) => TrackPresentationTask(__result);
     }
 
     [HarmonyPatch(typeof(NTransition), nameof(NTransition.RoomFadeIn))]
@@ -196,9 +172,8 @@ internal static class ReplayPresentationPatch
     {
         private static bool Prepare() => Enabled;
 
-        private static void Postfix(NTransition __instance, Tween? ____tween, Task __result)
+        private static void Postfix(NTransition __instance, Tween? ____tween)
         {
-            TrackPresentationTask(__result);
             if (Active
                 && !__instance.GetTree().Paused
                 && ____tween is { } tween

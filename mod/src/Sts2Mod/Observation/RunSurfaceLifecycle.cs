@@ -266,6 +266,10 @@ internal static class RunSurfaceLifecycle
                 RegisterReward(reward, registry);
                 RegisterInteraction(registry, button, button, reward);
                 break;
+            case NLinkedRewardSet linked when linked.LinkedRewardSet is { } linkedSet:
+                foreach (var reward in linkedSet.Rewards)
+                    RegisterReward(reward, registry);
+                break;
             case NMerchantInventory inventory when inventory.Inventory is { } model:
                 foreach (var entry in model.AllEntries)
                     RegisterMerchantEntry(entry, registry);
@@ -304,6 +308,13 @@ internal static class RunSurfaceLifecycle
 
     private static void RegisterReward(Reward reward, NodeObjectRegistry registry)
     {
+        if (reward is LinkedRewardSet linked)
+        {
+            foreach (var child in linked.Rewards)
+                RegisterReward(child, registry);
+            return;
+        }
+
         registry.Register(reward, PublicObjectKind.Offer);
         if (!reward.IsPopulated || reward.SuccessfullySelected)
             return;
@@ -385,9 +396,12 @@ internal static class RunSurfaceReadyRegistrationPatch
             typeof(NSimpleCardSelectScreen),
             typeof(NDeckUpgradeSelectScreen),
             typeof(NDeckTransformSelectScreen),
+            typeof(NDeckEnchantSelectScreen),
+            typeof(NCombatPileCardSelectScreen),
             typeof(NEventOptionButton),
             typeof(NRestSiteButton),
             typeof(NRewardButton),
+            typeof(NLinkedRewardSet),
             typeof(NMerchantInventory),
             typeof(NMerchantRoom),
             typeof(NCardBundle),

@@ -1,7 +1,9 @@
 using System.Collections.Immutable;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Sts2Mod.Core.Control;
 using Sts2Mod.Core.Observation;
+using Sts2Mod.Core.Transport;
 
 namespace Sts2Mod.Core.Execution;
 
@@ -53,7 +55,24 @@ public sealed record StepRoute(
     string GameInstanceId,
     string RunId,
     string NodeId,
-    ObservationOwner Owner);
+    ObservationOwner Owner)
+{
+    public static StepRoute ParseJson(JsonElement route)
+    {
+        JsonContract.RequireKeys(route, ["game_instance_id", "run_id", "node_id", "owner"]);
+        var owner = JsonContract.RequireText(route, "owner") switch
+        {
+            "run" => ObservationOwner.Run,
+            "combat" => ObservationOwner.Combat,
+            _ => throw new JsonException("Invalid route owner."),
+        };
+        return new(
+            JsonContract.RequireText(route, "game_instance_id"),
+            JsonContract.RequireText(route, "run_id"),
+            JsonContract.RequireText(route, "node_id"),
+            owner);
+    }
+}
 
 public sealed record StepLocation(
     string GameInstanceId,

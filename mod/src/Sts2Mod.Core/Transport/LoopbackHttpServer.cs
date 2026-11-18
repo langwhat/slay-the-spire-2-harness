@@ -9,18 +9,17 @@ namespace Sts2Mod.Core.Transport;
 /// </summary>
 public interface IModHttpHandlers
 {
-    (int StatusCode, string Json) GetStatus();
-    (int StatusCode, string Json) GetState();
-    Task<(int StatusCode, string Json)> Inspect(string body);
-    Task<(int StatusCode, string Json)> Catalog(string body);
-    (int StatusCode, string Json) SubmitAction(string body);
-    (int StatusCode, string Json) GetControl();
-    (int StatusCode, string Json) SetControl(string body);
-    Task<(int StatusCode, string Json)> PresentMap(string body);
-    Task<(int StatusCode, string Json)> VerifyMapRestoration(string body);
-    (int StatusCode, string Json) GetCheckpointIdentity();
-    (int StatusCode, string Json) SubmitCheckpoint(string body);
-    Task<(int StatusCode, string Json)> PrepareLaboratoryScenario(string body);
+    HttpReply GetStatus();
+    HttpReply GetState();
+    Task<HttpReply> Inspect(string body);
+    Task<HttpReply> Catalog(string body);
+    HttpReply SubmitAction(string body);
+    HttpReply SetControl(string body);
+    Task<HttpReply> PresentMap(string body);
+    Task<HttpReply> VerifyMapRestoration(string body);
+    HttpReply GetCheckpointIdentity();
+    HttpReply SubmitCheckpoint(string body);
+    Task<HttpReply> PrepareLaboratoryScenario(string body);
 }
 
 /// <summary>
@@ -148,21 +147,20 @@ public sealed class LoopbackHttpServer : IDisposable
                     body = Encoding.UTF8.GetString(bytes.ToArray());
             }
 
-            (int StatusCode, string Json) result = (request.HttpMethod, path) switch
+            var result = (request.HttpMethod, path) switch
             {
                 ("GET", "/status") => _handlers.GetStatus(),
                 ("GET", "/state") => _handlers.GetState(),
                 ("POST", "/inspect") => await _handlers.Inspect(body).ConfigureAwait(false),
                 ("POST", "/catalog") => await _handlers.Catalog(body).ConfigureAwait(false),
                 ("POST", "/action") => _handlers.SubmitAction(body),
-                ("GET", "/control") => _handlers.GetControl(),
                 ("POST", "/control") => _handlers.SetControl(body),
                 ("POST", "/map/present") => await _handlers.PresentMap(body).ConfigureAwait(false),
                 ("POST", "/map/restore/verify") => await _handlers.VerifyMapRestoration(body).ConfigureAwait(false),
                 ("GET", "/operator/checkpoint/identity") => _handlers.GetCheckpointIdentity(),
                 ("POST", "/operator/checkpoint") => _handlers.SubmitCheckpoint(body),
                 ("POST", "/operator/eval/scenario") => await _handlers.PrepareLaboratoryScenario(body).ConfigureAwait(false),
-                _ => (400, InvalidRequestReply.Json("Unknown HTTP route or method.", "route")),
+                _ => new HttpReply(400, InvalidRequestReply.Json("Unknown HTTP route or method.", "route")),
             };
 
             await WriteAsync(context.Response, result.StatusCode, result.Json).ConfigureAwait(false);

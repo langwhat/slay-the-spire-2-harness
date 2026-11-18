@@ -15,8 +15,9 @@ public sealed class MapOpeningBarrier(bool ownershipKnown, int maxFrames = 600)
             return false;
         if (!animationIsLive)
             return true;
-        if (++_frames > maxFrames)
-            TimedOut = true;
-        return false;
+        if (++_frames <= maxFrames)
+            return false;
+        TimedOut = true;
+        return true;
     }
 }

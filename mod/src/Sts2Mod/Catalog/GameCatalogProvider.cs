@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Models;
 using Sts2Mod.Core.Catalog;
 using Sts2Mod.Core.Developer;
 using Sts2Mod.Core.Observation;
+using Sts2Mod.Core.Transport;
 using Sts2Mod.Observation;
 
 namespace Sts2Mod.Catalog;
@@ -16,15 +17,15 @@ namespace Sts2Mod.Catalog;
 /// </summary>
 internal sealed class GameCatalogProvider
 {
-    private sealed record CatalogWork(string Body, TaskCompletionSource<(int StatusCode, string Json)> Completion);
+    private sealed record CatalogWork(string Body, TaskCompletionSource<HttpReply> Completion);
     private sealed record ScenarioWork(CombatEvalScenario Recipe, TaskCompletionSource<bool> Completion);
 
     private readonly ConcurrentQueue<CatalogWork> _requests = new();
     private readonly ConcurrentQueue<ScenarioWork> _scenarios = new();
 
-    public Task<(int StatusCode, string Json)> ReadAsync(string body)
+    public Task<HttpReply> ReadAsync(string body)
     {
-        var completion = new TaskCompletionSource<(int StatusCode, string Json)>(
+        var completion = new TaskCompletionSource<HttpReply>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         _requests.Enqueue(new CatalogWork(body, completion));
         return completion.Task;
@@ -79,7 +80,7 @@ internal sealed class GameCatalogProvider
 
         try
         {
-            var language = LocManager.Instance?.Language ?? "eng";
+            var language = LocManager.Instance?.Language ?? "";
             request.Completion.SetResult(CatalogReader.Read(request.Body, Capture, language));
         }
         catch (Exception error)

@@ -50,7 +50,7 @@ internal sealed class LaboratoryService(
         }
     }
 
-    public async Task<(int StatusCode, string Json)> PrepareScenarioAsync(string body, bool checkpointBusy)
+    public async Task<HttpReply> PrepareScenarioAsync(string body, bool checkpointBusy)
     {
         CombatEvalScenario recipe;
         try
@@ -188,19 +188,18 @@ internal sealed class LaboratoryService(
             }
 
             _ownsInput = false;
-            return (200, JsonContract.Serialize(new LaboratoryReply(
+            var completedJson = JsonContract.Serialize(new LaboratoryReply(
                 LaboratoryOutcome.Completed,
                 Error: null,
                 PreparedObservation: prepared,
-                Observation: combatObservation)));
+                Observation: combatObservation));
+            return new HttpReply(200, SemanticText.Json(completedJson, combatObservation.GameLanguage));
         }
         catch (Exception error)
         {
             GD.PrintErr($"[sts2agent] Laboratory scenario setup failed: {error}");
             if (!mutated)
             {
-                _ownsInput = false;
-                _active = false;
                 return Reply(
                     200,
                     LaboratoryOutcome.Rejected,
@@ -212,7 +211,10 @@ internal sealed class LaboratoryService(
         finally
         {
             if (!mutated)
+            {
                 _ownsInput = false;
+                _active = false;
+            }
         }
     }
 
@@ -319,25 +321,30 @@ internal sealed class LaboratoryService(
         return tcs.Task;
     }
 
-    private static (int StatusCode, string Json) Reply(
+    private static HttpReply Reply(
         int statusCode,
         LaboratoryOutcome outcome,
         LaboratoryErrorCode code,
         string message) =>
-        (statusCode, JsonContract.Serialize(new LaboratoryReply(
+        new(statusCode, JsonContract.Serialize(new LaboratoryReply(
             outcome,
             new LaboratoryError(code, message),
             PreparedObservation: null,
             Observation: null)));
 
-    private static (int StatusCode, string Json) Unknown(
+    private static HttpReply Unknown(
         LaboratoryErrorCode code,
-        NativeObservation? prepared) =>
-        (200, JsonContract.Serialize(new LaboratoryReply(
+        NativeObservation? prepared)
+    {
+        var json = JsonContract.Serialize(new LaboratoryReply(
             LaboratoryOutcome.Unknown,
             new LaboratoryError(
                 code,
                 "Laboratory setup did not settle cleanly; keep the instance paused and discard it."),
             PreparedObservation: prepared,
-            Observation: null)));
+            Observation: null));
+        return new HttpReply(
+            200,
+            prepared is null ? json : SemanticText.Json(json, prepared.GameLanguage));
+    }
 }

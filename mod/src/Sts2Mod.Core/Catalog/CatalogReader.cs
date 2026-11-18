@@ -10,23 +10,23 @@ namespace Sts2Mod.Core.Catalog;
 /// </summary>
 public static class CatalogReader
 {
-    public static (int StatusCode, string Json) Read(
+    public static HttpReply Read(
         string body,
         Func<CatalogPublication> capture,
         string gameLanguage)
     {
         var result = ReadCore(body, capture);
-        return (result.StatusCode, SemanticText.Json(result.Json, gameLanguage));
+        return new HttpReply(result.StatusCode, SemanticText.Json(result.Json, gameLanguage));
     }
 
-    public static (int StatusCode, string Json) Unavailable() =>
+    public static HttpReply Unavailable() =>
         Error(
             200,
             ReadOutcome.Failed,
             CatalogErrorCode.CatalogUnavailable,
             "The native definition catalog could not be read.");
 
-    private static (int StatusCode, string Json) ReadCore(string body, Func<CatalogPublication> capture)
+    private static HttpReply ReadCore(string body, Func<CatalogPublication> capture)
     {
         CatalogQuery query;
         try
@@ -232,16 +232,16 @@ public static class CatalogReader
             ? new CardMatch(record.DefinitionId, record.Name, record.Text, card.CardType, card.Rarity, card.Cost)
             : new NonCardMatch(record.Category, record.DefinitionId, record.Name, record.Text);
 
-    private static (int StatusCode, string Json) Completed<T>(T data) =>
-        (200, JsonContract.Serialize(new { status = ReadOutcome.Completed, data }));
+    private static HttpReply Completed<T>(T data) =>
+        new(200, JsonContract.Serialize(new { status = ReadOutcome.Completed, data }));
 
-    private static (int StatusCode, string Json) Error(
+    private static HttpReply Error(
         int http,
         ReadOutcome status,
         CatalogErrorCode code,
         string message,
         ImmutableArray<string>? fields = null) =>
-        (http, JsonContract.Serialize(new
+        new(http, JsonContract.Serialize(new
         {
             status,
             error = new CatalogCause(code, message) { Fields = fields },

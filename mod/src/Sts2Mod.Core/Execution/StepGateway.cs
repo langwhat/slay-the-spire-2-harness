@@ -192,7 +192,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
             return _presentation?.OperationId == operationId && PresentationLocationMatches();
     }
 
-    public (int StatusCode, string Json) Submit(string body)
+    public HttpReply Submit(string body)
     {
         StepRequest request;
         try
@@ -201,14 +201,14 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         }
         catch (JsonException)
         {
-            return (400, InvalidRequestReply.Json(
+            return new HttpReply(400, InvalidRequestReply.Json(
                 "The request does not match the single-step action contract.",
                 "operation_id",
                 "expected_route",
                 "step"));
         }
 
-        return (200, JsonContract.Serialize(SubmitReceipt(request)));
+        return new HttpReply(200, JsonContract.Serialize(SubmitReceipt(request)));
     }
 
     public NativeStepStatus Status()
@@ -511,15 +511,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;
         JsonContract.RequireKeys(root, ["operation_id", "expected_route", "step"]);
-
-        var route = root.GetProperty("expected_route");
-        JsonContract.RequireKeys(route, ["game_instance_id", "run_id", "node_id", "owner"]);
-        var owner = JsonContract.RequireText(route, "owner") switch
-        {
-            "run" => ObservationOwner.Run,
-            "combat" => ObservationOwner.Combat,
-            _ => throw new JsonException(),
-        };
+        var expectedRoute = StepRoute.ParseJson(root.GetProperty("expected_route"));
 
         var raw = root.GetProperty("step");
         var kind = JsonContract.RequireText(raw, "kind") switch
@@ -576,11 +568,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
 
         return new(
             JsonContract.RequireText(root, "operation_id"),
-            new(
-                JsonContract.RequireText(route, "game_instance_id"),
-                JsonContract.RequireText(route, "run_id"),
-                JsonContract.RequireText(route, "node_id"),
-                owner),
+            expectedRoute,
             step);
     }
 }

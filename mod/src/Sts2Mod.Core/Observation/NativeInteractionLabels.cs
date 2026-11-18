@@ -34,10 +34,10 @@ public static class NativeInteractionLabels
         ForLanguage(language)?.Travel ?? destination;
 
     public static string SoldOut(string language) =>
-        ForLanguage(language)?.SoldOut ?? "Sold out";
+        ForLanguage(language)?.SoldOut ?? "sold_out";
 
     public static string CardRemovalService(string language) =>
-        ForLanguage(language)?.CardRemovalService ?? "Card Removal Service";
+        ForLanguage(language)?.CardRemovalService ?? "card_removal_service";
 
     private static Labels? ForLanguage(string language) => language switch
     {

@@ -78,10 +78,7 @@ public sealed class AgentControlState
         return preserveMode;
     }
 
-    public (int StatusCode, string Json) ReadJson() =>
-        (200, JsonContract.Serialize(new ControlReply(Mode)));
-
-    public (int StatusCode, string Json) WriteJson(string body)
+    public HttpReply WriteJson(string body)
     {
         try
         {
@@ -96,11 +93,11 @@ public sealed class AgentControlState
                 "paused" => AgentControlMode.Paused,
                 _ => throw new JsonException("Unsupported control mode."),
             };
-            return (200, JsonContract.Serialize(new ControlReply(SetMode(mode))));
+            return new HttpReply(200, JsonContract.Serialize(new ControlReply(SetMode(mode))));
         }
         catch (JsonException)
         {
-            return (400, InvalidRequestReply.Json("The request does not match the control contract.", "mode"));
+            return new HttpReply(400, InvalidRequestReply.Json("The request does not match the control contract.", "mode"));
         }
     }
 }

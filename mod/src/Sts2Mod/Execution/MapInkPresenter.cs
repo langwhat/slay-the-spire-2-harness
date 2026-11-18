@@ -209,23 +209,11 @@ internal sealed class MapInkPresenter
         catch (Exception exception)
         {
             GD.PrintErr($"[sts2agent] Map presentation failed: {exception}");
-            if (display.OpeningBarrier is not null)
-            {
-                display.OpeningBarrier = new(false);
-                return;
-            }
+            _restorationUncertain = true;
+            display.OpeningBarrier = null;
             display.Outcome = PresentationDrawing.Failed;
             display.Returning = true;
-            try
-            {
-                if (display.Drawing)
-                    display.Capture.Map.Drawings.StopLineLocal();
-            }
-            catch (Exception stopError)
-            {
-                GD.PrintErr($"[sts2agent] Map pen stop failed: {stopError}");
-            }
-            display.Drawing = false;
+            StopDrawingSafely(display);
             try
             {
                 Finish(display);
@@ -233,19 +221,14 @@ internal sealed class MapInkPresenter
             catch (Exception cleanupError)
             {
                 GD.PrintErr($"[sts2agent] Map presentation cleanup failed: {cleanupError}");
-                display.Worker.TrySetException(cleanupError);
-                _gateway.SettlePresentation(
-                    display.Request.OperationId,
-                    PresentationDrawing.Unknown,
-                    PresentationRestoration.Unknown);
-                _display = null;
+                AbortUncertain(display);
             }
         }
     }
 
-    private Task<(int StatusCode, string Json)> SubmitAsync(PresentationRequest request)
+    private Task<HttpReply> SubmitAsync(PresentationRequest request)
     {
-        var response = new TaskCompletionSource<(int, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var response = new TaskCompletionSource<HttpReply>(TaskCreationOptions.RunContinuationsAsynchronously);
         _requests.Enqueue(() =>
         {
             try
@@ -257,7 +240,7 @@ internal sealed class MapInkPresenter
                     () => CaptureSurface(request, requireSettledScroll: false, out captured));
                 if (error is not null)
                 {
-                    response.SetResult((200, JsonContract.Serialize(new RejectedStep(request.OperationId, error))));
+                    response.SetResult(new HttpReply(200, JsonContract.Serialize(new RejectedStep(request.OperationId, error))));
                     return;
                 }
 
@@ -265,7 +248,7 @@ internal sealed class MapInkPresenter
                 _restorationUncertain = false;
                 var display = _display = new(request, captured!);
                 _gateway.TrackPresentationWorker(request.OperationId, display.Worker.Task);
-                response.SetResult((200, JsonContract.Serialize(new PendingStep(request.OperationId))));
+                response.SetResult(new HttpReply(200, JsonContract.Serialize(new PendingStep(request.OperationId))));
 
                 if (captured!.WasOpen)
                 {
@@ -274,7 +257,6 @@ internal sealed class MapInkPresenter
                     return;
                 }
 
-                display.OpeningBarrier = new(false);
                 try
                 {
                     captured.Map.Open();
@@ -285,8 +267,9 @@ internal sealed class MapInkPresenter
                 {
                     GD.PrintErr($"[sts2agent] Map presentation open failed: {exception}");
                     _restorationUncertain = true;
+                    display.OpeningBarrier = null;
                     display.Outcome = PresentationDrawing.Failed;
-                    display.OpeningBarrier = new(false);
+                    display.Returning = true;
                 }
             }
             catch (Exception exception)
@@ -297,9 +280,9 @@ internal sealed class MapInkPresenter
         return response.Task;
     }
 
-    private Task<(int StatusCode, string Json)> VerifyAsync(PresentationVerificationRequest request)
+    private Task<HttpReply> VerifyAsync(PresentationVerificationRequest request)
     {
-        var response = new TaskCompletionSource<(int, string)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var response = new TaskCompletionSource<HttpReply>(TaskCreationOptions.RunContinuationsAsynchronously);
         _requests.Enqueue(() =>
         {
             try
@@ -307,7 +290,7 @@ internal sealed class MapInkPresenter
                 var error = _gateway.BeginPresentationVerification(request.OperationId, request.Route);
                 if (error is not null)
                 {
-                    response.SetResult((200, JsonContract.Serialize(new RejectedStep(request.OperationId, error))));
+                    response.SetResult(new HttpReply(200, JsonContract.Serialize(new RejectedStep(request.OperationId, error))));
                     return;
                 }
 
@@ -326,7 +309,7 @@ internal sealed class MapInkPresenter
 
                 _gateway.FinishPresentationVerification(request.OperationId, result);
                 var status = _gateway.Presentation!;
-                response.SetResult((200, JsonContract.Serialize(new
+                response.SetResult(new HttpReply(200, JsonContract.Serialize(new
                 {
                     operation_id = request.OperationId,
                     status = StepOutcome.Completed,
@@ -364,7 +347,7 @@ internal sealed class MapInkPresenter
         if (ObservationHub.Current.Reply is not CompletedStateRead current)
             return new(StepErrorCode.ActionUnavailable, "Map capture failed: the current public state is unavailable.");
 
-        var points = Descendants(map).OfType<NMapPoint>().ToDictionary(
+        var points = NodeHierarchy.Descendants(map).OfType<NMapPoint>().ToDictionary(
             point => MapObserver.NodePosition(point.Point.coord),
             StringComparer.Ordinal);
         foreach (var edge in request.Edges)
@@ -376,14 +359,14 @@ internal sealed class MapInkPresenter
         }
 
         var overlay = NOverlayStack.Instance?.Peek();
-        var controls = (overlay is Node node ? Descendants(node) : Descendants(map.GetTree().Root))
+        var controls = (overlay is Node node ? NodeHierarchy.Descendants(node) : NodeHierarchy.Descendants(map.GetTree().Root))
             .OfType<NClickableControl>()
             .Where(control => control.IsVisibleInTree() && control.IsEnabled)
             .ToArray();
 
         var firstPoint = points[request.Edges[0].From];
-        var scroll = Ancestors(firstPoint).OfType<ScrollContainer>().FirstOrDefault();
-        var pan = Ancestors(firstPoint).OfType<Control>().FirstOrDefault(control => control.Name == "TheMap");
+        var scroll = NodeHierarchy.Ancestors(firstPoint).OfType<ScrollContainer>().FirstOrDefault();
+        var pan = NodeHierarchy.Ancestors(firstPoint).OfType<Control>().FirstOrDefault(control => control.Name == "TheMap");
         if (pan?.GetParent() is not CanvasItem)
             pan = null;
         if (pan is null)
@@ -680,10 +663,36 @@ internal sealed class MapInkPresenter
         catch (Exception exception)
         {
             GD.PrintErr($"[sts2agent] Map animation state unavailable: {exception}");
-            _restorationUncertain = true;
-            display.OpeningBarrier = new(false);
+            AbortUncertain(display);
             return true;
         }
+    }
+
+    private void AbortUncertain(ActiveDisplay display)
+    {
+        _restorationUncertain = true;
+        display.OpeningBarrier = null;
+        StopDrawingSafely(display);
+        display.Worker.TrySetResult();
+        _gateway.SettlePresentation(
+            display.Request.OperationId,
+            PresentationDrawing.Failed,
+            PresentationRestoration.Unknown);
+        _display = null;
+    }
+
+    private static void StopDrawingSafely(ActiveDisplay display)
+    {
+        try
+        {
+            if (display.Drawing)
+                display.Capture.Map.Drawings.StopLineLocal();
+        }
+        catch (Exception stopError)
+        {
+            GD.PrintErr($"[sts2agent] Map pen stop failed: {stopError}");
+        }
+        display.Drawing = false;
     }
 
     private static int Approach(int value, int target) =>
@@ -716,21 +725,5 @@ internal sealed class MapInkPresenter
         var next = pan.Position + parent.GetGlobalTransformWithCanvas().AffineInverse().BasisXform(offsetToCenter * 0.15f);
         capture.ScrollTarget.Set(next);
         pan.Position = next;
-    }
-
-    private static IEnumerable<Node> Descendants(Node node)
-    {
-        foreach (var child in node.GetChildren())
-        {
-            yield return child;
-            foreach (var descendant in Descendants(child))
-                yield return descendant;
-        }
-    }
-
-    private static IEnumerable<Node> Ancestors(Node node)
-    {
-        for (var parent = node.GetParent(); parent is not null; parent = parent.GetParent())
-            yield return parent;
     }
 }

@@ -29,7 +29,7 @@ public sealed class DeveloperContractTests
         Assert.False(MainMenuReadinessRules.IsRunStartReady(settled with { SubmenusOpen = true }));
 
         var parsed = HeadlessRunConfiguration.Parse("{\"character\":\"SILENT\",\"ascension\":7,\"seed\":\"SEED123\"}");
-        Assert.Equal("SILENT", parsed.Character);
+        Assert.Equal(StandardCharacter.Silent, parsed.Character);
         Assert.Equal(7, parsed.Ascension);
         Assert.Equal("SEED123", parsed.Seed);
 
@@ -123,6 +123,45 @@ public sealed class DeveloperContractTests
 
         var noRunPub = new NativeReadPublication(new FailedStateRead(new ReadCause(NativeReadError.NoRun, "None.")));
         Assert.IsType<FailedCheckpointIdentityRead>(CheckpointIdentityReader.Read(noRunPub));
+
+        var formattedRun = new RunStateView(
+            PublicInputControl.Ready,
+            new PublicProgress(1, 3, 1, "map:0:0", "monster", "[gold]Underdocks[/gold]", "ACT.UNDERDOCKS"),
+            new RunPlayer("Ironclad", "CHARACTER.IRONCLAD", 80, 80, 99, 3, 3, 5, 3, 0),
+            [],
+            [],
+            [],
+            null,
+            ObservationPhase.Run,
+            RunScreen.Map,
+            [],
+            [])
+        {
+            CardRarityOffset = -0.05f,
+        };
+        var identityPub = new NativeReadPublication(new CompletedStateRead(new NativeObservation(
+            new ObservationStamp("game-1", 1),
+            new ObservationLocation("game-1", "run-1", "node-1", ObservationOwner.Run),
+            "eng",
+            NativeInputReadiness.Ready,
+            formattedRun,
+            ImmutableDictionary<string, ObservedObject>.Empty,
+            ImmutableDictionary<string, string?>.Empty.Add("card:1:1", "Gain [img]res://energy_red.png[/img]."),
+            ImmutableDictionary<string, CardModifierDescriptions>.Empty,
+            ImmutableDictionary<string, UpgradePreview>.Empty,
+            ImmutableDictionary<string, ImmutableArray<GeneratedCard>>.Empty,
+            [],
+            new RunRules(0, []))))
+        {
+            CheckpointIdentities = new CheckpointIdentityFacts([], [], [], [], []),
+        };
+        using var identityDoc = JsonDocument.Parse(CheckpointIdentityReader.ReadJson(identityPub));
+        Assert.Equal(
+            "Underdocks",
+            identityDoc.RootElement.GetProperty("observation").GetProperty("state").GetProperty("progress").GetProperty("name").GetString());
+        Assert.Equal(
+            "Gain 1 energy.",
+            identityDoc.RootElement.GetProperty("observation").GetProperty("descriptions").GetProperty("card:1:1").GetString());
     }
 
     [Fact]
@@ -185,14 +224,11 @@ public sealed class DeveloperContractTests
         Assert.Throws<InvalidOperationException>(() => ReplayPresentation.Parse("instant", headless: false, replay: true));
 
         var activated = 0;
-        var restored = 0;
         var lifecycle = new ReplayPresentationLifecycle(enabled: true);
-        Assert.True(lifecycle.Activate(() => activated++, () => restored++));
-        Assert.False(lifecycle.Activate(() => activated++, () => restored++));
-        Assert.True(lifecycle.Restore());
-        Assert.True(lifecycle.Restore());
+        Assert.True(lifecycle.Activate(() => activated++));
+        Assert.False(lifecycle.Activate(() => activated++));
+        Assert.True(lifecycle.Active);
         Assert.Equal(1, activated);
-        Assert.Equal(1, restored);
 
         var scale = ReplayTimeScale.Parse("2.5", headless: true, replay: true)!;
         Assert.Equal(2.5, scale.BaseScale);

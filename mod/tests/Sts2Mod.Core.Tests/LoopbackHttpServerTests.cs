@@ -12,22 +12,21 @@ public sealed class LoopbackHttpServerTests
 {
     private sealed class FakeHandlers : IModHttpHandlers
     {
-        public Func<(int StatusCode, string Json)> OnStatus { get; set; } = static () => (200, "{\"route\":\"status\"}");
-        public Func<string, Task<(int StatusCode, string Json)>> OnInspect { get; set; } =
-            static body => Task.FromResult((200, $"{{\"route\":\"inspect\",\"body\":{body}}}"));
+        public Func<HttpReply> OnStatus { get; set; } = static () => new(200, "{\"route\":\"status\"}");
+        public Func<string, Task<HttpReply>> OnInspect { get; set; } =
+            static body => Task.FromResult(new HttpReply(200, $"{{\"route\":\"inspect\",\"body\":{body}}}"));
 
-        public (int StatusCode, string Json) GetStatus() => OnStatus();
-        public (int StatusCode, string Json) GetState() => (200, "{\"route\":\"state\"}");
-        public Task<(int StatusCode, string Json)> Inspect(string body) => OnInspect(body);
-        public Task<(int StatusCode, string Json)> Catalog(string body) => Task.FromResult((200, "{\"route\":\"catalog\"}"));
-        public (int StatusCode, string Json) SubmitAction(string body) => (200, "{\"route\":\"action\"}");
-        public (int StatusCode, string Json) GetControl() => (200, "{\"route\":\"get_control\"}");
-        public (int StatusCode, string Json) SetControl(string body) => (200, "{\"route\":\"set_control\"}");
-        public Task<(int StatusCode, string Json)> PresentMap(string body) => Task.FromResult((200, "{\"route\":\"present\"}"));
-        public Task<(int StatusCode, string Json)> VerifyMapRestoration(string body) => Task.FromResult((200, "{\"route\":\"verify\"}"));
-        public (int StatusCode, string Json) GetCheckpointIdentity() => (200, "{\"route\":\"checkpoint_identity\"}");
-        public (int StatusCode, string Json) SubmitCheckpoint(string body) => (200, "{\"route\":\"checkpoint\"}");
-        public Task<(int StatusCode, string Json)> PrepareLaboratoryScenario(string body) => Task.FromResult((200, "{\"route\":\"scenario\"}"));
+        public HttpReply GetStatus() => OnStatus();
+        public HttpReply GetState() => new(200, "{\"route\":\"state\"}");
+        public Task<HttpReply> Inspect(string body) => OnInspect(body);
+        public Task<HttpReply> Catalog(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"catalog\"}"));
+        public HttpReply SubmitAction(string body) => new(200, "{\"route\":\"action\"}");
+        public HttpReply SetControl(string body) => new(200, "{\"route\":\"set_control\"}");
+        public Task<HttpReply> PresentMap(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"present\"}"));
+        public Task<HttpReply> VerifyMapRestoration(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"verify\"}"));
+        public HttpReply GetCheckpointIdentity() => new(200, "{\"route\":\"checkpoint_identity\"}");
+        public HttpReply SubmitCheckpoint(string body) => new(200, "{\"route\":\"checkpoint\"}");
+        public Task<HttpReply> PrepareLaboratoryScenario(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"scenario\"}"));
     }
 
     private static int AllocateLoopbackPort()
@@ -49,7 +48,6 @@ public sealed class LoopbackHttpServerTests
 
         Assert.Equal("{\"route\":\"status\"}", await client.GetStringAsync("/status"));
         Assert.Equal("{\"route\":\"state\"}", await client.GetStringAsync("/state"));
-        Assert.Equal("{\"route\":\"get_control\"}", await client.GetStringAsync("/control"));
         Assert.Equal("{\"route\":\"checkpoint_identity\"}", await client.GetStringAsync("/operator/checkpoint/identity"));
 
         using var emptyInspect = await client.PostAsync("/inspect", new StringContent("", Encoding.UTF8, "application/json"));
@@ -75,7 +73,7 @@ public sealed class LoopbackHttpServerTests
     }
 
     [Fact]
-    public async Task UnknownRoutesQueryStringsAndOversizedBodies_ReturnHttp400InvalidRequest()
+    public async Task UnknownRoutesDisallowedMethodsQueryStringsAndOversizedBodies_ReturnHttp400InvalidRequest()
     {
         var handlers = new FakeHandlers();
         var port = AllocateLoopbackPort();
@@ -88,6 +86,9 @@ public sealed class LoopbackHttpServerTests
         Assert.Equal(HttpStatusCode.BadRequest, unknown.StatusCode);
         using var unknownDoc = JsonDocument.Parse(await unknown.Content.ReadAsStringAsync());
         Assert.Equal("invalid_request", unknownDoc.RootElement.GetProperty("error").GetProperty("code").GetString());
+
+        using var getControl = await client.GetAsync("/control");
+        Assert.Equal(HttpStatusCode.BadRequest, getControl.StatusCode);
 
         using var withQuery = await client.GetAsync("/status?extra=1");
         Assert.Equal(HttpStatusCode.BadRequest, withQuery.StatusCode);
@@ -111,7 +112,7 @@ public sealed class LoopbackHttpServerTests
             {
                 entered.TrySetResult();
                 await release.Task;
-                return (200, "{\"ok\":true}");
+                return new HttpReply(200, "{\"ok\":true}");
             },
         };
 

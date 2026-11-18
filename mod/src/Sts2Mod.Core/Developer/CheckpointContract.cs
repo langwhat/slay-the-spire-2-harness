@@ -260,6 +260,15 @@ public static class CheckpointIdentityReader
                 NativeReadError.ReadUnavailable,
                 "Native identity evidence is unavailable for this publication.")),
         };
+
+    public static string ReadJson(NativeReadPublication publication)
+    {
+        var read = Read(publication);
+        var json = JsonContract.Serialize(read);
+        return read is CompletedCheckpointIdentityRead completed
+            ? SemanticText.Json(json, completed.Observation.GameLanguage)
+            : json;
+    }
 }
 
 /// <summary>

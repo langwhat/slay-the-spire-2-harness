@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Text.Json;
-using Sts2Mod.Core.Observation;
 using Sts2Mod.Core.Transport;
 
 namespace Sts2Mod.Core.Execution;
@@ -12,17 +11,17 @@ public sealed record PresentationRequest(string OperationId, StepRoute Route, IR
 public sealed record PresentationVerificationRequest(string OperationId, StepRoute Route);
 
 public sealed class MapPresentationTransport(
-    Func<PresentationRequest, Task<(int StatusCode, string Json)>> present,
-    Func<PresentationVerificationRequest, Task<(int StatusCode, string Json)>> verify)
+    Func<PresentationRequest, Task<HttpReply>> present,
+    Func<PresentationVerificationRequest, Task<HttpReply>> verify)
 {
-    public Task<(int StatusCode, string Json)> Present(string body)
+    public Task<HttpReply> Present(string body)
     {
         try
         {
             using var document = Parse(body, includeEdges: true);
             var root = document.RootElement;
             var operationId = JsonContract.RequireText(root, "operation_id");
-            var route = ParseRoute(root.GetProperty("expected_route"));
+            var route = StepRoute.ParseJson(root.GetProperty("expected_route"));
             var edges = root.GetProperty("edges");
             if (edges.ValueKind != JsonValueKind.Array || edges.GetArrayLength() == 0)
                 throw new JsonException();
@@ -43,7 +42,7 @@ public sealed class MapPresentationTransport(
         }
         catch (JsonException)
         {
-            return Task.FromResult((400, InvalidRequestReply.Json(
+            return Task.FromResult(new HttpReply(400, InvalidRequestReply.Json(
                 "The request is invalid.",
                 "operation_id",
                 "expected_route",
@@ -51,19 +50,19 @@ public sealed class MapPresentationTransport(
         }
     }
 
-    public Task<(int StatusCode, string Json)> Verify(string body)
+    public Task<HttpReply> Verify(string body)
     {
         try
         {
             using var document = Parse(body, includeEdges: false);
             var root = document.RootElement;
             var operationId = JsonContract.RequireText(root, "operation_id");
-            var route = ParseRoute(root.GetProperty("expected_route"));
+            var route = StepRoute.ParseJson(root.GetProperty("expected_route"));
             return verify(new(operationId, route));
         }
         catch (JsonException)
         {
-            return Task.FromResult((400, InvalidRequestReply.Json(
+            return Task.FromResult(new HttpReply(400, InvalidRequestReply.Json(
                 "The request is invalid.",
                 "operation_id",
                 "expected_route")));
@@ -86,22 +85,6 @@ public sealed class MapPresentationTransport(
             document.Dispose();
             throw;
         }
-    }
-
-    private static StepRoute ParseRoute(JsonElement route)
-    {
-        JsonContract.RequireKeys(route, ["game_instance_id", "run_id", "node_id", "owner"]);
-        var owner = JsonContract.RequireText(route, "owner") switch
-        {
-            "run" => ObservationOwner.Run,
-            "combat" => ObservationOwner.Combat,
-            _ => throw new JsonException(),
-        };
-        return new(
-            JsonContract.RequireText(route, "game_instance_id"),
-            JsonContract.RequireText(route, "run_id"),
-            JsonContract.RequireText(route, "node_id"),
-            owner);
     }
 
     private static bool IsMapCoordinateId(string value)

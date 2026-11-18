@@ -85,23 +85,6 @@ public sealed class JsonContractTests
     }
 
     [Fact]
-    public void SerializeCanonical_SortsObjectPropertiesOrdinallyAndPreservesArrayOrder()
-    {
-        var payload = new Dictionary<string, object>
-        {
-            ["z_key"] = new[] { "b", "a" },
-            ["a_key"] = new Dictionary<string, int>
-            {
-                ["second"] = 2,
-                ["first"] = 1,
-            },
-        };
-
-        var canonical = JsonContract.SerializeCanonical(payload);
-        Assert.Equal("{\"a_key\":{\"first\":1,\"second\":2},\"z_key\":[\"b\",\"a\"]}", canonical);
-    }
-
-    [Fact]
     public void ValidationHelpersAndErrorReplies_MatchWireSchema()
     {
         using var document = JsonDocument.Parse("{\"id\":\"op-1\",\"opt\":\"ok\"}");

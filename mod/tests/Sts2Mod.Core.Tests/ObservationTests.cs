@@ -301,7 +301,9 @@ public sealed class ObservationTests
 
         Assert.Equal("Open shop", NativeInteractionLabels.Operation("eng", InteractionOperation.OpenShop));
         Assert.Equal("\u6253\u5f00\u5546\u5e97", NativeInteractionLabels.Operation("zhs", InteractionOperation.OpenShop));
-        Assert.Equal("open_shop", NativeInteractionLabels.Operation("unknown", InteractionOperation.OpenShop));
+        Assert.Equal("open_shop", NativeInteractionLabels.Operation("", InteractionOperation.OpenShop));
+        Assert.Equal("sold_out", NativeInteractionLabels.SoldOut(""));
+        Assert.Equal("card_removal_service", NativeInteractionLabels.CardRemovalService(""));
         Assert.Equal("map:1:2", NativeInteractionLabels.Travel("unknown", "map:1:2"));
 
         var odds = UnknownRoomOddsMath.Compute(0.10m, 0.05m, 0.02m, 0.03m, ["event", "monster", "shop"]);

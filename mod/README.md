@@ -26,4 +26,4 @@ Build `mod/src/Sts2Mod/Sts2Mod.csproj` in `Release` and copy the two output arti
 - `mod/src/Sts2Mod/bin/Release/net9.0/sts2agent.dll`
 - `mod/src/Sts2Mod/bin/Release/net9.0/mod_manifest.json`
 
-By default the Mod listens on `http://127.0.0.1:17877` (override with `STS2AGENT_PORT`). Developer checkpoint and laboratory endpoints are disabled unless `STS2AGENT_ENABLE_CHECKPOINTS=true` or `STS2AGENT_ENABLE_DEV_SCENARIOS=1` is set in the game environment.
+By default the Mod listens on `http://127.0.0.1:17877` (override with `STS2AGENT_PORT`). Developer checkpoint and laboratory endpoints are enabled only when running under Godot headless display mode with `STS2_ALLOW_CHECKPOINTS=true`.

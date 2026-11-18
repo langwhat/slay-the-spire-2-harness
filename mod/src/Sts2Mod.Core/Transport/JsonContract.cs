@@ -1,11 +1,10 @@
 using System.Collections.Immutable;
-using System.IO;
-using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Sts2Mod.Core.Transport;
+
+public readonly record struct HttpReply(int StatusCode, string Json);
 
 /// <summary>
 /// Strict UTF-8 JSON contract shared across HTTP endpoints, observations, catalogs, and developer tools.
@@ -63,21 +62,6 @@ public static class JsonContract
         }
     }
 
-    public static string SerializeCanonical<T>(T value)
-    {
-        using var document = JsonDocument.Parse(Serialize(value));
-        using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
-        {
-            Indented = false,
-            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        }))
-        {
-            WriteCanonical(writer, document.RootElement);
-        }
-        return Encoding.UTF8.GetString(stream.ToArray());
-    }
-
     public static string Wire<T>(T value) where T : struct, Enum =>
         JsonNamingPolicy.SnakeCaseLower.ConvertName(value.ToString());
 
@@ -117,32 +101,6 @@ public static class JsonContract
                 return true;
         }
         return false;
-    }
-
-    private static void WriteCanonical(Utf8JsonWriter writer, JsonElement value)
-    {
-        switch (value.ValueKind)
-        {
-            case JsonValueKind.Object:
-                writer.WriteStartObject();
-                foreach (var property in value.EnumerateObject()
-                             .OrderBy(static property => property.Name, StringComparer.Ordinal))
-                {
-                    writer.WritePropertyName(property.Name);
-                    WriteCanonical(writer, property.Value);
-                }
-                writer.WriteEndObject();
-                break;
-            case JsonValueKind.Array:
-                writer.WriteStartArray();
-                foreach (var item in value.EnumerateArray())
-                    WriteCanonical(writer, item);
-                writer.WriteEndArray();
-                break;
-            default:
-                value.WriteTo(writer);
-                break;
-        }
     }
 }
 

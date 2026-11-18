@@ -219,12 +219,12 @@ public sealed class StepGatewayAndRulesTests
             request =>
             {
                 capturedPresent = request;
-                return Task.FromResult((200, "{\"ok\":true}"));
+                return Task.FromResult(new HttpReply(200, "{\"ok\":true}"));
             },
             request =>
             {
                 capturedVerify = request;
-                return Task.FromResult((200, "{\"verified\":true}"));
+                return Task.FromResult(new HttpReply(200, "{\"verified\":true}"));
             });
 
         var validPresent = """
@@ -242,15 +242,15 @@ public sealed class StepGatewayAndRulesTests
               ]
             }
             """;
-        var (presentCode, _) = await transport.Present(validPresent);
-        Assert.Equal(200, presentCode);
+        var presentReply = await transport.Present(validPresent);
+        Assert.Equal(200, presentReply.StatusCode);
         Assert.NotNull(capturedPresent);
         Assert.Equal(2, capturedPresent!.Edges.Count);
 
-        var (badEdgesCode, _) = await transport.Present(validPresent.Replace("map:1:1", "invalid:coord"));
-        Assert.Equal(400, badEdgesCode);
+        var badEdgesReply = await transport.Present(validPresent.Replace("map:1:1", "invalid:coord"));
+        Assert.Equal(400, badEdgesReply.StatusCode);
 
-        var (verifyCode, _) = await transport.Verify("""
+        var verifyReply = await transport.Verify("""
             {
               "operation_id": "map-1",
               "expected_route": {
@@ -261,7 +261,7 @@ public sealed class StepGatewayAndRulesTests
               }
             }
             """);
-        Assert.Equal(200, verifyCode);
+        Assert.Equal(200, verifyReply.StatusCode);
         Assert.Equal("map-1", capturedVerify!.OperationId);
 
         var unknownBarrier = new MapOpeningBarrier(ownershipKnown: false, maxFrames: 2);
@@ -271,8 +271,7 @@ public sealed class StepGatewayAndRulesTests
         Assert.False(barrier.Advance(animationIsLive: true));
         Assert.False(barrier.Advance(animationIsLive: true));
         Assert.False(barrier.TimedOut);
-        Assert.False(barrier.Advance(animationIsLive: true));
+        Assert.True(barrier.Advance(animationIsLive: true));
         Assert.True(barrier.TimedOut);
-        Assert.True(barrier.Advance(animationIsLive: false));
     }
 }

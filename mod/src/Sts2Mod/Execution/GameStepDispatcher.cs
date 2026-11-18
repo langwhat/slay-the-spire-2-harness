@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
@@ -65,12 +66,12 @@ internal sealed class GameStepDispatcher
 
     public NativeReadPublication Project(NativeReadPublication publication) => _gateway.Project(publication);
 
-    public (int StatusCode, string Json) Submit(string body) => _gateway.Submit(body);
+    public HttpReply Submit(string body) => _gateway.Submit(body);
 
     public NativeStepStatus CurrentStatus() => _gateway.Status();
 
-    public (int StatusCode, string Json) StatusJson() =>
-        (200, JsonContract.Serialize(_gateway.Status()));
+    public HttpReply StatusJson() =>
+        new(200, JsonContract.Serialize(_gateway.Status()));
 
     public void ClearOnRunReset() => _gateway.ClearReceiptOnRunReset();
 
@@ -525,7 +526,17 @@ internal sealed class GameStepDispatcher
 
         if (screen is NChooseABundleSelectionScreen bundleScreen)
         {
-            var bundle = Descendants(bundleScreen)
+            if (step.Refs.IsEmpty)
+            {
+                var skip = bundleScreen.GetNodeOrNull<NClickableControl>("%SkipButton");
+                if (skip is null || !IsControlUsable(skip))
+                    return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native skip control is unavailable.");
+                _touched = true;
+                skip.EmitSignal(NClickableControl.SignalName.Released, skip);
+                return null;
+            }
+
+            var bundle = NodeHierarchy.Descendants(bundleScreen)
                 .OfType<NCardBundle>()
                 .SingleOrDefault(candidate => registry.GetRef(candidate.Bundle) == step.Refs.Single());
             if (bundle is null || !IsControlUsable(bundle.Hitbox))
@@ -547,7 +558,7 @@ internal sealed class GameStepDispatcher
             {
                 var skip = screen is NChooseACardSelectionScreen
                     ? screen.GetNodeOrNull<NClickableControl>("SkipButton")
-                    : FindRewardSkipButton((NCardRewardSelectionScreen)screen);
+                    : NodeHierarchy.FindRewardSkipButton((NCardRewardSelectionScreen)screen);
                 if (skip is null || !IsControlUsable(skip))
                     return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native skip control is unavailable.");
                 _touched = true;
@@ -555,7 +566,7 @@ internal sealed class GameStepDispatcher
                 return null;
             }
 
-            var holder = Descendants(screen)
+            var holder = NodeHierarchy.Descendants(screen)
                 .OfType<NCardHolder>()
                 .SingleOrDefault(candidate => ReferenceEquals(candidate.CardModel, cards.Single()));
             if (holder is null || !holder.IsVisibleInTree())
@@ -598,6 +609,13 @@ internal sealed class GameStepDispatcher
         var merchant = NMerchantRoom.Instance?.Inventory
                        ?? (NEventRoom.Instance?.CustomEventNode as NFakeMerchant)?.Inventory;
         var shopWasOpen = merchant?.IsOpen;
+        var sphereEntity = NOverlayStack.Instance?.Peek() is NCrystalSphereScreen sphereScreen
+            ? typeof(NCrystalSphereScreen).GetField("_entity", PrivateInstance)?.GetValue(sphereScreen) as CrystalSphereMinigame
+            : null;
+        var sphereTool = sphereEntity?.CrystalSphereTool;
+        var sphereCount = sphereEntity?.DivinationCount;
+        var ancientLayout = NEventRoom.Instance?.Layout as NAncientEventLayout;
+        var ancientLine = ReadAncientDialogueLine(ancientLayout);
 
         _gateway.TrackNativeAcceptance(request, () =>
             !GodotObject.IsInstanceValid(control)
@@ -606,9 +624,23 @@ internal sealed class GameStepDispatcher
             || control is NClickableControl { IsEnabled: false }
             || control is NCardHolder { Hitbox.IsEnabled: false }
             || control is NEventOptionButton { Option.WasChosen: true }
+            || (control is NCrystalSphereCell cell
+                && (!cell.Entity.IsHidden || (sphereEntity is not null && sphereEntity.DivinationCount != sphereCount)))
+            || (control is NDivinationButton
+                && sphereEntity is not null
+                && sphereEntity.CrystalSphereTool != sphereTool)
+            || (control is NAncientDialogueHitbox
+                && ancientLayout is not null
+                && GodotObject.IsInstanceValid(ancientLayout)
+                && ReadAncientDialogueLine(ancientLayout) != ancientLine)
             || (!mapWasOpen && NMapScreen.Instance?.IsOpen == true)
             || (merchant is not null && GodotObject.IsInstanceValid(merchant) && merchant.IsOpen != shopWasOpen));
     }
+
+    private static int? ReadAncientDialogueLine(NAncientEventLayout? layout) =>
+        layout is null
+            ? null
+            : typeof(NAncientEventLayout).GetField("_currentDialogueLine", PrivateInstance)?.GetValue(layout) as int?;
 
     private static async Task ObserveNativeFailureAsync(string operationId, Task completion)
     {
@@ -663,7 +695,7 @@ internal sealed class GameStepDispatcher
 
     private bool AdvanceConfirmation(Node screen)
     {
-        var confirm = Descendants(screen)
+        var confirm = NodeHierarchy.Descendants(screen)
             .OfType<NConfirmButton>()
             .FirstOrDefault(button => IsControlUsable(button) && !_pressedConfirmations.Contains(button));
         if (confirm is null)
@@ -671,31 +703,6 @@ internal sealed class GameStepDispatcher
         _pressedConfirmations.Add(confirm);
         confirm.EmitSignal(NClickableControl.SignalName.Released, confirm);
         return true;
-    }
-
-    private static NClickableControl? FindRewardSkipButton(NCardRewardSelectionScreen screen)
-    {
-        var alternatives = RunSurfaceLifecycle.GetCardRewardAlternatives(screen);
-        var buttons = screen.GetNode<Control>("UI/RewardAlternatives").GetChildren()
-            .OfType<NCardRewardAlternativeButton>()
-            .Where(button => !button.IsQueuedForDeletion())
-            .ToArray();
-        for (var index = 0; index < Math.Min(alternatives.Count, buttons.Length); index++)
-        {
-            if (string.Equals(alternatives[index].OptionId, "SKIP", StringComparison.OrdinalIgnoreCase))
-                return buttons[index];
-        }
-        return null;
-    }
-
-    private static IEnumerable<Node> Descendants(Node node)
-    {
-        foreach (var child in node.GetChildren())
-        {
-            yield return child;
-            foreach (var nested in Descendants(child))
-                yield return nested;
-        }
     }
 
     private static bool IsControlUsable(NClickableControl control) =>

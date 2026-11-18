@@ -1,6 +1,16 @@
 using System.Collections.Immutable;
+using Sts2Mod.Core.Transport;
 
 namespace Sts2Mod.Core.Observation;
+
+public enum UnknownRoomKind
+{
+    Monster,
+    Elite,
+    Treasure,
+    Shop,
+    Event,
+}
 
 public sealed record UnknownRoomOdds(
     decimal Monster,
@@ -18,7 +28,14 @@ public sealed record UnknownRoomOdds(
 /// </summary>
 public static class UnknownRoomOddsMath
 {
-    private static readonly string[] BandOrder = ["monster", "elite", "treasure", "shop", "event"];
+    private static readonly UnknownRoomKind[] BandOrder =
+    [
+        UnknownRoomKind.Monster,
+        UnknownRoomKind.Elite,
+        UnknownRoomKind.Treasure,
+        UnknownRoomKind.Shop,
+        UnknownRoomKind.Event,
+    ];
 
     public static UnknownRoomOdds Compute(
         decimal monsterWeight,
@@ -27,48 +44,79 @@ public static class UnknownRoomOddsMath
         decimal shopWeight,
         ImmutableArray<string> allowedRoomTypes)
     {
-        var allowed = allowedRoomTypes.ToHashSet(StringComparer.Ordinal);
-        var ordered = BandOrder.Where(allowed.Contains).ToImmutableArray();
-        var fallback = allowed.Contains("event")
-            ? "event"
-            : ordered.Length > 0 ? ordered[0] : "monster";
-
-        var probabilities = new Dictionary<string, decimal>(StringComparer.Ordinal)
+        var allowed = new HashSet<UnknownRoomKind>();
+        foreach (var raw in allowedRoomTypes)
         {
-            ["monster"] = 0m,
-            ["elite"] = 0m,
-            ["treasure"] = 0m,
-            ["shop"] = 0m,
-            ["event"] = 0m,
+            if (TryParseKind(raw, out var kind))
+                allowed.Add(kind);
+        }
+
+        var ordered = BandOrder.Where(allowed.Contains).ToImmutableArray();
+        var fallback = allowed.Contains(UnknownRoomKind.Event)
+            ? UnknownRoomKind.Event
+            : ordered.Length > 0 ? ordered[0] : UnknownRoomKind.Monster;
+
+        var probabilities = new Dictionary<UnknownRoomKind, decimal>
+        {
+            [UnknownRoomKind.Monster] = 0m,
+            [UnknownRoomKind.Elite] = 0m,
+            [UnknownRoomKind.Treasure] = 0m,
+            [UnknownRoomKind.Shop] = 0m,
+            [UnknownRoomKind.Event] = 0m,
         };
 
         decimal cumulative = 0m;
         var bands = new[]
         {
-            ("monster", monsterWeight),
-            ("elite", eliteWeight),
-            ("treasure", treasureWeight),
-            ("shop", shopWeight),
+            (UnknownRoomKind.Monster, monsterWeight),
+            (UnknownRoomKind.Elite, eliteWeight),
+            (UnknownRoomKind.Treasure, treasureWeight),
+            (UnknownRoomKind.Shop, shopWeight),
         };
 
-        foreach (var (name, weight) in bands)
+        foreach (var (kind, weight) in bands)
         {
-            if (!allowed.Contains(name) || weight < 0m)
+            if (!allowed.Contains(kind) || weight < 0m)
                 continue;
             var prior = Math.Min(cumulative, 1m);
             cumulative += weight;
-            probabilities[name] += Math.Max(0m, Math.Min(cumulative, 1m) - prior);
+            probabilities[kind] += Math.Max(0m, Math.Min(cumulative, 1m) - prior);
         }
 
         probabilities[fallback] += Math.Max(0m, 1m - Math.Min(cumulative, 1m));
 
         return new UnknownRoomOdds(
-            Rounded(probabilities["monster"]),
-            Rounded(probabilities["elite"]),
-            Rounded(probabilities["treasure"]),
-            Rounded(probabilities["shop"]),
-            Rounded(probabilities["event"]),
-            ordered);
+            Rounded(probabilities[UnknownRoomKind.Monster]),
+            Rounded(probabilities[UnknownRoomKind.Elite]),
+            Rounded(probabilities[UnknownRoomKind.Treasure]),
+            Rounded(probabilities[UnknownRoomKind.Shop]),
+            Rounded(probabilities[UnknownRoomKind.Event]),
+            ordered.Select(JsonContract.Wire).ToImmutableArray());
+    }
+
+    private static bool TryParseKind(string value, out UnknownRoomKind kind)
+    {
+        switch (value)
+        {
+            case "monster":
+                kind = UnknownRoomKind.Monster;
+                return true;
+            case "elite":
+                kind = UnknownRoomKind.Elite;
+                return true;
+            case "treasure":
+                kind = UnknownRoomKind.Treasure;
+                return true;
+            case "shop":
+                kind = UnknownRoomKind.Shop;
+                return true;
+            case "event":
+                kind = UnknownRoomKind.Event;
+                return true;
+            default:
+                kind = default;
+                return false;
+        }
     }
 
     private static decimal Rounded(decimal value) =>

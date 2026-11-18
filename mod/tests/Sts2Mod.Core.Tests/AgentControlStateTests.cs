@@ -54,18 +54,19 @@ public sealed class AgentControlStateTests
     }
 
     [Fact]
-    public void ReadAndWriteJson_EnforceControlContract()
+    public void WriteJson_EnforcesControlContract()
     {
         var control = new AgentControlState();
 
-        var (readCode, readJson) = control.ReadJson();
-        Assert.Equal(200, readCode);
-        Assert.Equal("{\"mode\":\"paused\"}", readJson);
-
-        var (writeCode, writeJson) = control.WriteJson("{\"mode\":\"running\"}");
-        Assert.Equal(200, writeCode);
-        Assert.Equal("{\"mode\":\"running\"}", writeJson);
+        var writeReply = control.WriteJson("{\"mode\":\"running\"}");
+        Assert.Equal(200, writeReply.StatusCode);
+        Assert.Equal("{\"mode\":\"running\"}", writeReply.Json);
         Assert.True(control.IsRunning);
+
+        var pauseReply = control.WriteJson("{\"mode\":\"paused\"}");
+        Assert.Equal(200, pauseReply.StatusCode);
+        Assert.Equal("{\"mode\":\"paused\"}", pauseReply.Json);
+        Assert.False(control.IsRunning);
 
         foreach (var invalid in new[]
                  {
@@ -75,9 +76,9 @@ public sealed class AgentControlStateTests
                      "{\"mode\":\"paused\",\"extra\":1}",
                  })
         {
-            var (code, json) = control.WriteJson(invalid);
-            Assert.Equal(400, code);
-            using var doc = JsonDocument.Parse(json);
+            var reply = control.WriteJson(invalid);
+            Assert.Equal(400, reply.StatusCode);
+            using var doc = JsonDocument.Parse(reply.Json);
             Assert.Equal("invalid_request", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
         }
     }

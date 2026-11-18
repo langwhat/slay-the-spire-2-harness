@@ -172,38 +172,35 @@ public static class ModEntry
         CheckpointService checkpoints,
         LaboratoryService laboratory) : IModHttpHandlers
     {
-        public (int StatusCode, string Json) GetStatus() => steps.StatusJson();
+        public HttpReply GetStatus() => steps.StatusJson();
 
-        public (int StatusCode, string Json) GetState() => (200, ObservationHub.ReadJson());
+        public HttpReply GetState() => new(200, ObservationHub.ReadJson());
 
-        public Task<(int StatusCode, string Json)> Inspect(string body) =>
+        public Task<HttpReply> Inspect(string body) =>
             Task.FromResult(ObservationHub.InspectJson(body));
 
-        public Task<(int StatusCode, string Json)> Catalog(string body) =>
+        public Task<HttpReply> Catalog(string body) =>
             ModEntry.Catalog.ReadAsync(body);
 
-        public (int StatusCode, string Json) SubmitAction(string body) =>
+        public HttpReply SubmitAction(string body) =>
             steps.Submit(body);
 
-        public (int StatusCode, string Json) GetControl() =>
-            ControlState.ReadJson();
-
-        public (int StatusCode, string Json) SetControl(string body) =>
+        public HttpReply SetControl(string body) =>
             ControlState.WriteJson(body);
 
-        public Task<(int StatusCode, string Json)> PresentMap(string body) =>
+        public Task<HttpReply> PresentMap(string body) =>
             steps.MapPresentation.Present(body);
 
-        public Task<(int StatusCode, string Json)> VerifyMapRestoration(string body) =>
+        public Task<HttpReply> VerifyMapRestoration(string body) =>
             steps.MapPresentation.Verify(body);
 
-        public (int StatusCode, string Json) GetCheckpointIdentity() =>
+        public HttpReply GetCheckpointIdentity() =>
             checkpoints.ReadIdentity();
 
-        public (int StatusCode, string Json) SubmitCheckpoint(string body) =>
+        public HttpReply SubmitCheckpoint(string body) =>
             checkpoints.Submit(body, otherDeveloperWorkBusy: laboratory.OwnsInput || HeadlessStarter.IsActive);
 
-        public Task<(int StatusCode, string Json)> PrepareLaboratoryScenario(string body) =>
+        public Task<HttpReply> PrepareLaboratoryScenario(string body) =>
             laboratory.PrepareScenarioAsync(body, checkpointBusy: checkpoints.OwnsInput || HeadlessStarter.IsActive);
     }
 }

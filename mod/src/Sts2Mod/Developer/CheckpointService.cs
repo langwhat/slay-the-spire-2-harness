@@ -57,18 +57,18 @@ internal sealed class CheckpointService(
     public bool Enabled => enabled;
     public bool OwnsInput => _ownsInput;
 
-    public (int StatusCode, string Json) ReadIdentity()
+    public HttpReply ReadIdentity()
     {
         if (!enabled)
         {
-            return (400, InvalidRequestReply.Json(
+            return new HttpReply(400, InvalidRequestReply.Json(
                 "Development checkpoints are disabled for this launch.",
                 "checkpoint"));
         }
-        return (200, ObservationHub.ReadCheckpointIdentityJson());
+        return new HttpReply(200, ObservationHub.ReadCheckpointIdentityJson());
     }
 
-    public (int StatusCode, string Json) Submit(string body, bool otherDeveloperWorkBusy)
+    public HttpReply Submit(string body, bool otherDeveloperWorkBusy)
     {
         if (!enabled)
         {
@@ -414,7 +414,7 @@ internal sealed class CheckpointService(
         return ProjectSettings.GlobalizePath(store.GetFullPath(key));
     }
 
-    private (int StatusCode, string Json) RejectBeforeDispatch(
+    private HttpReply RejectBeforeDispatch(
         string commandId,
         CheckpointErrorCode code,
         string nativeReason)
@@ -455,7 +455,7 @@ internal sealed class CheckpointService(
         // Leave _ownsInput = true so subsequent mutations do not race an uncertain native state.
     }
 
-    private (int StatusCode, string Json) StatusReply(string commandId)
+    private HttpReply StatusReply(string commandId)
     {
         if (_commands.Get(commandId) is { } entry)
             return Reply(200, entry.Reply);
@@ -466,6 +466,6 @@ internal sealed class CheckpointService(
                 new CheckpointCause(CheckpointErrorCode.NotFound, "No checkpoint command has this ID in this process.")));
     }
 
-    private static (int StatusCode, string Json) Reply(int statusCode, CheckpointReply reply) =>
-        (statusCode, JsonContract.Serialize(reply));
+    private static HttpReply Reply(int statusCode, CheckpointReply reply) =>
+        new(statusCode, JsonContract.Serialize(reply));
 }

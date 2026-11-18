@@ -1,5 +1,6 @@
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -85,8 +86,12 @@ internal sealed class IdentityLifecycle
             RegisterCreature(creature);
     }
 
-    public void RegisterCreature(Creature creature) =>
+    public void RegisterCreature(Creature creature)
+    {
+        if (creature.Player is not null && LocalContext.IsMe(creature.Player))
+            return;
         Registry.Register(creature, creature.IsEnemy ? PublicObjectKind.Enemy : PublicObjectKind.Ally);
+    }
 
     public void RegisterCard(CardModel card) =>
         Registry.Register(card, PublicObjectKind.Card);

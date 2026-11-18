@@ -6,6 +6,7 @@ using MegaCrit.Sts2.addons.mega_text;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Combat.History.Entries;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Ancients;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -66,7 +67,7 @@ internal static class CombatInputProbe
 
         var candidates = targetType == TargetType.AnyEnemy
             ? combat.HittableEnemies
-            : combat.Creatures;
+            : combat.Allies.Where(creature => creature.Player is null || !LocalContext.IsMe(creature.Player));
         return candidates.Where(creature => creature.IsAlive && isValidTarget(creature)).ToArray();
     }
 
@@ -169,7 +170,6 @@ internal static class ObservationHub
     public static IdentityLifecycle? Identities { get; private set; }
     public static string GameInstanceId => GameId;
     public static long CurrentRunInstanceId => RunSequencer.Current;
-    public static long CurrentSequence => Interlocked.Read(ref _sequence);
     public static bool IsTerminalLatched => _terminal;
     public static bool CheckpointIdentityEnabled { get; set; }
     public static Func<NativeReadPublication, NativeReadPublication>? ProjectForRead { get; set; }
@@ -177,10 +177,9 @@ internal static class ObservationHub
     public static NativeReadPublication Current => Volatile.Read(ref _current);
     private static NativeReadPublication ForRead => ProjectForRead?.Invoke(Current) ?? Current;
 
-    public static StateReadReply ReadState() => ForRead.Reply;
     public static string ReadJson() => ObservationReader.Read(ForRead);
-    public static (int StatusCode, string Json) InspectJson(string body) => ObservationReader.Inspect(ForRead, body);
-    public static string ReadCheckpointIdentityJson() => JsonContract.Serialize(CheckpointIdentityReader.Read(Current));
+    public static HttpReply InspectJson(string body) => ObservationReader.Inspect(ForRead, body);
+    public static string ReadCheckpointIdentityJson() => CheckpointIdentityReader.ReadJson(Current);
 
     public static void Initialize()
     {
@@ -246,7 +245,7 @@ internal static class ObservationHub
             var combat = CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsEnding
                 ? CombatManager.Instance.DebugOnlyGetState()
                 : null;
-            var language = LocManager.Instance?.Language ?? "eng";
+            var language = LocManager.Instance?.Language ?? "";
 
             var observer = new GameObserver(registry, run, combat, runInstanceId, language);
             var player = run.Players.Single();
@@ -385,7 +384,10 @@ internal sealed class GameObserver(
 
         var enemies = combat!.Enemies.Where(creature => creature.IsAlive).Select(ObserveEnemy).ToImmutableArray();
         var inactive = combat.Enemies.Where(creature => !creature.IsAlive).Select(ObserveEnemy).ToImmutableArray();
-        var allies = combat.Allies.Where(creature => creature.Player is null).Select(ObserveAlly).ToImmutableArray();
+        var allies = combat.Allies
+            .Where(creature => creature.Player is null || !LocalContext.IsMe(creature.Player))
+            .Select(ObserveAlly)
+            .ToImmutableArray();
         var actor = player.Creature;
 
         var readiness = pending is not null
@@ -969,11 +971,17 @@ internal sealed class GameObserver(
                 _descriptions[reference] = null;
             }
 
-            var prompt = new LocString("gameplay_ui", "CHOOSE_CARD_HEADER").GetFormattedText();
+            var prompt = new LocString("gameplay_ui", "CHOOSE_A_PACK").GetFormattedText();
+            var skipButton = bundleScreen.GetNodeOrNull<NClickableControl>("%SkipButton");
+            var canSkip = typeof(NChooseABundleSelectionScreen)
+                              .GetField("_canSkip", BindingFlags.Instance | BindingFlags.NonPublic)
+                              ?.GetValue(bundleScreen) is true
+                          && skipButton is { IsEnabled: true }
+                          && skipButton.IsVisibleInTree();
             return new SelectionView(
                 prompt,
                 null,
-                1,
+                canSkip ? 0 : 1,
                 1,
                 bundles.Select(bundle => registry.GetRef(bundle.Bundle)).ToImmutableArray(),
                 []);
@@ -1047,7 +1055,7 @@ internal sealed class GameObserver(
         if (treasure is null)
             return false;
 
-        foreach (var holder in Descendants(treasure).OfType<NTreasureRoomRelicHolder>())
+        foreach (var holder in NodeHierarchy.Descendants(treasure).OfType<NTreasureRoomRelicHolder>())
         {
             if (!holder.IsVisibleInTree() || RunSurfaceLifecycle.GetInitializedTreasureRelic(holder) is not { } relic)
                 continue;
@@ -1063,7 +1071,7 @@ internal sealed class GameObserver(
 
     private void ObserveRewards(NRewardsScreen screen, bool active)
     {
-        foreach (var button in screen.GetNode<Control>("%RewardsContainer").GetChildren().OfType<NRewardButton>())
+        foreach (var button in NodeHierarchy.Descendants(screen.GetNode<Control>("%RewardsContainer")).OfType<NRewardButton>())
         {
             if (button.Reward is not { } reward || (active && !button.IsVisibleInTree()))
                 continue;
@@ -1102,6 +1110,9 @@ internal sealed class GameObserver(
                     kind = OfferKind.Gold;
                     amount = gold.Amount;
                     break;
+                case CardRemovalReward or CardUpgradeReward:
+                    kind = OfferKind.Service;
+                    break;
                 default:
                     throw new InvalidOperationException("The native reward has no supported public content.");
             }
@@ -1113,7 +1124,11 @@ internal sealed class GameObserver(
             _offers.Add(new OfferView(reference, kind, contents, [action])
             {
                 Amount = amount,
-                RequiresSelection = kind == OfferKind.Card ? reward is CardReward : null,
+                RequiresSelection = kind == OfferKind.Card
+                    ? reward is CardReward
+                    : reward is CardRemovalReward or CardUpgradeReward
+                        ? true
+                        : null,
             });
         }
 
@@ -1165,23 +1180,8 @@ internal sealed class GameObserver(
         if (!RunSurfaceLifecycle.TryGetRewardChoice(screen, out var choice))
             throw new InvalidOperationException("Native reward choice was not registered before publication.");
 
-        var alternatives = RunSurfaceLifecycle.GetCardRewardAlternatives(screen);
-        var buttons = screen.GetNode<Control>("UI/RewardAlternatives").GetChildren()
-            .OfType<NCardRewardAlternativeButton>()
-            .Where(button => !button.IsQueuedForDeletion())
-            .ToArray();
-
-        var canSkip = false;
-        for (var index = 0; index < Math.Min(alternatives.Count, buttons.Length); index++)
-        {
-            if (string.Equals(alternatives[index].OptionId, "SKIP", StringComparison.OrdinalIgnoreCase)
-                && buttons[index].IsVisibleInTree()
-                && buttons[index].IsEnabled)
-            {
-                canSkip = true;
-                break;
-            }
-        }
+        var canSkip = NodeHierarchy.FindRewardSkipButton(screen) is { IsEnabled: true } skip
+                      && skip.IsVisibleInTree();
 
         return new SelectionView(
             new LocString("gameplay_ui", "CHOOSE_CARD_HEADER").GetFormattedText(),
@@ -1268,7 +1268,7 @@ internal sealed class GameObserver(
 
         if (NMerchantRoom.Instance is { } room && ReferenceEquals(room.Inventory, inventory) && ShopInputProbe.IsCurrent(room))
         {
-            foreach (var back in Descendants(inventory).OfType<NBackButton>().Where(ShopInputProbe.IsVisible))
+            foreach (var back in NodeHierarchy.Descendants(inventory).OfType<NBackButton>().Where(ShopInputProbe.IsVisible))
             {
                 AddInteraction(
                     back,
@@ -1295,7 +1295,7 @@ internal sealed class GameObserver(
             return;
         }
 
-        foreach (var back in Descendants(inventory).OfType<NBackButton>())
+        foreach (var back in NodeHierarchy.Descendants(inventory).OfType<NBackButton>())
             ObserveButton(back, operation: InteractionOperation.CloseShop);
 
         if (NMerchantRoom.Instance is { } otherRoom)
@@ -1361,12 +1361,12 @@ internal sealed class GameObserver(
         if (NEventRoom.Instance?.CustomEventNode is NFakeMerchant fake)
         {
             ObserveButton(fake.MerchantButton, reference, operation: InteractionOperation.OpenShop);
-            foreach (var proceed in Descendants(fake).OfType<NProceedButton>())
+            foreach (var proceed in NodeHierarchy.Descendants(fake).OfType<NProceedButton>())
                 ObserveButton(proceed, reference, operation: InteractionOperation.LeaveShop);
         }
         else if (NEventRoom.Instance?.CustomEventNode is Node custom)
         {
-            foreach (var button in Descendants(custom).OfType<NClickableControl>())
+            foreach (var button in NodeHierarchy.Descendants(custom).OfType<NClickableControl>())
                 ObserveButton(button, reference);
         }
 
@@ -1390,20 +1390,38 @@ internal sealed class GameObserver(
                 cell.IsEnabled && cell.Entity.IsHidden && entity.DivinationCount > 0);
         }
 
-        var bigLabel = new LocString("events", "CRYSTAL_SPHERE.button.DIVINATION_LABEL_BIG").GetFormattedText();
-        var smallLabel = new LocString("events", "CRYSTAL_SPHERE.button.DIVINATION_LABEL_SMALL").GetFormattedText();
-        ObserveButton(
-            screen.GetNode<NClickableControl>("%BigDivinationButton"),
-            fallbackLabel: string.IsNullOrWhiteSpace(bigLabel) ? "Large divination" : bigLabel);
-        ObserveButton(
-            screen.GetNode<NClickableControl>("%SmallDivinationButton"),
-            fallbackLabel: string.IsNullOrWhiteSpace(smallLabel) ? "Small divination" : smallLabel);
+        var bigButton = screen.GetNode<NClickableControl>("%BigDivinationButton");
+        if (!bigButton.IsQueuedForDeletion() && bigButton.IsVisibleInTree())
+        {
+            var bigLabel = DisplayedButtonLabel(bigButton)
+                           ?? new LocString("events", "CRYSTAL_SPHERE.button.DIVINATION_LABEL_BIG").GetFormattedText();
+            AddInteraction(
+                bigButton,
+                bigLabel,
+                bigButton.IsEnabled
+                && entity.DivinationCount > 0
+                && entity.CrystalSphereTool != CrystalSphereMinigame.CrystalSphereToolType.Big);
+        }
+
+        var smallButton = screen.GetNode<NClickableControl>("%SmallDivinationButton");
+        if (!smallButton.IsQueuedForDeletion() && smallButton.IsVisibleInTree())
+        {
+            var smallLabel = DisplayedButtonLabel(smallButton)
+                             ?? new LocString("events", "CRYSTAL_SPHERE.button.DIVINATION_LABEL_SMALL").GetFormattedText();
+            AddInteraction(
+                smallButton,
+                smallLabel,
+                smallButton.IsEnabled
+                && entity.DivinationCount > 0
+                && entity.CrystalSphereTool != CrystalSphereMinigame.CrystalSphereToolType.Small);
+        }
+
         ObserveButton(screen.GetNode<NClickableControl>("%ProceedButton"), operation: InteractionOperation.Proceed);
     }
 
     private void ObserveMapInteractions(NMapScreen map)
     {
-        foreach (var point in Descendants(map).OfType<NMapPoint>())
+        foreach (var point in NodeHierarchy.Descendants(map).OfType<NMapPoint>())
         {
             if (!point.IsVisibleInTree())
                 continue;
@@ -1461,9 +1479,11 @@ internal sealed class GameObserver(
         {
             NBackButton or NMerchantButton or NMapPoint or NTreasureButton => null,
             NProceedButton => (typeof(NProceedButton).GetField("_label", PrivateInstance)?.GetValue(button) as MegaLabel)?.Text,
-            NAncientDialogueHitbox => (typeof(NAncientDialogueHitbox).GetField("_label", PrivateInstance)?.GetValue(button) as MegaLabel)?.Text,
-            _ => Descendants(button).OfType<RichTextLabel>().Select(text => text.Text)
-                .Concat(Descendants(button).OfType<Label>().Select(text => text.Text))
+            NAncientDialogueHitbox => NEventRoom.Instance?.Layout is NAncientEventLayout ancientLayout
+                ? (typeof(NAncientEventLayout).GetField("_fakeNextButtonLabel", PrivateInstance)?.GetValue(ancientLayout) as MegaLabel)?.Text
+                : null,
+            _ => NodeHierarchy.Descendants(button).OfType<RichTextLabel>().Select(text => text.Text)
+                .Concat(NodeHierarchy.Descendants(button).OfType<Label>().Select(text => text.Text))
                 .FirstOrDefault(text => !string.IsNullOrEmpty(text)),
         };
 
@@ -1510,14 +1530,4 @@ internal sealed class GameObserver(
             MegaCrit.Sts2.Core.Entities.Creatures.HpDisplay.InfiniteWithoutNumbers => (null, null, HpDisplay.Infinite),
             _ => (null, null, HpDisplay.Unknown),
         };
-
-    private static IEnumerable<Node> Descendants(Node node)
-    {
-        foreach (var child in node.GetChildren())
-        {
-            yield return child;
-            foreach (var nested in Descendants(child))
-                yield return nested;
-        }
-    }
 }
