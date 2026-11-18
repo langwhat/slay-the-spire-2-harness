@@ -365,6 +365,8 @@ internal sealed class CheckpointService(
             mapScreen.IsTraveling = false;
             mapScreen.SetTravelEnabled(enabled: true);
             mapScreen.Open();
+            // This map frontier bypasses room entry, which normally unpauses the action executor.
+            RunManager.Instance.ActionExecutor.Unpause();
 
             await game.Transition.FadeIn();
 

@@ -170,6 +170,7 @@ internal static class ObservationHub
     public static IdentityLifecycle? Identities { get; private set; }
     public static string GameInstanceId => GameId;
     public static long CurrentRunInstanceId => RunSequencer.Current;
+    public static bool IsRunActive => RunSequencer.IsActive;
     public static bool IsTerminalLatched => _terminal;
     public static bool CheckpointIdentityEnabled { get; set; }
     public static Func<NativeReadPublication, NativeReadPublication>? ProjectForRead { get; set; }
@@ -233,15 +234,16 @@ internal static class ObservationHub
                 return;
             }
 
-            var registry = Identities?.Registry ?? throw new IdentityUnregisteredException();
             var run = RunManager.Instance.DebugOnlyGetState();
-            if (run is null || run.Players.Count == 0)
+            // Native setup installs the run state before RunStarted registers its identities.
+            if (!RunSequencer.IsActive || run is null || run.Players.Count == 0)
             {
                 Volatile.Write(ref _current, Failure(NativeReadError.ReadUnavailable, "Native run state is not ready."));
                 return;
             }
 
-            var runInstanceId = RunSequencer.EnsureRunStarted();
+            var registry = Identities?.Registry ?? throw new IdentityUnregisteredException();
+            var runInstanceId = RunSequencer.Current;
             var combat = CombatManager.Instance.IsInProgress && !CombatManager.Instance.IsEnding
                 ? CombatManager.Instance.DebugOnlyGetState()
                 : null;
@@ -476,11 +478,10 @@ internal sealed class GameObserver(
             if (hasActiveEvent)
                 currentEvent = ObserveEvent(publishControls: false);
         }
-        else if (NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: true } activeMap
-                 && !hasActiveEvent
-                 && overlay is not (NRewardsScreen or NCardRewardSelectionScreen))
+        // The native map covers the overlay stack, which can still retain settled rewards.
+        else if (NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: true } map)
         {
-            ObserveMapInteractions(activeMap);
+            ObserveMapInteractions(map);
             screen = RunScreen.Map;
         }
         else if (overlay is NCrystalSphereScreen sphere)
@@ -510,11 +511,6 @@ internal sealed class GameObserver(
                     screen = RunScreen.Shop;
             }
         }
-        else if (NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: true } map)
-        {
-            ObserveMapInteractions(map);
-            screen = RunScreen.Map;
-        }
         else if (run.CurrentRoom?.RoomType == RoomType.Shop && NMerchantRoom.Instance is { } merchant)
         {
             ObserveShop(merchant.Inventory);
@@ -533,21 +529,18 @@ internal sealed class GameObserver(
         if (screen == RunScreen.Other && run.CurrentRoom is null)
             screen = RunScreen.Transition;
 
+        var hasEnabledInteraction = _interactions.Any(action => action.Enabled);
         var selectionReady = selection is not null
-                             && (screen != RunScreen.Rewards || _interactions.Any(action => action.Enabled));
-        var eventWaiting = screen == RunScreen.Event
-                           && selection is null
-                           && !_interactions.Any(action => action.Enabled);
+                             && (screen != RunScreen.Rewards || hasEnabledInteraction);
 
         var readiness = selectionReady
             ? NativeInputReadiness.Selection
             : selection is not null
                 ? NativeInputReadiness.Busy
-                : !eventWaiting
+                : hasEnabledInteraction
                   && CombatInputProbe.IsRunInputActionIdle()
                   && !RunManager.Instance.IsChangingRooms
                   && screen is not (RunScreen.Transition or RunScreen.Other)
-                  && (screen != RunScreen.Rest || _interactions.Any(action => action.Enabled))
                     ? NativeInputReadiness.Ready
                     : NativeInputReadiness.Busy;
 

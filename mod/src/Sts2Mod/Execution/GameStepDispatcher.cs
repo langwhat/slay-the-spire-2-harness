@@ -159,7 +159,10 @@ internal sealed class GameStepDispatcher
                 observation.Stamp.ObservationSequence);
         }
 
-        if (RunManager.Instance.IsInProgress && !RunManager.Instance.IsCleaningUp && ObservationHub.Identities?.Registry is { } registry)
+        if (ObservationHub.IsRunActive
+            && RunManager.Instance.IsInProgress
+            && !RunManager.Instance.IsCleaningUp
+            && ObservationHub.Identities?.Registry is { } registry)
         {
             var location = new StepLocation(
                 ObservationHub.GameInstanceId,

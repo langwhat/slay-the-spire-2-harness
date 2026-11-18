@@ -80,14 +80,16 @@ public sealed class IdentityTests
         Assert.False(sequencer.HasStarted);
         Assert.False(sequencer.IsActive);
 
-        Assert.Equal(1, sequencer.EnsureRunStarted());
+        Assert.Equal(0, sequencer.Current);
+        Assert.Equal(1, sequencer.BeginRun());
         Assert.True(sequencer.HasStarted);
         Assert.True(sequencer.IsActive);
-        Assert.Equal(1, sequencer.EnsureRunStarted());
+        Assert.Equal(1, sequencer.Current);
 
         sequencer.MarkRunEnded();
         Assert.False(sequencer.IsActive);
-        Assert.Equal(2, sequencer.EnsureRunStarted());
-        Assert.Equal(3, sequencer.BeginRun());
+        Assert.Equal(1, sequencer.Current);
+        Assert.Equal(2, sequencer.BeginRun());
+        Assert.True(sequencer.IsActive);
     }
 }

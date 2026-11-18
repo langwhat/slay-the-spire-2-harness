@@ -19,6 +19,11 @@ Run the offline unit tests and, when local game assemblies are available, compil
 
 `mod/Directory.Build.props` resolves `$(GameDir)` from `STS2_GAME_DIR` or standard Steam installation directories on macOS, Linux, and Windows.
 
+The Mod and NativeTemplate builds are verified against Slay the Spire 2 v0.113.1.
+For isolated headless runs, install the built Mod in a frozen game bundle and use
+a native template generated from the same game assembly. Pass that bundle's
+executable and the template manifest with `sts2 headless --game` and `--template`.
+
 ## Install for Local Gameplay
 
 Build `mod/src/Sts2Mod/Sts2Mod.csproj` in `Release` and copy the two output artifacts into `<SlayTheSpire2>/mods/sts2agent/`:

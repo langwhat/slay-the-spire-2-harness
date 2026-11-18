@@ -21,7 +21,5 @@ public sealed class RunInstanceSequencer
         return _current;
     }
 
-    public long EnsureRunStarted() => _active ? _current : BeginRun();
-
     public void MarkRunEnded() => _active = false;
 }
