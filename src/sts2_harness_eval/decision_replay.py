@@ -183,6 +183,10 @@ class DecisionRun(DeckAgent):
     def _reward_view(self, observation: native.Observation) -> native.Observation:
         return observation
 
+    def _accepts_tools(self, tools: ToolCatalog) -> bool:
+        # Each replay variant supplies its own Run or Deck catalog.
+        return True
+
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
     ) -> ActionProposal | QueryToolResult | LocalProgress:
@@ -639,7 +643,6 @@ async def rebuild_case(
             case.configured_guidance,
         )
 
-    definitions = tools.definitions
     agent = DecisionRun(
         lambda: client,
         tools,
@@ -648,7 +651,6 @@ async def rebuild_case(
         materials=selected,
         user_input=UserInputQueue() if case.viewer else None,
     )
-    tools.definitions = definitions
     agent.variant = variant
     task, observation = await agent.restore(case, game, execution, documents)
     prepared = await agent.prepared()

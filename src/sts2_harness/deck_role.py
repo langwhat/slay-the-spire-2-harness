@@ -27,7 +27,6 @@ from sts2_harness.deck import (
     adding_selection,
     deck_context,
     deck_observation,
-    deck_tools,
 )
 from sts2_harness.diagnostics import Diagnostics
 from sts2_harness.execution.recovery import ToolRecoveryBudget
@@ -103,7 +102,11 @@ class DeckAgent(RunAgent):
         self._choice: PendingCardChoice | None = None
         self.resolution: CardResolution | None = None
         self.feedback: CardResolution | None = None
-        tools.definitions = deck_tools(tools.definitions)
+        if not self._accepts_tools(tools):
+            raise ValueError("DeckAgent requires a focused Deck tool catalog")
+
+    def _accepts_tools(self, tools: ToolCatalog) -> bool:
+        return tuple(tool.name for tool in tools.definitions) == (ToolName.RUN_DECK_CHOICE,)
 
     def _reward_view(self, observation: native.Observation) -> native.Observation:
         state = observation.state

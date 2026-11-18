@@ -16,16 +16,20 @@ from test_run import handoff
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.context.models import RunActContent, RunActHandoffContent
+from sts2_harness.deck_role import DeckAgent
+from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.fights import Fight, FightKind
 from sts2_harness.game import RunEnded, RunEndReason
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import AutomaticSnapshot, ResultSnapshot, RunTaskSnapshot
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import AssistantMessage
+from sts2_harness.llm.messages import AssistantMessage, ModelClient
 from sts2_harness.loop import DefaultFlow
 from sts2_harness.note_values import NotesState
+from sts2_harness.notes import Notes
 from sts2_harness.results import ActionCompleted, ActionUnknown, ReadCompleted
+from sts2_harness.tools import ToolCatalog, ToolName
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness.user_input_values import UserInput
 from sts2_harness_eval._replay import ReplayRejected
@@ -1140,3 +1144,33 @@ def test_deck_guidance_uses_only_the_focused_offer_and_its_selection(
             assert all(doc.auto_roles is not MISSING for doc in lookups[0].documents)
 
     asyncio.run(scenario())
+
+
+def test_deck_agent_rejects_a_run_tool_catalog() -> None:
+    async def unused_observe() -> native.Observation:
+        raise AssertionError
+
+    async def unused_inspect(query: native.InspectQuery) -> native.InspectReply:
+        raise AssertionError(query)
+
+    async def unused_catalog(request: native.CatalogRequest) -> native.CatalogReply:
+        raise AssertionError(request)
+
+    def catalog(*, focused_deck: bool) -> ToolCatalog:
+        return ToolCatalog(
+            native.DecisionOwner.RUN,
+            observe=unused_observe,
+            inspect=unused_inspect,
+            catalog=unused_catalog,
+            notes=Notes(""),
+            focused_deck=focused_deck,
+        )
+
+    def unused_model() -> ModelClient:
+        raise AssertionError
+
+    with pytest.raises(ValueError, match="focused Deck tool catalog"):
+        DeckAgent(unused_model, catalog(focused_deck=False), ToolRecoveryBudget())
+    focused = catalog(focused_deck=True)
+    DeckAgent(unused_model, focused, ToolRecoveryBudget())
+    assert [tool.name for tool in focused.definitions] == [ToolName.RUN_DECK_CHOICE]

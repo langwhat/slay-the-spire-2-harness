@@ -6,11 +6,10 @@ from enum import StrEnum
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.knowledge import DocumentView, GuidanceContent
-from sts2_harness.llm.messages import TextMessage, TextRole, ToolDefinition
+from sts2_harness.llm.messages import TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.prompts import PromptReader, deck_act_prompt
 from sts2_harness.results import Outcome
-from sts2_harness.tools import ToolName
 
 
 class CardChoiceKind(StrEnum):
@@ -62,10 +61,6 @@ def deck_context(
     if documents:
         system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
     return Context(native.DecisionOwner.RUN, system=system, minimal=minimal, focused_deck=True)
-
-
-def deck_tools(definitions: tuple[ToolDefinition, ...]) -> tuple[ToolDefinition, ...]:
-    return tuple(tool for tool in definitions if tool.name == ToolName.RUN_DECK_CHOICE)
 
 
 def deck_observation(
