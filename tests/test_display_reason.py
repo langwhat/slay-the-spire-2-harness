@@ -28,10 +28,12 @@ from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
 from sts2_harness.interactive import InteractiveOptions, run_interactive
 from sts2_harness.journal import Journal
+from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.client import Llm
 from sts2_harness.notes import Notes
 from sts2_harness.results import ActionToolResult, OutcomeStatus
 from sts2_harness.tools import ToolCatalog, ToolName
+from sts2_harness.user_input import UserInputQueue
 
 
 def test_mod_client_display_validates_contract_and_execution_display_is_best_effort() -> None:
@@ -212,6 +214,10 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
         async def accept(self, outcome: ActionToolResult) -> None:
             assert outcome.outcome.status is OutcomeStatus.STOPPED
 
+    async def read_materials(observation: native.Observation) -> tuple[DocumentView, ...]:
+        material_reads.append(observation)
+        return ()
+
     async def record_display(text: str) -> native.DisplayReply:
         published.append(text)
         return native.DisplayReply(status=native.DisplayStatus.SHOWN)
@@ -235,7 +241,11 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
         )
     )
 
-    def deck_model(_request: httpx.Request) -> httpx.Response:
+    deck_requests: list[str] = []
+    material_reads: list[native.Observation] = []
+
+    def deck_model(request: httpx.Request) -> httpx.Response:
+        deck_requests.append(request.content.decode())
         return httpx.Response(
             200, content=next(responses), headers={"Content-Type": "text/event-stream"}
         )
@@ -298,10 +308,14 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
                 tools,
                 ToolRecoveryBudget(),
                 offer_ref="offer:1",
+                materials=read_materials,
+                user_input=UserInputQueue(),
             )
             reward_route = native.RouteKey.model_validate(reward_obs.location.model_dump())
             decision = await deck.decide(ActTask(reward_route), reward_obs)
             assert isinstance(decision, LocalProgress)
             assert published == ["Skip redundant attack to keep draw lean."]
+            assert len(material_reads) == 1
+            assert "[viewer]" in deck_requests[0]
 
     asyncio.run(exercise())

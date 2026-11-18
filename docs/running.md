@@ -32,7 +32,7 @@ by the model adapter fail explicitly before connection.
 ## Live user input
 
 `STS2_USER_INPUT=true` lets `start` and `headless` accept live viewer input on
-`127.0.0.1:17879` and adds the viewer rule to the Run and Combat system prompts; `--input-port PORT`
+`127.0.0.1:17879` and adds the viewer rule to the Run, Deck, and Combat system prompts; `--input-port PORT`
 selects another port. It requires builtin driving and is off by default, which leaves the prompts
 unchanged.
 

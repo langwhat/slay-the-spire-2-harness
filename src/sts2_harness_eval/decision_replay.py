@@ -271,7 +271,13 @@ class DecisionRun(DeckAgent):
     ) -> Context:
         if self.variant is DecisionVariant.RUN:
             return RunAgent._initial_context(self, documents, observation)
-        return deck_context(self._prompts, documents, observation, minimal=self._tools.minimal)
+        return deck_context(
+            self._prompts,
+            documents,
+            observation,
+            minimal=self._tools.minimal,
+            viewer_input=self._user_input is not None,
+        )
 
     async def restore(
         self,

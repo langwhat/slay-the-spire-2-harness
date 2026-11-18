@@ -35,6 +35,7 @@ def deck_context(
     observation: native.Observation,
     *,
     minimal: bool,
+    viewer_input: bool = False,
 ) -> Context:
     blocks: tuple[str | MaterialText, ...] = (
         prompts.read("deck-tasks"),
@@ -47,6 +48,8 @@ def deck_context(
         "\n",
         prompts.read("deck-choice"),
     )
+    if viewer_input:
+        blocks += ("\n", prompts.read("viewer-input"))
     system = (
         TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),
         TextMessage(
