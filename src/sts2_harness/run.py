@@ -43,7 +43,7 @@ from sts2_harness.llm.messages import (
     ToolCall,
 )
 from sts2_harness.material_text import MaterialParts, MaterialUnavailable
-from sts2_harness.prompts import PackagedPrompts, PromptReader
+from sts2_harness.prompts import PackagedPrompts, PromptReader, deck_act_prompt
 from sts2_harness.results import (
     ActionCompleted,
     ActionToolResult,
@@ -671,6 +671,8 @@ class RunAgent(Agent):
             self._prompts.read("run-observations"),
             "\n",
             self._prompts.read("deck"),
+            "\n",
+            self._prompts.read(deck_act_prompt(observation.state.progress)),
         )
         if not self._tools.minimal:
             blocks += ("\n", self._prompts.read("run-notes"))

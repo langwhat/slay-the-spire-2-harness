@@ -30,7 +30,7 @@ from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.note_values import NotesView
-from sts2_harness.prompts import PackagedPrompts, PromptReader
+from sts2_harness.prompts import DECK_STATE_FORMAT_SECTION, PackagedPrompts, PromptReader
 from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.route_plan import RoutePlan
 from sts2_harness.tools import ToolCatalog
@@ -55,7 +55,12 @@ def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool = False)
     ):
         if blocks:
             blocks.append("\n")
-        blocks.append(prompts.read(name))
+        block = prompts.read(name)
+        if name == "state-format":
+            body, separator, _ = block.body.partition(DECK_STATE_FORMAT_SECTION)
+            if separator:
+                block = MaterialText.create(block.id, body)
+        blocks.append(block)
     return MaterialParts(tuple(blocks))
 
 

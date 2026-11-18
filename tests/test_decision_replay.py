@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from contextlib import closing
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import BaselineSnapshot, NativeSnapshot, PreparationEvidence
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ResponsesReply, TextMessage, TextRole
+from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.model_journal import RecordedLlm
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
@@ -380,6 +382,67 @@ def test_focused_replay_projects_remaining_route_without_the_map(
         assert projected.progress.get("route", MISSING) == (["R"] if plan else MISSING)
         assert isinstance(projected.deck_stats, dict)
         assert projected.deck_stats["circulating_avg_energy"] == 2.0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("act", "acts", "act_prompt"),
+    ((1, 3, "early"), (2, 3, "mid"), (3, 3, "final"), (None, 3, "mid"), (1, 1, "early")),
+)
+def test_deck_and_run_use_the_act_valuation_with_deck_only_choice_steps(
+    tmp_path: Path, act: int | None, acts: int, act_prompt: str
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent)
+        state = task.observation.state
+        observation = task.observation.model_copy(
+            update={
+                "state": state.model_copy(
+                    update={
+                        "progress": state.progress.model_copy(update={"acts": acts, "act": act})
+                    }
+                )
+            }
+        )
+        case = case.model_copy(
+            update={"events": (task.model_copy(update={"observation": observation}),)}
+        )
+        async with Llm(configuration(tmp_path)) as client:
+            deck = await rebuild_case(case, client, variant=DecisionVariant.DECK)
+            run = await rebuild_case(case, client, variant=DecisionVariant.RUN)
+        deck_text = deck.prepared.input[0]
+        run_text = run.prepared.input[0]
+        assert isinstance(deck_text, TextMessage) and deck_text.role is TextRole.SYSTEM
+        assert isinstance(run_text, TextMessage) and run_text.role is TextRole.SYSTEM
+        assert isinstance(deck_text.value, MaterialParts)
+        assert isinstance(run_text.value, MaterialParts)
+        act_id = f"prompt:deck-act-{act_prompt}"
+        deck_ids = tuple(
+            part.id for part in deck_text.value.parts if isinstance(part, MaterialText)
+        )
+        run_parts = tuple(part for part in run_text.value.parts if isinstance(part, MaterialText))
+        run_ids = tuple(part.id for part in run_parts)
+        assert deck_ids == (
+            "prompt:deck-tasks",
+            "prompt:state-format",
+            "prompt:deck",
+            act_id,
+            "prompt:deck-choice",
+        )
+        deck_index = run_ids.index("prompt:deck")
+        assert run_ids[deck_index + 1] == act_id
+        assert "prompt:deck-choice" not in run_ids
+        deck_fields = {
+            "circulating_avg_energy",
+            "deck_stats.circulating_avg_energy",
+            "progress.route",
+        }
+        for shared_part in run_parts[deck_index : deck_index + 2]:
+            identifiers = re.findall(r"\b\w+(?:\.\w+)*\b", shared_part.body)
+            assert deck_fields.isdisjoint(identifiers)
 
     asyncio.run(run())
 

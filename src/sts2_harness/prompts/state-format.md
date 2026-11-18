@@ -17,3 +17,7 @@ A tool result gives `outcome` and changed sections. completed: done. rejected: n
 `use.observed_plays` counts the base definition across all copies and upgrades, from sampled battle history, not complete fights. `deck_stats` counts the current deck and gives the native `base_draw` and `base_energy`. `notes` shows the strategy notes.
 
 `progress.acts` is the number of acts in the run. `progress.bosses_left` counts the Boss fights this act still requires, including the current one. In battle, `progress.route` lists the remaining planned rooms after this room as strings grouped by stretch, when one remaining route is known. A plan may end before the Boss. The room codes are M (Monster), E (Elite), R (rest site), $ (shop), T (treasure), ? (unknown), B (Boss), and A (Ancient). `card_rarity_offset` is the current native card rarity adjustment; supplied knowledge describes the reward calculation. `run_rules` supplies the current ascension level and the localized rules in force.
+
+## Deck reward fields
+
+For Deck, `progress.route` uses the same room codes and is omitted when the remaining plan is unavailable. `deck_stats.circulating_avg_energy` is the mean energy cost per copy of a playable circulating card with a fixed integer energy cost, rounded to two decimal places. It is omitted when no cards qualify.

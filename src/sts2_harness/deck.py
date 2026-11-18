@@ -8,7 +8,7 @@ from sts2_harness.context import Context
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import TextMessage, TextRole, ToolDefinition
 from sts2_harness.material_text import MaterialParts, MaterialText
-from sts2_harness.prompts import PromptReader
+from sts2_harness.prompts import PromptReader, deck_act_prompt
 from sts2_harness.results import Outcome
 from sts2_harness.tools import ToolName
 
@@ -40,9 +40,14 @@ def deck_context(
     blocks: tuple[str | MaterialText, ...] = (
         prompts.read("deck-tasks"),
         "\n",
+        prompts.read("state-format"),
+        "\n",
         prompts.read("deck"),
+        "\n",
+        prompts.read(deck_act_prompt(observation.state.progress)),
+        "\n",
+        prompts.read("deck-choice"),
     )
-    blocks += ("\n", prompts.read("state-format"))
     system = (
         TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),
         TextMessage(

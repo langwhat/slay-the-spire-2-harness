@@ -3,7 +3,18 @@
 from importlib.resources import files
 from typing import Protocol
 
+from sts2_harness.client.models import Progress
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
+
+DECK_STATE_FORMAT_SECTION = "\n## Deck reward fields\n"
+
+
+def deck_act_prompt(progress: Progress) -> str:
+    if progress.act == 1:
+        return "deck-act-early"
+    if progress.acts > 1 and progress.act == progress.acts:
+        return "deck-act-final"
+    return "deck-act-mid"
 
 
 class PromptReader(Protocol):
