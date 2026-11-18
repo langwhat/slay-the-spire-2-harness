@@ -48,6 +48,7 @@ _BASE_ORB_SLOTS = {
     "CHARACTER.REGENT": 0,
     "CHARACTER.NECROBINDER": 0,
     "CHARACTER.DEFECT": 3,
+    "CHARACTER.FOOL": 0,
 }
 _PROPOSAL_INPUTS: dict[ToolName, type[BaseModel]] = {
     ToolName.RUN_ACT: RunActInput,

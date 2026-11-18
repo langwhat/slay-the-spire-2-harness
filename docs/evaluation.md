@@ -30,9 +30,10 @@ The low-HP flag uses 40% of maximum HP. Future special movement is not modeled, 
 metrics do not score or execute a proposal. Unverifiable metrics are reported as unknown.
 At the evaluation-file boundary only, an old Run observation missing `base_orb_slots`
 receives the verified native character default in memory: three for `CHARACTER.DEFECT`
-and zero for `CHARACTER.IRONCLAD`, `CHARACTER.SILENT`, `CHARACTER.REGENT`, and
-`CHARACTER.NECROBINDER`. The source file is unchanged, and the derived field and basis
-appear in the trial and report. Other characters with a missing value remain unsupported.
+and zero for `CHARACTER.IRONCLAD`, `CHARACTER.SILENT`, `CHARACTER.REGENT`,
+`CHARACTER.NECROBINDER`, and `CHARACTER.FOOL`. The source file is unchanged, and the
+derived field and basis appear in the trial and report. Other characters with a missing
+value remain unsupported.
 
 To enrich a historical single-task case with provable combat encounter identities, first
 replay its original case using the public and private packages from the recorded run and a

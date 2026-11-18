@@ -397,6 +397,17 @@ class Orb(WireModel):
     definition_id: Nonempty | MISSING = MISSING
 
 
+class ArrowSlotStatus(StrEnum):
+    RETRIEVED = "retrieved"
+    AWAY = "away"
+    DESTROYED = "destroyed"
+
+
+class ArrowSlot(WireModel):
+    status: ArrowSlotStatus
+    impaled_target_ref: Nonempty | MISSING = MISSING
+
+
 class ActionOperation(StrEnum):
     OPEN_SHOP = "open_shop"
     CLOSE_SHOP = "close_shop"
@@ -479,6 +490,7 @@ class CombatState(WireModel):
     inactive_enemies: tuple[Enemy, ...]
     orbs: Orbs | MISSING = MISSING
     allies: tuple[Ally, ...] | MISSING = MISSING
+    arrow_slots: Annotated[tuple[ArrowSlot, ...], Field(min_length=1)] | MISSING = MISSING
 
 
 class Piles(WireModel):

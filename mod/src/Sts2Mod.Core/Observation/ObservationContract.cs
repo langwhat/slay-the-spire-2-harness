@@ -266,6 +266,17 @@ public sealed record OrbView(string Name, string DefinitionId, decimal Passive, 
 
 public sealed record OrbQueueView(int Capacity, ImmutableArray<OrbView> Slots);
 
+public enum ArrowSlotStatus
+{
+    Retrieved,
+    Away,
+    Destroyed,
+}
+
+public sealed record ArrowSlotView(
+    ArrowSlotStatus Status,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ImpaledTargetRef);
+
 public sealed record PileMembership(
     ImmutableArray<string> Hand,
     ImmutableArray<string> Draw,
@@ -360,6 +371,7 @@ public sealed record CombatStateView(
     ImmutableArray<EnemyView> InactiveEnemies) : IObservedState
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OrbQueueView? Orbs { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<ArrowSlotView>? ArrowSlots { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<AllyView>? Allies { get; init; }
 }
 

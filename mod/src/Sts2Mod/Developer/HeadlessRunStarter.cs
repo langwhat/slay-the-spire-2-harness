@@ -245,6 +245,7 @@ internal sealed class HeadlessRunStarter
         StandardCharacter.Regent => "REGENT",
         StandardCharacter.Necrobinder => "NECROBINDER",
         StandardCharacter.Defect => "DEFECT",
+        StandardCharacter.Fool => "FOOL",
         _ => throw new ArgumentOutOfRangeException(nameof(character)),
     };
 
@@ -260,6 +261,7 @@ internal sealed class HeadlessRunStarter
             StandardCharacter.Regent => (ModelDb.GetId<Regent>(), saveManager.IsEpochRevealed<Regent4Epoch>()),
             StandardCharacter.Necrobinder => (ModelDb.GetId<Necrobinder>(), saveManager.IsEpochRevealed<Necrobinder4Epoch>()),
             StandardCharacter.Defect => (ModelDb.GetId<Defect>(), saveManager.IsEpochRevealed<Defect4Epoch>()),
+            StandardCharacter.Fool => (ModelDb.GetId<Fool>(), saveManager.IsEpochRevealed<Fool4Epoch>()),
             _ => (ModelId.none, false),
         };
 

@@ -105,6 +105,7 @@ class StandardCharacter(StrEnum):
     REGENT = "REGENT"
     NECROBINDER = "NECROBINDER"
     DEFECT = "DEFECT"
+    FOOL = "FOOL"
 
 
 class NativeStartReceipt(native.WireModel):

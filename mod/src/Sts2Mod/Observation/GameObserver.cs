@@ -10,6 +10,7 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Ancients;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.FoolArrows;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Entities.Potions;
@@ -19,6 +20,7 @@ using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes.Cards;
@@ -436,6 +438,7 @@ internal sealed class GameObserver(
         {
             Allies = allies.IsEmpty ? null : allies,
             Orbs = ObserveOrbs(pcs.OrbQueue.Capacity, pcs.OrbQueue.Orbs, actor),
+            ArrowSlots = ObserveArrowSlots(pcs.Arrows, combat, actor),
         };
 
         var encounter = combat.Encounter;
@@ -762,6 +765,34 @@ internal sealed class GameObserver(
         };
         _descriptions[reference] = relic.DynamicDescription.GetFormattedText();
         AddHoverTipMaterial(reference, title, relic.Id.ToString(), relic.HoverTips);
+    }
+
+    private ImmutableArray<ArrowSlotView>? ObserveArrowSlots(
+        IReadOnlyList<ArrowSlot> slots, CombatState combatState, Creature owner)
+    {
+        if (slots.Count == 0)
+            return null;
+
+        var targetRefs = new Dictionary<ArrowSlot, string>(ReferenceEqualityComparer.Instance);
+        foreach (var target in combatState.Creatures)
+        {
+            foreach (var impaled in target.GetPowerInstances<ImpaledPower>().Where(power => power.Applier == owner))
+            {
+                var targetRef = target == owner ? "player" : registry.GetRef(target);
+                foreach (var arrow in impaled.Arrows)
+                    targetRefs.Add(arrow, targetRef);
+            }
+        }
+
+        return slots.Select(slot => new ArrowSlotView(
+            slot.Status switch
+            {
+                ArrowStatus.Retrieved => ArrowSlotStatus.Retrieved,
+                ArrowStatus.Away => ArrowSlotStatus.Away,
+                ArrowStatus.Destroyed => ArrowSlotStatus.Destroyed,
+                _ => throw new ArgumentOutOfRangeException(nameof(slots), slot.Status, "Unknown native arrow status."),
+            },
+            slot.Status == ArrowStatus.Away ? targetRefs.GetValueOrDefault(slot) : null)).ToImmutableArray();
     }
 
     private OrbQueueView ObserveOrbs(int capacity, IReadOnlyList<OrbModel> nativeOrbs, Creature holder)

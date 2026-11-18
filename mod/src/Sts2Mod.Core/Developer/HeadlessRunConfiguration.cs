@@ -12,6 +12,7 @@ public enum StandardCharacter
     Regent,
     Necrobinder,
     Defect,
+    Fool,
 }
 
 public sealed class StandardCharacterConverter : JsonConverter<StandardCharacter>
@@ -25,6 +26,7 @@ public sealed class StandardCharacterConverter : JsonConverter<StandardCharacter
                 "REGENT" => StandardCharacter.Regent,
                 "NECROBINDER" => StandardCharacter.Necrobinder,
                 "DEFECT" => StandardCharacter.Defect,
+                "FOOL" => StandardCharacter.Fool,
                 _ => throw new JsonException("Unsupported headless character."),
             }
             : throw new JsonException("Expected a string character identifier.");
@@ -37,6 +39,7 @@ public sealed class StandardCharacterConverter : JsonConverter<StandardCharacter
             StandardCharacter.Regent => "REGENT",
             StandardCharacter.Necrobinder => "NECROBINDER",
             StandardCharacter.Defect => "DEFECT",
+            StandardCharacter.Fool => "FOOL",
             _ => throw new JsonException("Unknown standard character."),
         });
 }

@@ -33,6 +33,11 @@ public sealed class DeveloperContractTests
         Assert.Equal(7, parsed.Ascension);
         Assert.Equal("SEED123", parsed.Seed);
 
+        var fool = HeadlessRunConfiguration.Parse("{\"character\":\"FOOL\",\"ascension\":10}");
+        Assert.Equal(StandardCharacter.Fool, fool.Character);
+        Assert.Equal(10, fool.Ascension);
+        Assert.Equal("\"FOOL\"", JsonSerializer.Serialize(fool.Character));
+
         Assert.Throws<ArgumentException>(() => HeadlessRunConfiguration.Parse("{\"character\":\"WATCHER\"}"));
         Assert.Throws<ArgumentException>(() => HeadlessRunConfiguration.Parse("{\"character\":\"DEFECT\",\"ascension\":11}"));
         Assert.Throws<ArgumentException>(() => HeadlessRunConfiguration.Parse("{\"character\":\"DEFECT\",\"seed\":\"\"}"));

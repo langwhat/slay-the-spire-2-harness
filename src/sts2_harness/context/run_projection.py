@@ -342,6 +342,8 @@ class RunDelivery:
                 sections["allies"] = [_json(ally) for ally in state.allies]
             if state.orbs is not MISSING:
                 sections["orbs"] = _json(state.orbs)
+            if state.arrow_slots is not MISSING:
+                sections["arrow_slots"] = [_json(slot) for slot in state.arrow_slots]
         if isinstance(state, (native.TerminalState, FinishedState, RunFinishedState)):
             sections["result"] = state.result
             if state.last_observed_turn is not MISSING:
