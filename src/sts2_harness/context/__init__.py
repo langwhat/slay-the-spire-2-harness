@@ -110,13 +110,14 @@ class Context:
         *,
         system: tuple[TextMessage, ...] = (),
         minimal: bool = False,
+        focused_deck: bool = False,
     ) -> None:
         self._role = role
         self._minimal = minimal
         self._history: list[TextMessage | AssistantMessage | ToolResultMessage] = list(system)
         self._system = system
         self._combat_delivery = RunDelivery(role=native.DecisionOwner.COMBAT)
-        self._run_delivery = RunDelivery()
+        self._run_delivery = RunDelivery(focused_deck=focused_deck)
         self._documents: dict[tuple[str, str | None], DocumentView] = {}
         self._guidance: dict[tuple[str, str | None], DocumentView] = {}
         self._last_group: _Group | None = None
@@ -174,7 +175,11 @@ class Context:
         self._run_delivery.fights = fights
 
     def set_deck_stats(self, stats: dict[str, JsonValue], use: dict[str, int]) -> None:
-        self._run_delivery.deck_stats = stats
+        self._run_delivery.deck_stats = (
+            stats
+            if self._run_delivery.focused_deck
+            else {name: value for name, value in stats.items() if name != "circulating_avg_energy"}
+        )
         self._run_delivery.deck_use = use
 
     def set_notes(self, notes: NotesView) -> None:

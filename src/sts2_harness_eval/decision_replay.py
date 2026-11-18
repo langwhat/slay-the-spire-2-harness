@@ -305,10 +305,16 @@ class DecisionRun(DeckAgent):
                     if route is not None
                     else None
                 )
+                plan = None
+                if self.variant is DecisionVariant.DECK:
+                    self._plan = reconcile_plan(self._plan, current.state.progress.position).plan
+                else:
+                    plan = self._plan_value(current)
+                    if route is not None and plan is None:
+                        raise ExtractionError(
+                            "The recorded route cannot be represented as stretches."
+                        )
                 context.set_route_plan(self._plan)
-                plan = self._plan_value(current)
-                if route is not None and plan is None:
-                    raise ExtractionError("The recorded route cannot be represented as stretches.")
                 context.begin_group(current, self._notes.read(), plan)
                 if self._materials is not None:
                     context.append_materials(await self._materials(current))
@@ -579,7 +585,6 @@ def _deck_case(case: DecisionCase) -> DecisionCase:
                         "previous_battle": previous,
                         "handoff": None,
                         "handoff_only": False,
-                        "state": event.state.model_copy(update={"route": None}),
                     }
                 ),
             )
@@ -595,9 +600,6 @@ async def rebuild_case(
     prompts: PromptReader | None = None,
     variant: DecisionVariant = DecisionVariant.RUN,
 ) -> RebuiltDecision:
-    source_observation = next(
-        event.observation for event in reversed(case.events) if isinstance(event, TaskEvent)
-    )
     if variant is DecisionVariant.DECK:
         case = _deck_case(case)
     first = next(event for event in case.events if isinstance(event, TaskEvent))
@@ -629,14 +631,6 @@ async def rebuild_case(
     async def selected(observation: native.Observation) -> tuple[DocumentView, ...]:
         if documents is None or not case.entry_documents_enabled:
             return ()
-        if (
-            variant is DecisionVariant.DECK
-            and observation.map is MISSING
-            and source_observation.map is not MISSING
-            and observation.stamp == source_observation.stamp
-            and observation.location == source_observation.location
-        ):
-            observation = observation.model_copy(update={"map": source_observation.map})
         return await entry_materials(
             execution,
             documents,

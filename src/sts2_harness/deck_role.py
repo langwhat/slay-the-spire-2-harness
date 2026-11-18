@@ -41,6 +41,7 @@ from sts2_harness.results import (
     ReadCompleted,
     ReasonCode,
 )
+from sts2_harness.route_plan import RoutePlan, reconcile_plan
 from sts2_harness.run import RunAgent
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
 from sts2_harness.tools.inputs import RunDeckChoice, SkipCard, TakeCard
@@ -100,7 +101,6 @@ class DeckAgent(RunAgent):
         self._stream = stream
         self._completion = completion
         self._choice: PendingCardChoice | None = None
-        self._material_map: tuple[native.Stamp, native.Location, native.PublicMap] | None = None
         self.resolution: CardResolution | None = None
         self.feedback: CardResolution | None = None
         tools.definitions = deck_tools(tools.definitions)
@@ -109,21 +109,18 @@ class DeckAgent(RunAgent):
         state = observation.state
         if not isinstance(state, native.RunState):
             return observation
-        if observation.map is not MISSING:
-            self._material_map = (observation.stamp, observation.location, observation.map)
         offer = next((offer for offer in state.offers if offer.ref == self._offer_ref), None)
         return deck_observation(observation, offer)
 
+    def set_route_plan(self, plan: RoutePlan | None) -> None:
+        self._plan = plan
+
     async def _prepare(self, observation: native.Observation) -> Context:
-        saved = self._material_map
-        if (
-            observation.map is MISSING
-            and saved is not None
-            and observation.stamp == saved[0]
-            and observation.location == saved[1]
-        ):
-            observation = observation.model_copy(update={"map": saved[2]})
-        return await super()._prepare(observation)
+        context = await super()._prepare(observation)
+        context.set_route_plan(
+            reconcile_plan(self.route_plan, observation.state.progress.position).plan
+        )
+        return context
 
     def offered(self, observation: native.Observation) -> bool:
         state = observation.state

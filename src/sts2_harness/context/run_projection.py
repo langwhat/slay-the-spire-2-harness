@@ -96,6 +96,7 @@ def definition_references(value: JsonValue) -> set[str]:
 @dataclass
 class RunDelivery:
     role: native.DecisionOwner = native.DecisionOwner.RUN
+    focused_deck: bool = False
     route_plan: RoutePlan | None = None
     definitions: dict[str, dict[str, JsonValue]] = field(
         default_factory=lambda: dict[str, dict[str, JsonValue]]()
@@ -303,12 +304,17 @@ class RunDelivery:
                 for node in source.map.nodes
             )
         )
-        if self.role is native.DecisionOwner.RUN and source.map is not MISSING and not post_boss:
+        if (
+            self.role is native.DecisionOwner.RUN
+            and not self.focused_deck
+            and source.map is not MISSING
+            and not post_boss
+        ):
             try:
                 sections["map"] = _json(project_map(source.map, state.progress, self.route_plan))
             except MapUnavailable:
                 sections["map"] = None
-        if self.role is native.DecisionOwner.COMBAT:
+        if self.role is native.DecisionOwner.COMBAT or self.focused_deck:
             if source.map is not MISSING:
                 try:
                     route = planned_route(source.map, state.progress, self.route_plan)
@@ -318,6 +324,7 @@ class RunDelivery:
                     progress = sections["progress"]
                     assert isinstance(progress, dict)
                     progress["route"] = list(route)
+        if self.role is native.DecisionOwner.COMBAT:
             player = sections["player"]
             assert isinstance(player, dict)
             for name in ("gold", "potion_slot_count", "empty_potion_slot_count", "base_orb_slots"):

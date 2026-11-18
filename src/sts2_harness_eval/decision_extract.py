@@ -63,7 +63,8 @@ from sts2_harness.results import (
     PlanData,
     ReadCompleted,
 )
-from sts2_harness.run import run_observation
+from sts2_harness.route_plan import reconcile_plan
+from sts2_harness.run import RunRole, run_observation
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness.tools import ToolName
 from sts2_harness.tools import inputs as tool_inputs
@@ -105,6 +106,14 @@ class _Captured(Exception):
     def __init__(self, input: ModelInput, tools: tuple[ToolDefinition, ...]) -> None:
         self.input = input
         self.tools = tools
+
+
+class _SourceSession(RunSession):
+    run_role: RunRole
+
+    def _new_run(self) -> RunRole:
+        self.run_role = super()._new_run()
+        return self.run_role
 
 
 type DecisionInput = tool_inputs.RunAct | tool_inputs.TakeCard | tool_inputs.SkipCard
@@ -825,10 +834,11 @@ async def extract_case(
         )
         captured_input: ModelInput | None = None
         captured_tools: tuple[ToolDefinition, ...] = ()
+        session = _SourceSession(
+            journal.manifest, dependencies, user_input=UserInputQueue() if viewer else None
+        )
         try:
-            async with RunSession(
-                journal.manifest, dependencies, user_input=UserInputQueue() if viewer else None
-            ) as session:
+            async with session:
                 first = timeline.records[0]
                 if isinstance(first, Record) and first.request == Pause():
                     await session.start()
@@ -850,6 +860,18 @@ async def extract_case(
         events = _events(captured_input, originals)
         last_task = next(event for event in reversed(events) if isinstance(event, TaskEvent))
         record = journal.request(source.model_sequence)
+        if record.stream.startswith(f"{ModelPurpose.DECK.value}:"):
+            plan = reconcile_plan(
+                session.run_role.route_plan, last_task.observation.state.progress.position
+            ).plan
+            if plan is not None:
+                route = RouteState(
+                    position=plan.position,
+                    edges=tuple((edge.source, edge.destination) for edge in plan.edges),
+                )
+                state = last_task.state.model_copy(update={"route": route})
+                task = last_task.model_copy(update={"state": state})
+                events = tuple(task if event is last_task else event for event in events)
         reply = record.attempts[-1].reply
         if reply is None:
             raise ExtractionError("The source decision has no recorded reply.")

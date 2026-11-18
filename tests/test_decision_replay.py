@@ -265,7 +265,7 @@ def test_focused_reward_preserves_owned_state_without_other_rewards(tmp_path: Pa
     assert focused.state.player == state.player
     assert focused.objects == task.observation.objects
     assert focused.descriptions == task.observation.descriptions
-    assert focused.map is MISSING
+    assert focused.map == observation.map
     assert isinstance(observation.state, native.RunState)
     assert len(observation.state.offers) == 2
 
@@ -325,6 +325,61 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
         )
         assert isinstance(run_task.content, RunActContent)
         assert run_task.content.observation.fights == fights
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("plan", (False, True))
+def test_focused_replay_projects_remaining_route_without_the_map(
+    tmp_path: Path, plan: bool
+) -> None:
+    async def run() -> None:
+        case = decision_case(tmp_path)
+        task = case.events[0]
+        assert isinstance(task, TaskEvent) and isinstance(task.observation.state, native.RunState)
+        state = task.observation.state
+        owned = task.observation.objects["owned"]
+        assert isinstance(owned, native.CardEntry)
+        observation = task.observation.model_copy(
+            update={
+                "state": state.model_copy(
+                    update={"progress": state.progress.model_copy(update={"position": "map:0:0"})}
+                ),
+                "objects": {
+                    **task.observation.objects,
+                    "owned": owned.model_copy(update={"cost": native.ResourceCosts(energy=2)}),
+                },
+                "map": native.PublicMap.model_validate_json(
+                    '{"bosses":[],"nodes":['
+                    '{"position":"map:0:0","room_type":"monster","children":["map:1:0"]},'
+                    '{"position":"map:1:0","room_type":"restsite","children":["map:2:0"]},'
+                    '{"position":"map:2:0","room_type":"shop","children":[]}],'
+                    '"legal_destinations":null}'
+                ),
+            }
+        )
+        route = RouteState(position="map:0:0", edges=(("map:0:0", "map:1:0"),)) if plan else None
+        case = case.model_copy(
+            update={
+                "events": (
+                    task.model_copy(
+                        update={"observation": observation, "state": HarnessState(route=route)}
+                    ),
+                )
+            }
+        )
+        async with Llm(configuration(tmp_path)) as client:
+            replay = await rebuild_case(case, client, variant=DecisionVariant.DECK)
+        request = next(
+            message for message in replay.prepared.input if isinstance(message, TaskMessage)
+        )
+        assert isinstance(request.content, RunActContent)
+        projected = request.content.observation
+        assert projected.map is MISSING
+        assert isinstance(projected.progress, dict)
+        assert projected.progress.get("route", MISSING) == (["R"] if plan else MISSING)
+        assert isinstance(projected.deck_stats, dict)
+        assert projected.deck_stats["circulating_avg_energy"] == 2.0
 
     asyncio.run(run())
 

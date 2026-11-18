@@ -367,6 +367,16 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
 ) -> None:
     async def scenario() -> None:
         game = RewardGame(minimal=minimal, unknown=unknown)
+        owned = game.observation.objects["owned"]
+        assert isinstance(owned, native.CardEntry)
+        game.observation = game.observation.model_copy(
+            update={
+                "objects": {
+                    **game.observation.objects,
+                    "owned": owned.model_copy(update={"cost": native.ResourceCosts(energy=2)}),
+                }
+            }
+        )
         archive = tmp_path / "archive.sqlite"
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(game.mod)),
@@ -452,6 +462,8 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 assert task.content.observation.map is MISSING
                 payload = json.loads(task.text)["observation"]
                 assert "map" not in payload
+                assert "route" not in payload["progress"]
+                assert payload["deck_stats"]["circulating_avg_energy"] == 2.0
                 assert len(payload["choice"]["offers"]) == 1
             first_run = requests[3]
             body_input = game.inputs[3]["input"]
@@ -463,6 +475,7 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 if isinstance(content, str):
                     texts.append(content)
             first_run_text = "\n".join(texts)
+            assert '"circulating_avg_energy"' not in first_run_text
             assert "local mechanism" not in first_run_text
             assert "CARD.LOCAL" not in first_run_text
             assert "owned mechanism" in first_run_text

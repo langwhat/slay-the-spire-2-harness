@@ -63,22 +63,32 @@ class DeckStatistics:
         kinds = Counter(card.card_type for card in cards)
         keywords = [set(keyword.casefold() for keyword in card.keywords) for card in cards]
         choices = self._choices.get(state.progress.act, Counter())
-        circulating = sum(
-            card.card_type != _CardType.POWER
+        circulating = [
+            (card, words)
+            for card, words in zip(cards, keywords, strict=True)
+            if card.card_type != _CardType.POWER
             and _Keyword.EXHAUST not in words
             and not {_Keyword.UNPLAYABLE, _Keyword.ETHEREAL}.issubset(words)
-            for card, words in zip(cards, keywords, strict=True)
-        )
+        ]
+        fixed_costs = [
+            cost
+            for card, words in circulating
+            if _Keyword.UNPLAYABLE not in words
+            and card.playable is not False
+            and isinstance(cost := card.cost.energy, int)
+        ]
         stats: dict[str, JsonValue] = {
             "cards": len(cards),
             "attacks": kinds[_CardType.ATTACK],
             "skills": kinds[_CardType.SKILL],
             "powers": kinds[_CardType.POWER],
             "unplayable": sum(_Keyword.UNPLAYABLE in words for words in keywords),
-            "circulating": circulating,
+            "circulating": len(circulating),
             "added": choices[True],
             "skipped": choices[False],
         }
+        if fixed_costs:
+            stats["circulating_avg_energy"] = round(sum(fixed_costs) / len(fixed_costs), 2)
         draw, energy = state.player.base_draw, state.player.base_energy
         if draw is not MISSING:
             stats["base_draw"] = draw

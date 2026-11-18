@@ -4,7 +4,7 @@ from sts2_harness.client import models as native
 from sts2_harness.deck_stats import DeckStatistics
 
 
-def observation(*costs: int | native.CostSymbol) -> native.Observation:
+def observation(*costs: int | native.CostSymbol | None) -> native.Observation:
     result = native.Observation.model_validate_json(RUN)
     assert isinstance(result.state, native.RunState)
     card = native.CardEntry.model_validate_json(CARD)
@@ -52,6 +52,7 @@ def test_current_deck_counts_are_independent_of_battle_history() -> None:
         "powers": 0,
         "unplayable": 0,
         "circulating": 4,
+        "circulating_avg_energy": 1.33,
         "base_draw": 2,
         "base_energy": 3,
         "added": 0,
@@ -65,6 +66,27 @@ def test_current_deck_counts_are_independent_of_battle_history() -> None:
     assert after == stats
     assert uses == {"CARD.0": 2, "CARD.1": 1}
     assert DeckStatistics().view(current)[0] == stats
+
+
+def test_average_energy_counts_only_playable_circulating_copies_with_fixed_cost() -> None:
+    current = observation(1, 1, 3, 8, 8, 8, 8, native.CostSymbol.X, native.CostSymbol.NONE, None)
+    objects = dict(current.objects)
+    for ref, updates in {
+        "c1": {"definition_id": "CARD.0"},
+        "c3": {"card_type": "power"},
+        "c4": {"keywords": ("exhaust",)},
+        "c5": {"keywords": ("unplayable",)},
+        "c6": {"playable": False},
+    }.items():
+        card = objects[ref]
+        assert isinstance(card, native.CardEntry)
+        objects[ref] = card.model_copy(update=updates)
+
+    stats, _ = DeckStatistics().view(current.model_copy(update={"objects": objects}))
+    assert stats["circulating"] == 8
+    assert stats["circulating_avg_energy"] == 1.67
+    no_fixed_cost, _ = DeckStatistics().view(observation(native.CostSymbol.X, None))
+    assert "circulating_avg_energy" not in no_fixed_cost
 
 
 def test_circulating_excludes_each_one_shot_card_once_and_choices_reset_each_act() -> None:

@@ -218,6 +218,8 @@ class DefaultFlow:
                     )
                 self._enter_role(native.DecisionOwner.RUN)
                 source = self._card_source(observation) if isinstance(task, ActTask) else self._run
+                if isinstance(source, DeckAgent):
+                    source.set_route_plan(self._run.route_plan)
                 outcome = await self._execution.run_unit(source, task)
                 entry_admitted = False
                 if isinstance(outcome, TaskComplete):

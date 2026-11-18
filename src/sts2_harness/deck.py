@@ -3,8 +3,6 @@
 import json
 from enum import StrEnum
 
-from pydantic import MISSING
-
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.knowledge import DocumentView, GuidanceContent
@@ -58,7 +56,7 @@ def deck_context(
     )
     if documents:
         system += (TextMessage(TextRole.SYSTEM, GuidanceContent(guidance=documents)),)
-    return Context(native.DecisionOwner.RUN, system=system, minimal=minimal)
+    return Context(native.DecisionOwner.RUN, system=system, minimal=minimal, focused_deck=True)
 
 
 def deck_tools(definitions: tuple[ToolDefinition, ...]) -> tuple[ToolDefinition, ...]:
@@ -109,7 +107,6 @@ def deck_observation(
                     "event": None,
                 }
             ),
-            "map": MISSING,
             "objects": {ref: entry for ref, entry in observation.objects.items() if ref in refs},
             "descriptions": {
                 ref: text for ref, text in observation.descriptions.items() if ref in refs
