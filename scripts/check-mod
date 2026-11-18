@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+if command -v dotnet >/dev/null 2>&1; then
+    DOTNET=dotnet
+elif [ -x "${HOME}/.local/share/dotnet/dotnet" ]; then
+    DOTNET="${HOME}/.local/share/dotnet/dotnet"
+else
+    echo "dotnet SDK 9.0+ is required to build and test mod/." >&2
+    exit 1
+fi
+
+"$DOTNET" test mod/Sts2Mod.Offline.sln -c Release --nologo
+
+GAME_DIR="${STS2_GAME_DIR:-}"
+if [ -n "$GAME_DIR" ]; then
+    if [ ! -f "$GAME_DIR/sts2.dll" ]; then
+        echo "STS2_GAME_DIR does not contain sts2.dll: $GAME_DIR" >&2
+        exit 1
+    fi
+else
+    for candidate in \
+        "$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_arm64" \
+        "$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/Resources/data_sts2_macos_x86_64" \
+        "$HOME/.local/share/Steam/steamapps/common/Slay the Spire 2/data_sts2_linux_x86_64"
+    do
+        if [ -f "$candidate/sts2.dll" ]; then
+            GAME_DIR="$candidate"
+            break
+        fi
+    done
+fi
+
+if [ -n "$GAME_DIR" ]; then
+    "$DOTNET" build mod/src/Sts2Mod/Sts2Mod.csproj -c Release --nologo "-p:GameDir=$GAME_DIR"
+    "$DOTNET" build mod/tools/NativeTemplate/Mod/NativeTemplate.csproj -c Release --nologo "-p:GameDir=$GAME_DIR"
+else
+    echo "Skipped game-assembly Mod builds (sts2.dll not found; set STS2_GAME_DIR to verify)."
+fi

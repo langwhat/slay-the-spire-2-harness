@@ -84,6 +84,15 @@ Run Ruff, strict Pyright, and pytest with `./scripts/check` (requires `uv` on PA
 Tests use temporary defaults, fake Mod/provider HTTP, finite local loopback servers, and
 owned child processes; no real game or model provider is required.
 
+The C# game Mod (`sts2agent`) lives under [mod/](mod/README.md), split between the
+game-neutral protocol core (`mod/src/Sts2Mod.Core`) and the Godot/Harmony adapter
+(`mod/src/Sts2Mod`), with offline xUnit tests in `mod/tests/Sts2Mod.Core.Tests`. Run
+`./scripts/check-mod` (requires .NET 9 SDK) to execute the offline test suite and, when
+local game assemblies are available (`STS2_GAME_DIR` or standard Steam paths), compile
+`sts2agent.dll` and the `NativeTemplate` developer tools in `Release`. Copy
+`mod/src/Sts2Mod/bin/Release/net9.0/sts2agent.dll` and `mod_manifest.json` into
+`<SlayTheSpire2>/mods/sts2agent/` before launching Mod-enabled gameplay.
+
 The Python `sts2_harness.llm.client.Llm` client accepts a `ModelConfiguration` snapshot
 and implements `complete(input, tools)` as an async context manager. It currently supports
 Responses, Chat Completions, and Messages. Callers own the immutable `ModelInput` message tuple;
@@ -392,7 +401,7 @@ skill loader. The backend serves tools directly and does not install or run an a
 ## Isolated developer headless runs
 
 Install the production Mod once and supply an already verified, fully unlocked clean
-native template generated with its NativeTemplate tools. This command owns one game
+native template generated with [mod/tools/NativeTemplate](mod/tools/NativeTemplate/README.md). This command owns one game
 process and one run; it never attaches another running game or changes the installation:
 
 ```console
