@@ -1,6 +1,7 @@
 """Admit and close one model-independent decision and its ordered actions."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 
 from pydantic import MISSING, ValidationError
@@ -87,14 +88,27 @@ class Execution:
         run_id: str,
         recovery: ToolRecoveryBudget | None = None,
         diagnostics: Diagnostics | None = None,
+        display: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._diagnostics = diagnostics
         self._game = game
         self._recovery = recovery
         self._game_instance_id = game_instance_id
         self._run_id = run_id
+        self._display = display
+        self._last_displayed_reason: str | None = None
         self.fights = FightHistory()
         self._observed: Callable[[native.Observation], None] | None = None
+
+    async def display_reason(self, reason: str | None) -> None:
+        if self._display is None or reason is None:
+            return
+        text = reason.strip()
+        if not text or text == self._last_displayed_reason:
+            return
+        with suppress(Exception):
+            await self._display(text)
+            self._last_displayed_reason = text
 
     def end_reason(self, location: native.Location | None) -> RunEndReason:
         """Classify a confirmed lifetime end against this execution's bound run."""
@@ -293,6 +307,8 @@ class Execution:
                         status = BatchStatus.STOPPED
                         uncertain_step = None
                         break
+                if index == 0:
+                    await self.display_reason(proposal.reason)
                 settlement = await self._game.settle(route, step)
                 for observation in settlement.observations:
                     self.fights.observe(observation)

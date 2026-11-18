@@ -1,5 +1,4 @@
 using Godot;
-using HarmonyLib;
 using MegaCrit.sts2.Core.Nodes.TopBar;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
@@ -7,13 +6,6 @@ using Sts2Mod.Bootstrap;
 using Sts2Mod.Core.Control;
 
 namespace Sts2Mod.Ui;
-
-[HarmonyPatch(typeof(NRun), nameof(NRun._Ready))]
-internal static class NRunPortraitControlPatch
-{
-    private static void Postfix(NRun __instance) =>
-        PortraitControlOverlay.Install(__instance);
-}
 
 /// <summary>
 /// Attaches the in-game start/pause control directly to the top-bar character portrait,
@@ -31,6 +23,9 @@ internal static class PortraitControlOverlay
 
     public static void Install(NRun run)
     {
+        if (ViewerPacing.IsHeadless)
+            return;
+
         if (!GodotObject.IsInstanceValid(run)
             || run.GlobalUi is not NGlobalUi globalUi
             || !GodotObject.IsInstanceValid(globalUi)
@@ -62,6 +57,9 @@ internal static class PortraitControlOverlay
 
     public static void Refresh()
     {
+        if (ViewerPacing.IsHeadless)
+            return;
+
         var run = NRun.Instance;
         if (run is null
             || !GodotObject.IsInstanceValid(run)

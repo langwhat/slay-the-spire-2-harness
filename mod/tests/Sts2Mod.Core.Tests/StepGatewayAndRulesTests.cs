@@ -274,4 +274,28 @@ public sealed class StepGatewayAndRulesTests
         Assert.True(barrier.Advance(animationIsLive: true));
         Assert.True(barrier.TimedOut);
     }
+
+    [Fact]
+    public void StepGateway_PreTouchRejectionAndScopedUncertainGuardOperationIdentity()
+    {
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var gateway = new StepGateway(control, "game-1");
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 1, _ => null);
+
+        gateway.Submit(ActionJson("op-highlight", RunRoute, "{\"kind\":\"interact\",\"action\":\"interaction:1:1\"}"));
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 1, _ => null);
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+
+        // Stale operation IDs do not disturb the active pending operation.
+        gateway.RejectPendingBeforeTouch("stale-op", StepErrorCode.ActionUnavailable, "Ignored.");
+        gateway.ReportUncertain("stale-op");
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+
+        // Pausing before native input is touched rejects cleanly without ExecutionUncertain.
+        gateway.RejectPendingBeforeTouch("op-highlight", StepErrorCode.ActionUnavailable, "Paused before dispatch.");
+        var rejected = Assert.IsType<RejectedStep>(gateway.Status().Receipt);
+        Assert.Equal("op-highlight", rejected.OperationId);
+        Assert.Equal(StepErrorCode.ActionUnavailable, rejected.Error.Code);
+    }
 }

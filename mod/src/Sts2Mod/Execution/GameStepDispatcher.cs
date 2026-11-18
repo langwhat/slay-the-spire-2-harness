@@ -32,6 +32,7 @@ using Sts2Mod.Core.Identity;
 using Sts2Mod.Core.Observation;
 using Sts2Mod.Core.Transport;
 using Sts2Mod.Observation;
+using Sts2Mod.Ui;
 
 namespace Sts2Mod.Execution;
 
@@ -42,10 +43,13 @@ internal sealed class GameStepDispatcher
 {
     private static readonly BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
 
+    private readonly AgentControlState _control;
     private readonly StepGateway _gateway;
     private readonly MapInkPresenter _mapPresenter;
+    private Task? _visualPresentation;
     private object? _submittedChoice;
     private Node? _confirmationScreen;
+    private ulong _confirmationNotBeforeMsec;
     private readonly HashSet<NConfirmButton> _pressedConfirmations = new(ReferenceEqualityComparer.Instance);
     private bool _touched;
     private StepRequest? _selectionOrigin;
@@ -56,6 +60,7 @@ internal sealed class GameStepDispatcher
 
     public GameStepDispatcher(AgentControlState control, Func<bool>? externalInputBusy = null)
     {
+        _control = control;
         _gateway = new StepGateway(control, ObservationHub.GameInstanceId);
         if (externalInputBusy is not null)
             _gateway.SetExternalInputBusyCheck(externalInputBusy);
@@ -117,6 +122,9 @@ internal sealed class GameStepDispatcher
             readiness = NativeInputReadiness.Busy;
         else
             _submittedChoice = null;
+
+        if (_visualPresentation is { IsCompleted: false })
+            readiness = NativeInputReadiness.Busy;
 
         _gateway.Advance(
             location,
@@ -402,6 +410,8 @@ internal sealed class GameStepDispatcher
             if (!cardHolder.IsVisibleInTree() || !IsControlUsable(cardHolder.Hitbox))
                 return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native card holder is not enabled and visible.");
             TrackInteractionAcceptance(request, cardHolder);
+            if (NOverlayStack.Instance?.Peek() is NCardRewardSelectionScreen rewardOverlay)
+                return PresentOverlayCardHolder(request, rewardOverlay, cardHolder, trackGatewayTask: false);
             _touched = true;
             cardHolder.EmitSignal(NCardHolder.SignalName.Pressed, cardHolder);
             return null;
@@ -446,11 +456,17 @@ internal sealed class GameStepDispatcher
         }
 
         TrackInteractionAcceptance(request, button);
-        _touched = true;
+        if (NOverlayStack.Instance?.Peek() is NCardRewardSelectionScreen rewardChoice
+            && ReferenceEquals(button, NodeHierarchy.FindRewardSkipButton(rewardChoice)))
+        {
+            return PresentOverlaySkip(request, rewardChoice, button, trackGatewayTask: false);
+        }
+
         switch (button)
         {
             case NMapPoint point when NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: true } map
                                       && point.State == MapPointState.Travelable:
+                _touched = true;
                 var travel = map.TravelToMapCoord(point.Point.coord);
                 _gateway.TrackNativeTask(request, travel);
                 _ = ObserveNativeFailureAsync(request.OperationId, travel);
@@ -458,24 +474,42 @@ internal sealed class GameStepDispatcher
             case NMapPoint:
                 throw new InvalidOperationException("The native map point is no longer travelable.");
             case NRestSiteButton rest:
-                rest.Call(NRestSiteButton.MethodName.OnRelease);
-                break;
+                return PresentFocusAndSubmit(
+                    request,
+                    rest,
+                    () => IsControlUsable(rest),
+                    focusSeconds: 0.22,
+                    () => rest.Call(NRestSiteButton.MethodName.OnRelease),
+                    trackGatewayTask: false);
             case NRewardButton reward:
-                reward.Call(NRewardButton.MethodName.OnRelease);
-                break;
+                return PresentFocusAndSubmit(
+                    request,
+                    reward,
+                    () => IsControlUsable(reward),
+                    focusSeconds: 0.16,
+                    () => reward.Call(NRewardButton.MethodName.OnRelease),
+                    trackGatewayTask: false);
             case NEventOptionButton option:
-                option.ForceClick();
-                break;
+                return PresentFocusAndSubmit(
+                    request,
+                    option,
+                    () => IsControlUsable(option) && !option.Option.WasChosen,
+                    focusSeconds: 0.22,
+                    option.ForceClick,
+                    trackGatewayTask: false);
             case NMerchantButton merchant:
+                _touched = true;
                 merchant.EmitSignal(NMerchantButton.SignalName.MerchantOpened, merchant);
                 break;
             case NClickableControl sphereProceed when NOverlayStack.Instance?.Peek() is NCrystalSphereScreen sphere
                                                       && ReferenceEquals(sphere.GetNodeOrNull<NClickableControl>("%ProceedButton"), sphereProceed):
+                _touched = true;
                 sphereProceed.EmitSignal(NClickableControl.SignalName.Released, sphereProceed);
                 if (NMapScreen.Instance is { IsOpen: true } && ReferenceEquals(NOverlayStack.Instance?.Peek(), sphere))
                     NOverlayStack.Instance.Remove(sphere);
                 break;
             default:
+                _touched = true;
                 button.EmitSignal(NClickableControl.SignalName.Released, button);
                 break;
         }
@@ -531,9 +565,7 @@ internal sealed class GameStepDispatcher
                 var skip = bundleScreen.GetNodeOrNull<NClickableControl>("%SkipButton");
                 if (skip is null || !IsControlUsable(skip))
                     return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native skip control is unavailable.");
-                _touched = true;
-                skip.EmitSignal(NClickableControl.SignalName.Released, skip);
-                return null;
+                return PresentOverlaySkip(request, bundleScreen, skip, trackGatewayTask: true);
             }
 
             var bundle = NodeHierarchy.Descendants(bundleScreen)
@@ -541,10 +573,19 @@ internal sealed class GameStepDispatcher
                 .SingleOrDefault(candidate => registry.GetRef(candidate.Bundle) == step.Refs.Single());
             if (bundle is null || !IsControlUsable(bundle.Hitbox))
                 return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The selected bundle is not available.");
-            _touched = true;
-            bundle.EmitSignal(NCardBundle.SignalName.Clicked, bundle);
-            BeginConfirmation(screen);
-            return null;
+            return PresentFocusAndSubmit(
+                request,
+                bundle.Hitbox,
+                () => ReferenceEquals(NOverlayStack.Instance?.Peek(), bundleScreen)
+                      && GodotObject.IsInstanceValid(bundle)
+                      && IsControlUsable(bundle.Hitbox),
+                focusSeconds: 0.28,
+                () =>
+                {
+                    bundle.EmitSignal(NCardBundle.SignalName.Clicked, bundle);
+                    BeginConfirmation(screen, holdMs: 220);
+                },
+                trackGatewayTask: true);
         }
 
         var cards = step.Refs.Select(reference =>
@@ -561,9 +602,7 @@ internal sealed class GameStepDispatcher
                     : NodeHierarchy.FindRewardSkipButton((NCardRewardSelectionScreen)screen);
                 if (skip is null || !IsControlUsable(skip))
                     return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native skip control is unavailable.");
-                _touched = true;
-                skip.EmitSignal(NClickableControl.SignalName.Released, skip);
-                return null;
+                return PresentOverlaySkip(request, screen, skip, trackGatewayTask: true);
             }
 
             var holder = NodeHierarchy.Descendants(screen)
@@ -571,9 +610,7 @@ internal sealed class GameStepDispatcher
                 .SingleOrDefault(candidate => ReferenceEquals(candidate.CardModel, cards.Single()));
             if (holder is null || !holder.IsVisibleInTree())
                 return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The selected native card is unavailable.");
-            _touched = true;
-            holder.EmitSignal(NCardHolder.SignalName.Pressed, holder);
-            return null;
+            return PresentOverlayCardHolder(request, screen, holder, trackGatewayTask: true);
         }
 
         if (screen is not NCardGridSelectionScreen grid)
@@ -590,6 +627,28 @@ internal sealed class GameStepDispatcher
             .Concat(cards.Where(card => !selected.Contains(card, ReferenceEqualityComparer.Instance)))
             .ToArray();
 
+        if (ViewerPacing.IsInteractiveGui && toggles.Length > 0)
+        {
+            var holder = ScrollCardGridIntoView(grid, toggles[0]);
+            if (toggles.Length == 1 && holder is not null && holder.IsVisibleInTree())
+            {
+                return PresentFocusAndSubmit(
+                    request,
+                    holder,
+                    () => ReferenceEquals(NOverlayStack.Instance?.Peek(), screen)
+                          && GodotObject.IsInstanceValid(holder)
+                          && holder.IsVisibleInTree(),
+                    focusSeconds: 0.22,
+                    () =>
+                    {
+                        callback.Invoke(grid, [toggles[0]]);
+                        if (ReferenceEquals(NOverlayStack.Instance?.Peek(), screen))
+                            BeginConfirmation(screen, holdMs: 180);
+                    },
+                    trackGatewayTask: true);
+            }
+        }
+
         foreach (var card in toggles)
         {
             if (!ReferenceEquals(NOverlayStack.Instance?.Peek(), screen))
@@ -599,7 +658,7 @@ internal sealed class GameStepDispatcher
         }
 
         if (ReferenceEquals(NOverlayStack.Instance?.Peek(), screen))
-            BeginConfirmation(screen);
+            BeginConfirmation(screen, holdMs: 260);
         return null;
     }
 
@@ -687,20 +746,193 @@ internal sealed class GameStepDispatcher
         AutoResolvedCardSelectionPatch.Resolved = null;
     }
 
-    private void BeginConfirmation(Node screen)
+    private StepReceipt? PresentOverlaySkip(
+        StepRequest request,
+        Node screen,
+        NClickableControl skip,
+        bool trackGatewayTask) =>
+        PresentFocusAndSubmit(
+            request,
+            skip,
+            () => ReferenceEquals(NOverlayStack.Instance?.Peek(), screen) && IsControlUsable(skip),
+            focusSeconds: 0.24,
+            () => skip.EmitSignal(NClickableControl.SignalName.Released, skip),
+            trackGatewayTask);
+
+    private StepReceipt? PresentOverlayCardHolder(
+        StepRequest request,
+        Node screen,
+        NCardHolder holder,
+        bool trackGatewayTask) =>
+        PresentFocusAndSubmit(
+            request,
+            holder,
+            () => ReferenceEquals(NOverlayStack.Instance?.Peek(), screen)
+                  && GodotObject.IsInstanceValid(holder)
+                  && holder.IsVisibleInTree()
+                  && IsControlUsable(holder.Hitbox),
+            focusSeconds: 0.28,
+            () => holder.EmitSignal(NCardHolder.SignalName.Pressed, holder),
+            trackGatewayTask);
+
+    private StepReceipt? PresentFocusAndSubmit(
+        StepRequest request,
+        Control focusNode,
+        Func<bool> stillValid,
+        double focusSeconds,
+        Action submit,
+        bool trackGatewayTask)
+    {
+        if (!ViewerPacing.IsInteractiveGui)
+        {
+            _touched = true;
+            submit();
+            return null;
+        }
+
+        var cue = RunFocusCueAsync(request.OperationId, focusNode, stillValid, focusSeconds, submit);
+        if (trackGatewayTask)
+        {
+            _visualPresentation = cue;
+            _gateway.TrackNativeTask(request, cue);
+            _ = ObserveNativeFailureAsync(request.OperationId, cue);
+        }
+        else
+        {
+            _visualPresentation = ObserveVisualCueOrReportUncertainAsync(request.OperationId, cue);
+        }
+        return null;
+    }
+
+    private async Task RunFocusCueAsync(
+        string operationId,
+        Control focusNode,
+        Func<bool> stillValid,
+        double focusSeconds,
+        Action submit)
+    {
+        var tree = focusNode.GetTree();
+        var usedRealFocus = false;
+        focusNode.GetViewport()?.GuiReleaseFocus();
+        if (focusNode.FocusMode != Control.FocusModeEnum.None)
+        {
+            focusNode.GrabFocus();
+            usedRealFocus = true;
+        }
+        else
+        {
+            focusNode.EmitSignal(Control.SignalName.FocusEntered);
+        }
+
+        try
+        {
+            await tree.ToSignal(tree.CreateTimer(focusSeconds, ignoreTimeScale: true), SceneTreeTimer.SignalName.Timeout);
+        }
+        finally
+        {
+            if (GodotObject.IsInstanceValid(focusNode) && focusNode.IsInsideTree())
+            {
+                if (usedRealFocus)
+                {
+                    if (ReferenceEquals(focusNode.GetViewport()?.GuiGetFocusOwner(), focusNode))
+                        focusNode.ReleaseFocus();
+                }
+                else
+                {
+                    focusNode.EmitSignal(Control.SignalName.FocusExited);
+                }
+            }
+        }
+
+        if (!_control.IsRunning || !stillValid())
+        {
+            _gateway.RejectPendingBeforeTouch(
+                operationId,
+                StepErrorCode.ActionUnavailable,
+                !_control.IsRunning
+                    ? "Agent control was paused before dispatch."
+                    : "The native control changed before dispatch.");
+            return;
+        }
+
+        _touched = true;
+        submit();
+    }
+
+    private async Task ObserveVisualCueOrReportUncertainAsync(string operationId, Task cue)
+    {
+        try
+        {
+            await cue;
+        }
+        catch (Exception error)
+        {
+            GD.PrintErr($"[sts2agent] Viewer highlight aborted: operation_id={operationId} error={error.Message}");
+            _gateway.ReportUncertain(operationId);
+        }
+    }
+
+    private static NCardHolder? ScrollCardGridIntoView(NCardGridSelectionScreen screen, CardModel targetCard)
+    {
+        try
+        {
+            if (screen.GetNodeOrNull<NCardGrid>("%CardGrid") is not { } grid
+                || typeof(NCardGrid).GetField("_cards", PrivateInstance)?.GetValue(grid) is not IReadOnlyList<CardModel> cards)
+            {
+                return null;
+            }
+
+            var index = -1;
+            for (var i = 0; i < cards.Count; i++)
+            {
+                if (ReferenceEquals(cards[i], targetCard))
+                {
+                    index = i;
+                    break;
+                }
+            }
+            if (index < 0)
+                return null;
+
+            var columns = Math.Max(1, grid.Get(NCardGrid.PropertyName.Columns).AsInt32());
+            var cardSize = grid.Get(NCardGrid.PropertyName._cardSize).AsVector2();
+            var top = grid.Get(NCardGrid.PropertyName.ScrollLimitTop).AsSingle();
+            var bottom = grid.Get(NCardGrid.PropertyName.ScrollLimitBottom).AsSingle();
+            var rowCenter = grid.YOffset + 80f + cardSize.Y * 0.5f + index / columns * (cardSize.Y + 40f);
+            var destination = Math.Clamp(grid.Size.Y * 0.5f - rowCenter, Math.Min(top, bottom), Math.Max(top, bottom));
+            grid.SetScrollPosition(destination);
+            for (var step = 0; step < 12 && grid.GetCardHolder(targetCard) is null; step++)
+                grid.Call(NCardGrid.MethodName.AllocateCardHolders);
+            return grid.GetCardHolder(targetCard);
+        }
+        catch (Exception error)
+        {
+            GD.PrintErr($"[sts2agent] Card grid scroll skipped: {error.Message}");
+            return null;
+        }
+    }
+
+    private void BeginConfirmation(Node screen, ulong holdMs = 0)
     {
         _confirmationScreen = screen;
+        _confirmationNotBeforeMsec = ViewerPacing.IsInteractiveGui && holdMs > 0
+            ? Time.GetTicksMsec() + holdMs
+            : 0;
         _pressedConfirmations.Clear();
     }
 
     private bool AdvanceConfirmation(Node screen)
     {
+        if (ViewerPacing.IsInteractiveGui && Time.GetTicksMsec() < _confirmationNotBeforeMsec)
+            return true;
+
         var confirm = NodeHierarchy.Descendants(screen)
             .OfType<NConfirmButton>()
             .FirstOrDefault(button => IsControlUsable(button) && !_pressedConfirmations.Contains(button));
         if (confirm is null)
             return false;
         _pressedConfirmations.Add(confirm);
+        _confirmationNotBeforeMsec = 0;
         confirm.EmitSignal(NClickableControl.SignalName.Released, confirm);
         return true;
     }

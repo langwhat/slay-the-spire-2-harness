@@ -443,6 +443,7 @@ class RunAgent(Agent):
         assert self._plan is not None and self._plan.next_destination is not None
         assert self._context is not None
         self._context.set_route_plan(self._plan)
+        await self._tools.display_reason(proposed.reason)
         location = current.location
         assert location.run_id is not None and location.node_id is not None
         route = native.RouteKey(

@@ -15,6 +15,7 @@ public interface IModHttpHandlers
     Task<HttpReply> Catalog(string body);
     HttpReply SubmitAction(string body);
     HttpReply SetControl(string body);
+    HttpReply SubmitDisplay(string body);
     Task<HttpReply> PresentMap(string body);
     Task<HttpReply> VerifyMapRestoration(string body);
     HttpReply GetCheckpointIdentity();
@@ -155,6 +156,7 @@ public sealed class LoopbackHttpServer : IDisposable
                 ("POST", "/catalog") => await _handlers.Catalog(body).ConfigureAwait(false),
                 ("POST", "/action") => _handlers.SubmitAction(body),
                 ("POST", "/control") => _handlers.SetControl(body),
+                ("POST", "/display") => _handlers.SubmitDisplay(body),
                 ("POST", "/map/present") => await _handlers.PresentMap(body).ConfigureAwait(false),
                 ("POST", "/map/restore/verify") => await _handlers.VerifyMapRestoration(body).ConfigureAwait(false),
                 ("GET", "/operator/checkpoint/identity") => _handlers.GetCheckpointIdentity(),

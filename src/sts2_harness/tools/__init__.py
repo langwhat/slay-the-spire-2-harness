@@ -130,6 +130,7 @@ class ToolCatalog:
             [native.RouteKey, tuple[native.PresentationEdge, ...]], Awaitable[Presented]
         ]
         | None = None,
+        display: Callable[[str | None], Awaitable[None]] | None = None,
         supplements: SupplementProvider | None = None,
         skills: SkillProvider | None = None,
         notes: Notes | None = None,
@@ -157,6 +158,7 @@ class ToolCatalog:
         self._inspect = inspect
         self._catalog = catalog
         self._present = present
+        self._display = display
         self._supplements = supplements
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
@@ -208,6 +210,10 @@ class ToolCatalog:
     @property
     def notes(self) -> Notes | None:
         return self._notes_owner
+
+    async def display_reason(self, reason: str | None) -> None:
+        if self._display is not None:
+            await self._display(reason)
 
     async def dispatch_action(
         self,

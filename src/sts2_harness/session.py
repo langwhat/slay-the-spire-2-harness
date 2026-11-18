@@ -1,6 +1,6 @@
 """Own one run's software state using injected logical dependencies."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
@@ -49,6 +49,7 @@ class SessionDependencies:
     documents: Documents
     model: ModelFactory
     card_completion: Callable[[CardChoiceCompletion], None] | None = None
+    display: Callable[[str], Awaitable[object]] | None = None
 
 
 class RunSession:
@@ -93,6 +94,7 @@ class RunSession:
             run_id=self._manifest.run_id,
             recovery=self.recovery,
             diagnostics=self._diagnostics,
+            display=self._dependencies.display,
         )
         run = self._new_run()
         self._flow = (
@@ -153,6 +155,7 @@ class RunSession:
             inspect=self.execution.inspect,
             catalog=self.execution.catalog,
             present=self.execution.present if role is native.DecisionOwner.RUN else None,
+            display=self.execution.display_reason if role is native.DecisionOwner.RUN else None,
             notes=self.notes if role is native.DecisionOwner.RUN else None,
             notes_write_guard=self._notes_write_guard,
             skills=self._dependencies.documents,

@@ -212,6 +212,7 @@ async def run_interactive(
                         stop_requested=stop_requested.is_set,
                         wait=wait,
                         user_input=user_input,
+                        display_reasons=True,
                     )
                 )
                 async with session_resource as session:

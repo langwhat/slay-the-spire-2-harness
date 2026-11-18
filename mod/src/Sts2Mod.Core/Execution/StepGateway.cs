@@ -417,11 +417,22 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         }
     }
 
-    public void ReportUncertain()
+    public void RejectPendingBeforeTouch(string operationId, StepErrorCode code, string message)
     {
         lock (_sync)
         {
-            if (_pending is not { } request)
+            if (_pending is not { } request || request.OperationId != operationId)
+                return;
+            _receipt = Reject(request, code, message);
+            _pending = null;
+        }
+    }
+
+    public void ReportUncertain(string? operationId = null)
+    {
+        lock (_sync)
+        {
+            if (_pending is not { } request || (operationId is not null && request.OperationId != operationId))
                 return;
             _receipt = new UnknownStep(
                 request.OperationId,

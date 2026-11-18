@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Reflection;
 using Godot;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Assets;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
@@ -11,6 +12,7 @@ using Sts2Mod.Core.Execution;
 using Sts2Mod.Core.Observation;
 using Sts2Mod.Core.Transport;
 using Sts2Mod.Observation;
+using Sts2Mod.Ui;
 
 namespace Sts2Mod.Execution;
 
@@ -137,9 +139,15 @@ internal sealed class NativeMapScrollTarget
 
 /// <summary>
 /// Executes <c>/map/present</c> ink drawing and <c>/map/restore/verify</c> viewport restoration on the game thread.
+/// Centers the active stroke vertically in GUI mode with an in-canvas quill tip while keeping headless mode instant.
 /// </summary>
 internal sealed class MapInkPresenter
 {
+    private const float NativeScrollLimitBottom = -600f;
+    private const float NativeScrollLimitTop = 1800f;
+    private const ulong FinishedRouteHoldMs = 350;
+    private const string QuillNodeName = "Sts2AgentMapQuill";
+
     private sealed record SurfaceCapture(
         NMapScreen Map,
         bool WasOpen,
@@ -157,6 +165,7 @@ internal sealed class MapInkPresenter
         NativeMapAnimations Animations,
         Dictionary<string, NMapPoint> Points,
         string SerializedState,
+        Control.MouseFilterEnum MouseFilter,
         int LineCount,
         int PointCount,
         NativeInputReadiness Readiness,
@@ -172,13 +181,18 @@ internal sealed class MapInkPresenter
         public int FollowFrame;
         public int TargetFollowFrame;
         public int RestoreFrame;
+        public ulong HoldUntilMsec;
         public MapOpeningBarrier? OpeningBarrier;
+        public TextureRect? Quill;
         public bool Drawing;
         public bool Returning;
         public bool Closed;
         public bool IdentityLost;
         public PresentationDrawing Outcome = PresentationDrawing.Shown;
     }
+
+    private static ImageTexture? _cachedQuillTexture;
+    private static bool _quillLoadAttempted;
 
     private readonly StepGateway _gateway;
     private readonly ConcurrentQueue<Action> _requests = new();
@@ -214,6 +228,7 @@ internal sealed class MapInkPresenter
             display.Outcome = PresentationDrawing.Failed;
             display.Returning = true;
             StopDrawingSafely(display);
+            RemoveQuillVisual(display);
             try
             {
                 Finish(display);
@@ -247,10 +262,14 @@ internal sealed class MapInkPresenter
                 _capture = captured!;
                 _restorationUncertain = false;
                 var display = _display = new(request, captured!);
+                captured!.Map.MouseFilter = Control.MouseFilterEnum.Ignore;
                 _gateway.TrackPresentationWorker(request.OperationId, display.Worker.Task);
                 response.SetResult(new HttpReply(200, JsonContract.Serialize(new PendingStep(request.OperationId))));
 
-                if (captured!.WasOpen)
+                if (!ViewerPacing.IsInteractiveGui && !captured.WasOpen)
+                    return;
+
+                if (captured.WasOpen)
                 {
                     if (captured.Animations.Busy() || captured.Pan.Position != captured.ScrollTarget.Current)
                         display.OpeningBarrier = new(true);
@@ -259,7 +278,7 @@ internal sealed class MapInkPresenter
 
                 try
                 {
-                    captured.Map.Open();
+                    captured.Map.Open(isOpenedFromTopBar: true);
                     captured.Animations.Busy();
                     display.OpeningBarrier = new(true);
                 }
@@ -406,6 +425,7 @@ internal sealed class MapInkPresenter
             animations,
             points,
             JsonContract.Serialize(current.Observation.State),
+            map.MouseFilter,
             lineCount,
             PointCount: pointCount,
             current.Observation.InputReadiness,
@@ -422,6 +442,7 @@ internal sealed class MapInkPresenter
         {
             _restorationUncertain = true;
             display.IdentityLost = true;
+            RemoveQuillVisual(display);
             return;
         }
 
@@ -446,6 +467,7 @@ internal sealed class MapInkPresenter
                 {
                     GD.PrintErr($"[sts2agent] Map opening recapture failed: {error?.Message ?? "The captured map surface changed."}");
                     _restorationUncertain = true;
+                    RemoveQuillVisual(display);
                     display.Worker.TrySetResult();
                     _gateway.SettlePresentation(
                         display.Request.OperationId,
@@ -454,6 +476,7 @@ internal sealed class MapInkPresenter
                     _display = null;
                     return;
                 }
+                settled = settled with { MouseFilter = display.Capture.MouseFilter };
                 display.Capture = settled;
                 _capture = settled;
             }
@@ -469,6 +492,7 @@ internal sealed class MapInkPresenter
         {
             _restorationUncertain = true;
             display.IdentityLost = true;
+            RemoveQuillVisual(display);
             return;
         }
         if (AnimationsBusy(display))
@@ -478,6 +502,13 @@ internal sealed class MapInkPresenter
             Finish(display);
             return;
         }
+        if (!ViewerPacing.IsInteractiveGui)
+        {
+            DrawAllEdgesInstantly(display, capture);
+            Finish(display);
+            return;
+        }
+
         if (!capture.Map.IsOpen)
         {
             display.Outcome = PresentationDrawing.Failed;
@@ -485,14 +516,14 @@ internal sealed class MapInkPresenter
             Finish(display);
             return;
         }
+
         if (display.Edge >= display.Request.Edges.Count)
         {
-            var (lines, points) = InkSize(capture.Map);
-            if (lines < capture.LineCount + display.Request.Edges.Count
-                || points < capture.PointCount + 2 * display.Request.Edges.Count)
-            {
-                display.Outcome = PresentationDrawing.Failed;
-            }
+            RemoveQuillVisual(display);
+            if (display.HoldUntilMsec != 0 && Time.GetTicksMsec() < display.HoldUntilMsec)
+                return;
+
+            VerifyInkCompleteness(display, capture);
             display.Returning = true;
             Finish(display);
             return;
@@ -502,42 +533,62 @@ internal sealed class MapInkPresenter
         var from = capture.Points[edge.From];
         var to = capture.Points[edge.To];
 
-        if (!display.Drawing && !capture.Map.IsNodeOnScreen(from))
-        {
-            Follow(capture, ScreenCenter(from));
-            if (++display.FollowFrame > 120)
-            {
-                display.Outcome = PresentationDrawing.Failed;
-                display.Returning = true;
-            }
-            return;
-        }
-
-        var start = ScreenCenter(from);
-        var end = ScreenCenter(to);
-        var position = start.Lerp(end, display.Progress);
         if (!display.Drawing)
         {
-            capture.Map.Drawings.BeginLineLocal(position, DrawingMode.Drawing);
+            var startScreen = ScreenEndpoint(from);
+            var onScreen = capture.Map.IsNodeOnScreen(from);
+            var centeredEnough = MathF.Abs(startScreen.Y - VisibleCenterY(capture)) <= 56f;
+            if (!onScreen || (display.Edge == 0 && !centeredEnough && display.FollowFrame < 20))
+            {
+                var moved = FollowVertical(capture, startScreen);
+                display.FollowFrame++;
+                if (!onScreen)
+                {
+                    if (display.FollowFrame > 120)
+                    {
+                        display.Outcome = PresentationDrawing.Failed;
+                        display.Returning = true;
+                    }
+                    return;
+                }
+                if (moved)
+                    return;
+            }
+        }
+
+        var start = ScreenEndpoint(from);
+        var end = ScreenEndpoint(to);
+        var target = start.Lerp(end, display.Progress);
+        FollowVertical(capture, target);
+
+        // Recompute canvas coordinates after vertical map pan so the stroke and quill align with the nodes.
+        start = ScreenEndpoint(from);
+        end = ScreenEndpoint(to);
+        target = start.Lerp(end, display.Progress);
+        UpdateQuillVisual(display, target);
+
+        var ink = ToDrawingsLocal(capture.Map, target);
+        if (!display.Drawing)
+        {
+            capture.Map.Drawings.BeginLineLocal(ink, DrawingMode.Drawing);
             display.Drawing = true;
         }
         else
         {
-            capture.Map.Drawings.UpdateCurrentLinePositionLocal(position);
+            capture.Map.Drawings.UpdateCurrentLinePositionLocal(ink);
         }
-
-        if (!capture.Map.IsNodeOnScreen(to))
-            Follow(capture, position);
 
         if (display.Progress < 1f)
         {
-            display.Progress = Math.Min(1f, display.Progress + 12f / Math.Max(1f, start.DistanceTo(end)));
+            var delta = (float)Math.Clamp(capture.Map.GetProcessDeltaTime(), 1d / 240d, 0.05d);
+            var step = Math.Clamp(920f * delta / Math.Max(1f, start.DistanceTo(end)), 0.02f, 0.25f);
+            display.Progress = Math.Min(1f, display.Progress + step);
             return;
         }
 
         if (!capture.Map.IsNodeOnScreen(to))
         {
-            if (++display.TargetFollowFrame <= 120)
+            if (++display.TargetFollowFrame <= 90)
                 return;
             display.Outcome = PresentationDrawing.Failed;
             display.Returning = true;
@@ -549,10 +600,45 @@ internal sealed class MapInkPresenter
         display.Progress = 0;
         display.FollowFrame = 0;
         display.TargetFollowFrame = 0;
+        if (display.Edge >= display.Request.Edges.Count)
+        {
+            RemoveQuillVisual(display);
+            display.HoldUntilMsec = Time.GetTicksMsec() + FinishedRouteHoldMs;
+        }
+    }
+
+    private static void DrawAllEdgesInstantly(ActiveDisplay display, SurfaceCapture capture)
+    {
+        while (display.Edge < display.Request.Edges.Count)
+        {
+            var edge = display.Request.Edges[display.Edge];
+            var from = capture.Points[edge.From];
+            var to = capture.Points[edge.To];
+            var fromInk = ToDrawingsLocal(capture.Map, ScreenEndpoint(from));
+            var toInk = ToDrawingsLocal(capture.Map, ScreenEndpoint(to));
+            capture.Map.Drawings.BeginLineLocal(fromInk, DrawingMode.Drawing);
+            capture.Map.Drawings.UpdateCurrentLinePositionLocal(toInk);
+            capture.Map.Drawings.StopLineLocal();
+            display.Edge++;
+        }
+
+        VerifyInkCompleteness(display, capture);
+        display.Returning = true;
+    }
+
+    private static void VerifyInkCompleteness(ActiveDisplay display, SurfaceCapture capture)
+    {
+        var (lines, points) = InkSize(capture.Map);
+        if (lines < capture.LineCount + display.Request.Edges.Count
+            || points < capture.PointCount + 2 * display.Request.Edges.Count)
+        {
+            display.Outcome = PresentationDrawing.Failed;
+        }
     }
 
     private void Finish(ActiveDisplay display)
     {
+        RemoveQuillVisual(display);
         var capture = display.Capture;
         if (!capture.ScrollTarget.IsBound)
         {
@@ -569,32 +655,53 @@ internal sealed class MapInkPresenter
             capture.Map.Drawings.StopLineLocal();
         }
 
-        if (((capture.Scroll is { } movingScroll
-              && (movingScroll.ScrollHorizontal != capture.ScrollX || movingScroll.ScrollVertical != capture.ScrollY))
-             || capture.Pan.Position != capture.PanPosition)
-            && ++display.RestoreFrame > 120)
+        if (!ViewerPacing.IsInteractiveGui)
         {
-            display.Worker.TrySetResult();
-            _gateway.SettlePresentation(display.Request.OperationId, display.Outcome, PresentationRestoration.Unknown);
-            _display = null;
-            return;
+            if (capture.Scroll is { } instantScroll)
+            {
+                instantScroll.ScrollHorizontal = capture.ScrollX;
+                instantScroll.ScrollVertical = capture.ScrollY;
+            }
+            if (capture.Pan.Position != capture.PanPosition)
+            {
+                capture.ScrollTarget.Set(capture.PanPosition);
+                capture.Pan.Position = capture.PanPosition;
+            }
         }
-
-        if (capture.Scroll is { } scroll
-            && (scroll.ScrollHorizontal != capture.ScrollX || scroll.ScrollVertical != capture.ScrollY))
+        else
         {
-            scroll.ScrollHorizontal = Approach(scroll.ScrollHorizontal, capture.ScrollX);
-            scroll.ScrollVertical = Approach(scroll.ScrollVertical, capture.ScrollY);
-            return;
-        }
+            if (((capture.Scroll is { } movingScroll
+                  && (movingScroll.ScrollHorizontal != capture.ScrollX || movingScroll.ScrollVertical != capture.ScrollY))
+                 || capture.Pan.Position != capture.PanPosition)
+                && ++display.RestoreFrame > 120)
+            {
+                RestoreInputAndFocus(capture);
+                display.Worker.TrySetResult();
+                _gateway.SettlePresentation(display.Request.OperationId, display.Outcome, PresentationRestoration.Unknown);
+                _display = null;
+                return;
+            }
 
-        if (capture.Pan.Position != capture.PanPosition)
-        {
-            var distance = capture.Pan.Position.DistanceTo(capture.PanPosition);
-            var next = capture.Pan.Position.MoveToward(capture.PanPosition, Math.Max(12f, distance / 8f));
-            capture.ScrollTarget.Set(next);
-            capture.Pan.Position = next;
-            return;
+            if (capture.Scroll is { } scroll
+                && (scroll.ScrollHorizontal != capture.ScrollX || scroll.ScrollVertical != capture.ScrollY))
+            {
+                scroll.ScrollHorizontal = Approach(scroll.ScrollHorizontal, capture.ScrollX);
+                scroll.ScrollVertical = Approach(scroll.ScrollVertical, capture.ScrollY);
+                return;
+            }
+
+            if (capture.Pan.Position != capture.PanPosition)
+            {
+                var distance = capture.Pan.Position.DistanceTo(capture.PanPosition);
+                var delta = (float)Math.Clamp(capture.Map.GetProcessDeltaTime(), 1d / 240d, 0.05d);
+                var step = distance <= 2f
+                    ? distance
+                    : Math.Max(18f, distance * Math.Clamp(14f * delta, 0.12f, 0.45f));
+                var next = capture.Pan.Position.MoveToward(capture.PanPosition, step);
+                capture.ScrollTarget.Set(next);
+                capture.Pan.Position = next;
+                return;
+            }
         }
 
         if (!capture.WasOpen && !display.Closed)
@@ -603,18 +710,112 @@ internal sealed class MapInkPresenter
                 capture.Map.Close(animateOut: false);
             capture.ScrollTarget.Set(capture.ScrollTarget.Original);
             display.Closed = true;
-            return;
+            if (ViewerPacing.IsInteractiveGui)
+                return;
         }
 
         if (capture.WasOpen)
             capture.ScrollTarget.Set(capture.ScrollTarget.Original);
 
+        RestoreInputAndFocus(capture);
         display.Worker.TrySetResult();
         var restoration = !_restorationUncertain && IsRestored(capture)
             ? RestorationOutcome(capture)
             : PresentationRestoration.Unknown;
         _gateway.SettlePresentation(display.Request.OperationId, display.Outcome, restoration);
         _display = null;
+    }
+
+    private static void RestoreInputAndFocus(SurfaceCapture capture)
+    {
+        if (!GodotObject.IsInstanceValid(capture.Map) || !capture.Map.IsInsideTree())
+            return;
+
+        capture.Map.MouseFilter = capture.MouseFilter;
+        var currentFocus = capture.Map.GetViewport().GuiGetFocusOwner();
+        if (ReferenceEquals(currentFocus, capture.Focus))
+            return;
+
+        if (capture.Focus is { FocusMode: not Control.FocusModeEnum.None } focus
+            && GodotObject.IsInstanceValid(focus)
+            && focus.IsInsideTree())
+        {
+            focus.GrabFocus();
+        }
+        else if (capture.Focus is null)
+        {
+            capture.Map.GetViewport().GuiReleaseFocus();
+        }
+    }
+
+    private static void UpdateQuillVisual(ActiveDisplay display, Vector2 screenTarget)
+    {
+        var map = display.Capture.Map;
+        var quill = display.Quill;
+        if (quill is null || !GodotObject.IsInstanceValid(quill) || quill.GetParent() != map)
+        {
+            var texture = LoadQuillTexture();
+            if (texture is null)
+                return;
+
+            if (map.GetNodeOrNull<Node>(QuillNodeName) is { } existing)
+            {
+                map.RemoveChild(existing);
+                existing.QueueFree();
+            }
+            quill = new TextureRect
+            {
+                Name = QuillNodeName,
+                Texture = texture,
+                MouseFilter = Control.MouseFilterEnum.Ignore,
+                ZIndex = 60,
+            };
+            map.AddChild(quill);
+            display.Quill = quill;
+        }
+
+        var localTarget = map.GetGlobalTransformWithCanvas().AffineInverse() * screenTarget;
+        quill.Position = localTarget - NMapDrawings.drawingCursorHotspot;
+        quill.Visible = true;
+    }
+
+    private static void RemoveQuillVisual(ActiveDisplay display)
+    {
+        if (display.Quill is { } quill)
+        {
+            display.Quill = null;
+            if (GodotObject.IsInstanceValid(quill))
+            {
+                quill.GetParent()?.RemoveChild(quill);
+                quill.QueueFree();
+            }
+        }
+
+        if (GodotObject.IsInstanceValid(display.Capture.Map)
+            && display.Capture.Map.GetNodeOrNull<Control>(QuillNodeName) is { } leftover)
+        {
+            leftover.GetParent()?.RemoveChild(leftover);
+            leftover.QueueFree();
+        }
+    }
+
+    private static ImageTexture? LoadQuillTexture()
+    {
+        if (_quillLoadAttempted)
+            return _cachedQuillTexture;
+
+        _quillLoadAttempted = true;
+        try
+        {
+            var image = PreloadManager.Cache.GetAsset<Image>(NMapDrawings.drawingCursorTiltedPath);
+            if (image is not null)
+                _cachedQuillTexture = ImageTexture.CreateFromImage(image);
+        }
+        catch
+        {
+            _cachedQuillTexture = null;
+        }
+        return _cachedQuillTexture;
     }
 
     private static bool IsRestored(SurfaceCapture? capture) =>
@@ -624,6 +825,7 @@ internal sealed class MapInkPresenter
         && !capture.Animations.Busy()
         && !capture.Map.Drawings.IsLocalDrawing()
         && capture.Map.IsOpen == capture.WasOpen
+        && capture.Map.MouseFilter == capture.MouseFilter
         && ReferenceEquals(NOverlayStack.Instance?.Peek(), capture.Overlay)
         && (capture.WasOpen || (!capture.Map.Visible && capture.Map.ProcessMode == Node.ProcessModeEnum.Disabled))
         && ReferenceEquals(CardSelectionInterceptor.GetPending(), capture.Choice)
@@ -673,6 +875,8 @@ internal sealed class MapInkPresenter
         _restorationUncertain = true;
         display.OpeningBarrier = null;
         StopDrawingSafely(display);
+        RemoveQuillVisual(display);
+        RestoreInputAndFocus(display.Capture);
         display.Worker.TrySetResult();
         _gateway.SettlePresentation(
             display.Request.OperationId,
@@ -706,24 +910,39 @@ internal sealed class MapInkPresenter
         return (lines.Length, lines.Sum(line => line.mapPoints.Count));
     }
 
-    private static Vector2 ScreenCenter(Control control) =>
-        control.GetGlobalTransformWithCanvas() * (control.Size / 2);
-
-    private static void Follow(SurfaceCapture capture, Vector2 target)
+    private static Vector2 ScreenEndpoint(NMapPoint point)
     {
+        var anchor = point.PivotOffset != Vector2.Zero ? point.PivotOffset : point.Size * 0.5f;
+        return point.GetGlobalTransformWithCanvas() * anchor;
+    }
+
+    private static Vector2 ToDrawingsLocal(NMapScreen map, Vector2 screenPoint) =>
+        map.Drawings.GetGlobalTransformWithCanvas().AffineInverse() * screenPoint;
+
+    private static float VisibleCenterY(SurfaceCapture capture) =>
+        capture.Map.GetViewport().GetVisibleRect().GetCenter().Y;
+
+    private static bool FollowVertical(SurfaceCapture capture, Vector2 target)
+    {
+        var delta = (float)Math.Clamp(capture.Map.GetProcessDeltaTime(), 1d / 240d, 0.05d);
+        var factor = 1f - MathF.Exp(-14f * delta);
+
         if (capture.Scroll is { } scroll)
         {
-            var offset = target - scroll.GetGlobalRect().GetCenter();
-            scroll.ScrollHorizontal += (int)(offset.X * 0.15f);
-            scroll.ScrollVertical += (int)(offset.Y * 0.15f);
-            return;
+            var previousScroll = scroll.ScrollVertical;
+            var offsetY = target.Y - scroll.GetGlobalRect().GetCenter().Y;
+            scroll.ScrollVertical += (int)MathF.Round(offsetY * factor);
+            return scroll.ScrollVertical != previousScroll;
         }
 
         var pan = capture.Pan;
+        var previousPos = pan.Position;
         var parent = (CanvasItem)pan.GetParent();
-        var offsetToCenter = capture.Map.GetViewport().GetVisibleRect().GetCenter() - target;
-        var next = pan.Position + parent.GetGlobalTransformWithCanvas().AffineInverse().BasisXform(offsetToCenter * 0.15f);
+        var verticalOffset = new Vector2(0f, VisibleCenterY(capture) - target.Y);
+        var next = pan.Position + parent.GetGlobalTransformWithCanvas().AffineInverse().BasisXform(verticalOffset * factor);
+        next.Y = Math.Clamp(next.Y, NativeScrollLimitBottom, NativeScrollLimitTop);
         capture.ScrollTarget.Set(next);
         pan.Position = next;
+        return MathF.Abs(next.Y - previousPos.Y) >= 0.5f;
     }
 }

@@ -22,6 +22,8 @@ from sts2_harness.client.models import (
     ControlReply,
     ControlRequest,
     DetailData,
+    DisplayReply,
+    DisplayRequest,
     ErrorCode,
     HistoryData,
     InspectArea,
@@ -51,6 +53,7 @@ type ActionResult = StepReceipt | InvalidRequestReply | TechnicalError
 type PresentResult = PresentReply | InvalidRequestReply | TechnicalError
 type VerifyPresentationResult = VerifyPresentationReply | InvalidRequestReply | TechnicalError
 type ControlResult = ControlReply | ControlFailed | InvalidRequestReply | TechnicalError
+type DisplayResult = DisplayReply | InvalidRequestReply | TechnicalError
 
 type StatusResult = Status | InvalidRequestReply | TechnicalError
 type StateResult = StateReply | InvalidRequestReply | TechnicalError
@@ -62,6 +65,7 @@ _ACTION = TypeAdapter(StepReceipt)
 _PRESENT = TypeAdapter(PresentReply)
 _VERIFY_PRESENTATION = TypeAdapter(VerifyPresentationReply)
 _CONTROL = TypeAdapter(ControlReply | ControlFailed)
+_DISPLAY = TypeAdapter(DisplayReply)
 _STATUS = TypeAdapter(Status)
 _STATE = TypeAdapter(StateReply)
 _INSPECT = TypeAdapter(InspectReply)
@@ -138,6 +142,15 @@ class ModClient:
     async def control(self, mode: ControlIntent) -> ControlResult:
         return await self._request("POST", "/control", _CONTROL, ControlRequest(mode=mode))
 
+    async def display(self, reason: str, *, timeout_seconds: float = 1.0) -> DisplayResult:
+        return await self._request(
+            "POST",
+            "/display",
+            _DISPLAY,
+            DisplayRequest(reason=reason),
+            timeout_seconds=timeout_seconds,
+        )
+
     async def status(self) -> StatusResult:
         return await self._request("GET", "/status", _STATUS)
 
@@ -203,7 +216,13 @@ class ModClient:
         return result
 
     async def _request[T](
-        self, method: str, path: str, adapter: TypeAdapter[T], request: WireModel | None = None
+        self,
+        method: str,
+        path: str,
+        adapter: TypeAdapter[T],
+        request: WireModel | None = None,
+        *,
+        timeout_seconds: float | None = None,
     ) -> T | InvalidRequestReply | TechnicalError:
         try:
             response = await self._http.request(
@@ -211,6 +230,7 @@ class ModClient:
                 path,
                 content=request.to_json().encode("utf-8") if request else None,
                 headers={"content-type": "application/json"} if request else None,
+                timeout=httpx.USE_CLIENT_DEFAULT if timeout_seconds is None else timeout_seconds,
             )
         except httpx.TimeoutException:
             raise ClientUnavailable(ClientFailureKind.TIMEOUT) from None

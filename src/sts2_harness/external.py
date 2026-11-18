@@ -62,10 +62,12 @@ class ExternalBackend:
         *,
         diagnostics: Diagnostics | None = None,
         wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        display_reasons: bool = False,
     ) -> None:
         self._client = client
         self._diagnostics = diagnostics
         self._wait = wait
+        self._display_reasons = display_reasons
         self._status_lock = asyncio.Lock()
         self._run: ExternalRun | None = None
         self._paused_instance: str | None = None
@@ -230,6 +232,7 @@ class ExternalBackend:
             game_instance_id=identity[0],
             run_id=identity[1],
             diagnostics=self._diagnostics,
+            display=self._client.display if self._display_reasons else None,
         )
         current = ExternalRun(
             identity,

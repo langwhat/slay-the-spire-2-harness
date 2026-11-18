@@ -4,8 +4,8 @@
 
 ## Layout
 
-- `mod/src/Sts2Mod.Core/`: Game- and Godot-independent protocol contracts, observation/inspection/catalog readers, single-step admission and settlement gateway, loopback HTTP server, and developer contracts.
-- `mod/src/Sts2Mod/`: Godot/Harmony game adapter (`sts2agent.dll` + `mod_manifest.json`) targeting Slay the Spire 2 (`net9.0`).
+- `mod/src/Sts2Mod.Core/`: Game- and Godot-independent protocol contracts, observation/inspection/catalog readers, single-step admission and settlement gateway, viewer reason feed store, loopback HTTP server, and developer contracts.
+- `mod/src/Sts2Mod/`: Godot/Harmony game adapter (`sts2agent.dll` + `mod_manifest.json`) targeting Slay the Spire 2 (`net9.0`), including GUI-only viewer presentation (portrait Start/Pause control, non-overlapping left-margin reason feed via `POST /display`, vertically centered map quill strokes, and brief choice focus highlights that bypass completely in headless mode).
 - `mod/tests/Sts2Mod.Core.Tests/`: Offline xUnit test suite exercising `Sts2Mod.Core` without game or Godot assemblies.
 - `mod/tools/NativeTemplate/`: Developer-only isolated profile initializer (`Settings` CLI + `sts2agent_template` Mod) paired with `sts2_harness.native_template`.
 

@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Runs;
 using Sts2Mod.Catalog;
 using Sts2Mod.Core.Control;
+using Sts2Mod.Core.Display;
 using Sts2Mod.Core.Transport;
 using Sts2Mod.Developer;
 using Sts2Mod.Execution;
@@ -22,6 +23,7 @@ public static class ModEntry
     private const int DefaultPort = 17877;
 
     internal static AgentControlState ControlState { get; } = new();
+    internal static ReasonFeedStore ReasonFeed { get; } = new();
 
     private static readonly GameCatalogProvider Catalog = new();
     private static readonly HeadlessRunStarter HeadlessStarter = new();
@@ -64,6 +66,7 @@ public static class ModEntry
         if (_steps is not null)
             _steps.Advance(ObservationHub.CurrentRunInstanceId, MainMenuProbe.Observe());
         ControlState.SetMode(AgentControlMode.Paused);
+        ReasonFeed.Clear();
         CardSelectionInterceptor.ResetForRunBoundary();
     }
 
@@ -71,6 +74,7 @@ public static class ModEntry
     {
         if (_checkpoints?.OwnsInput != true)
             ControlState.SetMode(AgentControlMode.Paused);
+        ReasonFeed.Clear();
         CardSelectionInterceptor.ResetForRunBoundary();
         ObservationHub.OnRunCleanUp();
     }
@@ -81,6 +85,7 @@ public static class ModEntry
         {
             HeadlessStarter.OnRunStarted();
             var preserved = ControlState.ApplyRunStartedBoundary();
+            ReasonFeed.Clear();
             CardSelectionInterceptor.ResetForRunBoundary();
             ObservationHub.OnRunStarted();
             _steps?.ClearOnRunReset();
@@ -151,6 +156,7 @@ public static class ModEntry
         try
         {
             PortraitControlOverlay.Refresh();
+            ReasonFeedOverlay.Refresh();
             var menuReadiness = MainMenuProbe.Observe();
             ReplayPresentationPatch.ActivateBeforeInput(RunManager.Instance.IsInProgress);
 
@@ -187,6 +193,9 @@ public static class ModEntry
 
         public HttpReply SetControl(string body) =>
             ControlState.WriteJson(body);
+
+        public HttpReply SubmitDisplay(string body) =>
+            ReasonFeed.WriteJson(body);
 
         public Task<HttpReply> PresentMap(string body) =>
             steps.MapPresentation.Present(body);

@@ -138,7 +138,9 @@ async def run_external(
         diagnostics.configured(configuration, mod_port)
         try:
             async with ExternalBackend(
-                ModClient(options.mod_url), diagnostics=diagnostics
+                ModClient(options.mod_url),
+                diagnostics=diagnostics,
+                display_reasons=True,
             ) as backend:
                 server = LocalServer(
                     uvicorn.Config(

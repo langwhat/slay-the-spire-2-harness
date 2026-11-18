@@ -45,6 +45,7 @@ async def live_session(
     diagnostics: Diagnostics | None = None,
     stop_requested: Callable[[], bool] | None = None,
     user_input: UserInputSource | None = None,
+    display_reasons: bool = False,
 ) -> AsyncGenerator[RunSession]:
     if model is None and (run_factory is None or combat_factory is None):
         raise ValueError("Default model roles require a model resource.")
@@ -95,6 +96,7 @@ async def live_session(
             RecordedDocuments(documents if documents is not None else FileDocuments(), journal),
             model_client,
             journal.record_card_choice,
+            display=client.display if display_reasons else None,
         )
         async with RunSession(
             manifest,

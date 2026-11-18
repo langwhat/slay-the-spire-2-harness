@@ -22,6 +22,7 @@ public sealed class LoopbackHttpServerTests
         public Task<HttpReply> Catalog(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"catalog\"}"));
         public HttpReply SubmitAction(string body) => new(200, "{\"route\":\"action\"}");
         public HttpReply SetControl(string body) => new(200, "{\"route\":\"set_control\"}");
+        public HttpReply SubmitDisplay(string body) => new(200, "{\"route\":\"display\"}");
         public Task<HttpReply> PresentMap(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"present\"}"));
         public Task<HttpReply> VerifyMapRestoration(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"verify\"}"));
         public HttpReply GetCheckpointIdentity() => new(200, "{\"route\":\"checkpoint_identity\"}");
@@ -59,6 +60,7 @@ public sealed class LoopbackHttpServerTests
                      ("/catalog", "catalog"),
                      ("/action", "action"),
                      ("/control", "set_control"),
+                     ("/display", "display"),
                      ("/map/present", "present"),
                      ("/map/restore/verify", "verify"),
                      ("/operator/checkpoint", "checkpoint"),

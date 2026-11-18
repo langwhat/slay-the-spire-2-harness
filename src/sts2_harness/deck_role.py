@@ -306,6 +306,7 @@ class DeckAgent(RunAgent):
                 )
             proposal = ActionProposal((SelectStep(chosen),), query.reason, allow_map_travel=False)
         elif not offer.requires_selection and not chosen:
+            await self._tools.display_reason(query.reason)
             result = QueryToolResult(ReadCompleted(), current)
             self._record(pending, QueryToolResult(ReadCompleted(), raw), local=True)
             self._resolved(pending, ActionToolResult(ActionCompleted(completed_steps=0), raw))

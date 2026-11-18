@@ -5,6 +5,7 @@ using MegaCrit.Sts2.Core.Assets;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Runs;
 using Sts2Mod.Core.Developer;
+using Sts2Mod.Ui;
 
 namespace Sts2Mod.Bootstrap;
 
@@ -130,4 +131,14 @@ internal static class RunManagerOnEndedPatch
 internal static class RunManagerCleanUpPatch
 {
     private static void Postfix() => ModEntry.OnRunCleanUp();
+}
+
+[HarmonyPatch(typeof(NRun), nameof(NRun._Ready))]
+internal static class NRunOverlaysPatch
+{
+    private static void Postfix(NRun __instance)
+    {
+        PortraitControlOverlay.Install(__instance);
+        ReasonFeedOverlay.Install(__instance);
+    }
 }

@@ -1590,3 +1590,15 @@ class ControlFailure(WireModel):
 class ControlFailed(WireModel):
     status: Literal[ResultStatus.FAILED]
     error: ControlFailure
+
+
+class DisplayStatus(StrEnum):
+    SHOWN = "shown"
+
+
+class DisplayRequest(WireModel):
+    reason: Nonempty
+
+
+class DisplayReply(WireModel):
+    status: Literal[DisplayStatus.SHOWN]
