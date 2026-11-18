@@ -235,6 +235,33 @@ public sealed class StepGatewayAndRulesTests
     }
 
     [Fact]
+    public void MapPresentation_RetiresOldLockedGateOnlyAfterWorkerStopsAndNewRunIsObserved()
+    {
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var gateway = new StepGateway(control, "game-1");
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 1, _ => null);
+        Assert.Null(gateway.BeginPresentation("map-old", RunRoute, static () => null));
+        var worker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        gateway.TrackPresentationWorker("map-old", worker.Task);
+
+        gateway.ClearReceiptOnRunReset();
+        var newRun = RunLocation with { RunId = "run-2" };
+        gateway.Advance(newRun, NativeInputReadiness.Unavailable, sequence: -1, _ => null);
+        Assert.Equal(PresentationPhase.Running, gateway.Presentation!.Phase);
+        gateway.Advance(newRun, NativeInputReadiness.Ready, sequence: 2, _ => null);
+        Assert.Equal(PresentationPhase.Running, gateway.Presentation!.Phase);
+
+        worker.SetResult();
+        Assert.True(gateway.SettlePresentation("map-old", PresentationDrawing.Failed, PresentationRestoration.Unknown));
+        gateway.Advance(newRun, NativeInputReadiness.Unavailable, sequence: -1, _ => null);
+        Assert.Equal(PresentationPhase.SettledUnverified, gateway.Presentation!.Phase);
+        gateway.Advance(newRun, NativeInputReadiness.Ready, sequence: 3, _ => null);
+        Assert.Null(gateway.Presentation);
+        Assert.Null(gateway.BeginPresentation("map-new", RunRoute with { RunId = "run-2" }, static () => null));
+    }
+
+    [Fact]
     public async Task MapPresentationTransportAndBarrier_ValidateEdgesAndBoundAnimationFrames()
     {
         PresentationRequest? capturedPresent = null;
@@ -321,5 +348,14 @@ public sealed class StepGatewayAndRulesTests
         var rejected = Assert.IsType<RejectedStep>(gateway.Status().Receipt);
         Assert.Equal("op-highlight", rejected.OperationId);
         Assert.Equal(StepErrorCode.ActionUnavailable, rejected.Error.Code);
+
+        var externalOwner = false;
+        gateway.SetExternalInputBusyCheck(() => externalOwner);
+        gateway.Submit(ActionJson("op-external", RunRoute, "{\"kind\":\"interact\",\"action\":\"interaction:1:1\"}"));
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+        externalOwner = true;
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 2, _ =>
+            throw new InvalidOperationException("The external input owner must prevent dispatch."));
+        Assert.Equal(StepErrorCode.NativeBusy, Assert.IsType<RejectedStep>(gateway.Status().Receipt).Error.Code);
     }
 }

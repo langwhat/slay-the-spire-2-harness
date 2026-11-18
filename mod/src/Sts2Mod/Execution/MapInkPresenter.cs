@@ -36,6 +36,8 @@ internal sealed class NativeMapAnimations
         _draggingField = dragging;
     }
 
+    public Tween? Transition => (Tween?)_transitionField.GetValue(_map);
+
     public bool IsDragging => (bool)_draggingField.GetValue(_map)!;
 
     public bool CanAwaitOpening => !IsDragging && Busy();
@@ -61,7 +63,7 @@ internal sealed class NativeMapAnimations
     public bool Busy()
     {
         var opening = (Tween?)_openingField.GetValue(_map);
-        var transition = (Tween?)_transitionField.GetValue(_map);
+        var transition = Transition;
         Observe(opening);
         Observe(transition);
         return opening is not null
@@ -187,7 +189,7 @@ internal sealed class MapInkPresenter
         public bool Drawing;
         public bool Returning;
         public bool Closed;
-        public bool OpenedMap;
+        public Tween? OpeningTween;
         public bool AbandonRestore;
         public PresentationDrawing Outcome = PresentationDrawing.Shown;
     }
@@ -215,7 +217,11 @@ internal sealed class MapInkPresenter
             request();
 
         if (_display is not { } display)
+        {
+            if (_capture is not null && _gateway.Presentation is null)
+                _capture = null;
             return;
+        }
 
         try
         {
@@ -278,9 +284,10 @@ internal sealed class MapInkPresenter
                     return;
                 }
 
+                var previousTransition = captured.Animations.Transition;
                 try
                 {
-                    _returnNeeded = display.OpenedMap = true;
+                    _returnNeeded = true;
                     captured.Map.Open(isOpenedFromTopBar: true);
                     captured.Animations.Busy();
                     display.OpeningBarrier = new(true);
@@ -288,9 +295,15 @@ internal sealed class MapInkPresenter
                 catch (Exception exception)
                 {
                     GD.PrintErr($"[sts2agent] Map presentation open failed: {exception}");
-                    display.OpeningBarrier = null;
+                    display.OpeningBarrier = new(true);
                     display.Outcome = PresentationDrawing.Failed;
                     display.Returning = true;
+                }
+                finally
+                {
+                    var transition = captured.Animations.Transition;
+                    if (!ReferenceEquals(transition, previousTransition))
+                        display.OpeningTween = transition;
                 }
             }
             catch (Exception exception)
@@ -861,11 +874,12 @@ internal sealed class MapInkPresenter
                     capture.Map.MouseFilter = capture.MouseFilter;
             }
         }
-        // A native animation started by this display still owns its work until it stops.
-        if (display.OpenedMap && GodotObject.IsInstanceValid(capture.Map) && capture.Map.IsInsideTree()
-            && capture.Animations.Busy())
+        // The top-bar open creates a transition tween. Only stop the tween this display started.
+        if (display.OpeningTween is { } opening && GodotObject.IsInstanceValid(opening) && opening.IsValid())
         {
-            return;
+            opening.Kill();
+            if (opening.IsValid())
+                return;
         }
 
         display.Worker.TrySetResult();

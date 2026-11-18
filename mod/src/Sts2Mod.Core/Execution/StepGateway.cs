@@ -9,9 +9,9 @@ namespace Sts2Mod.Core.Execution;
 /// <summary>
 /// Owns admission, settlement, and receipt publication for a single native gameplay step or map presentation.
 /// </summary>
-public sealed class StepGateway(AgentControlState control, string gameInstanceId)
+public sealed class StepGateway(AgentControlState control, string gameInstanceId, object? inputAdmission = null)
 {
-    private readonly object _sync = new();
+    private readonly object _sync = inputAdmission ?? new();
     private StepRequest? _pending;
     private bool _dispatching;
     private Task? _nativeCompletion;
@@ -308,7 +308,15 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
             if (_presentation is { Gate: PresentationGate.Locked } && !PresentationLocationMatches())
                 _presentationIdentityLost = true;
             if (_presentation is { Phase: PresentationPhase.Restored } && !PresentationLocationMatches())
-                _presentation = null;
+                ClearPresentation();
+            if (_presentation is { Phase: PresentationPhase.SettledUnverified }
+                && _presentationWorker is { IsCompleted: true }
+                && _presentationRoute is { } oldRoute
+                && location.RunId is not null && location.RunId != oldRoute.RunId
+                && sequence >= 0)
+            {
+                ClearPresentation();
+            }
             _ascension = location.RunId is null ? null : ascension;
             _readiness = readiness;
             _latestObservationSequence = Math.Max(sequence, _latestObservationSequence);
@@ -385,7 +393,8 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
                     request.OperationId,
                     new RouteChangedCause("The native route changed before dispatch.", location));
             }
-            else if (readiness is NativeInputReadiness.Busy or NativeInputReadiness.Unavailable)
+            else if (_externalInputBusy?.Invoke() == true
+                     || readiness is NativeInputReadiness.Busy or NativeInputReadiness.Unavailable)
             {
                 _receipt = Reject(request, StepErrorCode.NativeBusy, "Native input is not ready.");
             }
@@ -480,14 +489,18 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
                 return;
             _receipt = null;
             _awaitingObservationAfterUncertain = false;
-            if (_presentation is { Gate: PresentationGate.Locked })
-                return;
-            _presentation = null;
-            _presentationRoute = null;
-            _presentationWorker = null;
-            _presentationVerifier = null;
-            _presentationIdentityLost = false;
+            if (_presentation is not { Gate: PresentationGate.Locked })
+                ClearPresentation();
         }
+    }
+
+    private void ClearPresentation()
+    {
+        _presentation = null;
+        _presentationRoute = null;
+        _presentationWorker = null;
+        _presentationVerifier = null;
+        _presentationIdentityLost = false;
     }
 
     private void WaitForObservationAfterUncertain()

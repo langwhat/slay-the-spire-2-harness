@@ -59,12 +59,11 @@ internal sealed class GameStepDispatcher
     private CardModel[]? _autoSelectedCards;
     private bool _multipleAutoSelections;
 
-    public GameStepDispatcher(AgentControlState control, Func<bool>? externalInputBusy = null)
+    public GameStepDispatcher(AgentControlState control, object inputAdmission, Func<bool> externalInputBusy)
     {
         _control = control;
-        _gateway = new StepGateway(control, ObservationHub.GameInstanceId);
-        if (externalInputBusy is not null)
-            _gateway.SetExternalInputBusyCheck(externalInputBusy);
+        _gateway = new StepGateway(control, ObservationHub.GameInstanceId, inputAdmission);
+        _gateway.SetExternalInputBusyCheck(externalInputBusy);
         _mapPresenter = new MapInkPresenter(_gateway);
     }
 
@@ -927,14 +926,6 @@ internal sealed class GameStepDispatcher
 
     private bool AdvanceConfirmation(Node screen)
     {
-        if (ViewerPacing.IsInteractiveGui && Time.GetTicksMsec() < _confirmationNotBeforeMsec)
-            return true;
-
-        var confirm = NodeHierarchy.Descendants(screen)
-            .OfType<NConfirmButton>()
-            .FirstOrDefault(button => IsControlUsable(button) && !_pressedConfirmations.Contains(button));
-        if (confirm is null)
-            return false;
         if (_confirmationStillValid?.Invoke() == false)
         {
             _confirmationScreen = null;
@@ -944,6 +935,14 @@ internal sealed class GameStepDispatcher
             return true;
         }
 
+        if (ViewerPacing.IsInteractiveGui && Time.GetTicksMsec() < _confirmationNotBeforeMsec)
+            return true;
+
+        var confirm = NodeHierarchy.Descendants(screen)
+            .OfType<NConfirmButton>()
+            .FirstOrDefault(button => IsControlUsable(button) && !_pressedConfirmations.Contains(button));
+        if (confirm is null)
+            return false;
         _pressedConfirmations.Add(confirm);
         _confirmationStillValid = null;
         _confirmationNotBeforeMsec = 0;

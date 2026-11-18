@@ -115,18 +115,19 @@ public static class ModEntry
                                    && System.Environment.GetEnvironmentVariable("STS2_ALLOW_CHECKPOINTS") == "true";
             ObservationHub.CheckpointIdentityEnabled = developerEnabled;
 
+            var inputAdmission = new object();
             var steps = new GameStepDispatcher(
                 ControlState,
+                inputAdmission,
                 externalInputBusy: () => _checkpoints?.OwnsInput == true
                                          || _laboratory?.OwnsInput == true
                                          || HeadlessStarter.IsActive);
             ObservationHub.ProjectForRead = steps.Project;
             _steps = steps;
-            var developerAdmission = new object();
-            _checkpoints = new CheckpointService(developerEnabled, ControlState, steps.CurrentStatus, developerAdmission);
-            _laboratory = new LaboratoryService(developerEnabled, ControlState, Catalog, steps.CurrentStatus, developerAdmission);
+            _checkpoints = new CheckpointService(developerEnabled, ControlState, steps.CurrentStatus, inputAdmission);
+            _laboratory = new LaboratoryService(developerEnabled, ControlState, Catalog, steps.CurrentStatus, inputAdmission);
 
-            var handlers = new ModHttpRouter(steps, _checkpoints, _laboratory);
+            var handlers = new ModHttpRouter(steps, _checkpoints, _laboratory, inputAdmission);
             server = new LoopbackHttpServer(port, handlers);
             server.Start();
             _http = server;
@@ -177,7 +178,8 @@ public static class ModEntry
     private sealed class ModHttpRouter(
         GameStepDispatcher steps,
         CheckpointService checkpoints,
-        LaboratoryService laboratory) : IModHttpHandlers
+        LaboratoryService laboratory,
+        object inputAdmission) : IModHttpHandlers
     {
         public HttpReply GetStatus() => steps.StatusJson();
 
@@ -192,8 +194,11 @@ public static class ModEntry
         public HttpReply SubmitAction(string body) =>
             steps.Submit(body);
 
-        public HttpReply SetControl(string body) =>
-            ControlState.WriteJson(body);
+        public HttpReply SetControl(string body)
+        {
+            lock (inputAdmission)
+                return ControlState.WriteJson(body);
+        }
 
         public HttpReply SubmitDisplay(string body) =>
             ReasonFeed.WriteJson(body);
