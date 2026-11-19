@@ -67,6 +67,7 @@ Seeing more cards is not the payoff. Spend on access when its likely results bea
 - Which known and newly created cards, including negative ones, enter the next shuffle, after exhaustion, retention, and discards?
 - Which plausible next hands can kill or defend after each candidate line?
 - If the needed card does not arrive, what affordable sequence remains, and does it survive the next attack that matters?
+- When a line takes damage to deal more now, at the current pace how many enemy attacks remain before the kill, can ordinary next hands cover them with the HP left, and how much more does each extra turn cost as the enemy grows?
 - Does drawing or shuffling now remove a later retrieval target?
 - When replacing the whole hand, which retained defenses or key cards are lost?
 
