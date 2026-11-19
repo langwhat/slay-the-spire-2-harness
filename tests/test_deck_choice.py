@@ -557,7 +557,19 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
 def test_reward_http_input_includes_shared_battle_history(tmp_path: Path, minimal: bool) -> None:
     async def scenario() -> None:
         game = RewardGame(minimal=minimal)
-        fights = (Fight(floor=1, kind=FightKind.NORMAL, turns=2, hp_in=50, hp_out=46),)
+        fights = (
+            Fight(
+                floor=1,
+                kind=FightKind.NORMAL,
+                hp_in=50,
+                hp_out=46,
+                damage=(),
+                damage_one=(),
+                incoming=(),
+                hp_lost=(),
+                potions=(),
+            ),
+        )
         async with live_session(
             ModClient("http://mod", transport=httpx.MockTransport(game.mod)),
             Manifest(

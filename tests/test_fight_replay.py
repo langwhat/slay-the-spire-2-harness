@@ -50,7 +50,19 @@ def test_reconstructed_decision_recovers_only_proven_fight_encounters(
                     fight.model_copy(update={"hp_in": fight.hp_in + 1}) for fight in self.recent
                 )
             if scenario == "missing_observation" and len(self.recent) == 1:
-                self.recent += (Fight(floor=4, kind=FightKind.NORMAL, turns=1, hp_in=8, hp_out=7),)
+                self.recent += (
+                    Fight(
+                        floor=4,
+                        kind=FightKind.NORMAL,
+                        hp_in=8,
+                        hp_out=7,
+                        damage=(),
+                        damage_one=(),
+                        incoming=(),
+                        hp_lost=(),
+                        potions=(),
+                    ),
+                )
             if scenario == "same_node":
                 self.recent = self.recent[-1:]
 

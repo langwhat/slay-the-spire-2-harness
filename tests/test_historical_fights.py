@@ -115,7 +115,19 @@ def fixture(tmp_path: Path, scenario: str = "known") -> tuple[Path, Path, Path, 
         }
     )
     observations = [opening, after]
-    fights = (Fight(floor=1, kind=FightKind.NORMAL, turns=4, hp_in=10, hp_out=10),)
+    fights = (
+        Fight(
+            floor=1,
+            kind=FightKind.NORMAL,
+            hp_in=10,
+            hp_out=10,
+            damage=(),
+            damage_one=(),
+            incoming=(),
+            hp_lost=(),
+            potions=(),
+        ),
+    )
     if scenario == "missing":
         observations[0] = opening.model_copy(update={"encounter": MISSING})
     elif scenario == "different_id":
@@ -166,7 +178,20 @@ def fixture(tmp_path: Path, scenario: str = "known") -> tuple[Path, Path, Path, 
             }
         )
         observations.extend((second, after))
-        fights = (Fight(floor=2, kind=FightKind.NORMAL, turns=4, hp_in=10, hp_out=10), fights[0])
+        fights = (
+            Fight(
+                floor=2,
+                kind=FightKind.NORMAL,
+                hp_in=10,
+                hp_out=10,
+                damage=(),
+                damage_one=(),
+                incoming=(),
+                hp_lost=(),
+                potions=(),
+            ),
+            fights[0],
+        )
     db = sqlite3.connect(archive)
     db.executescript("""
         CREATE TABLE records(sequence INTEGER PRIMARY KEY, cursor INTEGER, kind TEXT, reply TEXT);

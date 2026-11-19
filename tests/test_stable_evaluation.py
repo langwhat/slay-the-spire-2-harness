@@ -361,7 +361,11 @@ def test_fresh_decision_uses_production_task_without_old_notes_or_report(tmp_pat
                                     Fight(
                                         floor=123,
                                         kind=FightKind.ELITE,
-                                        turns=456,
+                                        damage=(),
+                                        damage_one=(),
+                                        incoming=(),
+                                        hp_lost=(),
+                                        potions=(),
                                         hp_in=789,
                                         hp_out=654,
                                     ),

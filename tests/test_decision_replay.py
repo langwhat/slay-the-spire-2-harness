@@ -269,7 +269,19 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
 ) -> None:
     async def run() -> None:
         case = decision_case(tmp_path).model_copy(update={"minimal": minimal})
-        fights = (Fight(floor=1, kind=FightKind.NORMAL, turns=2, hp_in=50, hp_out=46),)
+        fights = (
+            Fight(
+                floor=1,
+                kind=FightKind.NORMAL,
+                hp_in=50,
+                hp_out=46,
+                damage=(),
+                damage_one=(),
+                incoming=(),
+                hp_lost=(),
+                potions=(),
+            ),
+        )
         case = case.model_copy(
             update={
                 "events": tuple(
