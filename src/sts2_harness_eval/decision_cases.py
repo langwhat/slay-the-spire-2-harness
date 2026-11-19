@@ -9,7 +9,7 @@ from pydantic import Field, JsonValue, model_validator
 from sts2_harness.client import models as native
 from sts2_harness.context.models import AutomaticProgress
 from sts2_harness.decisions import BattleReport
-from sts2_harness.fights import Fight
+from sts2_harness.fights import Fight, FightEncounter
 from sts2_harness.game import Catalog, Inspect
 from sts2_harness.journal_models import NativeSnapshot
 from sts2_harness.results import ActionOutcome, Outcome, PlanData
@@ -43,6 +43,7 @@ class HarnessState(native.WireModel):
     observed_plays: dict[str, int] = {}
     route: RouteState | None = None
     fights: tuple[Fight, ...] = ()
+    elites_fought: tuple[FightEncounter, ...] | None = None
 
 
 class BattleState(native.WireModel):

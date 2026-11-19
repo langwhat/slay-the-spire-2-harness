@@ -8,7 +8,7 @@ from test_mod_client import COMBAT, RUN
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.models import RunActInput
-from sts2_harness.fights import Fight, FightHistory, FightKind
+from sts2_harness.fights import Fight, FightEncounter, FightHistory, FightKind
 
 
 def battle(floor: int, hp: int, turn: int = 1) -> native.Observation:
@@ -273,3 +273,76 @@ def test_fight_rounds_measure_damage_defense_potions_and_deck_changes() -> None:
     assert fight.incoming == (12, 9, 0)
     assert fight.hp_lost == (4, 0, 6)
     assert fight.potions == (("POTION.FIRE",), ("POTION.BLOCK",), ())
+
+
+def named_battle(
+    floor: int, definition_id: str, room_type: str = "elite", act: int = 1
+) -> native.Observation:
+    observation = battle(floor, 50)
+    progress = observation.state.progress.model_copy(update={"room_type": room_type, "act": act})
+    return observation.model_copy(
+        update={
+            "state": observation.state.model_copy(update={"progress": progress}),
+            "encounter": native.NamedDefinition(name=definition_id, definition_id=definition_id),
+        }
+    )
+
+
+def at_act(act: int, position: str | None, floor: int) -> native.Observation:
+    observation = after(50, floor)
+    progress = observation.state.progress.model_copy(update={"act": act, "position": position})
+    return observation.model_copy(
+        update={"state": observation.state.model_copy(update={"progress": progress})}
+    )
+
+
+def test_act_elites_list_elite_entries_of_an_act_observed_from_its_start() -> None:
+    history = FightHistory()
+    history.observe(at_act(1, None, 0))
+    assert history.act_elites == ()
+    history.observe(named_battle(3, "ENCOUNTER.NORMAL", room_type="monster"))
+    history.observe(named_battle(5, "ENCOUNTER.EEL_ELITE"))
+    history.observe(named_battle(5, "ENCOUNTER.EEL_ELITE"))
+    history.observe(after(40, 5))
+    history.observe(named_battle(9, "ENCOUNTER.COLONY_ELITE"))
+    assert history.act_elites == (
+        FightEncounter(definition_id="ENCOUNTER.EEL_ELITE", name="ENCOUNTER.EEL_ELITE"),
+        FightEncounter(definition_id="ENCOUNTER.COLONY_ELITE", name="ENCOUNTER.COLONY_ELITE"),
+    )
+    history.observe(at_act(2, None, 17))
+    assert history.act_elites == ()
+    history.observe(named_battle(20, "ENCOUNTER.PRISMS_ELITE", act=2))
+    assert [elite.definition_id for elite in history.act_elites or ()] == ["ENCOUNTER.PRISMS_ELITE"]
+
+    joined = FightHistory()
+    joined.observe(at_act(2, "map:4:1", 21))
+    joined.observe(named_battle(22, "ENCOUNTER.PRISMS_ELITE", act=2))
+    assert joined.act_elites is None
+    joined.observe(at_act(3, None, 33))
+    assert joined.act_elites == ()
+
+
+def test_known_act_elites_are_shown_in_the_run_map() -> None:
+    observation = after(50)
+    public_map = native.PublicMap.model_validate_json(
+        '{"bosses":[],"nodes":['
+        '{"position":"map:0:0","room_type":"ancient","children":["map:1:0"]},'
+        '{"position":"map:1:0","room_type":"elite","children":["map:2:0"]},'
+        '{"position":"map:2:0","room_type":"boss","children":[]}],'
+        '"legal_destinations":null}'
+    )
+    observation = observation.model_copy(update={"map": public_map})
+    elite = FightEncounter(definition_id="ENCOUNTER.EEL_ELITE", name="鳗鱼")
+    for known, expected in (
+        ((elite,), [{"definition_id": "ENCOUNTER.EEL_ELITE", "name": "鳗鱼"}]),
+        ((), []),
+    ):
+        context = Context(native.DecisionOwner.RUN)
+        context.set_elites_fought(known)
+        context.append_task(RunActInput(), observation)
+        delivered = json.loads(context.model_input()[-1].text)["observation"]["map"]
+        assert delivered["elites_fought"] == expected
+    unknown = Context(native.DecisionOwner.RUN)
+    unknown.set_elites_fought(None)
+    unknown.append_task(RunActInput(), observation)
+    assert "elites_fought" not in json.loads(unknown.model_input()[-1].text)["observation"]["map"]

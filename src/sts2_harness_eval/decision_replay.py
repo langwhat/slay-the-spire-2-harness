@@ -308,6 +308,7 @@ class DecisionRun(DeckAgent):
                 self._tools.deck_stats = CaseStatistics(event.state, current)
                 if self._tools.fights is not None:
                     self._tools.fights.recent = event.state.fights
+                    self._tools.fights.act_elites = event.state.elites_fought
                 route = event.state.route
                 self._plan = (
                     RoutePlan(route.position, "", tuple(Edge(*edge) for edge in route.edges))

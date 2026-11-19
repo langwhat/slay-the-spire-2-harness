@@ -411,6 +411,10 @@ def _state(
             enriched.append(fight)
         fights = tuple(enriched)
 
+    elites = FightHistory()
+    for raw in originals[: originals.index(original) + 1]:
+        elites.observe(raw)
+
     return HarnessState(
         notes=notes,
         added=added,
@@ -418,6 +422,7 @@ def _state(
         observed_plays=plays,
         route=route,
         fights=fights,
+        elites_fought=elites.act_elites,
     )
 
 

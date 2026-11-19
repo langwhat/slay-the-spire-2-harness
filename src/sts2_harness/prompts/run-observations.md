@@ -1,6 +1,6 @@
 # Map
 
-`map.boss` identifies the known Bosses. `map.at` identifies the current node, its stretch, and its 1-based room number within that stretch; it is null before entering the act's first node. `map.next` is the set of destinations the game currently allows: null means availability is unknown, and an empty list means no destination is currently available.
+`map.boss` identifies the known Bosses. `map.at` identifies the current node, its stretch, and its 1-based room number within that stretch; it is null before entering the act's first node. `map.next` is the set of destinations the game currently allows: null means availability is unknown, and an empty list means no destination is currently available. `map.elites_fought` lists this act's Elite battles so far, in order; it is absent when unknown.
 
 A stretch has no fork inside: entering it commits to every room in it. `floors` gives its native act-local row or row range, and `rooms` lists the rooms in order. The room codes are M (Monster), E (Elite), R (rest site), $ (shop), T (treasure), ? (unknown), B (Boss), and A (Ancient). Each stretch's `next` lists its successor stretches. Stretch IDs are stable within the act. `unknown_odds` gives the native odds for unknown rooms, either once when they match or by stretch and 1-based room number when they differ; absent odds are unknown.
 
@@ -45,14 +45,15 @@ Ask the questions under each room that fit the decision at hand. They direct att
 
 First compare the paths to the act's Boss by what they pay: Elites, treasure, shops, unknown rooms, and rest sites, and the order they come in. Then check the preferred path against HP:
 
-- Count the fights before each certain recovery and price each at what `fights` shows battles of its kind have cost this run. Price an Elite not yet fought from its supplied rules when present, otherwise from the act's normal fights so far and the fact that it hits harder.
+- Count the fights before each certain recovery and price each at what `fights` shows battles of its kind have cost this run.
+- An act's Elites come in rounds: each round holds every Elite of the act once, in random order, and a new round never opens with the Elite that closed the last one. Which Elite a room holds depends only on how many Elites this act has had, not on which room is entered, so the candidates are the Elites still unfought in the current round, and the last one of a round is certain. Before entering, test the deck against each candidate's supplied rules: what its first turns demand, and whether the deck has the answer its mechanism calls for, such as damage that kills several enemies together, block for its opening attacks, defense that holds while playing few of the cards it punishes, or output that does not feed what it punishes. Price the Elite at the worst candidate. A deck that clearly answers a certain candidate can enter it with less HP; a candidate the deck has no answer to needs HP for its bad case. Price it at the last fork where the route can still change, together with the forced rooms and recoveries after it, and weigh what avoiding it gives up: relics, rest sites, shops, and the normal fights the detour forces.
 - A segment that does not fit within current HP is changed, or prepared for with a rest, gold, or potions, before entering.
 - Before choosing a stretch, count its forced rooms from the entry point, including any Elite, and follow any only-successor stretches to the next choice; check whether current HP and resources reach the next recovery.
 
 Elites by act:
 
 - First act: an Elite entered with HP for a bad opening, and a recovery or easy rooms after it, is normally worth its relic.
-- Later acts: enter an Elite when the deck ends that act's normal fights in few turns with little HP lost and the HP left after it still covers the fights to the next recovery. Route around an Elite whose rules the deck has no answer to, such as several enemies against a deck without damage to several. When several Elites are reachable, take first the ones the current deck answers best.
+- Later acts: enter an Elite when the deck ends that act's normal fights in few turns with little HP lost and the HP left after it still covers the fights to the next recovery. Route around an Elite whose rules the deck has no answer to, such as several enemies against a deck without damage to several.
 - Final act: weigh any Elite against entering the Bosses with the HP they need.
 
 Do not always choose the safest path, and do not aim for a fixed HP threshold or number of Elites.

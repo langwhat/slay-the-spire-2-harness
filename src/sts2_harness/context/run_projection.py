@@ -12,7 +12,7 @@ from sts2_harness.client import models as native
 from sts2_harness.context.map_projection import MapUnavailable, planned_route, project_map
 from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
 from sts2_harness.context.run_models import RunObservation
-from sts2_harness.fights import Fight
+from sts2_harness.fights import Fight, FightEncounter
 from sts2_harness.note_values import NotesView
 from sts2_harness.route_plan import RoutePlan
 
@@ -112,6 +112,7 @@ class RunDelivery:
 
     deck_stats: dict[str, JsonValue] | None = None
     fights: tuple[Fight, ...] = ()
+    elites_fought: tuple[FightEncounter, ...] | None = None
     deck_use: dict[str, int] = field(default_factory=lambda: dict[str, int]())
 
     notes: NotesView | None = None
@@ -311,7 +312,10 @@ class RunDelivery:
             and not post_boss
         ):
             try:
-                sections["map"] = _json(project_map(source.map, state.progress, self.route_plan))
+                projected = _json(project_map(source.map, state.progress, self.route_plan))
+                if self.elites_fought is not None:
+                    projected["elites_fought"] = [_json(elite) for elite in self.elites_fought]
+                sections["map"] = projected
             except MapUnavailable:
                 sections["map"] = None
         if self.role is native.DecisionOwner.COMBAT or self.focused_deck:

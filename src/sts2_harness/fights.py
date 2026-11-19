@@ -108,6 +108,10 @@ class FightHistory:
         self._boundaries: list[_Boundary] = []
         self._previous_deck: Counter[str] | None = None
         self._deck_change: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+        self._act: int | None = None
+        self._elite_nodes: set[str] = set()
+        # This act's Elite battles in entry order; None when the act was not seen from its start.
+        self.act_elites: tuple[FightEncounter, ...] | None = None
 
     def _reset_opening(self) -> None:
         self._opening = None
@@ -117,6 +121,21 @@ class FightHistory:
         self._ambiguous = False
         self._boundaries = []
 
+    def _record_elite(self, observation: native.Observation, definition_id: str, name: str) -> None:
+        node = observation.location.node_id
+        if (
+            self.act_elites is None
+            or node is None
+            or node in self._elite_nodes
+            or observation.state.progress.room_type != "elite"
+        ):
+            return
+        self._elite_nodes.add(node)
+        self.act_elites = (
+            *self.act_elites,
+            FightEncounter(definition_id=definition_id, name=name),
+        )
+
     def observe(self, observation: native.Observation) -> None:
         location, state = observation.location, observation.state
         identity = (location.game_instance_id, location.run_id)
@@ -125,6 +144,13 @@ class FightHistory:
             self._reset_opening()
             self._previous_deck = None
             self._identity = identity
+            self._act = None
+        if state.progress.act != self._act:
+            self._act = state.progress.act
+            self._elite_nodes = set()
+            # An act is observed from its start before its first room is entered.
+            opening = state.progress.position is None or (state.progress.floor or 0) <= 1
+            self.act_elites = () if opening else None
         if isinstance(state, native.TerminalState):
             self._reset_opening()
             return
@@ -152,6 +178,7 @@ class FightHistory:
                 self._encounter_names.add(encounter.name)
                 if encounter.definition_id is not MISSING:
                     self._encounters.add((encounter.definition_id, encounter.name))
+                    self._record_elite(observation, encounter.definition_id, encounter.name)
             return
         if self._opening is None:
             return
