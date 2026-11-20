@@ -154,6 +154,9 @@ def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_p
         assert [item.request for item in settlements] == posts
         assert settlements[1].receipt is None
         assert len(records[2].attempts) == 2
+        assert reopened.operations(attempts=False) == tuple(
+            record.model_copy(update={"attempts": ()}) for record in records
+        )
         assert records[-1].reply is not None
         assert records[0].reply is not None
         assert records[-1].reply.observations == (observation,)

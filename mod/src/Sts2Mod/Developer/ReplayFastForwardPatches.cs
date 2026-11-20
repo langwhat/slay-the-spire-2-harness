@@ -59,10 +59,10 @@ internal static class ReplayPresentationPatch
         _lifecycle.Activate(() =>
         {
             SaveManager.Instance.PrefsSave.FastMode = FastModeType.Instant;
-            Engine.MaxFps = 0;
+            Engine.MaxFps = originalFps > 0 ? originalFps : 60;
         });
 
-        GD.Print($"[sts2agent] Replay presentation active: original_fast_mode={OriginalFastMode}, fps={originalFps}->0.");
+        GD.Print($"[sts2agent] Replay presentation active: original_fast_mode={OriginalFastMode}, fps={originalFps}->{Engine.MaxFps}.");
     }
 
     internal static void RecordSummary()

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping
+import asyncio
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,9 +45,18 @@ from sts2_harness_eval.verification import (
     SourceCorrespondence,
     VerificationFailure,
     bind,
+    check_control,
+    counter_bounds,
+    is_relic_counter,
     loaded_refs,
     translated_step,
 )
+
+# A confirmed write can reach an input boundary before the next recorded result is published.
+_RESULT_TIMEOUT_SECONDS = 30.0
+_RESULT_POLL_SECONDS = 0.1
+# An owned local game answers status reads quickly, so replay polls it more often than a session.
+_POLL_SCALE = 0.2
 
 
 @dataclass(frozen=True)
@@ -56,6 +66,13 @@ class NativeLaunch:
     output: Path
     port: int | None = None
     startup_timeout_seconds: float = 90.0
+    # Owned replay launches may skip presentation animations and run at a base time scale (1-4).
+    instant_presentation: bool = False
+    replay_time_scale: float | None = None
+
+    @property
+    def fast_replay(self) -> bool:
+        return self.instant_presentation or self.replay_time_scale is not None
 
     def options(self, recipe: StandardRunRecipe) -> HeadlessOptions:
         return HeadlessOptions(
@@ -94,6 +111,10 @@ def _route(observation: native.Observation) -> native.RouteKey:
     return native.RouteKey.model_validate(observation.location.model_dump())
 
 
+async def _poll(seconds: float) -> None:
+    await asyncio.sleep(seconds * _POLL_SCALE)
+
+
 def _live(client: ModClient, observation: native.Observation) -> LiveGame:
     route = _route(observation)
     return LiveGame(
@@ -101,6 +122,7 @@ def _live(client: ModClient, observation: native.Observation) -> LiveGame:
         namespace=uuid4().hex,
         game_instance_id=route.game_instance_id,
         run_id=route.run_id,
+        wait=_poll,
         settle_confirmation_seconds=30.0,
     )
 
@@ -129,6 +151,43 @@ async def _write(
     await _control(client, native.ControlIntent.PAUSED)
 
 
+async def _wait_for_result[T](client: ModClient, compare: Callable[[], Awaitable[T]]) -> T:
+    """Let a transient mismatch settle without replaying the completed operation."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _RESULT_TIMEOUT_SECONDS
+    while True:
+        try:
+            return await compare()
+        except VerificationFailure:
+            if loop.time() >= deadline:
+                raise
+        await _control(client, native.ControlIntent.RUNNING)
+        await asyncio.sleep(_RESULT_POLL_SECONDS)
+        await _control(client, native.ControlIntent.PAUSED)
+
+
+async def _loaded_result(
+    client: ModClient,
+    checkpoints: CheckpointClient,
+    correspondence: LoadedCorrespondence,
+    reference: Publication,
+    binding: KeyedRefs | None = None,
+    step: native.NativeStep | None = None,
+    *,
+    allow_unloaded_room: bool = False,
+) -> tuple[IdentityRead, AllowedMapDifference | None]:
+    async def compare() -> tuple[IdentityRead, AllowedMapDifference | None]:
+        read = await checkpoints.identity()
+        translated = None
+        if binding is not None and step is not None:
+            translated = translated_step(step, loaded_refs(binding, read, step))
+        return read, correspondence.compare(
+            reference, read, next_step=translated, allow_unloaded_room=allow_unloaded_room
+        )
+
+    return await _wait_for_result(client, compare)
+
+
 @dataclass(frozen=True)
 class _BoundPublication:
     binding: KeyedRefs
@@ -143,24 +202,76 @@ class _DerivedPath:
 
 
 class _CaptureReplay:
-    def __init__(self, client: ModClient, checkpoints: CheckpointClient, game: LiveGame) -> None:
+    def __init__(
+        self,
+        client: ModClient,
+        checkpoints: CheckpointClient,
+        game: LiveGame,
+        *,
+        rank_refs: bool = False,
+    ) -> None:
         self.client = client
         self.checkpoints = checkpoints
         self.game = game
-        self.correspondence = SourceCorrespondence()
+        self.correspondence = SourceCorrespondence(rank_refs=rank_refs)
+        self.counter_bounds: dict[str, tuple[int, int]] = {}
 
     async def prefix(self, spans: tuple[ReplaySpan, ...]) -> None:
+        """Check each receipt and verify the result at the next recorded observation."""
         for span in spans:
-            before = unwrap(await self.game.observe()).observation
-            refs = self.correspondence.compare(span.before, before, span.steps[0].sequence)
+
+            async def compare(
+                span: ReplaySpan = span,
+            ) -> tuple[native.Observation, dict[str, str]]:
+                first = span.steps[0]
+                before = unwrap(await self.game.observe()).observation
+                try:
+                    refs = self.correspondence.compare(
+                        span.before,
+                        before,
+                        first.sequence,
+                        next_step=first.step,
+                        counter_bounds=self.counter_bounds,
+                    )
+                except VerificationFailure as error:
+                    if not is_relic_counter(error.field_path):
+                        raise
+                    # The optional equivalence comes from the Mod's identity read.
+                    read = await self.checkpoints.identity()
+                    self.counter_bounds.update(counter_bounds(read))
+                    before = read.observation
+                    refs = self.correspondence.compare(
+                        span.before,
+                        before,
+                        first.sequence,
+                        next_step=first.step,
+                        counter_bounds=self.counter_bounds,
+                    )
+                return before, refs
+
+            before, refs = await _wait_for_result(self.client, compare)
             for step in span.steps:
                 await _write(self.game, self.client, before, translated_step(step.step, refs), step)
-            after = unwrap(await self.game.observe()).observation
-            self.correspondence.compare(span.after, after, span.steps[-1].sequence)
 
-    async def publication(self, source: native.Observation, sequence: int) -> _BoundPublication:
-        read = await self.checkpoints.identity()
-        refs = self.correspondence.compare(source, read.observation, sequence)
+    async def publication(
+        self,
+        source: native.Observation,
+        sequence: int,
+        step: native.NativeStep | None = None,
+    ) -> _BoundPublication:
+        async def compare() -> tuple[IdentityRead, dict[str, str]]:
+            read = await self.checkpoints.identity()
+            self.counter_bounds.update(counter_bounds(read))
+            refs = self.correspondence.compare(
+                source,
+                read.observation,
+                sequence,
+                next_step=step,
+                counter_bounds=self.counter_bounds,
+            )
+            return read, refs
+
+        read, refs = await _wait_for_result(self.client, compare)
         try:
             binding = bind(sequence, source, read, refs)
         except VerificationFailure as error:
@@ -170,11 +281,14 @@ class _CaptureReplay:
         return _BoundPublication(binding, publication)
 
     async def path(self, spans: tuple[ReplaySpan, ...], *, verify_after: bool) -> _DerivedPath:
+        """Replay spans with a strict publication before each one and optionally after it."""
         bindings: list[KeyedRefs] = []
         before: list[Publication] = []
         after: list[Publication] = []
         for span in spans:
-            current = await self.publication(span.before, span.steps[0].sequence)
+            current = await self.publication(
+                span.before, span.steps[0].sequence, span.steps[0].step
+            )
             bindings.append(current.binding)
             before.append(current.publication)
             read = current.publication.read
@@ -186,17 +300,15 @@ class _CaptureReplay:
                 refs = loaded_refs(
                     current.binding, read, step.step, relation=Relation.SOURCE_REPLAY
                 )
-                await _write(
-                    self.game, self.client, read.observation, translated_step(step.step, refs), step
-                )
+                translated = translated_step(step.step, refs)
+                if not index:
+                    check_control(
+                        read.observation, translated, Relation.SOURCE_REPLAY, step.sequence
+                    )
+                await _write(self.game, self.client, read.observation, translated, step)
             if verify_after:
                 following = await self.publication(span.after, span.steps[-1].sequence)
                 after.append(following.publication)
-            else:
-                following_read = await self.checkpoints.identity()
-                self.correspondence.compare(
-                    span.after, following_read.observation, span.steps[-1].sequence
-                )
         return _DerivedPath(tuple(bindings), tuple(before), tuple(after))
 
 
@@ -210,7 +322,11 @@ class NativeRestorer:
     ) -> CapturedReach:
         recipe = self._launch_recipe(plan)
         async with OwnedHeadlessInstance(
-            self.launch.options(recipe), development_checkpoints=True
+            self.launch.options(recipe),
+            development_checkpoints=True,
+            development_replay=self.launch.fast_replay,
+            replay_instant_presentation=self.launch.instant_presentation,
+            replay_time_scale=self.launch.replay_time_scale,
         ) as owner:
             if owner.receipt.seed != plan.manifest.seed:
                 raise AdmissionFailure(
@@ -218,7 +334,12 @@ class NativeRestorer:
                 )
             url = f"http://127.0.0.1:{owner.port}"
             async with ModClient(url) as client, CheckpointClient(url) as checkpoints:
-                replay = _CaptureReplay(client, checkpoints, _live(client, owner.opening))
+                replay = _CaptureReplay(
+                    client,
+                    checkpoints,
+                    _live(client, owner.opening),
+                    rank_refs=self.launch.instant_presentation,
+                )
                 await replay.prefix(plan.prefix)
                 boundary = await replay.publication(plan.boundary, plan.boundary_sequence)
                 checkpoint, save = await self._checkpoint(plan, checkpoints, boundary, existing)
@@ -329,6 +450,9 @@ class NativeRestorer:
             self.launch.options(recipe),
             mode=HeadlessLaunchMode.FRESH_MENU,
             development_checkpoints=True,
+            development_replay=self.launch.fast_replay,
+            replay_instant_presentation=self.launch.instant_presentation,
+            replay_time_scale=self.launch.replay_time_scale,
         ) as owner:
             url = f"http://127.0.0.1:{owner.port}"
             async with ModClient(url) as client, CheckpointClient(url) as checkpoints:
@@ -347,19 +471,29 @@ class NativeRestorer:
                 game = _live(client, read.observation)
                 correspondence = LoadedCorrespondence()
                 differences: list[AllowedMapDifference] = []
-                difference = correspondence.compare(reference.boundary, read, allow_event_map=True)
+                difference = correspondence.compare(
+                    reference.boundary, read, allow_unloaded_room=True
+                )
                 if difference is not None:
                     differences.append(difference)
                 for span, keyed, expected in zip(
                     plan.suffix, binding.suffix, reference.suffix, strict=True
                 ):
-                    read = await checkpoints.identity()
-                    difference = correspondence.compare(expected, read, allow_event_map=True)
+                    read, difference = await _loaded_result(
+                        client,
+                        checkpoints,
+                        correspondence,
+                        expected,
+                        keyed,
+                        span.steps[0].step,
+                        allow_unloaded_room=True,
+                    )
                     if difference is not None:
                         differences.append(difference)
                     await self._loaded_span(game, client, checkpoints, span, keyed, read)
-                read = await checkpoints.identity()
-                correspondence.compare(reference.target, read)
+                read, _ = await _loaded_result(
+                    client, checkpoints, correspondence, reference.target
+                )
                 refs = loaded_refs(binding.target, read)
                 control = await _control(client, native.ControlIntent.PAUSED)
                 yield LoadedTarget(
@@ -409,13 +543,18 @@ class NativeRestorer:
             reference.follow_on,
             strict=True,
         ):
-            read = await loaded.checkpoints.identity()
-            loaded.correspondence.compare(before, read)
+            read, _ = await _loaded_result(
+                loaded.client,
+                loaded.checkpoints,
+                loaded.correspondence,
+                before,
+                keyed,
+                span.steps[0].step,
+            )
             await self._loaded_span(
                 loaded.game, loaded.client, loaded.checkpoints, span, keyed, read
             )
-            after = await loaded.checkpoints.identity()
-            loaded.correspondence.compare(expected, after)
+            await _loaded_result(loaded.client, loaded.checkpoints, loaded.correspondence, expected)
 
     async def _loaded_span(
         self,
@@ -433,6 +572,13 @@ class NativeRestorer:
             if read.observation.location != before.observation.location:
                 raise CheckpointUncertain("The loaded batch changed its original route.")
             refs = loaded_refs(binding, read, step.step)
+            if not index:
+                check_control(
+                    read.observation,
+                    translated_step(step.step, refs),
+                    Relation.REPLAY_LOAD,
+                    step.sequence,
+                )
             await _write(
                 game,
                 client,

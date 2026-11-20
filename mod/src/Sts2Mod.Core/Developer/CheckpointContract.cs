@@ -207,7 +207,14 @@ public sealed record CheckpointCreatureIdentity(string Ref, uint? CombatId);
 
 public sealed record CheckpointMapIdentity(string Ref, int Act, int Row, int Col);
 
-public sealed record CheckpointRelicIdentity(string Ref, ulong OwnerNetId, int Slot);
+/// <param name="CounterThreshold">The counter a relic shows while its trigger visuals play, when known.</param>
+/// <param name="CounterReset">The counter the same relic shows once those visuals end, when known.</param>
+public sealed record CheckpointRelicIdentity(
+    string Ref,
+    ulong OwnerNetId,
+    int Slot,
+    int? CounterThreshold = null,
+    int? CounterReset = null);
 
 public enum CheckpointRewardBindingKind
 {

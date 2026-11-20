@@ -472,7 +472,12 @@ class ReplayModel:
         target: ModelAnchor,
         reached: asyncio.Future[Reached],
         continuation: Callable[
-            [ModelInput, tuple[ToolDefinition, ...], RequestPreparation | None],
+            [
+                ModelInput,
+                tuple[ToolDefinition, ...],
+                RequestPreparation | None,
+                PreparedRequest | None,
+            ],
             Awaitable[ModelReply],
         ]
         | None = None,
@@ -739,7 +744,7 @@ class ReplayModel:
                 Reached(self._target, self._timeline.cursor, record.semantic_digest)
             )
             if self._continuation is not None:
-                return await self._continuation(input, tools, preparation)
+                return await self._continuation(input, tools, preparation, prepared)
             await asyncio.Future[None]()
         if record.failure is not None:
             if record.attempts and record.attempts[-1].capacity_signal is not None:
@@ -869,7 +874,8 @@ def prefix(journal: Journal, target: ModelAnchor) -> tuple[Dependency, ...]:
         )
     if journal.manifest.initial_notes is None:
         unsupported(None, UnsupportedCause.MISSING_INITIAL_NOTES)
-    records = journal.timeline(stop=target.model_sequence)
+    # Replayed game reads answer from recorded replies; attempt evidence is not consulted.
+    records = journal.timeline(stop=target.model_sequence, attempts=False)
     declaration = journal.manifest.variant
     if isinstance(declaration, SceneVariant):
         admitted = next((record for record in records if isinstance(record, Record)), None)

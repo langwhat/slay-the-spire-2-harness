@@ -3,13 +3,13 @@
 import asyncio
 from collections.abc import Callable
 from contextlib import ExitStack, closing, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
 import httpx2 as httpx
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from sts2_harness.capacity import CapacityPolicy
 from sts2_harness.client import ClientUnavailable
@@ -230,6 +230,10 @@ async def take_over(
     return await _Takeover(
         case, restorer, branch, model, prompts, documents, budget, stop_requested, variant
     ).run()
+
+
+def _model_body(body: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    return {key: value for key, value in body.items() if key != "prompt_cache_key"}
 
 
 class _Takeover:
@@ -570,13 +574,18 @@ class _Takeover:
                 input: ModelInput,
                 tools: tuple[ToolDefinition, ...],
                 preparation: RequestPreparation | None,
+                prepared: PreparedRequest | None,
             ) -> ModelReply:
                 await release.wait()
                 client = switch.current.model(role, stream)
                 if preparation is None:
                     return await client.complete(input, tools)
-                prepared = client.prepare(input, tools)
-                if prepared.measurement.estimated_input_tokens != preparation.estimate_after:
+                live = client.prepare(input, tools)
+                # The preparation was measured with the usage of the previous replayed reply,
+                # which only the replayed request carries, so the live client must send the
+                # same model input and keeps that measurement. The prompt cache key only routes
+                # the request and follows the recording or session that sends it.
+                if prepared is None or _model_body(live.body) != _model_body(prepared.body):
                     raise ReplayRejected(
                         Rejected(
                             RejectReason.INPUT_MISMATCH,
@@ -584,7 +593,13 @@ class _Takeover:
                             InputDifference(InputComponent.MODEL_INPUT),
                         )
                     )
-                return await client.complete_prepared(prepared, preparation=preparation)
+                measurement = replace(
+                    live.measurement,
+                    estimated_input_tokens=prepared.measurement.estimated_input_tokens,
+                )
+                return await client.complete_prepared(
+                    replace(live, measurement=measurement), preparation=preparation
+                )
 
             historical = ReplayModel(
                 timeline, role.owner, stream, self.case.source.anchor, reached, continue_live

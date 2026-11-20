@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, closing
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -485,12 +486,37 @@ def retain_case(directory: Path, case: Case) -> tuple[CaseStore, Case]:
     return store, retained_case
 
 
-@pytest.mark.parametrize("start", [False, True])
+def with_usage(sse: bytes) -> bytes:
+    """Add provider usage to a recorded reply so later requests are measured from it."""
+    event = json.loads(sse.decode().removeprefix("data: "))
+    event["response"]["usage"] = {
+        "input_tokens": 1200,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": 40,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 1240,
+    }
+    return ("data: " + json.dumps(event) + "\n\n").encode()
+
+
+@pytest.mark.parametrize(("start", "usage"), [(False, False), (True, False), (False, True)])
 def test_inspected_request_resumes_with_native_history_and_only_b_writes(
-    tmp_path: Path, start: bool
+    tmp_path: Path, start: bool, usage: bool
 ) -> None:
     async def scenario() -> None:
-        case = await source_case(tmp_path / "source.sqlite", start=start)
+        source = Source()
+        source_config = configuration(tmp_path)
+        live_config = source_config
+        if usage:
+            source.responses = iter(tuple(map(with_usage, source.responses)))
+            source_config = replace(source_config, prompt_cache_key="source-cache")
+            live_config = replace(live_config, prompt_cache_key="takeover-cache")
+        case = await source_case(
+            tmp_path / "source.sqlite",
+            start=start,
+            source=source,
+            model_configuration=source_config,
+        )
         restorer = FakeRestorer(tmp_path, case)
         inputs: list[bytes] = []
         responses = iter(
@@ -520,7 +546,7 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
             )
 
         branch = tmp_path / "branch.sqlite"
-        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as model:
+        async with Llm(live_config, transport=httpx.MockTransport(respond)) as model:
             result = await take_over(
                 case,
                 restorer,
@@ -531,7 +557,7 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
                 SampleBudget(5, 30),
                 stop_requested=lambda: False,
             )
-        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as model:
+        async with Llm(live_config, transport=httpx.MockTransport(respond)) as model:
             reused = await take_over(
                 case,
                 restorer,
@@ -590,6 +616,11 @@ def test_inspected_request_resumes_with_native_history_and_only_b_writes(
             resumed = journal.request(target.sequence)
             assert resumed.input == target.input
             assert resumed.tools == target.tools
+            if usage:
+                assert resumed.configuration.prompt_cache_key == "takeover-cache"
+                assert resumed.attempts[0].protocol_encoding_digest != (
+                    target.attempts[0].protocol_encoding_digest
+                )
             assert journal.manifest.parent is not None
             assert journal.manifest.parent.before_sequence == target.sequence
             new_anchor = ModelAnchor(journal.manifest.recording_id, journal.requests()[-1].sequence)

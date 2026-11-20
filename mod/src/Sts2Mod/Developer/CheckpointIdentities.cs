@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Multiplayer;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.CommonUi;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
@@ -26,6 +27,8 @@ namespace Sts2Mod.Developer;
 /// </summary>
 internal static class CheckpointIdentities
 {
+    private static readonly Dictionary<Type, (int? Threshold, int? Reset)> RelicCounterBounds = new();
+
     public static CheckpointIdentityFacts Capture(NativeObservation observation, NodeObjectRegistry registry)
     {
         var cards = ImmutableArray.CreateBuilder<CheckpointCardIdentity>();
@@ -113,7 +116,48 @@ internal static class CheckpointIdentities
         }
         if (slot < 0)
             throw new InvalidOperationException("A published relic is absent from its native owner's relics.");
-        return new(reference, owner.NetId, slot);
+        var (threshold, reset) = CounterBounds(relic);
+        return new(reference, owner.NetId, slot, threshold, reset);
+    }
+
+    /// <summary>
+    /// Only relics whose activation clears the counter have a fixed threshold and reset pair.
+    /// Other displays can keep a remainder or change their threshold during the run.
+    /// </summary>
+    private static (int? Threshold, int? Reset) CounterBounds(RelicModel relic)
+    {
+        if (relic.IsMock || relic is not (HappyFlower or OrnamentalFan or LastingCandy or LetterOpener))
+            return (null, null);
+
+        var type = relic.GetType();
+        if (RelicCounterBounds.TryGetValue(type, out var bounds))
+            return bounds;
+        // Checkpoint identities are published on the game thread every frame.
+        bounds = ReadCounterBounds(relic);
+        RelicCounterBounds.Add(type, bounds);
+        return bounds;
+    }
+
+    private static (int? Threshold, int? Reset) ReadCounterBounds(RelicModel relic)
+    {
+        var activating = relic.GetType().GetProperty(
+            "IsActivating", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (activating is not { PropertyType: var propertyType, SetMethod: not null } || propertyType != typeof(bool))
+            return (null, null);
+        try
+        {
+            var canonical = ModelDb.AllRelics.Single(model => model.Id == relic.Id && !model.IsMock);
+            var probe = canonical.ToMutable();
+            activating.SetValue(probe, false);
+            var reset = probe.DisplayAmount;
+            activating.SetValue(probe, true);
+            var threshold = probe.DisplayAmount;
+            return threshold == reset ? (null, null) : (threshold, reset);
+        }
+        catch (Exception error) when (error is InvalidOperationException or TargetInvocationException or NullReferenceException)
+        {
+            return (null, null);
+        }
     }
 
     private static T Resolve<T>(NodeObjectRegistry registry, string reference) where T : class =>

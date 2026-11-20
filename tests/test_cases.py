@@ -50,10 +50,11 @@ def admission_game(
     combat_batch: bool = False,
     prefix_batch: bool = False,
     unpublished_card: bool = False,
+    room_type: str = "event",
 ) -> tuple[Path, Path]:
     executable, template = game_fixture(tmp_path)
     opening = json.loads(ready_run().to_json())
-    opening["state"]["progress"]["room_type"] = "event"
+    opening["state"]["progress"]["room_type"] = room_type
     opening["state"]["player"]["definition_id"] = "CHARACTER.IRONCLAD"
     opening["location"]["node_id"] = "node-10"
     opening["state"]["actions"][0]["ref"] = "interaction:10:1"
@@ -370,12 +371,24 @@ server.serve_forever()
 @pytest.mark.skipif(
     sys.platform != "darwin", reason="Owned fake executable uses the macOS launcher."
 )
-@pytest.mark.parametrize("failure", [None, "unknown", "mismatch"])
+@pytest.mark.parametrize(
+    ("failure", "room_type"),
+    [
+        (None, "event"),
+        ("unknown", "event"),
+        ("mismatch", "event"),
+        (None, "restsite"),
+        (None, "shop"),
+        (None, "treasure"),
+        (None, "boss"),
+    ],
+)
 def test_admission_replays_source_then_independently_loads_and_publishes_after_cleanup(
     tmp_path: Path,
     failure: str | None,
+    room_type: str,
 ) -> None:
-    executable, template = admission_game(tmp_path)
+    executable, template = admission_game(tmp_path, room_type=room_type)
     paths: list[Path] = []
 
     def factory(

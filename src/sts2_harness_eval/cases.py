@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import dataclass
 from enum import StrEnum
@@ -36,6 +37,7 @@ from sts2_harness_eval.checkpoints import (
 from sts2_harness_eval.replay import reach
 from sts2_harness_eval.results import ModelAnchor, Reached
 from sts2_harness_eval.verification import (
+    LOADABLE_ROOM_TYPES,
     AllowedMapDifference,
     KeyedRefs,
     Reference,
@@ -263,16 +265,29 @@ def _ends_follow_on(target: native.Observation, span: ReplaySpan, stopped: bool)
     return ends_turn
 
 
+_RECORD_PAGE = 256
+
+
+def _records(journal: Journal) -> Iterator[Record]:
+    """Decode records page by page so planning stops reading once the follow-on ends."""
+    last = journal.operations(limit=1, attempts=False)
+    end = last[-1].sequence if last else 0
+    for start in range(1, end + 1, _RECORD_PAGE):
+        yield from journal.operations(start=start, stop=start + _RECORD_PAGE - 1, attempts=False)
+
+
 def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
     """Select one nearest map and the original confirmed follow-on interval."""
     Journal.archive_sha256(request.archive)
     with closing(Journal.open(request.archive)) as journal:
         manifest = journal.manifest
-        records = journal.operations()
+        records = _records(journal)
         target = next(
             (
                 item
-                for item in journal.requests(stop=request.anchor.model_sequence)
+                for item in journal.requests(
+                    start=request.anchor.model_sequence, stop=request.anchor.model_sequence
+                )
                 if item.sequence == request.anchor.model_sequence
             ),
             None,
@@ -370,7 +385,7 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
             _unsupported(UnsupportedCause.NO_BOUNDARY)
         assert boundary is not None
         sequence, cursor, observation = boundary
-        if observation.state.progress.room_type not in ("monster", "elite", "boss", "event"):
+        if observation.state.progress.room_type not in LOADABLE_ROOM_TYPES:
             _unsupported(UnsupportedCause.BOUNDARY, sequence)
         if target.confirmed_operation_cursor < cursor:
             _unsupported(UnsupportedCause.TARGET, target.sequence)

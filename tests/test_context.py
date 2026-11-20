@@ -1,7 +1,11 @@
 import json
+from collections.abc import Iterator
 
+import pytest
+from pydantic import JsonValue
 from test_mod_client import COMBAT, RUN
 
+from sts2_harness import context as context_module
 from sts2_harness.client.models import (
     CardEntry,
     CombatState,
@@ -394,3 +398,42 @@ def test_compaction_restores_rule_that_reappeared_after_an_absent_baseline() -> 
     context.install_compaction(candidate)
     baseline = json.loads(context.model_input()[0].text)["context_baseline"]["observation"]
     assert baseline["mechanisms"][0]["text"] == "Native recurring rule"
+
+
+class _ReversedSet(set[str]):
+    def __iter__(self) -> Iterator[str]:
+        ordered: list[str] = sorted(set[str].copy(self), reverse=True)
+        return iter(ordered)
+
+
+def test_compaction_baseline_definition_order_does_not_follow_set_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    card = observation.objects["c2"]
+    assert isinstance(card, CardEntry)
+    observation = observation.model_copy(
+        update={
+            "objects": {
+                **observation.objects,
+                "c2": card.model_copy(update={"definition_id": "CARD.TWO"}),
+            }
+        }
+    )
+    original = context_module.definition_references
+
+    def reversed_references(value: JsonValue) -> set[str]:
+        return _ReversedSet(original(value))
+
+    monkeypatch.setattr(context_module, "definition_references", reversed_references)
+    context = Context(DecisionOwner.COMBAT)
+    context.begin_group(observation, NotesView())
+    context.append_task(CombatActInput(), observation)
+    context.finish_group()
+    group = context._last_group  # pyright: ignore[reportPrivateUsage]
+    assert group is not None
+    # Only the retained message supplies these definitions to the compaction baseline.
+    group.observation["defs"] = []
+    _, baseline = context.compaction_input()
+    definitions = json.loads(baseline.text)["context_baseline"]["observation"]["defs"]
+    assert [row["id"] for row in definitions] == ["CARD.ONE", "CARD.TWO", "ENEMY.ONE"]

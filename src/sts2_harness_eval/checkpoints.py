@@ -36,6 +36,7 @@ class KeyKind(StrEnum):
     CARD = "card"
     CREATURE = "creature"
     RELIC = "relic"
+    POTION = "potion"
     MAP = "map"
     REWARD = "reward"
 
@@ -102,6 +103,13 @@ class RelicSlotKey(native.WireModel):
     slot: Nonnegative
 
 
+class PotionSlotKey(native.WireModel):
+    """A potion's position in the player's potion list; the native read carries no potion ids."""
+
+    kind: Literal[KeyKind.POTION] = KeyKind.POTION
+    slot: Nonnegative
+
+
 class MapPointKey(native.WireModel):
     kind: Literal[KeyKind.MAP] = KeyKind.MAP
     act: Annotated[int, Field(ge=1)]
@@ -110,7 +118,8 @@ class MapPointKey(native.WireModel):
 
 
 type NativeKey = Annotated[
-    CardKey | CreatureKey | RelicSlotKey | MapPointKey | RewardKey, Field(discriminator="kind")
+    CardKey | CreatureKey | RelicSlotKey | PotionSlotKey | MapPointKey | RewardKey,
+    Field(discriminator="kind"),
 ]
 
 
@@ -136,6 +145,9 @@ class RelicIdentity(native.WireModel):
     ref: native.Nonempty
     owner_net_id: Nonnegative
     slot: Nonnegative
+    # The counter shown while the relic's trigger visuals play, and the one shown at rest.
+    counter_threshold: int | None = None
+    counter_reset: int | None = None
 
 
 class RewardIdentity(native.WireModel):

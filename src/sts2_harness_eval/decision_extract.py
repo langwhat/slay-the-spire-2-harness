@@ -817,6 +817,7 @@ async def extract_case(
             input: ModelInput,
             tools: tuple[ToolDefinition, ...],
             preparation: RequestPreparation | None,
+            prepared: PreparedRequest | None,
         ) -> ModelReply:
             raise _Captured(input, tools)
 

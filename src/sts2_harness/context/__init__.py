@@ -241,7 +241,8 @@ class Context:
             if projected is None:
                 continue
             wire = _JSON_OBJECT.validate_json(projected.to_json())
-            for key in definition_references(wire):
+            # Sorted so the baseline's definition order does not follow the process hash seed.
+            for key in sorted(definition_references(wire)):
                 if key in self._delivery.definitions:
                     definitions.setdefault(key, self._delivery.definitions[key])
         observation["defs"] = list(definitions.values())

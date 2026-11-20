@@ -638,15 +638,26 @@ class Journal:
     ) -> None:
         if self._read_only or not isinstance(self.manifest.variant, HistoricalVariant):
             raise ArchiveError("Only a writable historical variant records prefix preparation.")
-        previous = self.variant_preparations()
-        if previous and (
-            source.sequence <= previous[-1].source_model_sequence
-            or previous[-1].outcome is not VariantPrefixOutcome.SOURCE_REPLY
-        ):
-            raise ArchiveError("Variant preparation order is inconsistent.")
         with self._storage() as connection:
             if connection is None:
                 raise ArchiveError("Cannot persist variant preparation.")
+            # Appends need the preceding row's order and outcome. The evidence reader decodes
+            # and verifies all of the stored model inputs when a recording is replayed.
+            last = connection.execute(
+                "SELECT timeline_index,source_model_sequence,value FROM variant_preparations "
+                "ORDER BY timeline_index DESC LIMIT 1"
+            ).fetchone()
+            timeline_index = 1
+            if last is not None:
+                index, sequence, raw = last
+                previous = VariantPrefixPreparation.model_validate_json(raw)
+                if (
+                    (index, sequence) != (previous.timeline_index, previous.source_model_sequence)
+                    or source.sequence <= sequence
+                    or previous.outcome is not VariantPrefixOutcome.SOURCE_REPLY
+                ):
+                    raise ArchiveError("Variant preparation order is inconsistent.")
+                timeline_index = index + 1
             before_ref = self._blob(
                 connection, PreparationInput(messages=preparation.input_before, tools=tools)
             )
@@ -677,7 +688,7 @@ class Journal:
                 baseline_ref=baseline_ref,
                 input_before_ref=before_ref,
                 input_after_ref=after_ref,
-                timeline_index=len(previous) + 1,
+                timeline_index=timeline_index,
                 source_model_sequence=source.sequence,
                 role=source.role,
                 stream=source.stream,
@@ -1667,7 +1678,9 @@ class Journal:
         start: int = 1,
         stop: int | None = None,
         limit: int | None = None,
+        attempts: bool = True,
     ) -> tuple[Record, ...]:
+        """Return records in sequence order; ``attempts=False`` leaves attempt evidence empty."""
         prefix = self.manifest.parent
         try:
             with closing(self._read_connection(self.path)) as connection:
@@ -1687,7 +1700,7 @@ class Journal:
                 ).fetchall()
                 records: list[Record] = []
                 for sequence, cursor, operation_id, request_digest, stored_json in reversed(rows):
-                    attempts = tuple(
+                    evidence = tuple(
                         AttemptEvidence(
                             index=index,
                             encoding_digest=digest,
@@ -1699,6 +1712,7 @@ class Journal:
                             "WHERE sequence=? ORDER BY attempt",
                             (sequence,),
                         ).fetchall()
+                        if attempts
                     )
                     reply = None
                     if stored_json is not None:
@@ -1723,7 +1737,7 @@ class Journal:
                                 self._read_blob(connection, request_digest)
                             ),
                             reply=reply,
-                            attempts=attempts,
+                            attempts=evidence,
                         )
                     )
         except (OSError, sqlite3.Error, ValidationError, ValueError):
@@ -1739,6 +1753,7 @@ class Journal:
             if stop is not None
             else prefix.before_sequence - 1,
             limit=remaining,
+            attempts=attempts,
         ) + tuple(records)
 
     @staticmethod
@@ -1887,10 +1902,11 @@ class Journal:
         start: int = 1,
         stop: int | None = None,
         limit: int | None = None,
+        attempts: bool = True,
     ) -> tuple[Record | ModelRecord | MaterialRecord, ...]:
         records: list[Record | ModelRecord | MaterialRecord] = []
         if kind is None or isinstance(kind, OperationKind):
-            records.extend(self.operations(kind=kind, start=start, stop=stop))
+            records.extend(self.operations(kind=kind, start=start, stop=stop, attempts=attempts))
         if kind is None or kind is DependencyKind.MODEL:
             records.extend(self.requests(start=start, stop=stop))
         if kind is None or kind is DependencyKind.MATERIAL:
