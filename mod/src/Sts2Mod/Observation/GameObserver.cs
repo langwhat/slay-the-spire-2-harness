@@ -394,7 +394,8 @@ internal sealed class GameObserver(
             .ToImmutableArray();
         var actor = player.Creature;
 
-        var readiness = pending is not null
+        var selectionReady = pending is not null && CardSelectionInterceptor.IsSelectionReady(pending);
+        var readiness = selectionReady
             ? NativeInputReadiness.Selection
             : combatReady
                 ? NativeInputReadiness.Ready
@@ -534,6 +535,7 @@ internal sealed class GameObserver(
 
         var hasEnabledInteraction = _interactions.Any(action => action.Enabled);
         var selectionReady = selection is not null
+                             && CardSelectionInterceptor.IsSelectionReady(CardSelectionInterceptor.GetPending())
                              && (screen != RunScreen.Rewards || hasEnabledInteraction);
 
         var readiness = selectionReady

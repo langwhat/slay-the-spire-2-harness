@@ -27,6 +27,9 @@ namespace Sts2Mod.Execution;
 /// </summary>
 public sealed class CardSelectionInterceptor : ICardSelector
 {
+    private const ulong SingleCardSelectionInputDelayMsec = 350;
+    private static readonly AccessTools.FieldRef<NChooseACardSelectionScreen, ulong> SingleCardOpenedAt =
+        AccessTools.FieldRefAccess<NChooseACardSelectionScreen, ulong>("_openedTicks");
     private static readonly CardSelectionInterceptor Instance = new();
     private static readonly object SelectionLock = new();
     private static IDisposable? _scope;
@@ -58,6 +61,7 @@ public sealed class CardSelectionInterceptor : ICardSelector
         string? SourceName,
         CardSelectorPrefs Prefs,
         bool Upgrade,
+        bool? CanSkip,
         TaskCompletionSource<IEnumerable<CardModel>> Completion);
 
     private CardSelectionInterceptor() { }
@@ -71,6 +75,16 @@ public sealed class CardSelectionInterceptor : ICardSelector
         lock (SelectionLock)
             return _pending;
     }
+
+    internal static NChooseACardSelectionScreen? VisibleSingleCardSelection =>
+        _visibleSelection as NChooseACardSelectionScreen;
+
+    // The native holder ignores clicks during the first 350 ms after the overlay opens.
+    internal static bool IsSelectionReady(PendingCardSelection? pending) =>
+        pending?.CanSkip is null
+        || (VisibleSingleCardSelection is { } screen
+            && ReferenceEquals(NOverlayStack.Instance?.Peek(), screen)
+            && Time.GetTicksMsec() - SingleCardOpenedAt(screen) > SingleCardSelectionInputDelayMsec);
 
     public static string SubjectId(PendingCardSelection request, int index) =>
         $"agent-choice:{request.ChoiceId}:{index}:{request.Options[index].Id}";
@@ -223,11 +237,27 @@ public sealed class CardSelectionInterceptor : ICardSelector
                     minSelect,
                     maxSelect),
                 Presentation.Value?.Upgrade == true,
+                Presentation.Value?.CanSkip,
                 completion);
             _pending = request;
         }
 
-        ShowVisibleSelection(request);
+        try
+        {
+            ShowVisibleSelection(request);
+        }
+        catch
+        {
+            lock (SelectionLock)
+            {
+                if (ReferenceEquals(_pending, request))
+                {
+                    _pending = null;
+                    CloseVisibleSelection();
+                }
+            }
+            throw;
+        }
         return completion.Task;
     }
 
@@ -238,6 +268,15 @@ public sealed class CardSelectionInterceptor : ICardSelector
 
     private static void ShowVisibleSelection(PendingCardSelection request)
     {
+        if (request.CanSkip is { } canSkip)
+        {
+            var screen = NChooseACardSelectionScreen.ShowScreen(request.Options, canSkip)
+                ?? throw new InvalidOperationException("The native single-card selection is unavailable.");
+            _visibleSelection = screen;
+            _ = CompleteFromNativeSelectionAsync(request, screen.CardsSelected());
+            return;
+        }
+
         var hand = NPlayerHand.Instance;
         if (hand is not null
             && request.Options.All(option => hand.ActiveHolders.Any(

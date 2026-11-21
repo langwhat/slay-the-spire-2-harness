@@ -547,7 +547,8 @@ internal sealed class GameStepDispatcher
             return new RejectedStep(request.OperationId, cause);
 
         _submittedChoice = CurrentChoice();
-        if (CardSelectionInterceptor.GetPending() is { } pending)
+        var pending = CardSelectionInterceptor.GetPending();
+        if (pending is { CanSkip: null })
         {
             var subjects = step.Refs.Select(reference =>
             {
@@ -564,7 +565,9 @@ internal sealed class GameStepDispatcher
             return null;
         }
 
-        if (NOverlayStack.Instance?.Peek() is not Node screen)
+        if (NOverlayStack.Instance?.Peek() is not Node screen
+            || (pending is { CanSkip: not null }
+                && !ReferenceEquals(screen, CardSelectionInterceptor.VisibleSingleCardSelection)))
             return StepGateway.Reject(request, StepErrorCode.SelectionUnavailable, "The native selection screen is unavailable.");
 
         if (screen is NChooseABundleSelectionScreen bundleScreen)
