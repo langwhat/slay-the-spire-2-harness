@@ -4,7 +4,7 @@ This document explains how the core is put together and why. Domain terms are de
 
 ## What the core does
 
-The core plays Slay the Spire 2 one run at a time, without save/load. It reads the game through the `sts2agent` Mod's public observations, asks a model (or any other decision-maker) what to do, submits the chosen actions through the Mod, and records everything in a local archive.
+The core plays Slay the Spire 2 one run at a time, without save/load. It reads the game through the `sts2agent` Mod's public observations, asks a model (or any other decision-maker) what to do, and submits the chosen actions through the Mod. Built-in driving records each run in a local archive; external driving writes diagnostics only.
 
 The repository has three parts:
 
@@ -127,7 +127,7 @@ Each agent owns one `Context`. It is the only record of that agent's current mod
 
 **Protocol state.** Assistant replies keep their complete native payload, including encrypted reasoning and signed thinking blocks, and are sent back unchanged. Role logic only sees normalized text and tool calls. Switching protocols does not migrate an existing history.
 
-**One tool call at a time.** A response with several tool calls is rejected before any of them runs. Each call gets an error result, and the model tries again. One `act` call can still contain many steps.
+**Tool-call batches.** A response may contain several tool calls. They run one after another, never in parallel. At most one game-action tool is allowed, and it must be last; a response with a game-action tool in any earlier position is rejected before any call runs, and the model tries again. If an earlier query does not complete, the game action after it is not executed. One action call can still contain several ordered game steps.
 
 ### Observation policy
 
@@ -221,4 +221,4 @@ Configuration is loaded once per process. Changing it means restarting that inst
 
 ## Recording
 
-Every game operation, model request, material read, and control action goes into one SQLite archive per run, written by `Journal`. Archives can be inspected offline with `sts2 journal` and replayed by `sts2_harness_eval` without a model or game. See [library.md](library.md#recordings).
+With built-in driving, every game operation, model request, material read, and control action goes into one SQLite archive per run, written by `Journal`. External driving writes bounded diagnostics only, not a model or game archive. Archives can be inspected offline with `sts2 journal` and replayed by `sts2_harness_eval` without a model or game. See [library.md](library.md#recordings).

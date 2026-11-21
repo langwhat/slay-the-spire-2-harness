@@ -13,7 +13,7 @@ You can also plug in your own fixed-code strategy, or drive the game from an out
 
 ## Results
 
-**Fool, Ascension 10, 20 new seeds: 13 wins, 7 losses (65%).** Each run was played from the start to the game's own victory or defeat.
+**Fool, Ascension 10, 20 new seeds: 13 wins, 7 losses (65%; Wilson 95% interval 43%–82%).** Each run was played from the start to the game's own victory or defeat. This is one baseline batch; the planned paired comparison arm was not run.
 
 | Item | Version |
 | --- | --- |
@@ -24,7 +24,7 @@ You can also plug in your own fixed-code strategy, or drive the game from an out
 
 Seeds, per-run results, setup, and run records are in [docs/results.md](docs/results.md).
 
-Across the 17 runs that reached floor 49, the median was 71 minutes (48–98), 7.24M input tokens (4.85M–13.92M, including 5.92M cached at the median), and 66.7K output tokens (50.6K–83.7K).
+Across the 17 runs that reached floor 49 (13 wins and 4 losses there), the median was 71 minutes (48–98), 7.24M input tokens (4.85M–13.92M, including 5.92M cached at the median), and 66.7K output tokens (50.6K–83.7K).
 
 ## Requirements
 
@@ -40,7 +40,7 @@ Across the 17 runs that reached floor 49, the median was 71 minutes (48–98), 7
 
 ```sh
 uv sync
-cp .env.example .env
+cp .env.example .env    # PowerShell: Copy-Item .env.example .env
 # Edit .env with your model and credentials; keep it private.
 uv run sts2 check-config
 ```
@@ -92,7 +92,7 @@ More filters and views are listed in [docs/library.md](docs/library.md#recording
 
 ```sh
 ./scripts/check      # Ruff, strict Pyright, pytest (no game or model needed)
-./scripts/check-mod  # Mod offline tests and Release build
+./scripts/check-mod  # Mod offline tests; builds the Mod when game assemblies are found
 ```
 
 ## Documentation
