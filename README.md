@@ -1,5 +1,7 @@
 # STS2 Harness
 
+[中文](README.zh-CN.md)
+
 A model-driven player for Slay the Spire 2 that plays one run at a time without save/load.
 
 - **Mod.** The `sts2agent` game Mod exposes the game's public state and actions over local HTTP.
@@ -13,7 +15,7 @@ You can also plug in your own fixed-code strategy, or drive the game from an out
 
 ## Results
 
-**Fool, Ascension 10, 20 new seeds: 13 wins, 7 losses (65%; Wilson 95% interval 43%–82%).** Each run was played from the start to the game's own victory or defeat. This is one baseline batch; the planned paired comparison arm was not run.
+**Fool, Ascension 10, 20 new seeds: 13 wins, 7 losses (65%; Wilson 95% interval 43%–82%).** Each run was played from the start to the game's own victory or defeat.
 
 | Item | Version |
 | --- | --- |
