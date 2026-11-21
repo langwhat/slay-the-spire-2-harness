@@ -13,21 +13,6 @@ A model-driven player for Slay the Spire 2 that plays one run at a time without 
 
 You can also plug in your own fixed-code strategy, or drive the game from an outside agent through a local tool API.
 
-## Results
-
-**Fool, Ascension 10, 20 new seeds: 13 wins, 7 losses (65%; Wilson 95% interval 43%–82%).** Each run was played from the start to the game's own victory or defeat.
-
-| Item | Version |
-| --- | --- |
-| Core | `f0486a9` |
-| Game | Slay the Spire 2 v0.113.1 |
-| Model | `gpt-6.2-astra`, effort `xhigh` |
-| Knowledge | `sts2-knowledge` at `bdf5079` |
-
-Seeds, per-run results, setup, and run records are in [docs/results.md](docs/results.md).
-
-Across the 17 runs that reached floor 49 (13 wins and 4 losses there), the median was 71 minutes (48–98), 7.24M input tokens (4.85M–13.92M, including 5.92M cached at the median), and 66.7K output tokens (50.6K–83.7K).
-
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -63,10 +48,9 @@ model. It stays resident and serves each new run you start. To drive the game wi
 own agent instead, run `uv run sts2 start --set STS2_DRIVER=external` and use the local
 tool API with the [play-sts2](skills/play-sts2/SKILL.md) skill.
 
-For the setup used in the results above, clone [sts2-knowledge](https://github.com/langwhat/sts2-knowledge)
+To play with the companion knowledge documents, clone [sts2-knowledge](https://github.com/langwhat/sts2-knowledge)
 next to this repository and run `uv run sts2-knowledge start` from the knowledge
 repository. The standalone `uv run sts2 start` uses the core without those documents.
-See [the recorded setup](docs/results.md#setup) for the exact revisions.
 
 Developers can launch isolated game instances, each with its own profile, port, and
 archive:
@@ -99,7 +83,6 @@ More filters and views are listed in [docs/library.md](docs/library.md#recording
 
 ## Documentation
 
-- [Results](docs/results.md): measured win rates and their setup.
 - [Architecture](docs/architecture.md): how the core is put together, roles, context, and tools.
 - [Glossary](GLOSSARY.md): domain terms.
 - [Configuration](docs/configuration.md): settings, authentication, minimal mode.

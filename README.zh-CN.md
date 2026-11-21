@@ -13,21 +13,6 @@
 
 也可以接入你自己写的固定代码策略，或者让外部 Agent 通过本机工具 API 玩游戏。
 
-## 成绩
-
-**愚者，进阶 10，20 个新种子：13 胜 7 负（65%；Wilson 95% 区间 43%–82%）。** 每局都从开局一直打到游戏自己判定胜负。
-
-| 项目 | 版本 |
-| --- | --- |
-| 核心 | `f0486a9` |
-| 游戏 | 杀戮尖塔 2 v0.113.1 |
-| 模型 | `gpt-6.2-astra`，effort `xhigh` |
-| 知识库 | `sts2-knowledge` 的 `bdf5079` |
-
-种子、每局结果、实验设置和运行记录见 [docs/results.md](docs/results.md)。
-
-有 17 局打到了第 49 层，其中 13 局获胜，4 局在第 49 层失败。这 17 局的中位数：用时 71 分钟（48–98）；输入 7.24M token（4.85M–13.92M），中位数中有 5.92M 命中缓存；输出 66.7K token（50.6K–83.7K）。
-
 ## 环境要求
 
 - Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。
@@ -56,7 +41,7 @@ uv run sts2 start
 
 后端连上游戏时处于暂停状态；按游戏里的 Start 控件，就把这一局交给模型。后端会一直运行，之后你开的每一局都由它接手。如果要用自己的 Agent 来玩，运行 `uv run sts2 start --set STS2_DRIVER=external`，再配合 [play-sts2](skills/play-sts2/SKILL.md) skill 使用本机工具 API。
 
-要复现上面成绩的设置，把 [sts2-knowledge](https://github.com/langwhat/sts2-knowledge) clone 到本仓库旁边，然后在知识库目录里运行 `uv run sts2-knowledge start`。直接运行 `uv run sts2 start` 只用核心，不带这些知识文档。具体版本见[实验设置](docs/results.md#setup)。
+要配合知识文档一起玩，把 [sts2-knowledge](https://github.com/langwhat/sts2-knowledge) clone 到本仓库旁边，然后在知识库目录里运行 `uv run sts2-knowledge start`。直接运行 `uv run sts2 start` 只用核心，不带这些知识文档。
 
 开发者可以启动相互隔离的游戏实例，每个实例有自己的存档、端口和录档：
 
@@ -88,7 +73,6 @@ uv run sts2 journal --archive runs/<run-directory>/archive.sqlite
 
 以下文档都是英文。
 
-- [成绩](docs/results.md)：实测胜率和实验设置。
 - [架构](docs/architecture.md)：核心的组成、角色、上下文和工具。
 - [术语表](GLOSSARY.md)：领域术语。
 - [配置](docs/configuration.md)：设置、认证、精简模式。
