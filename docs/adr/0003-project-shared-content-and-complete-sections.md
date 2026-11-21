@@ -1,3 +1,14 @@
 # Project shared content and complete sections
 
-Repeated object descriptions and full state delivery grow role history, while arbitrary field patches scatter current facts across many updates. Role Context therefore owns a normally append-only projection with immutable content profiles, complete scene bindings, complete replacements of changed named state sections, and a fresh decision surface for each decision; content identities remain separate from native definition IDs and node-scoped instance references. Proactive mechanical capacity compaction is an explicit exception inside the same Context, using a rebuilt current-state baseline and the latest complete decision group. This trades additional internal projection logic and retained profile content for less repeated prose and simpler model interpretation, while preserving explicit full reads and the confirmed per-battle and per-act Agent lifetimes; capacity and comprehension still require real-run validation.
+Sending full object descriptions again and again bloats a role's history. Patching individual fields scatters the current facts across many messages. So a role context:
+
+- sends shared content once, as immutable profiles;
+- binds each scene completely;
+- replaces a named state section whole when it changes;
+- gives every decision a fresh decision surface.
+
+Profile identities are separate from native definition IDs and from node-scoped instance references.
+
+Capacity compaction is the one exception to append-only delivery. It happens inside the same context and rebuilds a current-state baseline plus the latest complete decision group.
+
+The cost is more projection logic and some retained profile content. The gain is less repeated prose and state that is easier for the model to read. Explicit full reads are still available.
