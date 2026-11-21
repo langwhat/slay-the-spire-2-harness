@@ -110,6 +110,10 @@ More filters and views are listed in [docs/library.md](docs/library.md#recording
 - [Mod](mod/README.md): the C# game Mod and native template tools.
 - [Contributing](CONTRIBUTING.md).
 
+## Disclaimer
+
+This is an unofficial fan project, not affiliated with or endorsed by Mega Crit. Slay the Spire is a trademark of Mega Crit. This repository contains no game code or assets; you need your own copy of Slay the Spire 2.
+
 ## License
 
 [MIT](LICENSE).
