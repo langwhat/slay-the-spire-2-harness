@@ -118,10 +118,8 @@ recorded. The case, catalog, document, and link files are read into memory befor
 their hashes are recorded per trial. Prepare full snapshots from trustworthy sources:
 an exact-query cache alone is not a complete catalog or document snapshot.
 
-Before launch, check active batches, system memory pressure, representative worker
-memory, and headroom for the OS and interactive applications. Choose `--concurrency`
-from the available capacity; record scheduling changes separately. Configure the existing
-builtin model and run:
+Pick `--concurrency` to fit your machine's free memory and whatever else is running.
+Configure the builtin model as for gameplay and run:
 
 ```sh
 uv run python -m sts2_harness_eval.stable_suite \
@@ -129,9 +127,9 @@ uv run python -m sts2_harness_eval.stable_suite \
   --env-file .env --concurrency 4
 ```
 
-The output directory must be new. This entry point currently accepts the Responses
-protocol only and rejects other protocols before any request; the game's other protocols
-are unaffected. No transport retries or replacement trials are made. Before sending,
+The output directory must be new. This entry point accepts only the Responses protocol
+and rejects others before sending anything; gameplay itself supports all three. The
+evaluator adds no retries or replacement trials of its own. Before sending,
 the evaluator prints estimated trial and request counts and weighted tokens from the
 provided per-role, per-effort historical means. Missing means remain unknown. Estimates
 are informational, never a spending limit. Weighted tokens are uncached input plus 5%
@@ -238,8 +236,7 @@ including original assistant native replies needed to reconstruct earlier
 interactions within the node. They do not retain rendered prompts, tools,
 projections or knowledge bodies. A Deck case can retain the active Run plan as
 native edges reconciled at the reward position. Labels never enter the model
-input. Because history may include actual model text, store cases according to
-the private repository's artifact policy.
+input. Cases can contain real model text, so store them as private data.
 
 The optional source document provider repairs missing historical `auto_roles`
 metadata only: document identity/resource and subjects must match the archived

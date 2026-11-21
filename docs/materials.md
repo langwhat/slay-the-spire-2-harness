@@ -1,21 +1,17 @@
-# Run-scoped supplementary documents
+# Per-run documents
 
-`EntryMaterials` contains material-selection settings and a document factory. The
-factory accepts a `MaterialContext` and returns the existing `Documents` interface.
-Interactive startup supplies the native run ascension published by `/status`;
-headless startup supplies the ascension from its verified native start recipe.
-A new factory result is created for each run, including successive runs handled
-by a resident backend. No model-visible protocol changes are required.
+`EntryMaterials` pairs material settings with a document factory. The factory receives a `MaterialContext` and returns a `Documents` provider (see [EXTENSIONS.md](../EXTENSIONS.md)). The core calls it once for each run, including every new run a resident backend handles.
 
-Extensions can bind a document reader to that immutable context. Keep numerical
-selection, authoring formats, and curated game knowledge in the extension. Return
-fully rendered `MaterialText` so recording and Context versioning operate on the
-text actually delivered. Explicit reads, subject lookup, and automatic entry
-guidance must use the same reader. Unknown ascension is `None`; a reader that
-requires it must report `MaterialUnavailable` instead of assuming a difficulty.
+`MaterialContext` carries:
 
-Evaluation callers create their document dependencies with the verified case's
-ascension before supplying them to the existing takeover or laboratory entry.
-The document protocol, recorded material replies, and replayed model input retain
-their existing formats. Initial guidance enters the role's system context; later
-first-seen or changed guidance is appended using the existing Context rules.
+- `ascension`. Ordinary startup takes it from the Mod's `/status`, and headless startup takes it from its verified start recipe. It is `None` when unknown.
+- `minimal`, which is true in minimal mode.
+
+Use the context to pick or render material for the run, for example ascension-specific advice. Some guidelines:
+
+- Keep selection logic, authoring formats, and curated knowledge in the extension.
+- Return fully rendered `MaterialText`, so recordings and context versioning see exactly the text that was delivered.
+- Serve explicit reads, subject lookups, and automatic entry guidance from the same provider.
+- If a reader needs the ascension and it is `None`, raise `MaterialUnavailable` instead of guessing.
+
+Evaluation code builds its documents with the case's verified ascension before passing them to the takeover or laboratory entry points. Initial guidance enters the role's system prompt; later new or changed guidance is appended under the usual context rules.

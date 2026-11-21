@@ -14,7 +14,14 @@ Separate three kinds of action:
 - **Automatic progression:** actions the core takes without a model request, such as a single reachable map destination, a lone proceed control, or a single chest. Never attribute these to model judgment. Leave attribution unknown when execution boundaries or the decision source cannot establish it.
 - **Native consequences:** state changes that follow from game rules after an action.
 
-An observation proves what the game exposed to the harness; it does not by itself prove what the model received. `replay.reach` at the recording's own core revision checks that the recorded game, material, and model dependencies reassemble typed content equal to the recorded model input and tool definitions up to an anchor. Serialized bytes, including mapping key order, are not compared. A successful replay verifies assembly of the recorded request; it does not make a separate rendering of one observation equivalent to its delivered content. Verify any claimed public fragment against the same Context history and projection boundaries programmatically, without exposing restricted message bodies. Model-authored content in the same input (earlier replies, notes, handoff reports) stays unknown, and provider-side request conversion is outside this check. Investigate a mismatch at a different revision before classifying it as a delivery defect; it can reflect changed assembly behavior. A replay rejection can also come from nondeterminism in assembly or in the replay check itself; reproduce it under varied process conditions before treating it as evidence about the recording or its delivery. Treat any reconstructed deck plan as the reviewer's hypothesis, not a quotation of the agent's intent.
+An observation shows what the game exposed to the harness, not what the model received. To check what the model received:
+
+- Run `replay.reach` at the recording's own core revision. It rebuilds the model input and tool definitions up to an anchor from the recorded dependencies and compares typed content (not serialized bytes or key order) with what was recorded.
+- A passing replay confirms how the recorded request was assembled. To claim that a specific public fact reached the model, check it programmatically against that context's history and projection, without exposing restricted message bodies.
+- Model-written content in the input (earlier replies, notes, handoff reports) stays unknown, and provider-side request conversion is outside this check.
+- A mismatch at a different revision may just mean assembly changed. A replay rejection can also come from nondeterminism, so reproduce it before treating it as evidence about the recording.
+
+Treat any reconstructed deck plan as the reviewer's hypothesis, not a quote of the agent's intent.
 
 **Done when:** every sampled decision has a recording ID, sequence, action kind, trusted preceding facts, confirmed effects, delivery status (verified, unverified, or unknown parts), and an explicit list of missing evidence. Technical interruptions are separate from defeats.
 
@@ -95,7 +102,7 @@ Historical takeover replays the recorded prefix and changes only declared materi
 
 ## 5. Compare a targeted change
 
-Before any model call, fix in an external plan: baseline and candidate revisions, model settings, knowledge configuration, starting mode, initial notes, cases and their partition, endpoints, finite per-arm request and time budgets, repetition count and order (use an even number of pairs when balancing AB and BA), the behavioral criterion, and the promotion rule. Keep non-target conditions equal. Preserve original cases and create separate candidate branches. A model-visible text change still follows the project's review rule for runtime model text before it is promoted.
+Before any model call, fix in an external plan: baseline and candidate revisions, model settings, knowledge configuration, starting mode, initial notes, cases and their partition, endpoints, finite per-arm request and time budgets, repetition count and order (use an even number of pairs when balancing AB and BA), the behavioral criterion, and the promotion rule. Keep non-target conditions equal. Preserve original cases and create separate candidate branches. Review any model-visible text change in its assembled runtime input before promoting it.
 
 Write criteria that permit multiple valid choices. For a card reward, store a `CardRewardRubric` with the acceptable card set and whether skipping is acceptable; for a battle, describe observable outcomes and prohibited behaviors. Record its author permanently.
 

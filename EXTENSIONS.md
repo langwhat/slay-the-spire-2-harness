@@ -1,69 +1,95 @@
 # Extension documents
 
-Document providers integrate supplementary knowledge and guidance through the core’s existing typed interfaces.
+Extensions add knowledge and guidance to the core by supplying documents. This page is for anyone writing a document provider.
 
-## Responsibility
+## What a provider does
 
-The core owns the game client, submitted actions, settlement, Run/Combat orchestration, notes, role contexts, model calls, and recording. A document provider supplies supplementary text and its associations. It does not submit game actions, edit model history, trigger context rebuilding, or construct SDK messages or cache parameters.
+The core owns the game client, actions, settlement, orchestration, notes, role contexts, model calls, and recording. A provider only supplies text and says which game subjects it relates to. It does not submit actions, edit model history, trigger context rebuilds, or build SDK messages or cache parameters.
 
-Three consumers use this one document interface: curated object knowledge, act/Boss guidance, and static monster move/transition rules. A shared Boss document can serve Run and Combat under the same identity. Static move rules do not infer the current native state and require no observation subscription or tracker. Live native observations remain the source for current card values, powers, intent, and available actions.
+One interface serves every kind of supplementary material, for example curated card knowledge, act and Boss guidance, and static monster move rules. A shared Boss document can serve both Run and Combat. Move rules describe how a monster behaves; current values, powers, intents, and available actions always come from live observations.
 
-No third-party agent framework or extension event runtime is required. The current interface has no observation, combat-start, or combat-end callbacks. Providers may cache their own source data, but a cache is not evidence that a role context has received its contents.
+There are no observation or combat-start/end callbacks. A provider may cache its own source data, but its cache says nothing about what a role has actually received.
 
-## Provider and value types
+## Interface
 
-The Python types live in [`sts2_harness.knowledge`](src/sts2_harness/knowledge.py) and [`sts2_harness.material_text`](src/sts2_harness/material_text.py). `Documents` combines these asynchronous capabilities:
+The types live in [`sts2_harness.knowledge`](src/sts2_harness/knowledge.py) and [`sts2_harness.material_text`](src/sts2_harness/material_text.py). A `Documents` provider has three async methods:
 
-| Method | Input | Result | Meaning |
+| Method | Input | Result | Purpose |
 | --- | --- | --- | --- |
-| `list(role)` | `DecisionOwner` | `tuple[SkillSummary, ...]` | Discover navigable documents appropriate to the role. |
-| `read(request)` | `SkillRead(id: str, resource: str \| None = None)` | `DocumentView` | Read the complete document or one advertised resource. |
-| `lookup(subjects)` | `tuple[SubjectId, ...]` | `tuple[Document, ...]` | Select supplementary documents associated with native subjects. |
+| `list(role)` | `DecisionOwner` | `tuple[SkillSummary, ...]` | Documents to show this role in skill listings. |
+| `read(request)` | `SkillRead(id, resource=None)` | `DocumentView` | One whole document, or one of its advertised resources. |
+| `lookup(subjects)` | `tuple[SubjectId, ...]` | `tuple[Document, ...]` | Documents associated with native game subjects. |
 
-`SubjectId` contains a nonempty `category` and `definition_id`. Native object subjects use native category/definition IDs; act guidance also uses the `act` category. Document IDs identify provider documents independently of those subjects. A document may have several subjects, and several documents may apply to one subject.
+The value types:
 
-`DocumentView` has `id`, `name: MaterialText`, `text: MaterialText`, `resources: tuple[Resource, ...]`, and an optional `resource` key. `Resource` has a key and a `MaterialText` description. `Document` adds `subjects` and exposes `view()` for delivery without lookup provenance. Resource keys are scoped to their parent document. For a root `DocumentView`, omit `resource` (`MISSING`); do not pass `None`. A resource view supplies its nonempty key. `SkillRead` uses `None` to request the root document. The internal delivery ledger identifies roots and resources separately as `(document.id, resource-or-None)`.
+- **`SubjectId`** has a non-empty `category` and `definition_id`. Native objects use native categories and definition IDs; act guidance uses the `act` category. A document can have several subjects, and a subject can match several documents. Document IDs are separate from subjects.
+- **`DocumentView`** has `id`, `name`, `text`, `resources`, and an optional `resource` key. For a root document, leave `resource` unset (`MISSING`), not `None`. A resource view sets its non-empty key. In `SkillRead`, `resource=None` asks for the root document.
+- **`Resource`** has a key, unique within its document, and a description.
+- **`Document`** is a `DocumentView` plus its `subjects`; `view()` drops the subjects for delivery.
+- **`SkillSummary`** has `id`, `name`, and `description`. Listings need not include every supplement. A document missing from a role's listing can still be found by `lookup` or read by ID, so listings are not an access control.
+- **`MaterialText`** is an immutable `id`, `version`, and `body`. `MaterialText.create(id, body)` sets `version` to the SHA-256 of the UTF-8 body. Keep the ID stable for the same logical text and create a new snapshot when the body changes. Names, bodies, and descriptions each have their own material identity. Models see only the body; recordings keep all three fields.
 
-`SkillSummary` has `id`, `name: MaterialText`, and `description: MaterialText`. Discovery need not enumerate every object supplement. A document absent from a role's discovery list can still be selected by `lookup` or explicitly read by its configured identity. `lookup` has no role parameter; the caller supplies the subjects for its current purpose. Discovery filtering is not an authorization boundary.
+`FileDocuments` is the built-in implementation. It reads explicitly configured UTF-8 files from `DocumentSource` and `ResourceSource` values, rejects duplicate document IDs or resource keys, and never scans directories. `DocumentSource.auto_roles` limits which roles receive a document automatically. Other providers can use any source format and selection policy.
 
-`MaterialText` is an immutable `id`, `version`, and `body` snapshot. `MaterialText.create(id, body)` computes `version` as SHA-256 of the exact UTF-8 body. Keep IDs stable for the same logical material and create a new snapshot when its body changes. Names, body text, resource descriptions, and skill descriptions each retain their own material identity/version. Runtime model serialization emits the body; recording retains identity, version, and body separately.
+## Plugging in
 
-`FileDocuments` is the existing explicit-file implementation. It takes `DocumentSource` and `ResourceSource` values, rejects duplicate document IDs or resource keys, reads configured UTF-8 files, and matches subjects without scanning a directory. Other providers implement the same capabilities using their own source formats and selection policies. The core prescribes no private corpus layout.
+Pass `EntryMaterials(documents, settings)` to `sts2_harness.cli.main(argv=None, *, materials=None)` as `materials`. `EntryMaterials` comes from `sts2_harness.entry_materials`, and `SessionMaterials` from `sts2_harness.journal`. `documents` is a factory: it receives a `MaterialContext` and returns the `Documents` provider for one run. See [docs/materials.md](docs/materials.md).
 
-## Entry composition and lifecycle
+- Builtin `start` and `headless` use the provider. External-driver `start` rejects it with `ConfigurationError`. `check-config` and `journal` ignore it.
+- `SessionMaterials` sets `entry_documents_enabled`, `act_guidance: dict[int, tuple[str, ...]]`, and `battle_guidance: tuple[str, ...]`, and is recorded in the session manifest.
+- The same provider serves automatic entry guidance, skill reads, and knowledge supplements. Turning off entry guidance leaves the other two working.
 
-Pass `EntryMaterials(documents: Documents, settings: SessionMaterials)` to [`sts2_harness.cli.main`](src/sts2_harness/cli.py) as the keyword `materials`: `main(argv=None, *, materials=None)`. Import `EntryMaterials` from `sts2_harness.entry_materials` and `SessionMaterials` from `sts2_harness.journal`. Builtin `start` and developer `headless` support it; external-driver `start` rejects supplied entry materials with `ConfigurationError`. `check-config` and `journal` do not read the provider. `SessionMaterials` records `entry_documents_enabled`, `act_guidance: dict[int, tuple[str, ...]]`, and `battle_guidance: tuple[str, ...]` in the session manifest. The same provider supplies entry guidance, skill reads, and native-lookup supplements through the recorded IO ports. Entry delivery can be disabled without changing the three provider methods.
+## When documents are delivered
 
-At a new Run act context, the core reads configured act document IDs and looks up the public act identity plus all Boss encounter IDs known on the act map. It obtains a missing map through the existing inspect port and verifies that the run and act still match. Configured and subject-selected documents are combined by document ID.
+**Run context.** Every time Run builds a context (at act start and at each confirmed node change), the core does the following:
 
-At a fresh Combat context, the core reads configured battle document IDs and looks up the public encounter, current cards in all piles, relics, potions, enemies including inactive enemies, player/enemy/ally powers, and available orb IDs. Selection candidates are included when Combat owns the current menu. Selection uses public stable IDs and does not derive hidden game state. New or changed public battle objects can select further material before a later model request. A missing referenced current object is a content-loading failure, not silently omitted guidance.
+- reads the configured act guidance IDs;
+- looks up the act itself and every Boss encounter shown on the act map, fetching the map first if needed and checking that the run and act have not changed;
+- merges configured and matched documents by ID.
 
-The first selected documents are supplied as system `GuidanceContent` when that role's context is constructed. Later preparation reads select current documents again. `Context.append_materials` appends a user `GuidanceContent` containing only previously undelivered or changed complete `DocumentView` values. It compares the complete view, not just the main text hash. It never rewrites an earlier system or user snapshot. An empty selection does not retract earlier history.
+**Combat context.** When a battle starts, the core reads the configured battle guidance IDs. It also looks up the encounter, every card in every pile, relics, potions, all enemies (including inactive ones), player, enemy, and ally powers, and orbs. Selection candidates are included when Combat owns the menu. New or changed battle objects can bring in more material before a later model request. If a referenced object cannot be read, that is a loading failure; the guidance is not silently skipped.
 
-Delivery belongs to the retained context. Run and Combat track it independently even when their providers or documents are shared. A new Combat gets a fresh context; its ordinary nonterminal review retains that battle context. Run rebuilds at act entry. Rebuilding permits the same material to be delivered again. Pause/resume or repeated preparation alone does not clear retained delivery. A failed replacement Run initialization leaves the previous context intact until a new one can be built successfully.
+**Delivery rules.**
 
-This lifecycle has no extension-specific reset hook.
+- The first documents go into the role's system prompt when its context is built.
+- Later, `Context.append_materials` appends only documents that are new or changed, comparing the complete view, not just the text. Earlier messages are never rewritten, and an empty selection does not retract anything.
+- Each context tracks delivery on its own, even when Run and Combat share documents. A rebuilt context starts a fresh record, so the same material can be delivered again. Pause and resume do not reset it.
+- If building a replacement Run context fails, the previous context stays in place until a new one succeeds.
 
 ## Explicit reads and native knowledge
 
-The role's existing skill tool supports listing and reading. The core filters `list(role)` summaries by optional `text`, a case-insensitive substring of the public id, name, or description, with surrounding whitespace ignored. It sorts matching summaries by id and returns at most 20 per call. Tools accept `offset` (default 0) and `limit` (1–20, default 20); `total` counts all matches and `next_offset` is null at the end. Continue with the same text filter. Filtering does not read document bodies or change the provider interface. A resource read must name a resource advertised by its parent document. Explicit reads return the requested complete view even when the same content was delivered earlier; they are not replaced by a short “already read” result. `Context` records that actual tool result for subsequent automatic-delivery comparisons.
+**Skill reads.** The role's skill tool lists and reads documents. Listings filter `list(role)` by an optional `text` (case-insensitive substring of id, name, or description) and are sorted by id. Pages hold up to 20 entries (`offset` default 0, `limit` 1–20); `total` counts all matches and `next_offset` is `null` at the end. A resource read must name a resource the parent document advertises. Explicit reads always return the complete view, even if it was delivered before, and the context records the result so automatic delivery does not repeat it.
 
-The knowledge tool first queries the native catalog. For a native lookup, the core passes the found native subjects to `Documents.lookup`, attaches matching document views to each native entry, and keeps native entry order and `missing_ids`. Each returned document must include the matched native subject in `subjects`; the core uses that association when attaching supplements to an entry. Supplements cannot introduce native matches or turn an absent private supplement into a missing native ID. Complete native definitions and current-state inspection remain separate capabilities. Shared supplementary document identities are deduplicated within each native entry. Actual explicit lookup results also update the context's delivery ledger.
+**Knowledge supplements.** The knowledge tool queries the native catalog first. For a lookup, the core passes the native subjects it found to `Documents.lookup` and attaches each returned document to the native entries it lists in `subjects`. Native order and `missing_ids` are kept. Supplements never add native matches, and a missing supplement never makes a native ID missing.
 
-This is a read-only document seam. A provider cannot acquire execution ownership by returning action-shaped text or associations. The core still validates and executes the role's action tools through its normal execution boundary.
+Providers are read-only. Returning action-like text gives a provider no control; actions still go through the role's action tools and normal execution.
 
-## Empty results and failures
+## Empty results and errors
 
-An unconfigured provider, an empty successful discovery or lookup, and no applicable entry guidance are normal outcomes. Return empty tuples for those cases. Raise `UnknownDocument` for an unknown document ID or unadvertised resource. Raise `MaterialUnavailable` (including `SupplementUnavailable`) for an enabled source that cannot be read or decoded. Do not substitute empty text or silently disable a failed source. Boundary errors should identify the logical document/resource without exposing private paths or content.
+| Situation | What to do |
+| --- | --- |
+| No provider configured, no matches, or no applicable guidance | Return an empty tuple. This is normal. |
+| Unknown document ID or unadvertised resource | Raise `UnknownDocument`. |
+| An enabled source cannot be read or decoded | Raise `MaterialUnavailable` (or `SupplementUnavailable`). Do not return empty text or disable the source quietly. |
 
-An explicit unknown read becomes an invalid-arguments tool result. An enabled read/lookup failure becomes `content_unavailable` and participates in the existing shared tool recovery budget. Entry initialization failure pauses before the first gameplay decision; user Start retries initialization after the source is repaired. Later automatic material failure uses the role's existing recovery budget and preserves its context. Providers do not add their own retry loop, fallback source, or pause policy. Lifetime and role changes detected while obtaining public selection inputs remain core orchestration events.
+Error messages should name the logical document or resource without exposing private paths or content.
 
-## Recording, reconstruction, and material variants
+The core handles the consequences:
 
-The current manifest schema is 10 and includes `SessionMaterials`. `RecordedDocuments` records each role listing, document/resource read, and subject lookup with its typed result or explicit unknown/unavailable failure. `DocumentSnapshot` retains names, bodies, resource descriptions, and lookup subjects when applicable; `MaterialSnapshot` retains the exact material ID/version/body. The journal stores these snapshots and assembled model inputs so that reconstruction does not reread today's files as yesterday's evidence.
+- An unknown explicit read becomes an invalid-arguments tool result.
+- A read or lookup failure becomes `content_unavailable` and counts against the shared tool recovery budget.
+- A failure while loading entry guidance pauses the run before its first decision; fix the source and press Start to retry.
+- Providers should not add their own retries, fallbacks, or pause logic.
 
-Historical reconstruction uses `ReplayDocuments` and the recorded material timeline. It validates the requested operations, rebuilds the software prefix, and restores role delivery from actual messages. Replaying recorded output is sufficient for the current static readers.
+## Recording and replay
 
-The existing eval `MaterialVariant` declares `MaterialReplacement(material_id, expected_versions, text)` and either `HistoricalStart` or `SceneStart(initial_notes)`. Replacements keep the material ID and use a new exact-body hash. Preflight checks complete recorded source-version sets and rejects unknown, inconsistent, or undeclared versions. `VariantDocuments` applies declared replacements to list/read/lookup outputs while preserving document IDs, resource keys, and subjects. Historical variants retain the recorded software prefix with the declared material substitutions; scene variants build fresh role context at an admitted scene instead of claiming a historical prefix was delivered.
+The session manifest records `SessionMaterials`. `RecordedDocuments` records every listing, read, and lookup with its result or failure. `DocumentSnapshot` and `MaterialSnapshot` keep the exact names, bodies, resource descriptions, and subjects. Replays use what was recorded, never today's files.
 
-Use the existing eval admission, reconstruction, and suite paths for comparisons. A material variant preserves the recorded `SessionMaterials` settings and pre-target game operations. Disabling automatic entry delivery does not disable recorded explicit skill or knowledge reads; their recorded materials may still be replaced. The live continuation may make different decisions through the ordinary action tools. A variant does not invent unrecorded material dependencies. Invalid experiment material declarations are rejected at the eval boundary rather than repaired through gameplay tool recovery. A comparison must report its precise source settings, IDs, versions, start mode, and actual execution evidence.
+`ReplayDocuments` rebuilds role delivery from the recorded material timeline during offline replay.
+
+To compare alternative material, declare a `MaterialVariant` in `sts2_harness_eval.variants`. It contains:
+
+- `MaterialReplacement(material_id, expected_versions, text)` entries;
+- either `HistoricalStart`, which keeps the recorded prefix, or `SceneStart(initial_notes)`, which builds a fresh context at an admitted scene.
+
+Preflight rejects unknown, inconsistent, or undeclared source versions. `VariantDocuments` applies the replacements while keeping document IDs, resource keys, and subjects. The recorded `SessionMaterials` and pre-target game operations are kept. Turning off entry delivery does not stop recorded explicit reads, whose materials can still be replaced. A comparison should report its source settings, IDs, versions, start mode, and execution evidence. See [docs/evaluation.md](docs/evaluation.md).

@@ -1,79 +1,62 @@
 # Configuration
 
-Configuration is read once into an immutable snapshot shared by Run and Combat. Precedence
-is `--set NAME=VALUE`, process environment, local `.env`, then code defaults.
-`--env-file PATH` selects another defaults file; a missing file means no local defaults.
-Overrides never modify the environment or defaults file. Dotenv interpolation is disabled.
-Keep `.env` private; `.env.example` contains placeholders only. Unknown `LLM_`/`STS2_`
-names in the local file fail validation; unrelated process environment keys are ignored.
+Each backend process reads its configuration once into an immutable snapshot, and Run, Deck, and Combat all use it. To change a setting, restart the process.
 
-| Variable | Default / meaning |
+Precedence, highest first:
+
+1. `--set NAME=VALUE` on the command line
+2. the process environment
+3. the local `.env` file (or the file given by `--env-file PATH`; a missing file means no local defaults)
+4. code defaults
+
+Overrides never modify the environment or the `.env` file. Dotenv interpolation is off. Keep `.env` private; `.env.example` holds placeholders only. Unknown `LLM_`/`STS2_` names in the file are rejected; unrelated environment variables are ignored.
+
+Run `uv run sts2 check-config` to validate settings offline. It prints only safe metadata and hides model IDs, URLs, headers, effort, tier, and credentials, even on errors. It does not contact the endpoint, so it cannot tell you whether the provider accepts your model, effort, or credentials.
+
+| Variable | Default and meaning |
 | --- | --- |
-| `STS2_DRIVER` | `builtin`; `external` needs no model configuration |
-| `STS2_USER_INPUT` | `false`; `true` enables [live user input](running.md#live-user-input) |
-| `LLM_PROTOCOL` | `responses`; also `chat-completions`, `messages` |
-| `LLM_MODEL` | Required for builtin; configure once locally |
-| `LLM_BASE_URL` | `https://api.openai.com/v1`; Messages uses `https://api.anthropic.com` |
-| `LLM_AUTH` | `bearer` (`api-key` for Messages); also `none`, `api-key` (named header), `basic` |
-| `LLM_API_KEY` | Bearer token or named-header credential |
-| `LLM_AUTH_HEADER` | `x-api-key` for `api-key` |
-| `LLM_USERNAME`, `LLM_PASSWORD` | Basic authentication credentials |
-| `LLM_HEADERS` | Custom headers, one `Name: value` per line; last case-insensitive duplicate wins |
-| `LLM_REASONING_EFFORT`, `LLM_SERVICE_TIER` | Optional provider-specific settings |
-| `LLM_REQUEST_TIMEOUT_S` | `3600`, positive finite per-attempt timeout |
-| `LLM_EXTRA_RETRIES` | `25`, nonnegative additional attempts |
-| `LLM_CONTEXT_WINDOW` | `300000`, positive input accounting window |
-| `LLM_CAPACITY_VERIFIED_ENDPOINT` | Empty by default; an exact match with `LLM_BASE_URL` enables the verified Responses HTTP 400 `context_too_large` rejection signal |
+| `STS2_DRIVER` | `builtin`. `external` runs the [external tool service](running.md#external-gameplay-tools) and needs no model settings. |
+| `STS2_USER_INPUT` | `false`. `true` enables [live user input](running.md#live-user-input). |
+| `STS2_MINIMAL` | `false`. `true` enables [minimal mode](#minimal-mode). |
+| `LLM_PROTOCOL` | `responses`. Also `chat-completions` or `messages`. |
+| `LLM_MODEL` | Required for builtin driving. |
+| `LLM_BASE_URL` | `https://api.openai.com/v1`; `https://api.anthropic.com` for Messages. |
+| `LLM_AUTH` | `bearer` (`api-key` for Messages). Also `none`, `api-key` (named header), or `basic`. |
+| `LLM_API_KEY` | Bearer token or named-header credential. |
+| `LLM_AUTH_HEADER` | Header name for `api-key`; default `x-api-key`. |
+| `LLM_USERNAME`, `LLM_PASSWORD` | Basic authentication. |
+| `LLM_HEADERS` | Extra headers, one `Name: value` per line. The last case-insensitive duplicate wins. |
+| `LLM_REASONING_EFFORT`, `LLM_SERVICE_TIER` | Optional, passed to the provider as is. One effort applies to the whole run. |
+| `LLM_REQUEST_TIMEOUT_S` | `3600`. Timeout for each attempt. |
+| `LLM_EXTRA_RETRIES` | `25`. Retries after the first failed attempt. |
+| `LLM_CONTEXT_WINDOW` | `300000`. Input window used for [capacity compaction](#input-size-estimate). |
+| `LLM_CAPACITY_VERIFIED_ENDPOINT` | Empty. See below. |
 
-Set `LLM_CAPACITY_VERIFIED_ENDPOINT` only after verifying that exact endpoint's structured
-Responses rejection. Changing `LLM_BASE_URL` disables the signal until the selector matches
-again. Other protocols, HTTP statuses, and streamed failures do not establish this rejection.
-Recordings retain the verified category, protocol, and signal; they do not store the endpoint URL.
+## Endpoints and authentication
 
-Base URLs must omit userinfo, query strings, and fragments. Endpoint path prefixes are
-retained when the selected client appends `/responses` or `/chat/completions`.
-Authentication applies SDK
-defaults, configured authentication, then case-insensitive custom headers. SDK environment
-credentials and custom headers do not supply project authentication.
-`none` discards configured credentials and must not inherit SDK environment credentials.
-External mode fixes the driver and skips unused model configuration validation. Custom
-headers use LF-separated lines and ASCII field values with optional tabs; other control
-characters are rejected. Bearer and named-header credentials must fit these HTTP header
-constraints without leading/trailing whitespace. Basic passwords may contain Unicode.
+Base URLs must not contain userinfo, query strings, or fragments. Path prefixes are kept; the client appends `/responses`, `/chat/completions`, or `/v1/messages`.
 
-The check emits only bounded configuration metadata. Free-form model IDs, endpoint URLs,
-headers, effort, tier, and credentials are hidden, including on validation failures.
-Success establishes offline validity only; provider-specific model/effort/tier support and
-actual authentication require real endpoint checks.
+Headers are built in this order: SDK defaults, then configured authentication, then custom headers (case-insensitive). Credentials from SDK environment variables are never used. `LLM_AUTH=none` sends no credentials at all. Custom header lines are LF-separated, with ASCII values and optional tabs. Bearer and named-header credentials must be valid header values without surrounding whitespace. Basic passwords may contain Unicode.
+
+### Context-too-large signal
+
+Some Responses endpoints reject an oversized request with HTTP 400 and the code `context_too_large`. If you have confirmed your endpoint does this, set `LLM_CAPACITY_VERIFIED_ENDPOINT` to exactly the same value as `LLM_BASE_URL`. The core then treats that rejection as a capacity signal. Changing `LLM_BASE_URL` turns the signal off until the two match again. Recordings keep the endpoint category and signal, not the URL.
 
 ## Minimal mode
 
-Add `--minimal` to `start` or `headless` for minimal gameplay, or set
-`STS2_MINIMAL=true` in `.env` or the process environment. As with other settings, `--set`
-overrides the process environment, which overrides `.env`; explicit `--minimal` takes
-precedence over all three. Use `--set STS2_MINIMAL=false` to disable an environment default.
-`check-config` reports the resolved mode. Both modes share gameplay and state-reading rules.
-Ordinary mode adds deck construction and battle review instructions, notes, and query tools.
-Minimal gameplay exposes only actions and route planning, skips model battle reviews and
-standalone report-processing calls, and supplies no notes. Automatic knowledge injection,
-measured deck statistics, and automatic progression remain available.
-Minimal gameplay targets lower total usage cost; fewer input tokens alone do not establish
-savings when cached input is discounted. The archive records the mode so offline replay
-uses the same behavior. Ordinary gameplay is the default.
+Minimal mode is a cheaper way to play. Turn it on with `--minimal` on `start` or `headless`, or with `STS2_MINIMAL=true`. `--minimal` beats every other source; use `--set STS2_MINIMAL=false` to turn off an environment default. `check-config` shows the resolved mode.
+
+Both modes use the same gameplay and state-reading rules. Ordinary mode adds deck-building and battle-review instructions, strategy notes, and query tools. Minimal mode gives the roles only action and route-planning tools. It skips battle reviews and handoff processing, and has no notes. Automatic knowledge injection, deck statistics, and automatic progression still run.
+
+Fewer input tokens do not always mean lower cost when cached input is discounted, so compare total usage cost. The archive records the mode, so offline replay uses the same behavior.
 
 ## Input-size estimate
 
-The `input_characters_v1` estimator runs locally without tokenizer packages, downloaded
-tables, provider counting calls, or historical-usage calibration. It counts Unicode
-characters in decoded string values plus a canonical JSON structural skeleton whose
-string values are empty. Keys, non-string scalar values, and structure count once.
-The estimate is `ceil(characters / 3) + 3 * items`, where items are top-level entries
-in the protocol's input-bearing arrays and tool list: Responses `input`/`tools`, Chat
-Completions `messages`/`tools`, and Messages `system`/`messages`/`tools`.
-Opaque continuation strings count at ordinary character length. HTTP escaping and
-transport-only settings do not inflate the estimate. Full canonical request digests
-and byte counts cover the unchanged transport body. The algorithm identity is recorded
-in the Journal alongside the capacity policy and each attempt's estimate and provider usage.
-These are approximate counts, not provider counts or a guaranteed upper bound, especially
-for different languages, content distributions, or providers. Use `uv run --offline`
-when uv itself must not access the network; dependencies must already be cached.
+Capacity compaction needs an estimate of each request's input size. It runs locally, with no tokenizer download or provider counting call. The default estimator, `reported_usage_bytes_v1`, works like this:
+
+- When the previous request in the same context reported its usage, the estimate is that request's input tokens plus output tokens, plus the bytes added since then divided by 4.
+- Otherwise it is the JSON byte size of the request's input fields divided by 4.
+
+When the estimate reaches 90% of `LLM_CONTEXT_WINDOW`, the agent tries a compacted input; see [architecture](architecture.md#context-and-model-input). The Journal records the estimator, the capacity policy, and each attempt's estimate and reported usage. Older archives may use the earlier `input_characters_v1` estimator, and replay keeps whichever one they recorded.
+
+Use `uv run --offline` when uv itself must not touch the network. Dependencies must already be cached.

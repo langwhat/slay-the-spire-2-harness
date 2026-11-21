@@ -1,70 +1,58 @@
 # Using the core as a library
 
-These sections describe the Python APIs behind the CLI: model clients, recordings, single-run sessions, roles, and offline replay.
+The Python APIs behind the CLI: model clients, recordings, single-run sessions, roles, and offline replay.
 
 ## Model client
 
-The Python `sts2_harness.llm.client.Llm` client accepts a `ModelConfiguration` snapshot
-and implements `complete(input, tools)` as an async context manager. It currently supports
-Responses, Chat Completions, and Messages. Callers own the immutable `ModelInput` message tuple;
-the client retains
-no conversation. Tool definitions use concrete Pydantic argument models. Provider
-schemas use `strict=False` to preserve optional-field semantics; tools remain responsible
-for strict local argument decoding.
+`sts2_harness.llm.client.Llm` takes a `ModelConfiguration` and offers `complete(input, tools)`; use it as an async context manager. It speaks Responses, Chat Completions, and Messages. The caller owns the immutable `ModelInput` message tuple; the client keeps no conversation. Tool definitions use Pydantic argument models. Provider schemas are sent with `strict=False` so optional fields keep their meaning, and tools decode arguments strictly on their own side.
 
-A completed `ModelReply` exposes read-only text/tool-call views, native continuation,
-usage, and separate requested/response model metadata. `ResponsesReply.to_json()` and
-`from_json()` preserve the complete ordered native output, including encrypted reasoning
-and assistant phases in one immutable encoded snapshot. Decoded SDK items are independent
-copies. `ChatCompletionsReply` retains a complete native completion and continues with its
-native assistant message, including opaque continuation fields. `MessagesReply` retains the
-complete native Message and continues with its ordered content blocks, including thinking,
-signatures, redacted thinking, explicit nulls, and opaque fields. Thinking is not exposed
-in the normalized text view. Messages groups tool results in the immediately following
-user message before auxiliary text. Histories from another
-protocol are rejected; protocol switching does not migrate existing context. Append the
-returned assistant message and associated tool-result
-messages to the caller's input; native output is sent once, without `previous_response_id`.
-The adapter does not execute tools or return intermediate streamed argument fragments.
+### Replies
 
-Responses requires `response.completed`; Chat Completions requires a complete `stop` or
-`tool_calls` choice after consuming the stream, including any final usage chunk.
-Messages requires closed, ordered content blocks and an explicit `message_stop` after
-a supported `end_turn` or `tool_use` outcome. Server-tool blocks, `pause_turn`, `refusal`,
-and unconfigured `stop_sequence` outcomes are unsupported.
-Premature clean EOF,
-connection failures, timeouts, rate limits, and overload are retried. Each attempt gets its
-own configured timeout covering request start through final decoding. SDK retries are
-disabled; the default 25 additional attempts wait 2, 4, 8, 16, then 32 seconds, totaling
-702 seconds of backoff. Explicit output truncation, authentication, permission, quota,
-model/configuration errors, and malformed terminal responses raise a typed
-`ModelUnavailable` without automatic regeneration. Cancellation propagates to the caller.
+A completed `ModelReply` gives:
 
-Messages uses the official Anthropic SDK with an internal `max_tokens=16000` policy;
-this is not a universal model maximum. Thinking is omitted to preserve the server default.
-Nonempty effort accepts `low`, `medium`, `high`, `xhigh`, or `max`; service tier accepts
-`auto` or `standard_only`. Unsupported target options fail explicitly without fallback.
-Top-level ephemeral automatic caching uses the default five-minute TTL, without warmup
-requests or additional block breakpoints. Total input includes uncached input plus actual
-cache creation and read counts; missing counts remain unknown. Messages appends
-`/v1/messages` to the configured base URL, preserving its path prefix. Each custom target
-requires its own finite protocol acceptance check; passing fake HTTP tests does not
-establish compatibility with a live provider.
+- read-only text and tool-call views;
+- the native continuation;
+- usage;
+- the requested and returned model names.
 
-Missing usage counters remain `None`. Cache hit ratio uses cache-read tokens divided by
-all input tokens, including cache writes. `Usage.summarize_cache()` sums comparable token
-counts and reports coverage instead of averaging request percentages. Cache configuration
-belongs to the protocol adapter; no separate cache settings or warmup calls are introduced.
+To continue, append the returned assistant message and the matching tool results to your input. Native output is sent back once, without `previous_response_id`. The client does not run tools or return partial streamed arguments.
 
-Protocol validation uses the official SDK with fake HTTP and controlled waits. It does
-not establish real endpoint compatibility or game behavior. Inject an HTTP transport and
-sleep callable into `Llm` to exercise these public boundaries without network calls.
+How each protocol keeps its native output:
+
+- **Responses.** `ResponsesReply.to_json()` / `from_json()` keep the complete ordered output, including encrypted reasoning and assistant phases.
+- **Chat Completions.** `ChatCompletionsReply` keeps the full completion and continues with its native assistant message.
+- **Messages.** `MessagesReply` keeps the full message and continues with its ordered content blocks, including thinking, signatures, redacted thinking, and opaque fields. Thinking is never in the text view. Tool results go in the next user message, before any extra text.
+
+A history from one protocol cannot be continued with another.
+
+### Completion and retries
+
+A reply counts as complete only on these signals:
+
+- **Responses:** `response.completed`.
+- **Chat Completions:** a `stop` or `tool_calls` choice, after the whole stream (including a final usage chunk) has been read.
+- **Messages:** closed, ordered content blocks and `message_stop` after `end_turn` or `tool_use`. Server-tool blocks, `pause_turn`, `refusal`, and unconfigured `stop_sequence` are not supported.
+
+Early EOF, connection failures, timeouts, rate limits, and overload are retried. Each attempt has its own timeout, from request start to final decoding. SDK retries are off; the default 25 extra attempts wait 2, 4, 8, 16, then 32 seconds (702 seconds of backoff in total). Truncated output, authentication, permission, quota, model or configuration errors, and malformed responses raise `ModelUnavailable` and are not retried. Cancellation propagates.
+
+### Messages specifics
+
+Messages uses the official Anthropic SDK with an internal `max_tokens=16000`, which is a project policy rather than a model limit.
+
+- Thinking is left at the server default.
+- Effort accepts `low`, `medium`, `high`, `xhigh`, or `max`, and service tier accepts `auto` or `standard_only`. Unsupported options fail instead of falling back.
+- Automatic top-level caching uses the default five-minute TTL, with no warmup requests or extra breakpoints.
+- `/v1/messages` is appended to the base URL, keeping any path prefix.
+
+### Usage and testing
+
+Missing usage counters stay `None`. Total input counts uncached input plus cache creation and cache reads. The cache hit ratio is cache-read tokens divided by all input tokens, including cache writes. `Usage.summarize_cache()` sums comparable token counts and reports coverage instead of averaging per-request percentages.
+
+To test without a network, inject an HTTP transport and a sleep function into `Llm`. Fake-HTTP tests check protocol handling; a real endpoint still needs its own check.
 
 ## Recordings
 
-Game, model, material, and control recordings share one local SQLite archive. Compose `RecordedGame` around the
-logical `LiveGame` dependency; pass the same Journal as the live native audit receiver.
-The caller supplies the recording identity and genuinely known initial conditions:
+Game, model, material, and control records share one SQLite archive per run. Wrap the live game in `RecordedGame` and give the same `Journal` to `LiveGame` as its audit receiver:
 
 ```python
 journal = Journal.create(archive_path, manifest)
@@ -86,102 +74,87 @@ execution = Execution(
 journal.close()  # After the last operation has finished.
 ```
 
-These classes live in `sts2_harness.game`, `sts2_harness.execution`, and
-`sts2_harness.journal`. Built-in admission waits for Start; external admission uses
-`wait_for_start=False` and omits the recovery budget. Each dependency is sequential.
-Use one live dependency and one Journal owner for a recording; reopening an archive
-provides a read-only evidence view, not session continuation.
+These classes live in `sts2_harness.game`, `sts2_harness.execution`, and `sts2_harness.journal`. Built-in driving waits for Start; external driving uses `wait_for_start=False` and no recovery budget. Use one live game and one Journal per recording. Reopening an archive gives a read-only view, not a way to continue the session.
 
-Each logical operation has one sequence. Native polls are child audit attempts whose
-complete typed replies are compressed and deduplicated as they arrive. Catalog queries
-and their subsequent current-state reads remain separate logical operations. A submitted
-operation ID does not establish completion: only confirmed completed receipts advance
-the game-operation cursor. Unfinished operations retain their request and arrived
-attempts with an explicit incomplete result. Ordinary archive failures preserve gameplay
-and report recording gaps; unwritable gaps remain in memory until storage recovers.
-`journal.availability` distinguishes an unpersisted initial manifest from a usable archive;
-initial disk failures also preserve gameplay and retry the same owned archive when writable.
-Existing archives and invalid recording paths are rejected rather than overwritten.
-Diagnostics default to the archive directory. `diagnostics.jsonl` and its two backups
-are each capped at 10 MiB of UTF-8 bytes, including the active segment. `status.json`
-updates on stage changes. INFO includes actual tool, batch, automatic-progression,
-and role/act/battle results; batch summaries distinguish planned, confirmed, and
-uncertain steps. Ordinary rejection and Pause are INFO; unknown effects and exhausted
-failures are ERROR. Same-request retry warnings are combined for up to 60 seconds,
-with cumulative failure totals on recovery or exhaustion. Journal attempts remain complete.
-Embedded callers can temporarily construct `Diagnostics(..., level=logging.DEBUG)`
-to include model encoding digests under the same output cap; prompts and wire bodies
-are not diagnostic metadata. Failed destinations retry independently after one second.
-The Journal is never rotated with diagnostics. Keep archives outside the repository.
-Inspect an active archive through `sts2 journal` or a SQLite read-only connection; close
-the connection before recording ends. External writers and checkpoint operations are
-unsupported while its Journal is recording. Sealing failures leave the archive and WAL in
-place and are diagnosed without interrupting ordinary gameplay or cancellation. Preserve
-both files for inspection; no recovery command currently seals them afterward. Evaluation
-binding and admission reject unsealed archives, as does pruning a scope containing one.
-Evaluation artifacts require a successfully sealed standalone archive.
+### What is recorded
 
-Inspect recorded facts without startup configuration or network access:
+**Operations.**
+
+- Each logical operation gets one sequence number. Native polls are child attempts, with replies compressed and deduplicated as they arrive.
+- A catalog query and the state read after it are separate operations.
+- Only confirmed completed receipts advance the game-operation cursor. Unfinished operations keep their request and attempts, marked incomplete.
+
+**Model requests.**
+
+- Each logical request gets an anchor before its first attempt, and retries share it. Complete outputs are saved before the stream closes.
+- The archive keeps a digest of the protocol request encoding, separate from the semantic input digest. It does not store provider bodies, headers, or SSE fragments.
+- Failure kinds, usage, and model metadata are kept.
+- The first input in a stream is stored in full; later inputs store a common prefix plus the new suffix. Materials, documents, and native outputs share compressed content blocks.
+- A recording gap never becomes the base of a later input, and editing source files never changes history.
+
+**Storage failures.** If the archive cannot be written, gameplay continues and the gap is reported. Unwritten records stay in memory until storage recovers. `journal.availability` tells an unsaved initial manifest apart from a usable archive. Existing archives and invalid paths are rejected rather than overwritten.
+
+**Sealing.** If sealing fails, the archive and its WAL are left in place with a diagnostic. Keep both files; there is no command to seal them later. Evaluation refuses unsealed archives.
+
+While a Journal is recording, inspect the archive only through `sts2 journal` or a read-only SQLite connection, and close it before recording ends.
+
+### Diagnostics
+
+Diagnostics go to the archive directory by default:
+
+- **Log files.** `diagnostics.jsonl` and two backups are each capped at 10 MiB. The Journal is never rotated.
+- **Status.** `status.json` is updated on every stage change.
+- **INFO.** Covers tool, batch, automatic-progression, and role/act/battle results. Batch summaries separate planned, confirmed, and uncertain steps. Ordinary rejections and Pause are INFO.
+- **ERROR.** Covers unknown effects and exhausted failures.
+- **Retries.** Retry warnings for the same request are combined for up to 60 seconds, with totals on recovery or exhaustion.
+
+`Diagnostics(..., level=logging.DEBUG)` adds model encoding digests; prompts and wire bodies are never written to diagnostics.
+
+### Inspecting an archive
+
+Inspection needs no configuration or network:
 
 ```sh
-uv run sts2 journal --archive /path/to/journal.sqlite
-uv run sts2 journal --archive /path/to/journal.sqlite --kind settle --around 12 --window 2
-uv run sts2 journal --archive /path/to/journal.sqlite --role combat --node NODE_ID --errors-only
-uv run sts2 journal --archive /path/to/journal.sqlite --view operation --sequence 12 --expand
-uv run sts2 journal --archive /path/to/journal.sqlite --view request --sequence 15 --expand
-uv run sts2 journal --archive /path/to/journal.sqlite --around 12 --expand --export evidence.json
+uv run sts2 journal --archive /path/to/archive.sqlite
+uv run sts2 journal --archive /path/to/archive.sqlite --kind settle --around 12 --window 2
+uv run sts2 journal --archive /path/to/archive.sqlite --role combat --node NODE_ID --errors-only
+uv run sts2 journal --archive /path/to/archive.sqlite --view operation --sequence 12 --expand
+uv run sts2 journal --archive /path/to/archive.sqlite --view request --sequence 15 --expand
+uv run sts2 journal --archive /path/to/archive.sqlite --around 12 --expand --export evidence.json
 ```
 
-Compose `sts2_harness.model_journal.RecordedLlm` around a live `Llm`, with the same
-Journal, the actual role, and a distinct stream name for each new Context. Pass that
-client to the Agent. Compose `RecordedDocuments` around `FileDocuments` for skill and
-supplement lookups, and pass `RecordedPrompts(PackagedPrompts(), journal)` to either role's
-`prompts` argument. The session creator supplies `Manifest.initial_notes` from its actual
-initial value: `""` is known empty, while `None` is unknown. A Combat's opening notes never
-backfill that manifest. Packaged tool definitions are code configuration loaded before
-session creation; every model anchor records their actual schemas and named descriptions.
+The default timeline shows the latest 20 matching records in sequence order.
 
-Each logical model request gets an anchor before its first attempt. Retry attempts share
-that anchor; complete native outputs are durable before the provider stream exits.
-Arrival and successful delivery are separate facts. The adapter records a canonical
-protocol request encoding digest, distinct from the archival semantic input digest,
-without saving duplicate provider bodies, headers, or SSE fragments. Safe failure kinds,
-usage, and model metadata are retained. Model timeout and backoff still belong to `Llm`.
+- **Filters.** `--kind`, `--role run|combat`, `--node NODE_ID`, and `--errors-only` can be combined. With `--around`, filters apply inside that window.
+- **Unknown links.** A role or node that is not known stays empty; it is never guessed from a neighboring record.
+- **Errors.** `--errors-only` shows failed, unknown, and incomplete records. A complete model reply that was never delivered is incomplete, not a model failure. Ordinary rejections, Pause, and orderly stops are not errors.
+- **Order, not cause.** Sequence numbers and the game cursor show order. They do not show that a particular model request caused an adjacent action.
 
-The first input in a stream is full; later inputs store a durable common prefix and new
-suffix. Materials, documents, and native outputs use shared compressed content blocks.
-Expansion restores named material IDs, versions, and bodies from the archive. A recording
-gap cannot become the base of a later input. Source edits never repair or replace history.
+In Python:
 
-The default timeline shows the latest 20 matching dependency records in global sequence
-order; `--kind model` and `--kind material` filter dependencies.
-`--role run|combat`, `--node NODE_ID`, and `--errors-only` combine with those filters.
-With `--around`, all filters apply inside that fixed sequence window; otherwise the
-latest 20 matching rows are selected. Unknown role or node associations remain null:
-they are not inferred from a neighboring model request or a future observation.
-The error filter includes failed, unknown, and incomplete dependencies. A complete
-native model reply that has not been delivered is still incomplete, not a model failure.
-Ordinary rejected actions, manual Pause, and orderly stopping are not errors.
-Summaries use a small index in the same archive without expanding input or response
-blocks; an inconsistent summary index is reported explicitly. `Journal.operations()`
-selects game/control operations, `requests()` selects model anchors, and `materials()`
-selects material reads. `request(sequence)` expands one anchor. Expanded CLI views include
-historical inputs, replies, attempts, and observations; selective exports include the
-manifest and gaps. Use `--around` with the timeline to inspect neighboring actions,
-receipts, queries, and material reads. Sequence and confirmed game cursor express ordering;
-they do not imply that an adjacent action was caused by a particular model request.
+- `Journal.operations()` selects game and control operations.
+- `requests()` selects model anchors, and `request(sequence)` expands one.
+- `materials()` selects material reads.
 
-The current archive schema is version 16 and records each native reply's protocol explicitly.
-`Journal.open()` provides read-only inspection. Schema versions are validated without archive
-migration. Read older archives with the revision that recorded them. Native restoration
-and live evaluation remain unsupported; the manifest does not claim exact native replay.
+Summaries come from a small index and do not expand stored blocks. Expanded views include inputs, replies, attempts, and observations, and exports include the manifest and gaps.
+
+### Recording a session
+
+To record a session yourself:
+
+- **Model.** Wrap the live `Llm` in `sts2_harness.model_journal.RecordedLlm`, giving it the same Journal, the role, and a distinct stream name for each new context.
+- **Documents.** Wrap `FileDocuments` in `RecordedDocuments`.
+- **Prompts.** Pass `RecordedPrompts(PackagedPrompts(), journal)` as `prompts`.
+- **Initial notes.** Set `Manifest.initial_notes` from the real starting value: `""` means known empty and `None` means unknown. Combat's opening notes never fill it in.
+- **Tools.** Tool definitions are loaded before the session starts, and every model anchor records the actual schemas and descriptions.
+
+### Archive versions
+
+`Manifest.schema_version` gives the archive format. `Journal.open()` checks it and does not migrate. Read an older archive with the core revision that recorded it. To continue a recorded headless run in a live game, see verified cases and takeover in [gameplay-retrospectives.md](gameplay-retrospectives.md#4-select-the-appropriate-evaluation).
 
 ## Single-run sessions
 
-`sts2_harness.live_session.live_session` assembles `ModClient`, `Llm`, `Manifest`, and an
-archive path into one run. The manifest supplies the bound game/run identities and the unique
-initial notes value; `initial_notes` must be explicit, including `""` for known empty notes.
-Pass resources that the live context owns and closes:
+`sts2_harness.live_session.live_session` puts a `ModClient`, an `Llm`, a `Manifest`, and an archive path together into one run. The manifest supplies the game and run identities and the initial notes; `initial_notes` must be explicit, `""` for known empty.
 
 ```python
 from sts2_harness.live_session import live_session
@@ -191,93 +164,58 @@ async with live_session(client, manifest, archive_path, model=model) as session:
     ended = await session.run()
 ```
 
-The live context releases the supplied client and optional model and closes its Journal.
-`RunSession(manifest, dependencies)` borrows typed game, prompt, document, and model-factory
-dependencies and owns one Notes instance, recovery budget, and role flow. It does not close
-injected dependencies. Automatic entry guidance is enabled separately from tool documents.
-`DocumentSource.auto_roles` limits automatic subject-matched guidance to the listed roles;
-explicit document reads and knowledge lookups still return the complete document.
-`DefaultFlow` waits for Start,
-schedules Run and Combat, completes pending battle handoffs before creating the next
-Combat, and replaces the Run role and its context when the native act changes. An unknown
-act does not establish a transition. Boss encounters and rewards do not define the role
-lifetime. A native terminal state ends the run without a battle review or further model call.
-Strategy notes remain available across acts and are supplied to each Combat at its opening.
-`start()` records a real Pause and waits for explicit Start before `run()` enters gameplay.
-A supplied process Diagnostics instance is borrowed and remains open across run sessions.
-It does not launch a game or select a character. Run chooses automatic progression or
-strategy within the same execution path; shop entry actions remain separate units and
-purchases and departure remain strategy decisions. Validation uses fake HTTP and local
-archives; this does not establish complete real-game acceptance.
+`start()` records a real Pause and waits for Start; `run()` then plays until the run ends. The live session closes the client, the model, and the Journal when it exits. `RunSession(manifest, dependencies)` borrows its game, prompt, document, and model-factory dependencies without closing them. It owns one `Notes`, one recovery budget, and the flow. A borrowed `Diagnostics` stays open across sessions. A session never launches the game or picks a character.
+
+`DefaultFlow` handles Run, Deck, and Combat, as described in [architecture](architecture.md#how-a-run-flows):
+
+- It finishes pending battle handoffs before creating the next Combat.
+- It replaces the Run role when the native act changes. An unknown act number is not a transition, and Boss encounters or rewards do not end the Run role.
+- A terminal state ends the run with no review or further model call.
+- Strategy notes last the whole run and are copied to each Combat at its start.
+
+Automatic entry guidance is enabled separately from tool documents.
 
 ## Role contexts
 
-In both modes, the next Run model decision after a confirmed native node change starts
-a fresh context with the current observation, map and route plan, applicable guidance,
-and latest battle evidence. Rebuilding waits for a complete native map and settled action
-feedback. Ordinary gameplay also carries the current strategy notes. Queries and actions within the
-same node stay in order, so opening a reward or continuing a shop purchase preserves the
-local decision. A change of decision owner within one node does not reset this history.
-The Run agent and route plan still last one act; Combat context lasts one battle.
-Capacity-triggered compaction remains available for long local interactions. Failed or
-uncertain actions retain the feedback needed for recovery. Full history stays in the
-archive even when earlier nodes leave the model input. New archives record
-`run_context_policy=node_local_v1` and `state_format=sections_v2` in schema 16; earlier schemas require their matching
-core version for inspection and replay.
+The Run agent and its route plan last one act. After a confirmed node change, the next Run model decision starts a fresh context, once the map is complete and action feedback has settled. The context contains:
 
-In both modes, an ongoing role receives action receipts and query data in tool results,
-with fresh state delivered once in the next `act` task. Results retain their observation
-when control leaves that role. Messages append within the active context between capacity
-compactions.
+- the current observation, map, and route plan;
+- applicable guidance and the latest battle evidence;
+- in ordinary mode, the current notes.
+
+Within a node, queries and actions stay in one conversation, so opening a reward or continuing a shop visit keeps the local exchange, even if the decision owner changes. Combat's context lasts one battle. Capacity compaction handles long local exchanges. Failed or uncertain actions keep the feedback needed to recover. Earlier nodes leave the model input but stay in the archive. Archives record this as `run_context_policy=node_local_v1` and `state_format=sections_v2`.
+
+While a role is active, action receipts and query data arrive in tool results, and the next `act` task delivers fresh state once. Results keep their observation when control leaves the role. Messages are appended between compactions.
 
 ## Roles and strategy notes
 
-`RunAgent`, `DeckAgent`, and `CombatAgent` share the `Agent` loop and `Execution.run_unit`.
-`DefaultFlow` hands card-adding selections and card offers on the reward screen to a
-`DeckAgent`; every other Run decision, including shop purchases, stays with `RunAgent`.
-A Deck role is created for the first undecided card offer in a node and kept while that
-offer remains. It ends when the choice resolves or the node changes, and an offer
-declined in a node is not handed to a new Deck role in that node.
+`RunAgent`, `DeckAgent`, and `CombatAgent` share the `Agent` loop and `Execution.run_unit`. `DefaultFlow` sends card-adding selections and card offers on the reward screen to a `DeckAgent`; every other Run decision, including shop purchases, stays with `RunAgent`. A Deck role is created for the first undecided card offer in a node and kept while that offer remains. It ends when the choice resolves or the node changes. An offer declined in a node is not handed to Deck again in that node.
 
-`DeckAgent` subclasses `RunAgent` to reuse its notes, act-scoped context lifetime, state
-enrichment, and route-plan view. It replaces the initial context, the reward view, and
-tool dispatch, and it accepts only a catalog built with `ToolCatalog(..., focused_deck=True)`,
-which advertises `run_deck_choice` alone. An ordinary Run catalog excludes that tool.
-Each `ToolCatalog` owns its tool set; callers do not edit its definitions. Tool
-descriptions and role prompts are the source of truth for model-visible rules.
+`DeckAgent` extends `RunAgent` to reuse its notes, state enrichment, and route-plan view. It has its own initial context, reward view, and tool dispatch. It only accepts a catalog built with `ToolCatalog(..., focused_deck=True)`, which offers `run_deck_choice` alone; an ordinary Run catalog excludes that tool. Each `ToolCatalog` owns its tool set. Tool descriptions and role prompts are the source of truth for model-visible rules.
 
-Construct one `Notes(NotesState(...))` per run and pass it to the Run `ToolCatalog`; the
-agents read the same owner. An empty initial string creates empty notes. Fields and their
-limits are defined by `NotesState`. `run_notes(mode="write", ...)` replaces only supplied
-fields, including clearing a field with an empty string. Combat receives the notes at
-battle entry. Minimal mode has no notes tools or injected notes. The Mod distinguishes
-rewards that open a selector from immediate card grants; declined immediate grants stay
-unclaimed until the reward screen is left.
+### Notes
 
-State delivery replaces complete named sections and sends stable-ID definitions once per
-context. Run deck rows aggregate identical native instances with their actual card text.
-`deck_stats` counts the current deck and reports native base draw and energy.
-Reward takes and skips are counted per act; shop purchases do not change those counters.
-`use.observed_plays` describes the last five sampled battle-history prefixes;
-they omit unmeasured draw, damage, block, and energy statistics.
+Create one `Notes(NotesState(...))` per run and pass it to the Run `ToolCatalog`; all agents read the same owner. `NotesState` defines the fields and limits:
 
-Notes are authoritative
-in memory. Reads return the full text; replacement permits clearing; an edit requires one
-exact unique match, including overlapping occurrences, and permits deletion. Failed edits
-leave notes unchanged, while successful writes return only `{"updated":true}`.
+- `core`, up to five distinct entries;
+- `plan`, up to 300 characters;
+- `other`.
 
-`await role.enter_act(ActStart(observation))` loads guidance and packaged instructions for
-that role's single act before installing its Context and delivery ledger. A required-material
-failure requests Pause through `DecisionInterrupted`; explicit retry preserves the same notes
-owner. Finish pending action feedback before entering an act. The first actual act or handoff
-task in the new Context carries current notes, including an empty string; construction alone
-does not consume them. Session orchestration creates a new Run role for each confirmed native
-act transition and owns recording stream assembly.
+`run_notes(mode="read")` returns the full notes. `run_notes(mode="write", ...)` replaces only the fields supplied, and an empty string clears a field. A successful write returns `{"updated":true}`. Notes live in memory. Combat gets a copy at the start of each battle. Minimal mode has no notes tools or injected notes.
+
+The Mod tells rewards that open a selector apart from immediate card grants. A declined immediate grant stays unclaimed until the reward screen is left.
+
+### State delivery
+
+State is delivered as complete named sections, and stable-ID definitions are sent once per context. Run's deck rows group identical native instances with their actual card text. `deck_stats` counts the current deck and reports native base draw and energy. Reward takes and skips are counted per act; shop purchases do not change those counts. `use.observed_plays` covers the last five sampled battle-history prefixes and leaves out unmeasured draw, damage, block, and energy statistics.
+
+### Entering an act
+
+`await role.enter_act(ActStart(observation))` loads guidance and packaged instructions for that act, then installs the context. Finish pending action feedback before calling it. If required material fails to load, it raises `DecisionInterrupted` to request Pause, and a retry keeps the same notes. The first real act or handoff task in the new context carries the current notes, even when they are empty. Session orchestration creates a new Run role for each confirmed act change and assembles the recording streams.
 
 ## Offline software replay
 
-`sts2_harness_eval` exports `reach`, `ModelAnchor`, `Reached`, `Rejected`, `RejectReason`,
-and `ReplayResult`. Select a recording identity and model sequence from the Journal:
+`sts2_harness_eval` exports `reach`, `ModelAnchor`, `Reached`, `Rejected`, `RejectReason`, and `ReplayResult`. Pick a recording identity and model sequence from the Journal:
 
 ```python
 from pathlib import Path
@@ -290,9 +228,4 @@ async with reach(Path("/path/to/archive.sqlite"), ModelAnchor("recording-id", 15
         print(result.reason, result.sequence, result.detail)
 ```
 
-Replay supports the default built-in Run/Combat flow without automatic entry guidance;
-explicit document tools use recorded materials. It checks recorded inputs and dependency
-order without contacting a model, game, or material source. `Reached` holds the original
-RunSession coroutine inside the target model call only while the context is open; exit
-cancels and awaits that coroutine. It consumes no target reply, restores no native game,
-and provides no live takeover. Missing facts and mismatches return typed `Rejected` results.
+Replay rebuilds the default Run/Combat flow from recorded inputs and checks dependency order, without contacting a model, game, or material source. Automatic entry guidance is off, and explicit document reads use recorded materials. `Reached` holds the original `RunSession` coroutine paused inside the target model call while the context is open; leaving the context cancels it. It consumes no reply and restores no game. Missing facts and mismatches come back as typed `Rejected` results.
