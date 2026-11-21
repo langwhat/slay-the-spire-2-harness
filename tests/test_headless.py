@@ -38,7 +38,8 @@ def template_fixture(directory: Path) -> Path:
                     for name in ("IRONCLAD", "SILENT", "REGENT", "NECROBINDER", "DEFECT")
                 ],
                 "ascension_total": 50,
-                "runs": 0,
+                "runs": 1,
+                "bosses_seen": ["ENCOUNTER.VANTOM_BOSS"],
                 "history": 0,
                 "has_run": False,
                 "has_multiplayer_run": False,
@@ -83,6 +84,25 @@ def test_corrupt_template_is_rejected_before_creating_a_writable_profile(tmp_pat
     with pytest.raises(TemplateError):
         NativeTemplate(manifest).copy_to(tmp_path / "instance", tmp_path / "archive")
     assert not (tmp_path / "instance").exists()
+
+
+@pytest.mark.parametrize(
+    "changes", [{"runs": 0}, {"runs": True}, {"bosses_seen": None}, {"bosses_seen": []}]
+)
+def test_template_requires_veteran_progress(tmp_path: Path, changes: dict[str, object]) -> None:
+    from sts2_harness.native_template import NativeTemplate, TemplateError
+
+    manifest = template_fixture(tmp_path)
+    values = json.loads(manifest.read_text())
+    for field, value in changes.items():
+        if value is None:
+            del values[field]
+        else:
+            values[field] = value
+    manifest.write_text(json.dumps(values))
+
+    with pytest.raises(TemplateError, match="Regenerate"):
+        NativeTemplate(manifest)
 
 
 def game_fixture(
@@ -210,6 +230,31 @@ server.serve_forever()
     values["game_assembly_sha256"] = hashlib.sha256(b"assembly").hexdigest()
     template.write_text(json.dumps(values))
     return executable, template
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+def test_headless_start_reports_that_an_old_template_must_be_regenerated(tmp_path: Path) -> None:
+    import asyncio
+
+    from sts2_harness.headless import HeadlessError, HeadlessOptions, OwnedHeadlessInstance
+
+    game, manifest = game_fixture(tmp_path)
+    values = json.loads(manifest.read_text())
+    values["runs"] = 0
+    del values["bosses_seen"]
+    manifest.write_text(json.dumps(values))
+    instance = tmp_path / "instance"
+
+    async def start() -> None:
+        options = HeadlessOptions(
+            game=game, template_manifest=manifest, instance_directory=instance
+        )
+        async with OwnedHeadlessInstance(options):
+            pytest.fail("The old template was accepted.")
+
+    with pytest.raises(HeadlessError, match="Regenerate"):
+        asyncio.run(start())
+    assert not instance.exists()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")

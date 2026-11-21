@@ -34,7 +34,8 @@ class TemplateManifest(WireModel):
     potions: Annotated[int, Field(gt=0)]
     characters: Annotated[tuple[str, ...], Field(min_length=5)]
     ascension_total: Annotated[int, Field(ge=50)]
-    runs: Literal[0]
+    runs: Annotated[int, Field(ge=0, le=1)]
+    bosses_seen: tuple[str, ...] = ()
     history: Literal[0]
     has_run: Literal[False]
     has_multiplayer_run: Literal[False]
@@ -70,6 +71,9 @@ class NativeTemplate:
                 raise TemplateError("A native template requires its .manifest.json file.")
             self._manifest_bytes = manifest_path.read_bytes()
             self._manifest = TemplateManifest.model_validate_json(self._manifest_bytes)
+            # Historical manifests can still be read for archive verification.
+            if self._manifest.runs != 1 or not self._manifest.bosses_seen:
+                raise TemplateError("Regenerate the native template with the current generator.")
             self._source = manifest_path.with_name(
                 manifest_path.name.removesuffix(".manifest.json")
             )
@@ -92,7 +96,11 @@ class NativeTemplate:
                 next(item.sha256 for item in files if item.path == "default/1/settings.save"),
                 self._manifest.game_assembly_sha256,
             )
-        except (OSError, ValidationError) as error:
+        except ValidationError as error:
+            raise TemplateError(
+                "Invalid native template manifest. Regenerate it with the current generator."
+            ) from error
+        except OSError as error:
             raise TemplateError("Cannot read the verified native template.") from error
 
     def copy_to(self, user_directory: Path, archive_directory: Path) -> TemplateEvidence:

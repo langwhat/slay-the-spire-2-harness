@@ -4,6 +4,8 @@ using Godot;
 using MegaCrit.Sts2.Core.DevConsole;
 using MegaCrit.Sts2.Core.DevConsole.ConsoleCommands;
 using MegaCrit.Sts2.Core.Modding;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.Nodes.Ftue;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.Timeline;
@@ -12,7 +14,7 @@ using Environment = System.Environment;
 namespace Sts2Mod.Tools.NativeTemplate;
 
 /// <summary>
-/// Developer-only Mod entry point that initializes a clean unlocked profile in an isolated headless user directory
+/// Developer-only Mod entry point that initializes an unlocked veteran profile in an isolated headless user directory
 /// and exports the immutable three-file native template plus its verification manifest.
 /// </summary>
 [ModInitializer(nameof(Initialize))]
@@ -91,6 +93,16 @@ public static class TemplateGenerator
             if (unlock.task is not null)
                 await unlock.task;
 
+            var bosses = ModelDb.Acts
+                .SelectMany(act => act.AllBossEncounters.Concat(act.BossDiscoveryOrder))
+                .DistinctBy(boss => boss.Id)
+                .ToArray();
+            foreach (var boss in bosses)
+                saves.Progress.GetOrCreateEncounterStats(boss.Id);
+
+            // An Ironclad loss increments the profile's run count without granting ascension progress.
+            saves.Progress.GetOrCreateCharacterStats(ModelDb.GetId<Ironclad>()).TotalLosses = 1;
+
             saves.SetFtuesEnabled(false);
             saves.MarkFtueAsComplete(NAcceptTutorialsFtue.id);
             saves.MarkFtueAsComplete(NAscensionSingleplayerFtue.id);
@@ -98,7 +110,16 @@ public static class TemplateGenerator
             saves.SaveSettings();
             saves.SaveProgressFile();
             saves.SaveProfile();
-            RequireClean(saves);
+
+            var progressRead = saves.InitProgressData();
+            if (progressRead.Status != ReadSaveStatus.Success || saves.Progress.NumberOfRuns != 1)
+                throw new InvalidOperationException("Saved native progress must load with exactly one recorded run.");
+
+            var unlockState = saves.GenerateUnlockStateFromProgress();
+            if (bosses.Length == 0 || bosses.Any(boss => !unlockState.HasSeenEncounter(boss)))
+                throw new InvalidOperationException("Saved native progress must have seen every boss encounter.");
+
+            RequireNoRunFiles(saves);
 
             var epochs = EpochModel.AllEpochIds.ToArray();
             if (saves.GetUnlocksRemaining() != 0
@@ -129,13 +150,12 @@ public static class TemplateGenerator
                 cards = saves.GetTotalUnlockedCards(),
                 relics = saves.GetTotalUnlockedRelics(),
                 potions = saves.GetTotalUnlockedPotions(),
-                characters = saves
-                    .GenerateUnlockStateFromProgress()
-                    .Characters
+                characters = unlockState.Characters
                     .Select(character => character.Id.ToString())
                     .ToArray(),
                 ascension_total = saves.GetAggregateAscensionProgress(),
                 runs = saves.Progress.NumberOfRuns,
+                bosses_seen = bosses.Select(boss => boss.Id.ToString()).Order(StringComparer.Ordinal).ToArray(),
                 history = saves.GetRunHistoryCount(),
                 has_run = saves.HasRunSave,
                 has_multiplayer_run = saves.HasMultiplayerRunSave,
@@ -155,13 +175,15 @@ public static class TemplateGenerator
 
     private static void RequireClean(SaveManager saves)
     {
-        if (saves.HasRunSave
-            || saves.HasMultiplayerRunSave
-            || saves.GetRunHistoryCount() != 0
-            || saves.Progress.NumberOfRuns != 0)
-        {
-            throw new InvalidOperationException("Template generation requires a clean profile without runs or history.");
-        }
+        RequireNoRunFiles(saves);
+        if (saves.Progress.NumberOfRuns != 0 || saves.Progress.EncounterStats.Count != 0)
+            throw new InvalidOperationException("Template generation requires a clean profile without run or encounter stats.");
+    }
+
+    private static void RequireNoRunFiles(SaveManager saves)
+    {
+        if (saves.HasRunSave || saves.HasMultiplayerRunSave || saves.GetRunHistoryCount() != 0)
+            throw new InvalidOperationException("The template profile must have no run saves or run history.");
     }
 
     private static string Digest(string path) =>

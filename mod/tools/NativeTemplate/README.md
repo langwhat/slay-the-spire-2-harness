@@ -1,6 +1,6 @@
 # Isolated Native Template and Standard Starts
 
-These developer-only tools create a minimal, fully unlocked native template profile for isolated headless runs. They do not participate in gameplay, expose HTTP endpoints, or read an ordinary player profile. Keep generated profiles, manifests, and observations outside Git.
+These developer-only tools create a fully unlocked veteran profile for isolated headless runs. They do not participate in gameplay, expose HTTP endpoints, or read an ordinary player profile. Keep generated profiles, manifests, and observations outside Git.
 
 ## Generate Once
 
@@ -19,7 +19,9 @@ These developer-only tools create a minimal, fully unlocked native template prof
 4. In only that headless child's environment, set `STS2AGENT_TEMPLATE_USER_DIR` to the exact absolute `OS.GetUserDataDir()` path and `STS2AGENT_TEMPLATE_OUTPUT` to a new absolute template directory outside the user-data directory. Do not set `STS2AGENT_START_RUN_FILE`. Require process exit code `0` and `<template-directory>.manifest.json`.
 5. Remove the temporary `mods/sts2agent_template` directory. Verify a standard headless start against a fresh writable copy of the template before admitting it for runs.
 
-`TemplateGenerator` requires a clean profile, executes native `unlock all`, disables FTUEs, marks the tutorial and singleplayer ascension FTUEs complete, and saves through `SaveManager`. Its manifest records unlock counts, character IDs, aggregate ascension progress, zero run/history checks, and SHA-256 digests of `sts2.dll`, `sts2agent_template.dll`, and the three read-only native files (`default/1/settings.save`, `default/1/modded/profile1/saves/progress.save`, and `default/1/modded/profile1/saves/prefs.save`).
+`TemplateGenerator` starts with a clean profile and executes native `unlock all`. It disables FTUEs, marks the tutorial and singleplayer ascension FTUEs complete, and records one completed run and every boss encounter as seen. It reloads progress through `SaveManager` and verifies the unlocks, run count, boss discoveries, and absence of run saves and history before exporting. The game uses profile progress to apply first-run rules and boss discovery order, so the template represents a veteran player's profile.
+
+The manifest records unlock counts, character IDs, aggregate ascension progress, `runs: 1`, a sorted `bosses_seen` list, run save and history checks, and SHA-256 digests of `sts2.dll`, `sts2agent_template.dll`, and the three read-only native files (`default/1/settings.save`, `default/1/modded/profile1/saves/progress.save`, and `default/1/modded/profile1/saves/prefs.save`). Regenerate templates created before these veteran progress checks were added.
 
 ## Start Each Isolated Run
 

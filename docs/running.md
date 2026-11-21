@@ -72,7 +72,7 @@ Headless runs are for development and evaluation. Each one owns its own game pro
 You need:
 
 - the production Mod installed in the game bundle;
-- a clean, fully unlocked native template made with [mod/tools/NativeTemplate](../mod/tools/NativeTemplate/README.md) for the same game assembly.
+- a fully unlocked veteran template with one recorded run, every boss marked as seen, and no run history. Generate it for the same game assembly with [mod/tools/NativeTemplate](../mod/tools/NativeTemplate/README.md).
 
 ```console
 uv run sts2 headless --game /absolute/Game.app/Contents/MacOS/Game \

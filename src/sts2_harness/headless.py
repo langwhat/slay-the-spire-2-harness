@@ -326,6 +326,8 @@ class OwnedHeadlessInstance:
             if self.diagnostics is not None:
                 self.diagnostics.lifecycle(Lifecycle.FAILED)
             await self.aclose()
+            if isinstance(error, TemplateError):
+                raise HeadlessError(str(error)) from error
             raise HeadlessError(
                 "Isolated native startup failed; inspect the instance startup evidence."
             ) from error
