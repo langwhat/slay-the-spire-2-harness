@@ -11,6 +11,19 @@ A model-driven player for Slay the Spire 2 that plays one run at a time without 
 
 You can also plug in your own fixed-code strategy, or drive the game from an outside agent through a local tool API.
 
+## Results
+
+**Fool, Ascension 10, 20 new seeds: 13 wins, 7 losses (65%).** Each run was played from the start to the game's own victory or defeat.
+
+| Item | Version |
+| --- | --- |
+| Core | `f0486a9` |
+| Game | Slay the Spire 2 v0.113.1 |
+| Model | `gpt-6.2-astra`, effort `xhigh` |
+| Knowledge | `sts2-knowledge` at `bdf5079` |
+
+Seeds, per-run results, setup, and run records are in [docs/results.md](docs/results.md).
+
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -75,6 +88,7 @@ More filters and views are listed in [docs/library.md](docs/library.md#recording
 
 ## Documentation
 
+- [Results](docs/results.md): measured win rates and their setup.
 - [Architecture](docs/architecture.md): how the core is put together, roles, context, and tools.
 - [Glossary](GLOSSARY.md): domain terms.
 - [Configuration](docs/configuration.md): settings, authentication, minimal mode.
@@ -86,3 +100,7 @@ More filters and views are listed in [docs/library.md](docs/library.md#recording
 - [Per-run documents](docs/materials.md): building documents for each run.
 - [Mod](mod/README.md): the C# game Mod and native template tools.
 - [Contributing](CONTRIBUTING.md).
+
+## License
+
+[MIT](LICENSE).

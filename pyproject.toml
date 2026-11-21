@@ -2,6 +2,7 @@
 name = "sts2-harness"
 version = "0.1.0"
 description = "No-save/load game-playing core"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic==2.3.0",
