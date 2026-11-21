@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 
+from sts2_harness.client import models as native
 from sts2_harness.journal import Journal
 from sts2_harness_eval._sample_binding import bind_sample
 from sts2_harness_eval.annotation_records import (
@@ -225,7 +226,17 @@ class AnnotationStore:
                 if provenance.target != binding.target_ref:
                     raise ValueError("The report target is not the verified sample publication.")
                 endpoint = provenance.endpoint
-                if endpoint is not None:
+                if binding.run_end is not None:
+                    state = binding.run_end.observation.state
+                    assert isinstance(state, native.TerminalState)
+                    if (
+                        endpoint != binding.run_end.ref
+                        or report.evidence.metrics.native_result != state.result
+                    ):
+                        raise ValueError(
+                            "The report does not match the verified native run endpoint."
+                        )
+                elif endpoint is not None:
                     observations = tuple(
                         record
                         for record in journal.operations(

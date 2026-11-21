@@ -49,6 +49,7 @@ class RewardBindingKind(StrEnum):
     PICK_ACTION = "pick_action"
     ALTERNATIVE_ACTION = "alternative_action"
     PROCEED_ACTION = "proceed_action"
+    CONTENT_OBJECT = "content_object"
 
 
 class RewardAddress(native.WireModel):

@@ -31,6 +31,7 @@ from sts2_harness_eval.sample import (
     Completed,
     Endpoint,
     Incomplete,
+    RunEnd,
     SampleBudget,
     SampleHost,
     StopCause,
@@ -129,6 +130,33 @@ def test_one_decision_keeps_settlement_and_feedback_before_stopping(tmp_path: Pa
             assert len(journal.operations(kind=OperationKind.SETTLE)) == 1
             assert journal.operations()[-1].request.kind is OperationKind.OBSERVE
             assert journal.requests()[0].delivered
+
+    asyncio.run(scenario())
+
+
+def test_run_end_keeps_playing_after_first_battle_until_native_victory(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        campaign = Campaign()
+        async with sample(tmp_path / "run.sqlite", campaign, SampleBudget(30, 10), RunEnd()) as (
+            host,
+            journal,
+            session,
+        ):
+            host.arm(campaign.states[0])
+            result = await host.run(session)
+            assert isinstance(result, Completed) and result.endpoint == RunEnd()
+            states = [
+                observation.state
+                for record in journal.operations()
+                if record.reply is not None
+                for observation in record.reply.observations
+            ]
+            assert isinstance(states[-1], native.TerminalState)
+            assert states[-1].result is native.TerminalResult.VICTORY
+            assert any(
+                isinstance(state, native.CombatState) and state.progress.act == 2
+                for state in states
+            )
 
     asyncio.run(scenario())
 

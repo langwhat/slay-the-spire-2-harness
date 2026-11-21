@@ -76,9 +76,9 @@ Use the smallest experiment that can establish the claim:
 
 Verify current support with `admit_case` before choosing an endpoint; an unsupported admission is a capability result, not a low-quality sample. Current support must be checked against the actual recording and implementation:
 
-- Admission requires a headless recording with its seed and template, no recording gaps through the endpoint, and a ready map boundary reached from a monster, elite, boss, event, rest site, shop, or treasure room.
-- A natural Run case requires an already open ordinary card selection (choose at most one card, skip allowed) with a one-decision endpoint; it measures that pick, not the pick's later effect. A reward overview followed by opening and selecting in one batch is a different starting boundary.
-- Combat cases end after a decision count or at the battle's end.
+- Admission requires a headless recording with its seed and template, a gap-free source history through the verified follow-on, and a ready map boundary reached from a monster, elite, boss, event, rest site, shop, or treasure room.
+- A natural Run reward case can start at an already open ordinary card selection (choose at most one card, skip allowed), or at a settled reward overview with an available card offer. At the overview, the verified follow-on opens the offer and resolves the selection in two confirmed writes. A one-decision case measures the pick itself.
+- Combat cases can end after a decision count or at battle settlement. A combat or a supported Run reward case can also continue to the same native run's victory or defeat.
 - `SceneStart` starts a fresh Combat request with explicit equal initial notes. It is not valid for a Run reward case.
 
 Native replay checks each completed receipt and compares the result at each recorded observation boundary. The game can advance while a transient difference settles, and a persistent difference fails verification.

@@ -71,6 +71,7 @@ class CheckpointRef(native.WireModel):
 class EndpointKind(StrEnum):
     AFTER_DECISIONS = "after_decisions"
     TARGET_BATTLE = "target_battle"
+    RUN_END = "run_end"
 
 
 class AfterDecisionsSpec(native.WireModel):
@@ -82,7 +83,13 @@ class TargetBattle(native.WireModel):
     kind: Literal[EndpointKind.TARGET_BATTLE] = EndpointKind.TARGET_BATTLE
 
 
-type CaseEndpoint = Annotated[AfterDecisionsSpec | TargetBattle, Field(discriminator="kind")]
+class RunEndSpec(native.WireModel):
+    kind: Literal[EndpointKind.RUN_END] = EndpointKind.RUN_END
+
+
+type CaseEndpoint = Annotated[
+    AfterDecisionsSpec | TargetBattle | RunEndSpec, Field(discriminator="kind")
+]
 
 
 class Case(native.WireModel):
@@ -370,9 +377,15 @@ def plan_admission(request: AdmissionRequest, staging: Path) -> AdmissionPlan:
         if target_observation is None or not (
             isinstance(target_observation.state, native.CombatState)
             or (
-                isinstance(request.endpoint, AfterDecisionsSpec)
-                and request.endpoint.count == 1
-                and _card_reward_selection(target_observation)
+                (
+                    isinstance(request.endpoint, RunEndSpec)
+                    or isinstance(request.endpoint, AfterDecisionsSpec)
+                    and request.endpoint.count == 1
+                )
+                and (
+                    _card_reward_selection(target_observation)
+                    or bool(_available_card_rewards(target_observation))
+                )
             )
         ):
             _unsupported(UnsupportedCause.TARGET, target.sequence)
@@ -436,7 +449,64 @@ def _card_reward_selection(observation: native.Observation) -> bool:
     )
 
 
+def _available_card_rewards(observation: native.Observation) -> tuple[native.Offer, ...]:
+    state = observation.state
+    if (
+        not isinstance(state, native.RunState)
+        or state.screen is not native.RunScreen.REWARDS
+        or state.selection is not None
+        or observation.input_readiness is not native.InputReadiness.READY
+    ):
+        return ()
+    return tuple(
+        offer
+        for offer in state.offers
+        if offer.kind is native.OfferKind.CARD
+        and offer.contents
+        and all(
+            isinstance(observation.objects.get(ref), native.CardEntry) for ref in offer.contents
+        )
+        and any(action.enabled and action.ref in offer.actions for action in state.actions)
+    )
+
+
 def _reward_follow_on(target: native.Observation, span: ReplaySpan) -> bool:
+    after = span.after
+    if (
+        after.input_readiness is not native.InputReadiness.READY
+        or not isinstance(after.state, native.RunState)
+        or after.state.screen is not native.RunScreen.REWARDS
+        or after.state.selection is not None
+    ):
+        return False
+    if len(span.steps) == 2:
+        opened, picked = span.steps
+        if (
+            not isinstance(opened.step, native.Interact)
+            or opened.boundary is not native.InputReadiness.SELECTION
+            or not isinstance(picked.step, native.Select)
+            or len(picked.step.refs) > 1
+            or picked.boundary is not native.InputReadiness.READY
+        ):
+            return False
+        for offer in _available_card_rewards(span.before):
+            if (
+                opened.step.action not in offer.actions
+                or not set(picked.step.refs) <= set(offer.contents)
+                or not any(
+                    prior.ref == offer.ref and prior.contents == offer.contents
+                    for prior in _available_card_rewards(target)
+                )
+            ):
+                continue
+            if picked.step.refs:
+                return all(remaining.ref != offer.ref for remaining in after.state.offers)
+            # Native Skip closes the selection and offers the same card reward again.
+            return any(
+                prior.ref == offer.ref and prior.contents == offer.contents
+                for prior in _available_card_rewards(after)
+            )
+        return False
     if (
         len(span.steps) != 1
         or not _card_reward_selection(target)
@@ -457,14 +527,7 @@ def _reward_follow_on(target: native.Observation, span: ReplaySpan) -> bool:
         )
     else:
         return False
-    after = span.after
-    return (
-        valid_choice
-        and after.input_readiness is native.InputReadiness.READY
-        and isinstance(after.state, native.RunState)
-        and after.state.screen is native.RunScreen.REWARDS
-        and after.state.selection is None
-    )
+    return valid_choice
 
 
 class Artifact(StrEnum):

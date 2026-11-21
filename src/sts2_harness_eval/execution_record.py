@@ -15,6 +15,7 @@ from sts2_harness_eval.cases import IncompleteCause, Mismatch, Stage, Unsupporte
 from sts2_harness_eval.checkpoints import CheckpointCause
 from sts2_harness_eval.sample import (
     AfterDecisions,
+    BattleEnd,
     Completed,
     Incomplete,
     OperatorStopped,
@@ -161,6 +162,7 @@ type RefusalRecord = Annotated[
 class EndpointKind(StrEnum):
     DECISIONS = "after_decisions"
     BATTLE = "battle_end"
+    RUN = "run_end"
 
 
 class DecisionEndpoint(WireModel):
@@ -173,12 +175,18 @@ class BattleEndpoint(WireModel):
     node_id: str
 
 
+class RunEndpoint(WireModel):
+    kind: Literal[EndpointKind.RUN] = EndpointKind.RUN
+
+
 class CompletedExecution(WireModel):
     kind: Literal[ExecutionKind.COMPLETED] = ExecutionKind.COMPLETED
     branch: Path
     recording_id: str
     anchor: ReachedRecord
-    endpoint: Annotated[DecisionEndpoint | BattleEndpoint, Field(discriminator="kind")]
+    endpoint: Annotated[
+        DecisionEndpoint | BattleEndpoint | RunEndpoint, Field(discriminator="kind")
+    ]
     decisions: int
     requests: int
 
@@ -256,13 +264,18 @@ def execution_record(value: TakeoverResult) -> ExecutionRecord:
         case TakeoverCompleted(
             branch, anchor, Completed(endpoint, decisions, requests), recording_id
         ):
+            finished: DecisionEndpoint | BattleEndpoint | RunEndpoint
+            if isinstance(endpoint, AfterDecisions):
+                finished = DecisionEndpoint(count=endpoint.count)
+            elif isinstance(endpoint, BattleEnd):
+                finished = BattleEndpoint(node_id=endpoint.node_id)
+            else:
+                finished = RunEndpoint()
             return CompletedExecution(
                 branch=branch.resolve(),
                 recording_id=recording_id,
                 anchor=anchor_record(anchor),
-                endpoint=DecisionEndpoint(count=endpoint.count)
-                if isinstance(endpoint, AfterDecisions)
-                else BattleEndpoint(node_id=endpoint.node_id),
+                endpoint=finished,
                 decisions=decisions,
                 requests=requests,
             )

@@ -225,6 +225,7 @@ public enum CheckpointRewardBindingKind
     PickAction,
     AlternativeAction,
     ProceedAction,
+    ContentObject,
 }
 
 public sealed record CheckpointRewardAddress(

@@ -69,7 +69,12 @@ class BattleEnd:
     node_id: str
 
 
-type Endpoint = AfterDecisions | BattleEnd
+@dataclass(frozen=True, slots=True)
+class RunEnd:
+    """End at the starting run's native victory or defeat."""
+
+
+type Endpoint = AfterDecisions | BattleEnd | RunEnd
 
 
 class StopCause(StrEnum):
@@ -135,6 +140,7 @@ class SampleHost:
         self._core_paused = False
         self._admitting = False
         self._last: native.Observation | None = None
+        self._run: native.Location | None = None
         self._battle: native.Location | None = None
         self._recording_unavailable = False
         self._terminal_candidate = False
@@ -288,6 +294,10 @@ class SampleHost:
     def arm(self, current: native.Observation | None = None) -> None:
         if self._armed:
             raise RuntimeError("A sample can only be armed once.")
+        if isinstance(self._endpoint, RunEnd):
+            if current is None or current.location.run_id is None:
+                raise ValueError("The run endpoint requires a starting run observation.")
+            self._run = current.location
         self._armed = True
         self._unit_model = False
         self._unit_settle = False
@@ -311,6 +321,16 @@ class SampleHost:
     def _reached(self) -> bool:
         if isinstance(self._endpoint, AfterDecisions):
             return self._decisions >= self._endpoint.count
+        if isinstance(self._endpoint, RunEnd):
+            return (
+                self._run is not None
+                and self._last is not None
+                and self._last.location.game_instance_id == self._run.game_instance_id
+                and self._last.location.run_id == self._run.run_id
+                and isinstance(self._last.state, native.TerminalState)
+                and self._last.state.result
+                in {native.TerminalResult.VICTORY, native.TerminalResult.DEFEAT}
+            )
         if self._terminal:
             return True
         if self._battle is None or self._last is None:

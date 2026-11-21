@@ -23,6 +23,7 @@ from sts2_harness_eval.annotations import (
 from sts2_harness_eval.cases import (
     Artifact,
     Case,
+    CaseEndpoint,
     CaseStore,
     CheckpointRef,
     ShortcutBinding,
@@ -34,7 +35,8 @@ from sts2_harness_eval.results import ModelAnchor
 from sts2_harness_eval.verification import KeyedRefs, Publication, Reference
 
 
-def cases_fixture(directory: Path) -> CaseStore:
+def cases_fixture(directory: Path, endpoint: CaseEndpoint | None = None) -> CaseStore:
+    endpoint = TargetBattle() if endpoint is None else endpoint
     directory.mkdir()
     archive = directory / "source.sqlite"
     with closing(
@@ -91,7 +93,7 @@ def cases_fixture(directory: Path) -> CaseStore:
             reference=reference,
         ),
     )
-    evidence = store.content(Artifact.EVIDENCE, TargetBattle())
+    evidence = store.content(Artifact.EVIDENCE, endpoint)
     checkpoint_file = directory / "synthetic-checkpoint"
     checkpoint_file.write_bytes(b"synthetic checkpoint")
     checkpoint = CheckpointRef(
@@ -122,7 +124,7 @@ def cases_fixture(directory: Path) -> CaseStore:
                 checkpoint=checkpoint,
                 binding=binding,
                 evidence=evidence,
-                endpoint=TargetBattle(),
+                endpoint=endpoint,
             )
         )
     return store

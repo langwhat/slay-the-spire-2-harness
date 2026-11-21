@@ -175,6 +175,7 @@ def _evidence(
     target: native.Observation | None,
     target_ref: CaseTargetRef | SceneInitialRef | None,
     recording_id: str,
+    run_end: EvidenceObservation | None,
 ) -> _Evidence:
     actions: list[ConfirmedAction] = []
     uses: list[PotionUse] = []
@@ -269,9 +270,9 @@ def _evidence(
         writes_known = True
         before, before_ref = after, after_ref
         before_valid = not unknown_write
-    endpoint = None
-    endpoint_ref = None
-    if records:
+    endpoint = run_end.observation if run_end is not None else None
+    endpoint_ref = run_end.ref if run_end is not None else None
+    if run_end is None and records:
         last = records[-1]
         if last.reply is not None and last.reply.observations:
             candidate = last.reply.observations[-1]
@@ -353,6 +354,7 @@ async def assess_sample(
     gaps = False
     target = None
     target_ref = None
+    run_end = None
     if identity is not None:
         with closing(Journal.open(branch)) as journal:
             binding = bind_sample(case, annotations.cases, journal, record)
@@ -364,11 +366,13 @@ async def assess_sample(
             last_sequence = binding.last_sequence
             gaps = binding.gaps
             records = () if first_sequence is None else journal.operations(start=first_sequence)
+            run_end = binding.run_end
     projection = _evidence(
         records,
         target,
         target_ref,
         identity.recording_id if identity else "",
+        run_end,
     )
     evidence = projection.sample
     endpoint_ref = projection.endpoint.ref if projection.endpoint is not None else None

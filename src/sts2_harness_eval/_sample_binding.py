@@ -13,8 +13,13 @@ from sts2_harness.journal import (
     ParentPrefix,
     SceneVariant,
 )
-from sts2_harness_eval.assessment_records import CaseTargetRef, SceneInitialRef
-from sts2_harness_eval.cases import AfterDecisionsSpec, Case, CaseStore
+from sts2_harness_eval.assessment_records import (
+    CaseTargetRef,
+    EvidenceObservation,
+    ObservationRef,
+    SceneInitialRef,
+)
+from sts2_harness_eval.cases import AfterDecisionsSpec, Case, CaseStore, RunEndSpec
 from sts2_harness_eval.checkpoints import ReloadTarget
 from sts2_harness_eval.execution_record import (
     AnchorRecord,
@@ -23,6 +28,7 @@ from sts2_harness_eval.execution_record import (
     DecisionEndpoint,
     ExecutionRecord,
     ReachedRecord,
+    RunEndpoint,
     UnsupportedExecution,
 )
 
@@ -36,6 +42,7 @@ class SampleBinding:
     first_sequence: int | None
     last_sequence: int | None
     gaps: bool
+    run_end: EvidenceObservation | None
 
 
 def bind_sample(
@@ -86,12 +93,17 @@ def bind_sample(
         )
         summaries = journal.summaries(start=parent.before_sequence)
         first_sequence = parent.before_sequence
+    run_end = None
     if isinstance(execution, CompletedExecution):
         endpoint = execution.endpoint
         expected = case.endpoint
         if isinstance(expected, AfterDecisionsSpec):
             if not isinstance(endpoint, DecisionEndpoint) or endpoint.count != expected.count:
                 raise ValueError("The completed endpoint does not match the case.")
+        elif isinstance(expected, RunEndSpec):
+            if not isinstance(endpoint, RunEndpoint):
+                raise ValueError("The completed run endpoint does not match the case.")
+            run_end = _bind_run_end(journal, first_sequence)
         elif (
             not isinstance(endpoint, BattleEndpoint) or endpoint.node_id != target.location.node_id
         ):
@@ -104,7 +116,36 @@ def bind_sample(
         first_sequence=first_sequence,
         last_sequence=max((item.sequence for item in summaries), default=None),
         gaps=bool(journal.gaps),
+        run_end=run_end,
     )
+
+
+def _bind_run_end(journal: Journal, first_sequence: int | None) -> EvidenceObservation:
+    records = (
+        ()
+        if first_sequence is None
+        else journal.operations(start=first_sequence, limit=1, attempts=False)
+    )
+    if records:
+        record = records[0]
+        if record.reply is not None and record.reply.observations:
+            observation = record.reply.observations[-1]
+            if (
+                observation.location.game_instance_id == journal.manifest.game_instance_id
+                and observation.location.run_id == journal.manifest.run_id
+                and isinstance(observation.state, native.TerminalState)
+                and observation.state.result
+                in {native.TerminalResult.VICTORY, native.TerminalResult.DEFEAT}
+            ):
+                return EvidenceObservation(
+                    ref=ObservationRef(
+                        recording_id=journal.manifest.recording_id,
+                        sequence=record.sequence,
+                        index=len(record.reply.observations) - 1,
+                    ),
+                    observation=observation,
+                )
+    raise ValueError("The completed run endpoint has no native victory or defeat in its run.")
 
 
 def _validate_scene_sample(

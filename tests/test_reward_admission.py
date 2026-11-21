@@ -23,6 +23,7 @@ from sts2_harness_eval.cases import (
     AdmissionFailure,
     AdmissionRequest,
     AfterDecisionsSpec,
+    RunEndSpec,
     TargetBattle,
     plan_admission,
 )
@@ -49,6 +50,29 @@ def test_reward_plan_stops_after_one_confirmed_choice_without_absorbing_later_ac
     assert plan.follow_on[0].after.state.selection is None
 
 
+@pytest.mark.parametrize("skip,closed", [(False, True), (True, True), (True, False)])
+def test_reward_overview_accepts_a_settled_pick_or_skip_for_a_run_endpoint(
+    tmp_path: Path, skip: bool, closed: bool
+) -> None:
+    archive, anchor = reward_source(
+        tmp_path, skip=skip, overview=True, failure=None if closed else "offer_missing"
+    )
+    request = AdmissionRequest(id="reward", archive=archive, anchor=anchor, endpoint=RunEndSpec())
+    if not closed:
+        with pytest.raises(AdmissionFailure):
+            plan_admission(request, tmp_path)
+        return
+    plan = plan_admission(request, tmp_path)
+    assert plan.target.input_readiness is native.InputReadiness.READY
+    (follow_on,) = plan.follow_on
+    assert tuple(step.step for step in follow_on.steps) == (
+        native.Interact(kind=native.StepKind.INTERACT, action="interaction:2:11"),
+        native.Select(kind=native.StepKind.SELECT, refs=() if skip else ("card:2:1",)),
+    )
+    assert isinstance(follow_on.after.state, native.RunState)
+    assert bool(follow_on.after.state.offers) is skip
+
+
 @pytest.mark.parametrize("failure", ["event", "multiple", "nested", "busy", "unrelated", "battle"])
 def test_reward_plan_rejects_other_run_flows_and_unfinished_settlement(
     tmp_path: Path, failure: str
@@ -67,7 +91,12 @@ def test_reward_plan_rejects_other_run_flows_and_unfinished_settlement(
 
 
 def reward_source(
-    directory: Path, *, skip: bool, failure: str | None = None, initial_notes: str | None = None
+    directory: Path,
+    *,
+    skip: bool,
+    failure: str | None = None,
+    initial_notes: str | None = None,
+    overview: bool = False,
 ) -> tuple[Path, ModelAnchor]:
     opening = run_state(1, "map")
     assert isinstance(opening.state, native.RunState)
@@ -170,6 +199,18 @@ def reward_source(
             ),
         }
     )
+    reward = target
+    if overview:
+        reward = target.model_copy(
+            update={
+                "input_readiness": native.InputReadiness.READY,
+                "state": target.state.model_copy(
+                    update={"selection": None, "actions": target.state.actions[-2:]}
+                ),
+            }
+        )
+        if skip and failure != "offer_missing":
+            after = reward
     archive = directory / "source.sqlite"
     manifest = Manifest(
         initial_notes=NotesState(other=initial_notes) if initial_notes is not None else None,
@@ -205,7 +246,7 @@ def reward_source(
             opening,
             native.Interact(kind=native.StepKind.INTERACT, action="interaction:1:1"),
             "travel",
-            target,
+            reward,
         )
         sequence = journal.begin_model(
             native.DecisionOwner.RUN,
@@ -216,6 +257,15 @@ def reward_source(
         )
         journal.finish_model(sequence)
         journal.end_model()
+        if overview:
+            write_step(
+                journal,
+                reward,
+                native.Interact(kind=native.StepKind.INTERACT, action="interaction:2:11"),
+                "open-reward",
+                None,
+                boundary=native.InputReadiness.SELECTION,
+            )
         step = (
             native.Interact(kind=native.StepKind.INTERACT, action="unrelated")
             if failure == "unrelated"

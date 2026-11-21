@@ -2,11 +2,12 @@ import asyncio
 from contextlib import closing
 from hashlib import file_digest
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from pydantic import TypeAdapter
 from test_annotations import cases_fixture
-from test_lifecycle import battle_state, run_state
+from test_lifecycle import battle_state, run_state, terminal
 
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
@@ -20,16 +21,22 @@ from sts2_harness_eval.assessment import (
     archive_identity,
     assess_sample,
 )
-from sts2_harness_eval.cases import Case
+from sts2_harness_eval.cases import Case, RunEndSpec
 from sts2_harness_eval.execution_record import (
     BattleEndpoint,
     CompletedExecution,
     ExecutionRecord,
+    RunEndpoint,
     execution_record,
 )
 from sts2_harness_eval.results import Reached
-from sts2_harness_eval.sample import BattleEnd, Completed
-from sts2_harness_eval.takeover import ProtocolMismatch, TakeoverCompleted, TakeoverUnsupported
+from sts2_harness_eval.sample import BattleEnd, Completed, Incomplete, StopCause
+from sts2_harness_eval.takeover import (
+    ProtocolMismatch,
+    TakeoverCompleted,
+    TakeoverIncomplete,
+    TakeoverUnsupported,
+)
 
 
 def new_branch(path: Path, case: Case) -> Journal:
@@ -56,6 +63,10 @@ def write_step(
     step: native.NativeStep,
     operation_id: str,
     after: native.Observation | None,
+    *,
+    boundary: Literal[
+        native.InputReadiness.READY, native.InputReadiness.SELECTION, native.InputReadiness.TERMINAL
+    ] = native.InputReadiness.READY,
 ) -> None:
     route = native.RouteKey.model_validate(before.location.model_dump())
     journal.begin(Settle(route=route, step=step))
@@ -68,7 +79,7 @@ def write_step(
                 receipt=native.ReceiptCompleted(
                     operation_id=operation_id,
                     status=native.ResultStatus.COMPLETED,
-                    boundary=native.InputReadiness.READY,
+                    boundary=boundary,
                 ),
             ),
             observations=(after,) if after is not None else (),
@@ -115,6 +126,64 @@ def test_persisted_execution_can_be_reassessed_without_replaying_game(tmp_path: 
     bad = record.model_copy(update={"endpoint": BattleEndpoint(node_id="another-battle")})
     with pytest.raises(ValueError, match="endpoint"):
         asyncio.run(assess_sample(case, bad, store, AssessmentSelection(), judgment=None))
+
+
+@pytest.mark.parametrize("ending", ["victory", "defeat", "combat", "escaped", "other_run"])
+def test_completed_run_requires_native_victory_or_defeat_in_the_sample(
+    tmp_path: Path, ending: str
+) -> None:
+    cases = cases_fixture(tmp_path / "cases", RunEndSpec())
+    case = cases.load("battle")
+    branch = tmp_path / "run.sqlite"
+    opening = battle_state(1, "battle")
+    final = opening if ending == "combat" else terminal(opening)
+    if ending == "other_run":
+        final = final.model_copy(
+            update={"location": final.location.model_copy(update={"run_id": "other"})}
+        )
+    elif ending in {"defeat", "escaped"}:
+        final = final.model_copy(
+            update={
+                "state": final.state.model_copy(update={"result": native.TerminalResult(ending)})
+            }
+        )
+    with closing(new_branch(branch, case)) as journal:
+        journal.begin(Observe())
+        journal.finish(GameReply(outcome=Observed(observation=final), observations=(final,)))
+        journal.end()
+    execution = execution_record(completed(case, branch)).model_copy(
+        update={"endpoint": RunEndpoint()}
+    )
+    store = AnnotationStore(tmp_path / "annotations", cases)
+    if ending not in {"victory", "defeat"}:
+        with pytest.raises(ValueError, match="no native victory or defeat"):
+            asyncio.run(assess_sample(case, execution, store, AssessmentSelection(), judgment=None))
+        partial = TakeoverIncomplete(
+            branch,
+            completed(case, branch).anchor,
+            Incomplete(StopCause.TIME_BUDGET, 1, 1),
+            recording_id=archive_identity(branch).recording_id,
+        )
+        report = asyncio.run(
+            assess_sample(case, partial, store, AssessmentSelection(), judgment=None)
+        )
+        forged = report.model_copy(update={"execution": execution, "endpoint_reached": True})
+        with pytest.raises(ValueError, match="no native victory or defeat"):
+            store.append_assessment(forged, id="forged")
+        return
+    report = asyncio.run(
+        assess_sample(case, execution, store, AssessmentSelection(), judgment=None)
+    )
+    assert report.endpoint_reached
+    assert report.evidence.metrics.native_result == native.TerminalResult(ending)
+    saved = store.append_assessment(report, id="valid")
+    assert store.assessment(saved) == report
+    bad_metrics = report.evidence.metrics.model_copy(update={"native_result": None})
+    forged = report.model_copy(
+        update={"evidence": report.evidence.model_copy(update={"metrics": bad_metrics})}
+    )
+    with pytest.raises(ValueError, match="verified native run endpoint"):
+        store.append_assessment(forged, id="forged")
 
 
 @pytest.mark.parametrize("ending", ["healed", "missing", "changed_run", "ordinary_exit"])

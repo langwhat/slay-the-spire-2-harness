@@ -85,8 +85,10 @@ from sts2_harness_eval.cases import (
     AdmissionRequest,
     AfterDecisionsSpec,
     Case,
+    CaseEndpoint,
     IncompleteCause,
     Mismatch,
+    RunEndSpec,
     Stage,
     plan_admission,
 )
@@ -119,6 +121,7 @@ from sts2_harness_eval.sample import (
     Endpoint,
     Incomplete,
     OperatorStopped,
+    RunEnd,
     SampleBudget,
     SampleHost,
     SampleResult,
@@ -234,6 +237,15 @@ async def take_over(
 
 def _model_body(body: dict[str, JsonValue]) -> dict[str, JsonValue]:
     return {key: value for key, value in body.items() if key != "prompt_cache_key"}
+
+
+def _sample_endpoint(spec: CaseEndpoint, location: native.Location) -> Endpoint:
+    if isinstance(spec, AfterDecisionsSpec):
+        return AfterDecisions(spec.count)
+    if isinstance(spec, RunEndSpec):
+        return RunEnd()
+    assert location.node_id is not None
+    return BattleEnd(location.node_id)
 
 
 class _Takeover:
@@ -442,12 +454,7 @@ class _Takeover:
             )
             journal = resources.enter_context(closing(Journal.create(self.branch, manifest)))
             self.recording_id = journal.manifest.recording_id
-            endpoint: Endpoint
-            if isinstance(self.case.endpoint, AfterDecisionsSpec):
-                endpoint = AfterDecisions(self.case.endpoint.count)
-            else:
-                assert location.node_id is not None
-                endpoint = BattleEnd(location.node_id)
+            endpoint = _sample_endpoint(self.case.endpoint, location)
 
             def scene_stopped() -> bool:
                 self.operator_stopped = self.operator_stopped or self.stop_requested()
@@ -549,12 +556,7 @@ class _Takeover:
         )
         journal = resources.enter_context(closing(Journal.create(self.branch, manifest)))
         self.recording_id = journal.manifest.recording_id
-        if isinstance(self.case.endpoint, AfterDecisionsSpec):
-            endpoint = AfterDecisions(self.case.endpoint.count)
-        else:
-            node = plan.target.location.node_id
-            assert node is not None
-            endpoint = BattleEnd(node)
+        endpoint = _sample_endpoint(self.case.endpoint, plan.target.location)
         host = SampleHost(self.budget, endpoint, journal)
         reached: asyncio.Future[Reached] = asyncio.get_running_loop().create_future()
         release = asyncio.Event()

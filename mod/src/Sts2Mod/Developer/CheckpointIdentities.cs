@@ -47,11 +47,11 @@ internal static class CheckpointIdentities
                 case EnemyEntry or AllyEntry:
                     creatures.Add(new(reference, Resolve<Creature>(registry, reference).CombatId));
                     break;
-                case RelicEntry:
-                    relics.Add(RelicSlot(reference, Resolve<RelicModel>(registry, reference)));
-                    break;
             }
         }
+
+        foreach (var reference in observation.State.Relics)
+            relics.Add(RelicSlot(reference, Resolve<RelicModel>(registry, reference)));
 
         if (observation.State is RunStateView { Screen: RunScreen.Map } run)
         {
@@ -64,9 +64,11 @@ internal static class CheckpointIdentities
             }
         }
 
-        var canonicalCards = cards
+        var anchoredObjects = cards
             .Where(card => card.CombatCardId is not null || card.DeckCard is not null)
             .Select(card => card.Ref)
+            .Concat(observation.State.Relics)
+            .Concat(observation.State.Potions)
             .ToHashSet(StringComparer.Ordinal);
 
         return new(
@@ -74,7 +76,7 @@ internal static class CheckpointIdentities
             creatures.ToImmutable(),
             map.ToImmutable(),
             relics.ToImmutable(),
-            RewardCheckpointIdentities.Capture(observation, registry, canonicalCards));
+            RewardCheckpointIdentities.Capture(observation, registry, anchoredObjects));
     }
 
     private static uint? CombatCardId(CardModel card)
@@ -185,7 +187,7 @@ internal static class RewardCheckpointIdentities
     public static ImmutableArray<CheckpointRewardIdentity> Capture(
         NativeObservation observation,
         NodeObjectRegistry registry,
-        IReadOnlySet<string> canonicalCards)
+        IReadOnlySet<string> anchoredObjects)
     {
         if (observation.State is not RunStateView { Screen: RunScreen.Rewards } state
             || NOverlayStack.Instance is not { } overlays)
@@ -217,6 +219,14 @@ internal static class RewardCheckpointIdentities
                 ?? throw new InvalidOperationException("A populated native reward has no creation cards.")))
                 .Select((creation, slot) => (Reward: reward, Creation: creation, Slot: slot)))
             .ToArray();
+
+        var singleContents = set.Rewards.Select(reward => (Reward: reward, Content: reward switch
+        {
+            RelicReward relic => (object?)relic.Relic,
+            PotionReward potion => potion.Potion,
+            SpecialCardReward special => RunSurfaceLifecycle.GetSpecialRewardCard(special),
+            _ => null,
+        })).Where(item => item.Content is not null).ToArray();
 
         CardReward? parent = null;
         NCardHolder[] holders = [];
@@ -260,7 +270,7 @@ internal static class RewardCheckpointIdentities
         var identities = ImmutableArray.CreateBuilder<CheckpointRewardIdentity>();
         foreach (var reference in observation.Objects.Keys.Concat(state.Actions.Select(action => action.Ref)).Distinct())
         {
-            if (canonicalCards.Contains(reference))
+            if (anchoredObjects.Contains(reference))
                 continue;
             if (!registry.TryResolve<object>(reference, out var subject))
                 throw new InvalidOperationException("A published reward reference has no native binding.");
@@ -320,6 +330,12 @@ internal static class RewardCheckpointIdentities
                     break;
             }
 
+            if (address is null)
+            {
+                var matches = singleContents.Where(item => ReferenceEquals(item.Content, subject)).ToArray();
+                if (matches.Length == 1)
+                    address = Address(set, matches[0].Reward, CheckpointRewardBindingKind.ContentObject);
+            }
             if (address is not null)
                 identities.Add(new(reference, address));
         }
