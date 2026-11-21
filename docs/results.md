@@ -67,5 +67,5 @@ The game normalizes the letters `I` and `O` in a seed to the digits `1` and `0`.
 ### Evidence
 
 - **Run records.** Archives, logs, native run histories, the frozen protocol, and the seed normalization record are in [`sts2-harness-runs/2026-11-20-fool-a10`](https://github.com/langwhat/sts2-harness-runs/tree/main/2026-11-20-fool-a10).
-- **Inspecting an archive.** Use `uv run sts2 journal --archive <run>/instance/archive.sqlite` with the core at `f0486a9` (archive schema 21).
+- **Inspecting an archive.** Use `uv run --python 3.14 sts2 journal --archive <run>/instance/archive.sqlite` with the core at `f0486a9` (archive schema 21).
 - **Knowledge.** The documents delivered during these runs come from [`sts2-knowledge`](https://github.com/langwhat/sts2-knowledge) at `bdf5079`.

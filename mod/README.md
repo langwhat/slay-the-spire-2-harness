@@ -2,6 +2,12 @@
 
 `mod/` contains the C# Slay the Spire 2 Mod that exposes the local loopback HTTP bridge (`127.0.0.1:17877` by default) and the in-game Start/Pause control for `sts2_harness`.
 
+## Game Compatibility
+
+The Mod supports **Slay the Spire 2 v0.113.1 only**. In Steam, select `public-beta`
+under **Properties → Game Versions & Betas** and verify the installed game version
+is v0.113.1.
+
 ## Layout
 
 - `mod/src/Sts2Mod.Core/`: Game- and Godot-independent protocol contracts, observation/inspection/catalog readers, single-step admission and settlement gateway, viewer reason feed store, loopback HTTP server, and developer contracts.
@@ -19,7 +25,6 @@ Run the offline unit tests and, when local game assemblies are available, compil
 
 `mod/Directory.Build.props` resolves `$(GameDir)` from `STS2_GAME_DIR` or standard Steam installation directories on macOS, Linux, and Windows.
 
-The Mod and NativeTemplate builds are verified against Slay the Spire 2 v0.113.1.
 For isolated headless runs, install the built Mod in a frozen game bundle and use
 a native template generated from the same game assembly. Pass that bundle's
 executable and the template manifest with `sts2 headless --game` and `--template`.

@@ -27,8 +27,9 @@ Seeds, per-run results, setup, and run records are in [docs/results.md](docs/res
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/).
-- Slay the Spire 2 with the [`sts2agent` Mod](mod/README.md) installed. Building the Mod
-  needs the .NET 9 SDK and local game assemblies.
+- Slay the Spire 2 v0.113.1 on Steam's `public-beta` branch with the
+  [`sts2agent` Mod](mod/README.md) installed. Building the Mod needs the .NET 9 SDK
+  and local game assemblies.
 - A model endpoint using the OpenAI Responses, Chat Completions, or Anthropic Messages
   protocol. External driving needs no model.
 - Developer headless runs are macOS only.

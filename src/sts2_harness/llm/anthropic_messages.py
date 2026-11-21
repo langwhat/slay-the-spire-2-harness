@@ -1,5 +1,7 @@
 """One Messages request with official stream assembly and explicit completion gates."""
 
+from __future__ import annotations
+
 import json
 from typing import Literal, assert_never
 
