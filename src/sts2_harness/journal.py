@@ -1,14 +1,17 @@
 """One dependency sequence with compressed content-addressed game and model evidence."""
 
 import hashlib
+import os
 import sqlite3
+import subprocess
 import zlib
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from importlib import metadata
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, TypedDict
 
 from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
 
@@ -97,6 +100,50 @@ from sts2_harness.note_values import InitialNotes
 from sts2_harness.results import Reason
 
 _WRITE_TIMEOUT_SECONDS = 0.1
+CURRENT_ARCHIVE_SCHEMA: Literal[22] = 22
+
+
+class CoreIdentity(TypedDict):
+    core_version: str
+    core_revision: str | None
+
+
+def current_core_identity() -> CoreIdentity:
+    return {
+        "core_version": metadata.version("sts2-harness"),
+        "core_revision": _checkout_revision(),
+    }
+
+
+def _checkout_revision() -> str | None:
+    try:
+        source = Path(__file__).resolve().parent.parent
+        root = source.parent
+        # A wheel installed in a virtual environment may sit inside an unrelated checkout.
+        if source.name != "src" or not (root / ".git").exists():
+            return None
+        # Callers such as Git hooks may set variables that point to a different repository.
+        env = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            check=True,
+            timeout=3,
+        ).stdout
+        status = subprocess.run(
+            ["git", "--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal"],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            check=True,
+            timeout=3,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    revision = head.strip().decode("ascii")
+    return f"{revision}-dirty" if status else revision
 
 
 class StandardCharacter(StrEnum):
@@ -150,12 +197,13 @@ class SessionMaterials(native.WireModel):
 
 
 class Manifest(native.WireModel):
-    schema_version: Literal[21] = 21
+    schema_version: Literal[21, 22] = CURRENT_ARCHIVE_SCHEMA
     scope: Literal["game_model_material_control"] = "game_model_material_control"
     exact_replay_supported: Literal[False] = False
     model_requests_supported: Literal[True] = True
     recording_id: str
     core_version: str
+    core_revision: str | None = None
     game_instance_id: str
     run_id: str
     materials: SessionMaterials
@@ -174,7 +222,9 @@ class Manifest(native.WireModel):
     )
 
     @model_validator(mode="after")
-    def scene_conditions(self) -> Self:
+    def archive_conditions(self) -> Self:
+        if self.schema_version == 21 and self.core_revision is not None:
+            raise ValueError("Core revisions require archive schema 22.")
         if not isinstance(self.variant, SceneVariant):
             return self
         initial = self.variant.initial
@@ -421,8 +471,10 @@ class Journal:
             raise ArchiveError("The parent recording identity differs.")
         inherited = self.manifest.model_copy(
             update={
+                "schema_version": parent.manifest.schema_version,
                 "recording_id": parent.manifest.recording_id,
                 "core_version": parent.manifest.core_version,
+                "core_revision": parent.manifest.core_revision,
                 "parent": parent.manifest.parent,
                 "variant": parent.manifest.variant,
             }
@@ -502,9 +554,10 @@ class Journal:
                 if connection.execute("PRAGMA journal_mode=WAL").fetchone() != ("wal",):
                     raise sqlite3.OperationalError("Cannot enable concurrent recording reads.")
                 connection.executescript(_SCHEMA)
+                omitted = {"core_revision"} if self.manifest.schema_version == 21 else None
                 connection.execute(
                     "INSERT OR REPLACE INTO manifest VALUES (1,?)",
-                    (self.manifest.model_dump_json(),),
+                    (self.manifest.model_dump_json(exclude=omitted),),
                 )
             # Only holds WAL resources after initialization; cleanup may run on another thread.
             self._wal_connection = connection

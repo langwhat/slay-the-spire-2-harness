@@ -7,7 +7,7 @@ A model-driven player for Slay the Spire 2 that plays one run at a time without 
   - Run plans routes, shops, events, and rest sites;
   - Deck picks cards;
   - Combat plays each battle.
-- **Recording.** Every game and model exchange is recorded, and recordings can be replayed offline.
+- **Recording.** Built-in play records game and model exchanges for offline replay. External driving writes diagnostics only.
 
 You can also plug in your own fixed-code strategy, or drive the game from an outside agent through a local tool API.
 

@@ -35,6 +35,7 @@ from sts2_harness.journal import (
     NativeStartReceipt,
     SessionMaterials,
     StandardCharacter,
+    current_core_identity,
 )
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
@@ -662,7 +663,6 @@ async def run_headless(
                     entry_documents_enabled=False, act_guidance={}, battle_guidance=()
                 ),
                 recording_id=uuid4().hex,
-                core_version="0.1.0",
                 game_instance_id=instance.opening.location.game_instance_id,
                 run_id=run_id,
                 initial_notes="",
@@ -682,6 +682,7 @@ async def run_headless(
                         instance.opening.to_json().encode()
                     ).hexdigest(),
                 ),
+                **current_core_identity(),
             )
             archive = instance.directory / "archive.sqlite"
             diagnostics.bind_recording(manifest.recording_id, instance.opening.location, archive)

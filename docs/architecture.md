@@ -102,7 +102,10 @@ Queries and actions inside one node stay in one conversation, so opening a rewar
 
 ### Replacing a role
 
-Anything that implements `DecisionSource` can take a role:
+[`DecisionSource`](../src/sts2_harness/decisions.py#L115) is the decision contract
+shared by all three roles. Combat uses it directly. Run and Deck also implement
+[`RunRole`](../src/sts2_harness/run.py#L156) and
+[`DeckRole`](../src/sts2_harness/deck_role.py#L77), respectively.
 
 ```python
 class DecisionSource(Protocol):
@@ -110,7 +113,7 @@ class DecisionSource(Protocol):
     async def accept(self, outcome: ActionToolResult) -> None: ...
 ```
 
-A fixed-code strategy does not need to inherit `Agent`, build model messages, or configure an LLM. It returns the same `ActionProposal` values and gets the same execution, settlement, reporting, and pause handling. `RunSession` accepts optional factories for Run, Combat, and the flow. Replacing Combat does not affect Run, and the reverse is also true. A non-model Combat may return no review; the program report is always produced.
+A fixed-code strategy does not need to inherit `Agent`, build model messages, or configure an LLM. It returns the same `ActionProposal` values and gets the same execution, settlement, reporting, and pause handling. `RunSession` accepts optional factories for Run, Combat, Deck, and the flow. A custom [`RunFlow`](../src/sts2_harness/loop.py#L39) owns card choice and can omit the Deck factory. Replacing Combat does not affect Run, and the reverse is also true. A non-model Combat may return no review; the program report is always produced.
 
 ## Context and model input
 

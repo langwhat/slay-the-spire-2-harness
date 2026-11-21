@@ -46,10 +46,12 @@ These timestamps come from the local clock. The available evidence provides no
 independent timestamp and cannot establish whether other batches were run.
 
 To spot-check a seed, start a Fool Ascension 10 Standard run in v0.113.1 with the
-**as played** seed. Compare the opening Ancient's floor 1 choices and map with
-the archive's initial observation and compare the first few encounters along the
-same route with the archive and the game's `saves/history/*.run`. Each recorded
-result was checked against its archive and native run history.
+**as played** seed and a clean, fully unlocked starting profile, as described in
+[the native template setup](running.md#developer-headless-runs). Compare the opening
+Ancient's floor 1 choices and map with the archive's initial observation. To
+check later encounters against the archive and the game's `saves/history/*.run`,
+make the same preceding choices as the recorded run. Each recorded result was
+checked against its archive and native run history.
 
 For future batches, publish the protocol before starting and retain the hosting
 service's server-side push time, or commit to a future public randomness beacon

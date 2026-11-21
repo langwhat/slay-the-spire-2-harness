@@ -4,6 +4,7 @@ import zlib
 from contextlib import closing
 from hashlib import sha256
 from pathlib import Path
+from typing import Literal
 
 import httpx2 as httpx
 from test_combat import reply
@@ -48,8 +49,10 @@ async def record_campaign(
     *,
     documents: Documents | None = None,
     start: bool = False,
+    schema_version: Literal[21, 22] = 22,
 ) -> tuple[ModelAnchor, ...]:
     manifest = Manifest(
+        schema_version=schema_version,
         materials=SessionMaterials(
             entry_documents_enabled=False, act_guidance={}, battle_guidance=()
         ),
@@ -183,7 +186,9 @@ def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Pa
 
     async def scenario() -> None:
         source_path = tmp_path / "parent.sqlite"
-        anchors = await record_campaign(source_path, StartedCampaign(), start=True)
+        anchors = await record_campaign(
+            source_path, StartedCampaign(), start=True, schema_version=21
+        )
         with closing(Journal.open(source_path)) as source:
             cutoff = anchors[2].model_sequence
             target = source.request(anchors[-1].model_sequence)
@@ -192,7 +197,9 @@ def test_reach_uses_branch_suffix_with_recorded_mixed_operation_ids(tmp_path: Pa
                 source.manifest.model_copy(
                     update={
                         "recording_id": "branch",
+                        "schema_version": 22,
                         "core_version": "current-software",
+                        "core_revision": "a" * 40,
                         "parent": ParentPrefix(
                             archive=source_path,
                             recording_id=source.manifest.recording_id,

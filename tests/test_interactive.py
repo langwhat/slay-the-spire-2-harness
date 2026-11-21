@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from pathlib import Path
 
 import httpx2 as httpx
@@ -193,10 +194,13 @@ def test_resident_process_waits_for_start_and_isolates_new_runs(
     assert sessions[0].recovery is not sessions[1].recovery
     archives = sorted((tmp_path / "resident").glob("*/archive.sqlite"))
     assert len(archives) == 2
+    revisions = {manifest.recording_id: manifest.core_revision for manifest in manifests}
     for path in archives:
         archive = Journal.open(path)
         assert archive.manifest.initial_notes == ""
-        assert archive.manifest.schema_version == 21
+        assert archive.manifest.schema_version == 22
+        assert archive.manifest.core_version == version("sts2-harness")
+        assert archive.manifest.core_revision == revisions[archive.manifest.recording_id]
         assert archive.manifest.minimal is minimal
         assert archive.operations()[0].request.kind.value == "pause"
         assert archive.gaps == ()

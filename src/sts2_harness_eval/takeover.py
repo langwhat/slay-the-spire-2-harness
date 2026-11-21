@@ -34,6 +34,7 @@ from sts2_harness.game import (
 )
 from sts2_harness.headless import HeadlessError
 from sts2_harness.journal import (
+    CURRENT_ARCHIVE_SCHEMA,
     ArchiveError,
     HistoricalVariant,
     Journal,
@@ -43,6 +44,7 @@ from sts2_harness.journal import (
     RecordedGame,
     SceneSource,
     SceneVariant,
+    current_core_identity,
 )
 from sts2_harness.journal_models import AssistantSnapshot, MaterialRecord, ModelRecord
 from sts2_harness.knowledge import Documents
@@ -442,7 +444,6 @@ class _Takeover:
                 minimal=plan.manifest.minimal,
                 capacity_policy=self.model.capacity_policy,
                 recording_id=uuid4().hex,
-                core_version="0.1.0",
                 game_instance_id=location.game_instance_id,
                 run_id=location.run_id,
                 materials=plan.manifest.materials,
@@ -451,6 +452,7 @@ class _Takeover:
                 template=initial.template,
                 game_version=initial.game_version,
                 variant=declaration,
+                **current_core_identity(),
             )
             journal = resources.enter_context(closing(Journal.create(self.branch, manifest)))
             self.recording_id = journal.manifest.recording_id
@@ -549,9 +551,11 @@ class _Takeover:
             )
         manifest = plan.manifest.model_copy(
             update={
+                "schema_version": CURRENT_ARCHIVE_SCHEMA,
                 "recording_id": uuid4().hex,
                 "parent": parent,
                 "variant": declaration,
+                **current_core_identity(),
             }
         )
         journal = resources.enter_context(closing(Journal.create(self.branch, manifest)))

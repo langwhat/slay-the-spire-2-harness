@@ -150,7 +150,18 @@ To record a session yourself:
 
 ### Archive versions
 
-`Manifest.schema_version` gives the archive format. `Journal.open()` checks it and does not migrate. Read an older archive with the core revision that recorded it. To continue a recorded headless run in a live game, see verified cases and takeover in [gameplay-retrospectives.md](gameplay-retrospectives.md#4-select-the-appropriate-evaluation).
+`Manifest.schema_version` gives the archive format. The current reader opens
+schemas 21 and 22 without migration. For other older formats, use the core
+revision that recorded the archive.
+
+Schema 22 records the installed core release in `core_version` and, for a source
+checkout, the Git commit in `core_revision`. A `-dirty` suffix marks a checkout
+with staged, unstaged, or untracked changes. The revision is `null` when Git
+metadata is unavailable or the archive uses schema 21. The `sts2 journal` JSON
+includes both fields in its manifest.
+
+To continue a recorded headless run in a live game, see verified cases and
+takeover in [gameplay-retrospectives.md](gameplay-retrospectives.md#4-select-the-appropriate-evaluation).
 
 ## Single-run sessions
 
@@ -167,9 +178,10 @@ async with live_session(client, manifest, archive_path, model=model) as session:
 `start()` records a real Pause and waits for Start; `run()` then plays until the run ends. The live session closes the client, the model, and the Journal when it exits. `RunSession(manifest, dependencies)` borrows its game, prompt, document, and model-factory dependencies without closing them. It owns one `Notes`, one recovery budget, and the flow. A borrowed `Diagnostics` stays open across sessions. A session never launches the game or picks a character.
 
 Use `run_factory`, `combat_factory`, and `deck_factory` to supply code-driven
-roles to either session entry point. To omit the model in `live_session`, supply all
-three factories. The Deck factory receives the opening observation and the
-focused reward offer, or `None` for another kind of card addition.
+roles to either session entry point. To omit the model in `live_session`, supply
+Run and Combat factories along with a Deck factory or a custom `flow_factory`.
+The Deck factory receives the opening observation and the focused reward offer,
+or `None` for another kind of card addition.
 
 `DefaultFlow` handles Run, Deck, and Combat, as described in [architecture](architecture.md#how-a-run-flows):
 

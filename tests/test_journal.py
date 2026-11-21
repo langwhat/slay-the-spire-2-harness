@@ -1,5 +1,7 @@
 import asyncio
+import shutil
 import sqlite3
+import subprocess
 import time
 from contextlib import closing
 from pathlib import Path
@@ -9,6 +11,7 @@ import pytest
 from test_execution import Source
 from test_mod_client import RUN
 
+from sts2_harness import journal as journal_module
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.decisions import ActionDecision, ActionKind, ActionProposal, ActionStep, ActTask
@@ -21,6 +24,68 @@ from sts2_harness.journal import (
     SessionMaterials,
 )
 from sts2_harness.results import ActionUnknown, Reason, ReasonCode
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Requires Git to create a source checkout.")
+def test_core_identity_follows_source_checkout_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def git(*arguments: str) -> str:
+        return subprocess.run(
+            ["git", *arguments], cwd=tmp_path, check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    source = tmp_path / "src" / "sts2_harness" / "journal.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("original\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+    monkeypatch.setattr(journal_module, "__file__", str(source))
+
+    def version(distribution: str) -> str:
+        assert distribution == "sts2-harness"
+        return "1.2.3"
+
+    monkeypatch.setattr(journal_module.metadata, "version", version)
+    git("init")
+    assert journal_module.current_core_identity() == {
+        "core_version": "1.2.3",
+        "core_revision": None,
+    }
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=.no-hooks",
+        "commit",
+        "-m",
+        "Test",
+    )
+    head = git("rev-parse", "HEAD")
+    installed = tmp_path / ".venv" / "site-packages" / "sts2_harness" / "journal.py"
+    installed.parent.mkdir(parents=True)
+    installed.touch()
+    assert journal_module.current_core_identity() == {
+        "core_version": "1.2.3",
+        "core_revision": head,
+    }
+    with monkeypatch.context() as invoking_repository:
+        invoking_repository.setenv("GIT_DIR", str(tmp_path / "another.git"))
+        invoking_repository.setenv("GIT_WORK_TREE", str(installed.parent))
+        assert journal_module.current_core_identity()["core_revision"] == head
+    source.write_text("changed\n", encoding="utf-8")
+    assert journal_module.current_core_identity()["core_revision"] == f"{head}-dirty"
+    git("add", ".")
+    assert journal_module.current_core_identity()["core_revision"] == f"{head}-dirty"
+    (tmp_path / "untracked").touch()
+    git("restore", "--staged", "--worktree", "--", "src")
+    assert journal_module.current_core_identity()["core_revision"] == f"{head}-dirty"
+    monkeypatch.setattr(journal_module, "__file__", str(installed))
+    assert journal_module.current_core_identity()["core_revision"] is None
 
 
 def test_execution_archive_reopens_with_partial_unknown_and_explicit_start(tmp_path: Path) -> None:

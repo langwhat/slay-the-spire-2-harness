@@ -21,7 +21,7 @@ from sts2_harness.game import (
     RunEndReason,
     SessionStopped,
 )
-from sts2_harness.journal import Manifest, SessionMaterials
+from sts2_harness.journal import Manifest, SessionMaterials, current_core_identity
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
@@ -188,10 +188,10 @@ async def run_interactive(
                         entry_documents_enabled=False, act_guidance={}, battle_guidance=()
                     ),
                     recording_id=recording_id,
-                    core_version="0.1.0",
                     game_instance_id=location.game_instance_id,
                     run_id=run_id,
                     initial_notes="",
+                    **current_core_identity(),
                 )
                 diagnostics.bind_recording(recording_id, location, archive)
 

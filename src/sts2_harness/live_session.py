@@ -49,7 +49,11 @@ async def live_session(
     user_input: UserInputSource | None = None,
     display_reasons: bool = False,
 ) -> AsyncGenerator[RunSession]:
-    if model is None and (run_factory is None or combat_factory is None or deck_factory is None):
+    if model is None and (
+        run_factory is None
+        or combat_factory is None
+        or (flow_factory is None and deck_factory is None)
+    ):
         raise ValueError("Default model roles require a model resource.")
     if documents is None and (
         manifest.materials.entry_documents_enabled

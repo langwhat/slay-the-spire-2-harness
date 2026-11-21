@@ -16,7 +16,14 @@ from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import ControlResult
 from sts2_harness.game import GameReadError, LiveGame, SessionStopped
-from sts2_harness.journal import ArchiveError, Journal, Manifest, RecordedGame, SessionMaterials
+from sts2_harness.journal import (
+    ArchiveError,
+    Journal,
+    Manifest,
+    RecordedGame,
+    SessionMaterials,
+    current_core_identity,
+)
 from sts2_harness.knowledge import Documents
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import (
@@ -262,11 +269,11 @@ async def run_laboratory_sample(
         manifest = Manifest(
             capacity_policy=model.capacity_policy,
             recording_id=uuid4().hex,
-            core_version="0.1.0",
             game_instance_id=location.game_instance_id,
             run_id=location.run_id,
             initial_notes=initial_notes,
             materials=materials,
+            **current_core_identity(),
         )
         path = (directory / "journal.sqlite").resolve()
         journal = Journal.create(path, manifest)
