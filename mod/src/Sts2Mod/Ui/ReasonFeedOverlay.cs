@@ -13,31 +13,28 @@ using Sts2Mod.Core.Display;
 namespace Sts2Mod.Ui;
 
 /// <summary>
-/// Renders recent decision reasons in a non-interactive left-margin card stack.
-/// Uses Godot container layout (<see cref="VBoxContainer"/> + <see cref="PanelContainer"/>) so multi-line
-/// wrapped text never overlaps adjacent rows, shifts below the relic bar automatically, and hides on
-/// full-screen card grids or submenus.
+/// Renders recent decision reasons in a non-interactive left-margin text stack.
+/// Wrapped rows stay in the upper-left margin and hide on full-screen card grids or submenus.
 /// </summary>
 internal static class ReasonFeedOverlay
 {
     private const string FeedNodeName = "Sts2AgentReasonFeed";
-    private const int MaxVisibleCards = 3;
-    private const float HorizontalMargin = 24f;
-    private const float CardSeparation = 6f;
+    private const int MaxVisibleReasons = 3;
+    private const float LeftFraction = 0.022f;
+    private const float TopFraction = 0.185f;
+    private const int ReasonSeparation = 6;
 
-    private sealed class ReasonCardSlot
+    private sealed class ReasonSlot
     {
-        public required PanelContainer Panel { get; init; }
-        public required StyleBoxFlat Style { get; init; }
         public required Label Label { get; init; }
         public long EntryId { get; set; } = -1;
     }
 
     private static VBoxContainer? _container;
-    private static readonly List<ReasonCardSlot> Slots = [];
+    private static readonly List<ReasonSlot> Slots = [];
     private static long _renderedVersion = -1;
     private static long _renderedHalfSecond = -1;
-    private static float _renderedCardWidth = -1f;
+    private static float _renderedWidth = -1f;
 
     public static void Install(NRun run)
     {
@@ -83,9 +80,11 @@ internal static class ReasonFeedOverlay
             var halfSecond = now.ToUnixTimeMilliseconds() / 500;
             var feed = ModEntry.ReasonFeed;
             var viewportSize = globalUi.GetViewportRect().Size;
-            var cardWidth = Math.Clamp(viewportSize.X * 0.205f, 320f, 396f);
+            var width = Math.Clamp(viewportSize.X * 0.205f, 320f, 396f);
 
-            UpdatePosition(globalUi, container, viewportSize);
+            var position = new Vector2(viewportSize.X * LeftFraction, viewportSize.Y * TopFraction);
+            if (container.Position != position)
+                container.Position = position;
 
             if (ShouldHideForActiveScreen(globalUi))
             {
@@ -96,42 +95,41 @@ internal static class ReasonFeedOverlay
 
             if (feed.Version == _renderedVersion
                 && halfSecond == _renderedHalfSecond
-                && MathF.Abs(cardWidth - _renderedCardWidth) < 0.5f)
+                && MathF.Abs(width - _renderedWidth) < 0.5f)
             {
                 return;
             }
 
             _renderedVersion = feed.Version;
             _renderedHalfSecond = halfSecond;
-            _renderedCardWidth = cardWidth;
+            _renderedWidth = width;
 
-            var entries = feed.GetActive(now, MaxVisibleCards);
+            var entries = feed.GetActive(now, MaxVisibleReasons);
             if (entries.IsEmpty)
             {
                 container.Visible = false;
                 for (var index = 0; index < Slots.Count; index++)
-                    Slots[index].Panel.Visible = false;
+                    Slots[index].Label.Visible = false;
                 return;
             }
 
             EnsureSlots(container, entries.Length);
-            container.CustomMinimumSize = new Vector2(cardWidth, 0f);
-            container.Size = new Vector2(cardWidth, 0f);
+            container.CustomMinimumSize = new Vector2(width, 0f);
+            container.Size = new Vector2(width, 0f);
 
             for (var index = 0; index < Slots.Count; index++)
             {
                 var slot = Slots[index];
                 if (index >= entries.Length)
                 {
-                    slot.Panel.Visible = false;
+                    slot.Label.Visible = false;
                     slot.EntryId = -1;
                     continue;
                 }
 
                 var entry = entries[index];
-                var isNewest = index == 0;
-                ApplyCardAppearance(slot, entry, index, isNewest, cardWidth, feed.EntryLifetime, now);
-                slot.Panel.Visible = true;
+                ApplyReason(slot, entry, index, width, feed.EntryLifetime, now);
+                slot.Label.Visible = true;
             }
 
             container.ResetSize();
@@ -161,7 +159,7 @@ internal static class ReasonFeedOverlay
         Slots.Clear();
         _renderedVersion = -1;
         _renderedHalfSecond = -1;
-        _renderedCardWidth = -1f;
+        _renderedWidth = -1f;
 
         if (host.GetNodeOrNull<Node>(FeedNodeName) is { } existing)
         {
@@ -176,22 +174,10 @@ internal static class ReasonFeedOverlay
             ZAsRelative = false,
             Visible = false,
         };
-        container.AddThemeConstantOverride("separation", (int)CardSeparation);
+        container.AddThemeConstantOverride("separation", ReasonSeparation);
         host.AddChild(container);
         _container = container;
         return container;
-    }
-
-    private static void UpdatePosition(NGlobalUi globalUi, VBoxContainer container, Vector2 viewportSize)
-    {
-        var relicBottom = 136f;
-        if (globalUi.RelicInventory is { Visible: true } relics && GodotObject.IsInstanceValid(relics))
-            relicBottom = Math.Max(relicBottom, relics.GlobalPosition.Y + relics.Size.Y);
-
-        var maxTop = Math.Max(228f, viewportSize.Y * 0.45f);
-        var topY = Math.Clamp(Math.Max(148f, relicBottom + 10f), 148f, maxTop);
-        if (container.Position != new Vector2(HorizontalMargin, topY))
-            container.Position = new Vector2(HorizontalMargin, topY);
     }
 
     private static bool ShouldHideForActiveScreen(NGlobalUi globalUi)
@@ -223,76 +209,35 @@ internal static class ReasonFeedOverlay
     {
         while (Slots.Count < needed)
         {
-            var style = new StyleBoxFlat
-            {
-                CornerRadiusTopLeft = 6,
-                CornerRadiusTopRight = 6,
-                CornerRadiusBottomLeft = 6,
-                CornerRadiusBottomRight = 6,
-                BorderWidthTop = 1,
-                BorderWidthRight = 1,
-                BorderWidthBottom = 1,
-            };
-
-            var panel = new PanelContainer
-            {
-                MouseFilter = Control.MouseFilterEnum.Ignore,
-                SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
-                Visible = false,
-            };
-            panel.AddThemeStyleboxOverride("panel", style);
-
             var label = new Label
             {
                 MouseFilter = Control.MouseFilterEnum.Ignore,
                 SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+                // Leave trimming disabled so the wrapped label can report its full height.
                 AutowrapMode = TextServer.AutowrapMode.WordSmart,
-                VerticalAlignment = VerticalAlignment.Center,
                 MaxLinesVisible = 3,
-                TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis,
+                Visible = false,
             };
-            label.AddThemeFontSizeOverride("font_size", 15);
+            label.AddThemeFontSizeOverride("font_size", 21);
             label.AddThemeColorOverride("font_color", new Color(0.96f, 0.95f, 0.91f));
             label.AddThemeConstantOverride("outline_size", 4);
             label.AddThemeColorOverride("font_outline_color", new Color(0.01f, 0.01f, 0.02f, 0.94f));
             label.AddThemeConstantOverride("line_spacing", 2);
 
-            panel.AddChild(label);
-            container.AddChild(panel);
-            Slots.Add(new ReasonCardSlot
-            {
-                Panel = panel,
-                Style = style,
-                Label = label,
-            });
+            container.AddChild(label);
+            Slots.Add(new ReasonSlot { Label = label });
         }
     }
 
-    private static void ApplyCardAppearance(
-        ReasonCardSlot slot,
+    private static void ApplyReason(
+        ReasonSlot slot,
         ReasonFeedEntry entry,
         int index,
-        bool isNewest,
-        float cardWidth,
+        float width,
         TimeSpan entryLifetime,
         DateTimeOffset now)
     {
-        var horizontalPadding = isNewest ? 12f : 11f;
-        var verticalPadding = isNewest ? 7f : 6f;
-        slot.Style.ContentMarginLeft = horizontalPadding;
-        slot.Style.ContentMarginRight = horizontalPadding;
-        slot.Style.ContentMarginTop = verticalPadding;
-        slot.Style.ContentMarginBottom = verticalPadding;
-        slot.Style.BorderWidthLeft = isNewest ? 3 : 2;
-        slot.Style.BgColor = isNewest
-            ? new Color(0.04f, 0.055f, 0.085f, 0.78f)
-            : new Color(0.035f, 0.045f, 0.07f, 0.60f);
-        slot.Style.BorderColor = isNewest
-            ? new Color(0.92f, 0.76f, 0.34f, 0.90f)
-            : new Color(0.58f, 0.56f, 0.48f, 0.42f);
-
-        var textWidth = Math.Max(160f, cardWidth - horizontalPadding * 2f - 4f);
-        slot.Label.CustomMinimumSize = new Vector2(textWidth, 0f);
+        slot.Label.CustomMinimumSize = new Vector2(width, 0f);
         if (!string.Equals(slot.Label.Text, entry.Text, StringComparison.Ordinal))
             slot.Label.Text = entry.Text;
 
@@ -309,15 +254,15 @@ internal static class ReasonFeedOverlay
         };
 
         var targetAlpha = rankAlpha * fadeFactor;
-        if (slot.EntryId != entry.Id && isNewest)
+        if (slot.EntryId != entry.Id && index == 0)
         {
-            slot.Panel.Modulate = new Color(1f, 1f, 1f, 0.25f);
-            var tween = slot.Panel.CreateTween();
-            tween.TweenProperty(slot.Panel, "modulate:a", targetAlpha, 0.14);
+            slot.Label.Modulate = new Color(1f, 1f, 1f, 0.25f);
+            var tween = slot.Label.CreateTween();
+            tween.TweenProperty(slot.Label, "modulate:a", targetAlpha, 0.14);
         }
         else
         {
-            slot.Panel.Modulate = new Color(1f, 1f, 1f, targetAlpha);
+            slot.Label.Modulate = new Color(1f, 1f, 1f, targetAlpha);
         }
 
         slot.EntryId = entry.Id;
