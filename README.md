@@ -1,9 +1,15 @@
 # STS2 Harness
 
 A model-driven player for Slay the Spire 2 that plays one run at a time without save/load.
-A Python backend drives Run, Deck, and Combat roles through the `sts2agent` game Mod's
-public observations and actions, records every game and model exchange, and can replay
-recordings offline.
+
+- **Mod.** The `sts2agent` game Mod exposes the game's public state and actions over local HTTP.
+- **Backend.** A Python backend splits decisions between three model roles:
+  - Run plans routes, shops, events, and rest sites;
+  - Deck picks cards;
+  - Combat plays each battle.
+- **Recording.** Every game and model exchange is recorded, and recordings can be replayed offline.
+
+You can also plug in your own fixed-code strategy, or drive the game from an outside agent through a local tool API.
 
 ## Requirements
 
@@ -69,10 +75,14 @@ More filters and views are listed in [docs/library.md](docs/library.md#recording
 
 ## Documentation
 
+- [Architecture](docs/architecture.md): how the core is put together, roles, context, and tools.
+- [Glossary](GLOSSARY.md): domain terms.
 - [Configuration](docs/configuration.md): settings, authentication, minimal mode.
 - [Running](docs/running.md): ordinary, external, and headless startup.
 - [Using the core as a library](docs/library.md): model client, recordings, sessions, roles.
 - [Evaluation](docs/evaluation.md): offline replay and frozen decision evaluation.
 - [Gameplay retrospectives](docs/gameplay-retrospectives.md): reviewing finished runs.
-- [Run-scoped documents](docs/materials.md): supplying extension documents.
+- [Extension documents](EXTENSIONS.md): supplying extra knowledge and guidance.
+- [Per-run documents](docs/materials.md): building documents for each run.
 - [Mod](mod/README.md): the C# game Mod and native template tools.
+- [Contributing](CONTRIBUTING.md).
