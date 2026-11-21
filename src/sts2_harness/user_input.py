@@ -2,6 +2,7 @@
 
 import asyncio
 import socket
+from collections import deque
 from collections.abc import AsyncGenerator, Iterable
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -18,7 +19,7 @@ from sts2_harness.client import models as native
 from sts2_harness.config import ConfigurationError
 from sts2_harness.external_http import LocalServer
 from sts2_harness.results import SemanticValue
-from sts2_harness.user_input_values import UserInput
+from sts2_harness.user_input_values import VIEWER_LINE_SEPARATOR, VIEWER_TEXT_LIMIT, UserInput
 
 
 class UserInputQueue:
@@ -26,22 +27,36 @@ class UserInputQueue:
 
     def __init__(self) -> None:
         self.instance = uuid4().hex
-        self._pending: list[UserInput] = []
+        self._pending: deque[UserInput] = deque()
         self._seen: set[str] = set()
         self._delivered: list[str] = []
 
     def submit(self, inputs: Iterable[UserInput]) -> None:
-        for item in inputs:
+        batch = tuple(inputs)
+        if any(len(item.line) > VIEWER_TEXT_LIMIT for item in batch):
+            raise ValueError(
+                f"Each viewer line is limited to {VIEWER_TEXT_LIMIT:,} characters "
+                "after whitespace normalization, including its prefix."
+            )
+        for item in batch:
             if item.id not in self._seen:
                 self._seen.add(item.id)
                 self._pending.append(item)
 
     def drain(self) -> tuple[UserInput, ...]:
-        """Take every pending input and record it as delivered, without suspending."""
-        batch = tuple(self._pending)
-        self._pending.clear()
+        """Take the longest FIFO prefix that fits and record it as delivered."""
+        batch: list[UserInput] = []
+        length = 0
+        while self._pending:
+            line_length = len(self._pending[0].line)
+            if batch:
+                line_length += len(VIEWER_LINE_SEPARATOR)
+            if length + line_length > VIEWER_TEXT_LIMIT:
+                break
+            batch.append(self._pending.popleft())
+            length += line_length
         self._delivered.extend(item.id for item in batch)
-        return batch
+        return tuple(batch)
 
     @property
     def delivered(self) -> tuple[str, ...]:
@@ -67,7 +82,10 @@ def create_input_app(queue: UserInputQueue) -> Starlette:
             submission = _Submission.model_validate_json(await request.body())
         except ValidationError:
             return JSONResponse({"error": "Expected {inputs: [{id, text}]}."}, 400)
-        queue.submit(UserInput(item.id, item.text) for item in submission.inputs)
+        try:
+            queue.submit(UserInput(item.id, item.text) for item in submission.inputs)
+        except ValueError as error:
+            return JSONResponse({"error": str(error)}, 400)
         return JSONResponse({"instance": queue.instance, "accepted": len(submission.inputs)})
 
     async def deliveries(request: Request) -> Response:

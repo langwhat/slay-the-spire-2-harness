@@ -38,7 +38,7 @@ POST /inputs
 { "inputs": [{ "id": "...", "text": "..." }] }
 ```
 
-Messages go into an in-memory queue, and ids already seen are ignored. Right before the next new model request, queued messages are added to the current role's context as `[viewer] text` lines. HTTP retries reuse the same request, and a battle's closing review takes no input. One delivery keeps its first 50,000 characters.
+Messages go into an in-memory queue, and ids already seen are ignored. Right before each new model request that accepts input, the current role's context receives as many whole `[viewer] text` lines as fit in 50,000 characters. Whitespace within each message is collapsed to single spaces. The limit counts the prefixes and the line breaks between messages. When the next message does not fit, it and all later messages wait in order for the next eligible request. `POST /inputs` returns HTTP 400 and queues none of the submission if any formatted line exceeds the limit. HTTP retries reuse the same request, and a battle's closing review takes no input.
 
 `GET /inputs/deliveries?after=N` returns `{ "instance", "last", "deliveries": [{ "sequence", "id" }] }`. A delivery means the message left the queue for a context; it does not mean the model request succeeded. `instance` changes when the backend restarts, so a client can tell which messages to resend. Runs that received viewer input cannot be replayed offline without that input.
 

@@ -52,10 +52,7 @@ from sts2_harness.results import (
     ToolResult,
 )
 from sts2_harness.route_plan import MovementStatus, RoutePlan
-from sts2_harness.user_input_values import UserInput
-
-_VIEWER_PREFIX = "[viewer] "
-_VIEWER_TEXT_LIMIT = 50_000
+from sts2_harness.user_input_values import VIEWER_LINE_SEPARATOR, VIEWER_PREFIX, UserInput
 
 
 @dataclass(frozen=True, slots=True)
@@ -494,15 +491,12 @@ class Context:
     def _last_entry(self) -> TextMessage | AssistantMessage | ToolResultMessage | None:
         # Viewer input can sit between a task and its retry without changing what the task repeats.
         for entry in reversed(self._history):
-            if not (isinstance(entry, TextMessage) and entry.text.startswith(_VIEWER_PREFIX)):
+            if not (isinstance(entry, TextMessage) and entry.text.startswith(VIEWER_PREFIX)):
                 return entry
         return None
 
     def append_user_input(self, inputs: tuple[UserInput, ...]) -> None:
-        # One line per input, so a viewer's line break cannot pass for anything but their own words.
-        lines = (f"{_VIEWER_PREFIX}{' '.join(item.text.split())}" for item in inputs)
-        # The limit keeps one delivery from exhausting a window that compaction could not recover.
-        text = "\n".join(lines)[:_VIEWER_TEXT_LIMIT]
+        text = VIEWER_LINE_SEPARATOR.join(item.line for item in inputs)
         self._history.append(TextMessage(TextRole.USER, text))
 
     def append_correction(self, message: str) -> None:

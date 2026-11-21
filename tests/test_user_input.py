@@ -118,6 +118,68 @@ def test_input_enters_at_each_logical_request_and_retries_reuse_the_frozen_reque
     assert queue.delivered == ("1", "2", "3")
 
 
+def test_delivery_receipts_match_complete_viewer_lines_across_model_requests(
+    tmp_path: Path,
+) -> None:
+    queue = UserInputQueue()
+    opening = native.Observation.model_validate_json(COMBAT)
+    long_text = "a" * 49_961
+    requests: list[dict[str, JsonValue]] = []
+    reported: list[list[dict[str, JsonValue]]] = []
+    replies = iter(
+        (
+            reply(("inspect", "combat_inspect", '{"area":"state"}')),
+            reply(("act", "combat_act", ACT)),
+        )
+    )
+
+    async def scenario() -> None:
+        transport = httpx.ASGITransport(app=create_input_app(queue))
+        async with httpx.AsyncClient(transport=transport, base_url="http://input") as client:
+            accepted = await client.post(
+                "/inputs",
+                json={
+                    "inputs": [
+                        {"id": "1", "text": long_text},
+                        {"id": "2", "text": "guard \n now"},
+                        {"id": "3", "text": "防御"},
+                        {"id": "4", "text": "?"},
+                    ]
+                },
+            )
+            assert accepted.status_code == 200
+
+            async def model(request: httpx.Request) -> httpx.Response:
+                requests.append(json.loads(request.content))
+                reported.append((await client.get("/inputs/deliveries")).json()["deliveries"])
+                return httpx.Response(
+                    200, content=next(replies), headers={"Content-Type": "text/event-stream"}
+                )
+
+            llm, tools, budget = agent_with_model(tmp_path, httpx.MockTransport(model))
+            async with llm:
+                role = CombatAgent(
+                    llm, tools, budget, opening_notes=NotesView(other=""), user_input=queue
+                )
+                decision = await role.decide(
+                    ActTask(native.RouteKey.model_validate(opening.location.model_dump())), opening
+                )
+            assert isinstance(decision, ActionDecision)
+
+    asyncio.run(scenario())
+    assert suggestions(requests[0]) == [[long_text, "guard now"]]
+    assert suggestions(requests[1]) == [[long_text, "guard now"], ["防御", "?"]]
+    assert reported == [
+        [{"sequence": 1, "id": "1"}, {"sequence": 2, "id": "2"}],
+        [
+            {"sequence": 1, "id": "1"},
+            {"sequence": 2, "id": "2"},
+            {"sequence": 3, "id": "3"},
+            {"sequence": 4, "id": "4"},
+        ],
+    ]
+
+
 def test_http_boundary_submits_and_reports_deliveries() -> None:
     queue = UserInputQueue()
 
@@ -144,6 +206,35 @@ def test_http_boundary_submits_and_reports_deliveries() -> None:
             assert state["deliveries"] == [{"sequence": 1, "id": "1"}]
             later = (await client.get("/inputs/deliveries", params={"after": 1})).json()
             assert later["deliveries"] == []
+
+    asyncio.run(scenario())
+
+
+def test_http_boundary_rejects_a_line_longer_than_one_delivery() -> None:
+    queue = UserInputQueue()
+    full_line_text = "护" * 49_991
+
+    async def scenario() -> None:
+        transport = httpx.ASGITransport(app=create_input_app(queue))
+        async with httpx.AsyncClient(transport=transport, base_url="http://input") as client:
+            rejected = await client.post(
+                "/inputs",
+                json={
+                    "inputs": [
+                        {"id": "first", "text": "block"},
+                        {"id": "oversize", "text": full_line_text + "甲"},
+                    ]
+                },
+            )
+            assert rejected.status_code == 400
+            assert "50,000" in rejected.json()["error"]
+            assert queue.drain() == ()
+
+            accepted = await client.post(
+                "/inputs", json={"inputs": [{"id": "oversize", "text": full_line_text}]}
+            )
+            assert accepted.status_code == 200
+            assert queue.drain() == (UserInput("oversize", full_line_text),)
 
     asyncio.run(scenario())
 

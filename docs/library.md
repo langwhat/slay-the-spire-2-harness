@@ -92,7 +92,7 @@ These classes live in `sts2_harness.game`, `sts2_harness.execution`, and `sts2_h
 - The first input in a stream is stored in full; later inputs store a common prefix plus the new suffix. Materials, documents, and native outputs share compressed content blocks.
 - A recording gap never becomes the base of a later input, and editing source files never changes history.
 
-**Storage failures.** If the archive cannot be written, gameplay continues and the gap is reported. Unwritten records stay in memory until storage recovers. `journal.availability` tells an unsaved initial manifest apart from a usable archive. Existing archives and invalid paths are rejected rather than overwritten.
+**Storage failures.** Previously written records remain available. A recording gap marks the affected sequence range and is the authoritative record of what is missing. The journal does not backfill failed writes. When storage recovers, the journal persists the gap and resumes recording. Gameplay continues without resending game actions because of a recording failure. `journal.availability` tells an unsaved initial manifest apart from a usable archive. Existing archives and invalid paths are rejected rather than overwritten.
 
 **Sealing.** If sealing fails, the archive and its WAL are left in place with a diagnostic. Keep both files; there is no command to seal them later. Evaluation refuses unsealed archives.
 
