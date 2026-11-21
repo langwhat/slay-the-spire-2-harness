@@ -28,7 +28,7 @@ class Definition(native.WireModel):
 
 
 DEFINITIONS = TypeAdapter(tuple[Definition, ...]).validate_json(
-    files(__package__).joinpath("definitions.json").read_text(), strict=True
+    files(__package__).joinpath("definitions.json").read_text(encoding="utf-8"), strict=True
 )
 
 

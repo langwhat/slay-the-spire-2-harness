@@ -15,7 +15,7 @@ from sts2_harness.decisions import (
     TaskComplete,
 )
 from sts2_harness.deck import adding_selection
-from sts2_harness.deck_role import DeckAgent
+from sts2_harness.deck_role import DeckRole
 from sts2_harness.diagnostics import ActEntered, Diagnostics, RoleChanged
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import (
@@ -33,7 +33,7 @@ from sts2_harness.route_plan import RoutePlan, reconcile_plan
 from sts2_harness.run import ActStart, RunRole
 
 type CombatFactory = Callable[[native.Observation, NotesView, RoutePlan | None], DecisionSource]
-type DeckFactory = Callable[[native.Observation, native.Offer | None], DeckAgent]
+type DeckFactory = Callable[[native.Observation, native.Offer | None], DeckRole]
 
 
 class RunFlow(Protocol):
@@ -68,7 +68,7 @@ class DefaultFlow:
         self._latest_handoff: CombatHandoff | None = None
         self._minimal = minimal
         self._deck_factory = deck
-        self._deck: DeckAgent | None = None
+        self._deck: DeckRole | None = None
         self._deck_node: tuple[str, str | None, str | None] | None = None
         self._declined: set[str] = set()
 
@@ -218,8 +218,9 @@ class DefaultFlow:
                     )
                 self._enter_role(native.DecisionOwner.RUN)
                 source = self._card_source(observation) if isinstance(task, ActTask) else self._run
-                if isinstance(source, DeckAgent):
-                    source.set_route_plan(self._run.route_plan)
+                deck = self._deck
+                if deck is not None and source is deck:
+                    deck.set_route_plan(self._run.route_plan)
                 outcome = await self._execution.run_unit(source, task)
                 entry_admitted = False
                 if isinstance(outcome, TaskComplete):
@@ -229,8 +230,10 @@ class DefaultFlow:
                     continue
                 match outcome:
                     case LocalProgress():
-                        assert self._deck is not None and self._deck.resolution is not None
-                        observation = self._deck.resolution.result.observation
+                        assert deck is not None
+                        resolution = deck.resolution
+                        assert resolution is not None
+                        observation = resolution.result.observation
                     case Executed():
                         if outcome.ended is not None:
                             return outcome.ended

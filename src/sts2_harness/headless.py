@@ -191,10 +191,11 @@ class OwnedHeadlessInstance:
             (engine / "override.cfg").write_text(
                 '[application]\nrun/main_scene="res://harness_audio/game.tscn"\nconfig/use_custom_user_dir=true\n'
                 f'config/custom_user_dir_name="{name}"\n'
-                '\n[sentry]\nconfig/dsn=""\noptions/auto_init=false\n' + configure_audio(engine)
+                '\n[sentry]\nconfig/dsn=""\noptions/auto_init=false\n' + configure_audio(engine),
+                encoding="utf-8",
             )
             probe = engine / "probe.gd"
-            probe.write_text(_PROBE)
+            probe.write_text(_PROBE, encoding="utf-8")
             # Deliberately exclude model configuration and credentials from the game environment.
             self.environment = {
                 "PATH": os.defpath,
@@ -266,7 +267,7 @@ class OwnedHeadlessInstance:
                 raise HeadlessError("The native probe did not prepare headless audio isolation.")
             start = self.directory / "start.json"
             if self._mode is HeadlessLaunchMode.RECIPE:
-                start.write_text(self.options.recipe.model_dump_json())
+                start.write_text(self.options.recipe.model_dump_json(), encoding="utf-8")
                 self.environment["STS2AGENT_START_RUN_FILE"] = str(start)
             if self._development_checkpoints:
                 self.environment["STS2_ALLOW_CHECKPOINTS"] = "true"
@@ -336,6 +337,14 @@ class OwnedHeadlessInstance:
     async def _ready(self, start: Path) -> None:
         assert self.process is not None
         receipt = Path(str(start) + ".result.json")
+        recipe = self.options.recipe
+        seed = recipe.seed or ""
+        # The Mod verifies Unicode casing using the game's .NET rules.
+        expected_seed = (
+            seed.strip(" \t\n\v\f\r").upper().replace("O", "0").replace("I", "1")
+            if seed.isascii()
+            else ""
+        )
         async with ModClient(f"http://127.0.0.1:{self.port}") as client:
             previous: native.Observation | None = None
             previous_menu: native.Status | None = None
@@ -419,13 +428,16 @@ class OwnedHeadlessInstance:
                     previous = None
                     await asyncio.sleep(0.1)
                     continue
+                assert self.receipt is not None
                 if (
                     status.control_intent is not native.ControlIntent.PAUSED
                     or status.location != observation.location
                     or observation.location.run_id is None
                     or not isinstance(observation.state, native.RunState)
                     or observation.state.player.definition_id
-                    != f"CHARACTER.{self.options.recipe.character.value}"
+                    != f"CHARACTER.{recipe.character.value}"
+                    or observation.run_rules.ascension != recipe.ascension
+                    or (expected_seed and self.receipt.seed != expected_seed)
                 ):
                     raise HeadlessError(
                         "The controlled native start did not match the paused run recipe."
@@ -436,7 +448,9 @@ class OwnedHeadlessInstance:
                     and previous.state == observation.state
                 ):
                     self.opening = observation
-                    (self.directory / "initial-observation.json").write_text(observation.to_json())
+                    (self.directory / "initial-observation.json").write_text(
+                        observation.to_json(), encoding="utf-8"
+                    )
                     return
                 previous = observation
                 await asyncio.sleep(0.1)
@@ -626,7 +640,9 @@ async def run_headless(
                             "Initial Start could not be confirmed; it will not be resent."
                         ) from error
                     instance.bootstrap(Endpoint.CONTROL, initial_control)
-                (instance.directory / "initial-control.json").write_text(initial_control.to_json())
+                (instance.directory / "initial-control.json").write_text(
+                    initial_control.to_json(), encoding="utf-8"
+                )
                 if (
                     not isinstance(initial_control, native.ControlReply)
                     or initial_control.mode is not native.ControlIntent.RUNNING

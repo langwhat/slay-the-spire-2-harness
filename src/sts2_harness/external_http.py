@@ -57,7 +57,8 @@ class _ReplyResponse(Response):
 
 def create_app(backend: ExternalBackend) -> Starlette:
     external_run_act = Definition.model_validate_json(
-        files("sts2_harness.tools").joinpath("external-run-act.json").read_text(), strict=True
+        files("sts2_harness.tools").joinpath("external-run-act.json").read_text(encoding="utf-8"),
+        strict=True,
     )
     model_only_tools = frozenset({ToolName.RUN_PLAN, ToolName.RUN_NEXT, ToolName.RUN_DECK_CHOICE})
     discovery = Discovery(

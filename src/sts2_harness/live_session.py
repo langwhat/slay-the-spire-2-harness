@@ -21,6 +21,7 @@ from sts2_harness.model_journal import (
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.prompts import PackagedPrompts
 from sts2_harness.session import (
+    DeckFactory,
     FlowFactory,
     RoleFactory,
     RunFactory,
@@ -40,6 +41,7 @@ async def live_session(
     documents: Documents | None = None,
     run_factory: RunFactory | None = None,
     combat_factory: RoleFactory | None = None,
+    deck_factory: DeckFactory | None = None,
     flow_factory: FlowFactory | None = None,
     wait: Callable[[float], Awaitable[None]] = asyncio.sleep,
     diagnostics: Diagnostics | None = None,
@@ -47,7 +49,7 @@ async def live_session(
     user_input: UserInputSource | None = None,
     display_reasons: bool = False,
 ) -> AsyncGenerator[RunSession]:
-    if model is None and (run_factory is None or combat_factory is None):
+    if model is None and (run_factory is None or combat_factory is None or deck_factory is None):
         raise ValueError("Default model roles require a model resource.")
     if documents is None and (
         manifest.materials.entry_documents_enabled
@@ -103,6 +105,7 @@ async def live_session(
             dependencies,
             run_factory=run_factory,
             combat_factory=combat_factory,
+            deck_factory=deck_factory,
             flow_factory=flow_factory,
             diagnostics=journal.diagnostics,
             user_input=user_input,

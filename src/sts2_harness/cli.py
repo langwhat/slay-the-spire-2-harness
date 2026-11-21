@@ -6,9 +6,10 @@ import json
 import os
 import signal
 import sys
-from collections.abc import AsyncGenerator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Generator, Sequence
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
+from types import FrameType
 from typing import NoReturn
 
 from pydantic import ValidationError
@@ -41,6 +42,27 @@ async def _user_input(port: int | None) -> AsyncGenerator[UserInputQueue | None]
         yield queue
 
 
+@contextmanager
+def _stop_on_signal() -> Generator[asyncio.Event]:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def request_stop(signum: int, frame: FrameType | None) -> None:
+        loop.call_soon_threadsafe(stop.set)
+
+    with ExitStack() as signals:
+        for name in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(name, stop.set)
+            except (AttributeError, NotImplementedError):
+                previous = signal.signal(name, request_stop)
+                if previous is not None:
+                    signals.callback(signal.signal, name, previous)
+            else:
+                signals.callback(loop.remove_signal_handler, name)
+        yield stop
+
+
 async def _start(
     options: InteractiveOptions,
     configuration: Configuration,
@@ -48,11 +70,7 @@ async def _start(
     materials: EntryMaterials | None,
     input_port: int | None,
 ) -> None:
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for name in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(name, stop.set)
-    try:
+    with _stop_on_signal() as stop:
         if configuration.driver is Driver.EXTERNAL:
             await run_external(options, configuration, tool_port=tool_port, stop_requested=stop)
         else:
@@ -64,9 +82,6 @@ async def _start(
                     materials=materials,
                     user_input=user_input,
                 )
-    finally:
-        for name in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(name)
 
 
 async def _headless(
@@ -75,11 +90,7 @@ async def _headless(
     materials: EntryMaterials | None,
     input_port: int | None,
 ) -> None:
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for name in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(name, stop.set)
-    try:
+    with _stop_on_signal() as stop:
         async with _user_input(input_port) as user_input:
             await run_headless(
                 options,
@@ -88,9 +99,6 @@ async def _headless(
                 materials=materials,
                 user_input=user_input,
             )
-    finally:
-        for name in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(name)
 
 
 def _build_parser() -> _Parser:

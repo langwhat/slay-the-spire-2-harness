@@ -564,7 +564,7 @@ async def evaluate(
         flush=True,
     )
     output.mkdir(parents=True, exist_ok=False)
-    output.joinpath("plan.json").write_text(plan.model_dump_json(indent=2) + "\n")
+    output.joinpath("plan.json").write_text(plan.model_dump_json(indent=2) + "\n", encoding="utf-8")
     jobs = [
         (case, configs[config_id], repetition)
         for case in cases
@@ -611,10 +611,10 @@ async def evaluate(
             )
             results[index] = trial
             output.joinpath(f"trial-{index + 1:04d}.json").write_text(
-                trial.model_dump_json(indent=2) + "\n"
+                trial.model_dump_json(indent=2) + "\n", encoding="utf-8"
             )
             output.joinpath("report.md").write_text(
-                report(plan, tuple(item for item in results if item is not None))
+                report(plan, tuple(item for item in results if item is not None)), encoding="utf-8"
             )
 
     await asyncio.gather(*(run(index, *job) for index, job in enumerate(jobs)))

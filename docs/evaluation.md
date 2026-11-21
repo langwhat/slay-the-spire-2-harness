@@ -114,7 +114,7 @@ IDs, content hashes, and bodies rather than the model-visible text-only serializ
 By default, each configuration snapshots the packaged prompts before the run. To compare
 another version, set `prompt_directory` to a directory containing the corresponding
 named Markdown files. The version label and the digest of the actual prompt set are both
-recorded. The case, catalog, document, and link files are read into memory before calls;
+recorded. The case, catalog, and document files are read into memory before calls;
 their hashes are recorded per trial. Prepare full snapshots from trustworthy sources:
 an exact-query cache alone is not a complete catalog or document snapshot.
 

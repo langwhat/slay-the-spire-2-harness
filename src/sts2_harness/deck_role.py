@@ -3,6 +3,7 @@
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Protocol
 
 from pydantic import MISSING, ValidationError
 
@@ -17,6 +18,7 @@ from sts2_harness.decisions import (
     ActionStep,
     ActTask,
     Decision,
+    DecisionSource,
     DecisionTask,
     LocalProgress,
     SelectStep,
@@ -70,6 +72,18 @@ class CardResolution:
     progress: AutomaticProgress
     result: ActionToolResult
     declined_offer: str | None = None
+
+
+class DeckRole(DecisionSource, Protocol):
+    @property
+    def resolution(self) -> CardResolution | None: ...
+
+    @property
+    def feedback(self) -> CardResolution | None: ...
+
+    def offered(self, observation: native.Observation) -> bool: ...
+
+    def set_route_plan(self, plan: RoutePlan | None) -> None: ...
 
 
 class DeckAgent(RunAgent):

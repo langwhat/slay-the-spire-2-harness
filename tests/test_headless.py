@@ -85,7 +85,9 @@ def test_corrupt_template_is_rejected_before_creating_a_writable_profile(tmp_pat
     assert not (tmp_path / "instance").exists()
 
 
-def game_fixture(tmp_path: Path) -> tuple[Path, Path]:
+def game_fixture(
+    tmp_path: Path, *, actual_ascension: int | None = None, actual_seed: str | None = None
+) -> tuple[Path, Path]:
     import platform
 
     from test_interactive import ready_run
@@ -169,13 +171,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 server = http.server.HTTPServer(("127.0.0.1", int(os.environ["STS2AGENT_PORT"])), Handler)
 start = pathlib.Path(os.environ["STS2AGENT_START_RUN_FILE"])
 recipe = json.loads(start.read_text())
+initial["run_rules"]["ascension"] = ACTUAL_ASCENSION
 receipt = {"status":"completed", "effect_verified":True,
-           "reason_code":None, "seed":recipe["seed"]}
+           "reason_code":None, "seed":ACTUAL_SEED}
 pathlib.Path(str(start) + ".result.json").write_text(json.dumps(receipt))
 server.serve_forever()
 """
     script = script.replace("INITIAL", repr(observation.to_json())).replace(
         "ENDED", repr(terminal(observation).to_json())
+    )
+    script = script.replace(
+        "ACTUAL_ASCENSION",
+        "recipe['ascension']" if actual_ascension is None else repr(actual_ascension),
+    ).replace(
+        "ACTUAL_SEED",
+        "(recipe['seed'] or 'RANDOM').replace('I', '1').replace('O', '0')"
+        if actual_seed is None
+        else repr(actual_seed),
     )
     executable = tmp_path / "Game.app/Contents/MacOS/Game"
     executable.parent.mkdir(parents=True)
@@ -198,6 +210,51 @@ server.serve_forever()
     values["game_assembly_sha256"] = hashlib.sha256(b"assembly").hexdigest()
     template.write_text(json.dumps(values))
     return executable, template
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")
+@pytest.mark.parametrize(
+    ("requested_seed", "ascension", "seed", "matches"),
+    [
+        ("FOOLI", 10, "F00L1", True),
+        ("FOOLI", 9, "F00L1", False),
+        ("FOOLI", 10, "F00L2", False),
+        ("straßei", 10, "STRAßE1", True),
+        ("\x1cfoi\x1c", 10, "\x1cF01\x1c", True),
+    ],
+)
+def test_headless_ready_requires_the_requested_ascension_and_canonical_seed(
+    tmp_path: Path, requested_seed: str, ascension: int, seed: str, matches: bool
+) -> None:
+    import asyncio
+
+    from sts2_harness.headless import (
+        HeadlessError,
+        HeadlessOptions,
+        OwnedHeadlessInstance,
+        StandardRunRecipe,
+    )
+    from sts2_harness.journal import StandardCharacter
+
+    executable, template = game_fixture(tmp_path, actual_ascension=ascension, actual_seed=seed)
+    options = HeadlessOptions(
+        executable,
+        template,
+        tmp_path / "runs",
+        recipe=StandardRunRecipe(
+            character=StandardCharacter.IRONCLAD, ascension=10, seed=requested_seed
+        ),
+    )
+
+    async def launch() -> None:
+        async with OwnedHeadlessInstance(options) as instance:
+            assert instance.receipt is not None and instance.receipt.seed == seed
+
+    if matches:
+        asyncio.run(launch())
+    else:
+        with pytest.raises(HeadlessError, match="did not match the paused run recipe"):
+            asyncio.run(launch())
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="The native launcher targets macOS.")

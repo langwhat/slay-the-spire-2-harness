@@ -12,7 +12,7 @@ from sts2_harness.combat import CombatAgent
 from sts2_harness.context.models import AutomaticProgress
 from sts2_harness.decisions import DecisionSource
 from sts2_harness.deck import CardChoiceCompletion
-from sts2_harness.deck_role import DeckAgent
+from sts2_harness.deck_role import DeckAgent, DeckRole
 from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
@@ -36,6 +36,9 @@ from sts2_harness.user_input_values import UserInputSource
 type RunFactory = Callable[[Execution, Notes, ToolRecoveryBudget], RunRole]
 type RoleFactory = Callable[
     [Execution, ToolRecoveryBudget, native.Observation, NotesView], DecisionSource
+]
+type DeckFactory = Callable[
+    [Execution, ToolRecoveryBudget, native.Observation, native.Offer | None], DeckRole
 ]
 type FlowFactory = Callable[[Execution, ToolRecoveryBudget, Notes, RunRole, CombatFactory], RunFlow]
 
@@ -61,6 +64,7 @@ class RunSession:
         *,
         run_factory: RunFactory | None = None,
         combat_factory: RoleFactory | None = None,
+        deck_factory: DeckFactory | None = None,
         flow_factory: FlowFactory | None = None,
         diagnostics: Diagnostics | None = None,
         user_input: UserInputSource | None = None,
@@ -74,6 +78,7 @@ class RunSession:
         self._manifest = manifest
         self._run_factory = run_factory
         self._combat_factory = combat_factory
+        self._deck_factory = deck_factory
         self._flow_factory = flow_factory
         self._diagnostics = diagnostics
         self._user_input = user_input
@@ -178,7 +183,9 @@ class RunSession:
         self._run_stream += 1
         return self._dependencies.model(ModelPurpose.RUN, f"run:{self._run_stream}")
 
-    def _deck(self, opening: native.Observation, offer: native.Offer | None) -> DeckAgent:
+    def _deck(self, opening: native.Observation, offer: native.Offer | None) -> DeckRole:
+        if self._deck_factory is not None:
+            return self._deck_factory(self.execution, self.recovery, opening, offer)
         self._deck_stream += 1
         stream = f"deck:{self._deck_stream}"
         return DeckAgent(

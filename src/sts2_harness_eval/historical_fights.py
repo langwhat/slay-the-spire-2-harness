@@ -389,7 +389,9 @@ def enrich_historical_case(
     output.mkdir(parents=True, exist_ok=False)
     case_result = output / "case.json"
     provenance = output / "provenance.json"
-    case_result.write_text(json.dumps(original, ensure_ascii=False, indent=2) + "\n")
+    case_result.write_text(
+        json.dumps(original, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     provenance.write_text(
         json.dumps(
             {
@@ -415,7 +417,8 @@ def enrich_historical_case(
             ensure_ascii=False,
             indent=2,
         )
-        + "\n"
+        + "\n",
+        encoding="utf-8",
     )
     return DerivedFiles(case_result, provenance)
 

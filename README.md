@@ -24,6 +24,8 @@ You can also plug in your own fixed-code strategy, or drive the game from an out
 
 Seeds, per-run results, setup, and run records are in [docs/results.md](docs/results.md).
 
+Across the 17 runs that reached floor 49, the median was 71 minutes (48–98), 7.24M input tokens (4.85M–13.92M, including 5.92M cached at the median), and 66.7K output tokens (50.6K–83.7K).
+
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/).
@@ -59,6 +61,11 @@ model. It stays resident and serves each new run you start. To drive the game wi
 own agent instead, run `uv run sts2 start --set STS2_DRIVER=external` and use the local
 tool API with the [play-sts2](skills/play-sts2/SKILL.md) skill.
 
+For the setup used in the results above, clone [sts2-knowledge](https://github.com/langwhat/sts2-knowledge)
+next to this repository and run `uv run sts2-knowledge start` from the knowledge
+repository. The standalone `uv run sts2 start` uses the core without those documents.
+See [the recorded setup](docs/results.md#setup) for the exact revisions.
+
 Developers can launch isolated game instances, each with its own profile, port, and
 archive:
 
@@ -72,7 +79,8 @@ and headless details. `uv run sts2 --help` lists every command and option.
 
 ## Inspect recordings
 
-Each run writes `archive.sqlite` in its own directory under `runs/`. Inspect it offline:
+With the builtin driver, each run writes `archive.sqlite` in its own directory under
+`runs/`. The external driver writes diagnostics only. Inspect a builtin recording offline:
 
 ```sh
 uv run sts2 journal --archive runs/<run-directory>/archive.sqlite

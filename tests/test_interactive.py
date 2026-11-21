@@ -333,6 +333,9 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
             path,
             run_factory=run_factory,
             combat_factory=combat_factory,
+            deck_factory=lambda execution, recovery, opening, offer: pytest.fail(
+                "Unexpected card reward."
+            ),
             diagnostics=diagnostics,
             stop_requested=stop.is_set,
             wait=wait,

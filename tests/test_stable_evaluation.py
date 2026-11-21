@@ -14,7 +14,7 @@ from test_responses import configuration
 from test_run import handoff
 
 from sts2_harness.client import models as native
-from sts2_harness.fights import Fight, FightKind
+from sts2_harness.fights import Fight, FightEncounter, FightKind
 from sts2_harness.llm.client import Llm
 from sts2_harness.tools import ToolName
 from sts2_harness_eval.decision_cases import (
@@ -2691,6 +2691,63 @@ def test_run_next_without_a_plan_is_captured_as_invalid(tmp_path: Path) -> None:
         assert sample.proposal.arguments == arguments and sample.reason == "Continue."
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "elites",
+    (None, (), (FightEncounter(definition_id="ENCOUNTER.EEL_ELITE", name="鳗鱼"),)),
+)
+def test_fresh_run_preserves_known_and_unknown_act_elites(
+    tmp_path: Path, elites: tuple[FightEncounter, ...] | None
+) -> None:
+    case = decision_case(tmp_path, multiselect=True)
+    task = case.events[0]
+    assert isinstance(task, TaskEvent)
+    observation = task.observation.model_copy(
+        update={"map": native.PublicMap(bosses=(), nodes=(), legal_destinations=None)}
+    )
+    case = case.model_copy(
+        update={
+            "events": (
+                task.model_copy(
+                    update={
+                        "observation": observation,
+                        "state": task.state.model_copy(update={"elites_fought": elites}),
+                    }
+                ),
+            )
+        }
+    )
+    catalog = FrozenCatalog.model_validate_json(
+        '{"complete":false,"catalog":{"categories":[],"card_filters":'
+        '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+    )
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=reply(("next", "run_next", '{"reason":"Continue."}')),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    async def run() -> None:
+        config = replace(configuration(tmp_path), extra_retries=0)
+        async with Llm(config, transport=httpx.MockTransport(respond)) as client:
+            await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.RUN)
+
+    asyncio.run(run())
+    (request,) = requests
+    observed_map = next(
+        json.loads(item["content"])["observation"]["map"]
+        for item in json.loads(request.content)["input"]
+        if item.get("role") == "user" and '"task":"act"' in item["content"]
+    )
+    if elites is None:
+        assert "elites_fought" not in observed_map
+    else:
+        assert observed_map["elites_fought"] == [elite.model_dump() for elite in elites]
 
 
 @pytest.mark.parametrize(

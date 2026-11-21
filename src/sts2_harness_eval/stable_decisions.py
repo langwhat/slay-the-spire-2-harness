@@ -460,6 +460,7 @@ async def sample_fresh(
 
         fights = FightHistory()
         fights.recent = task_event.state.fights
+        fights.act_elites = task_event.state.elites_fought
         notes = Notes("")
         tools = ToolCatalog(
             owner,

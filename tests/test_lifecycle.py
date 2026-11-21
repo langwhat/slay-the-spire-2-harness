@@ -512,6 +512,9 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
             tmp_path / "archive.sqlite",
             run_factory=lambda execution, notes, recovery: Run(notes, recovery),
             combat_factory=combat,
+            deck_factory=lambda execution, recovery, opening, offer: pytest.fail(
+                "Unexpected card reward."
+            ),
         ) as session:
             ended = await session.run()
             assert ended.reason is RunEndReason.TERMINAL

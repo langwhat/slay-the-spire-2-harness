@@ -126,6 +126,38 @@ Each agent owns one `Context`. It is the only record of that agent's current mod
 
 **One tool call at a time.** A response with several tool calls is rejected before any of them runs. Each call gets an error result, and the model tries again. One `act` call can still contain many steps.
 
+### Observation policy
+
+- Each role sees the relevant parts of the current public game state, including available actions, HP, cards, and visible map or combat information.
+- Run observations include the game's current card rarity offset from `PlayerOdds.CardRarity`. They also include question-mark room probabilities when available. [The Mod](../mod/src/Sts2Mod/Observation/MapObserver.cs) calculates the odds from current weights and room rules without advancing the game's RNG.
+- Combat observations keep hand order and sort the other card piles by card reference. The actual draw order stays hidden. The Mod reports both `Hidden` and `Unknown` enemy intents as `unknown`.
+- The catalog comes from the running game's definitions via the Mod. Any extra card knowledge or guidance comes from the configured [document provider](../EXTENSIONS.md).
+
+This excerpt is from Run 01, model request sequence 13, in the [Fool A10 archive](https://github.com/langwhat/sts2-harness-runs/tree/main/2026-11-20-fool-a10/01-control-02). It shows selected fields from the task message. Prompts, knowledge documents, and other fields are omitted.
+
+```json
+{
+  "task": "act",
+  "observation": {
+    "card_rarity_offset": -0.05,
+    "progress": {
+      "act": 1,
+      "acts": 3,
+      "bosses_left": 1,
+      "definition_id": "ACT.OVERGROWTH",
+      "floor": 1,
+      "name": "密林",
+      "position": "map:0:3",
+      "room_type": "event"
+    },
+    "map": {
+      "elites_fought": [],
+      "unknown_odds": {"elite": 0, "event": 0.85, "monster": 0.1, "shop": 0.03, "treasure": 0.02}
+    }
+  }
+}
+```
+
 ## Tools
 
 Each role's tool set is fixed when the role is created. The model-visible rules for each tool live in its description in `tools/definitions.json`; gameplay rules live in the role prompts under `prompts/`.

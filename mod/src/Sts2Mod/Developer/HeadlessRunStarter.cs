@@ -91,17 +91,32 @@ internal sealed class HeadlessRunStarter
                 return;
 
             var run = RunManager.Instance.DebugOnlyGetState();
-            var seed = run?.Rng.StringSeed;
-            if (string.IsNullOrWhiteSpace(seed)
+            if (run is null
+                || string.IsNullOrWhiteSpace(run.Rng.StringSeed)
                 || ObservationHub.Current.Reply is not CompletedStateRead completed
-                || completed.Observation.State is not RunStateView)
+                || completed.Observation.State is not RunStateView state)
             {
                 return;
             }
 
-            var receiptJson = JsonContract.Serialize(HeadlessStartReceipt.Completed(seed));
+            var seed = run.Rng.StringSeed;
+            var receipt = HeadlessStartReceipt.Completed(seed);
+            if (state.Player.DefinitionId != $"CHARACTER.{CharacterEntry(config.Character)}"
+                || run.AscensionLevel != config.Ascension
+                || (!string.IsNullOrWhiteSpace(config.Seed)
+                    && seed != SeedHelper.CanonicalizeSeed(config.Seed)))
+            {
+                receipt = receipt with { EffectVerified = false, ReasonCode = "recipe_mismatch" };
+            }
+
+            var receiptJson = JsonContract.Serialize(receipt);
             File.WriteAllText(_startFilePath + ".result.json", receiptJson);
             _completed = true;
+            if (!receipt.EffectVerified)
+            {
+                GD.PrintErr("[sts2agent] The started run did not match the requested recipe.");
+                return;
+            }
             GD.Print($"[sts2agent] Headless run started: character={config.Character}, ascension={config.Ascension}, seed={seed}.");
             return;
         }

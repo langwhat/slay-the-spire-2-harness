@@ -166,6 +166,11 @@ async with live_session(client, manifest, archive_path, model=model) as session:
 
 `start()` records a real Pause and waits for Start; `run()` then plays until the run ends. The live session closes the client, the model, and the Journal when it exits. `RunSession(manifest, dependencies)` borrows its game, prompt, document, and model-factory dependencies without closing them. It owns one `Notes`, one recovery budget, and the flow. A borrowed `Diagnostics` stays open across sessions. A session never launches the game or picks a character.
 
+Use `run_factory`, `combat_factory`, and `deck_factory` to supply code-driven
+roles to either session entry point. To omit the model in `live_session`, supply all
+three factories. The Deck factory receives the opening observation and the
+focused reward offer, or `None` for another kind of card addition.
+
 `DefaultFlow` handles Run, Deck, and Combat, as described in [architecture](architecture.md#how-a-run-flows):
 
 - It finishes pending battle handoffs before creating the next Combat.

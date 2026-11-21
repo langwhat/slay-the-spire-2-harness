@@ -967,14 +967,15 @@ def _report(samples: tuple[DecisionSample, ...]) -> str:
 
 def write_results(destination: Path, samples: tuple[DecisionSample, ...]) -> None:
     destination.joinpath("results.json").write_text(
-        TypeAdapter(tuple[DecisionSample, ...]).dump_json(samples, indent=2).decode() + "\n"
+        TypeAdapter(tuple[DecisionSample, ...]).dump_json(samples, indent=2).decode() + "\n",
+        encoding="utf-8",
     )
-    destination.joinpath("report.md").write_text(_report(samples))
+    destination.joinpath("report.md").write_text(_report(samples), encoding="utf-8")
 
 
 def load_case(path: Path, *, replay: bool = True) -> RecordedDecision:
     """Keep recorded metadata usable when a historical native schema cannot load."""
-    text = path.read_text()
+    text = path.read_text(encoding="utf-8")
     fields = _JSON.validate_json(text)
     header = RecordedDecision.model_validate_json(
         json.dumps({key: fields.get(key) for key in RecordedDecision.model_fields})

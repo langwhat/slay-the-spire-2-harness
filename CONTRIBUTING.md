@@ -2,8 +2,9 @@
 
 ## Before you start
 
-- Start from an issue the maintainer has agreed to. Read the relevant parts of [docs/architecture.md](docs/architecture.md) and [GLOSSARY.md](GLOSSARY.md).
-- Confirm changes to public interfaces, model-visible formats, prompts, or gameplay behavior with the maintainer before writing code.
+- Open an issue and agree on changes to interfaces, architecture, prompts, model-visible formats, or gameplay behavior with the maintainer before writing code.
+- Open a pull request directly for typos, broken links, or straightforward bug fixes.
+- Read the relevant parts of [docs/architecture.md](docs/architecture.md) and [GLOSSARY.md](GLOSSARY.md).
 - Keep each change small enough to verify on its own.
 - Do not commit private strategy knowledge, extracted game data, credentials, saves, or run archives.
 

@@ -5,11 +5,16 @@ from pathlib import Path
 import httpx2 as httpx
 import pytest
 from test_combat import reply
-from test_lifecycle import Campaign, terminal
+from test_deck_choice import RewardGame
+from test_execution import Source
+from test_lifecycle import Campaign, CodeCombat, terminal
 from test_responses import configuration
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
+from sts2_harness.context.models import AutomaticProgress
+from sts2_harness.decisions import ActionDecision, ActionKind, ActionProposal, ActionStep
+from sts2_harness.deck_role import CardResolution
 from sts2_harness.game import LiveGame, RunEndReason
 from sts2_harness.journal import Manifest, SessionMaterials
 from sts2_harness.knowledge import MaterialRole, SubjectId
@@ -20,6 +25,9 @@ from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import NotesState
 from sts2_harness.prompts import PackagedPrompts
+from sts2_harness.results import ActionToolResult
+from sts2_harness.route_plan import RoutePlan
+from sts2_harness.run import ActStart
 from sts2_harness.session import RunSession, SessionDependencies
 
 
@@ -178,6 +186,90 @@ def test_session_runs_injected_dependencies_without_closing_them(tmp_path: Path)
         (ModelPurpose.COMBAT, "combat:2"),
     ]
     assert len(campaign.actions) == 5
+
+
+def test_live_code_roles_play_combat_and_take_a_card_without_a_model(tmp_path: Path) -> None:
+    campaign = Campaign(code_combat=True)
+    reward = RewardGame(minimal=False).observation
+    assert isinstance(reward.state, native.RunState)
+    (offer,) = (offer for offer in reward.state.offers if offer.ref == "guaranteed")
+    finish = native.Action(ref="finish", label="Finish", enabled=True)
+    opened = reward.model_copy(
+        update={
+            "state": reward.state.model_copy(
+                update={
+                    "offers": (offer,),
+                    "actions": tuple(
+                        action for action in reward.state.actions if action.ref == "open-guaranteed"
+                    ),
+                }
+            )
+        }
+    )
+    taken = reward.model_copy(
+        update={
+            "state": reward.state.model_copy(
+                update={"offers": (), "actions": (finish,), "deck": ("owned", "guaranteed")}
+            )
+        }
+    )
+    campaign.states = [campaign.states[1], opened, taken, terminal(taken)]
+
+    class CodeRun(Source):
+        route_plan: RoutePlan | None = None
+
+        async def enter_act(self, start: ActStart) -> None:
+            pass
+
+        def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:
+            pass
+
+    class CodeDeck(Source):
+        resolution: CardResolution | None = None
+        feedback: CardResolution | None = None
+
+        def offered(self, observation: native.Observation) -> bool:
+            return (
+                isinstance(observation.state, native.RunState) and offer in observation.state.offers
+            )
+
+        def set_route_plan(self, plan: RoutePlan | None) -> None:
+            pass
+
+    run = CodeRun(ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "finish"),))))
+    deck = CodeDeck(
+        ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "open-guaranteed"),)))
+    )
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(campaign.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="code-reward",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=True,
+            ),
+            tmp_path / "reward.sqlite",
+            run_factory=lambda execution, notes, recovery: run,
+            combat_factory=lambda execution, recovery, opening, notes: CodeCombat(),
+            deck_factory=lambda execution, recovery, opening, offer: deck,
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+
+    asyncio.run(scenario())
+    assert [request.step for request in campaign.actions] == [
+        native.EndTurn(kind=native.StepKind.END_TURN),
+        native.Interact(kind=native.StepKind.INTERACT, action="open-guaranteed"),
+        native.Interact(kind=native.StepKind.INTERACT, action="finish"),
+    ]
+    assert len(deck.outcomes) == 1
+    assert run.observations[0].state.deck == ("owned", "guaranteed")
 
 
 class ClosingTransport(httpx.MockTransport):
