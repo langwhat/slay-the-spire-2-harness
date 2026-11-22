@@ -1049,10 +1049,16 @@ internal sealed class GameObserver(
         foreach (var card in cards)
             AddAutomaticUpgrade(card);
 
+        // The enchant preview never confirms an empty selection. Only Close can return one.
+        var minSelect = grid is NDeckEnchantSelectScreen enchant
+                        && prefs.MinSelect == 0
+                        && NodeHierarchy.FindEnchantCloseButton(enchant) is null
+            ? 1
+            : prefs.MinSelect;
         return new SelectionView(
             prefs.Prompt.GetFormattedText(),
             null,
-            prefs.MinSelect,
+            minSelect,
             prefs.MaxSelect,
             Refs(cards),
             selected is null ? [] : Refs(selected));

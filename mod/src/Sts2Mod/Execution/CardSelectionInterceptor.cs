@@ -361,24 +361,34 @@ public sealed class CardSelectionInterceptor : ICardSelector
                 if (!ReferenceEquals(_pending, request))
                     return;
                 _pending = null;
+                _visibleSelection = null;
+                _visibleHandSelection = null;
             }
-            _visibleSelection = null;
-            _visibleHandSelection = null;
             request.Completion.TrySetResult(selected);
         }
         catch (OperationCanceledException)
         {
-            // Expected when an agent step or run-boundary reset closes the native selection.
+            lock (SelectionLock)
+            {
+                if (!ReferenceEquals(_pending, request))
+                    return;
+                _pending = null;
+                _visibleSelection = null;
+                _visibleHandSelection = null;
+            }
+            request.Completion.TrySetCanceled();
         }
         catch (Exception exception)
         {
             lock (SelectionLock)
             {
                 if (ReferenceEquals(_pending, request))
+                {
                     _pending = null;
+                    _visibleSelection = null;
+                    _visibleHandSelection = null;
+                }
             }
-            _visibleSelection = null;
-            _visibleHandSelection = null;
             request.Completion.TrySetException(exception);
             GD.PrintErr($"[sts2agent] Native card selection failed: {exception}");
         }
