@@ -226,9 +226,7 @@ case = asyncio.run(
         audit=audit,
     )
 )
-Path("/private/cases/example.json").write_text(
-    case.model_dump_json(indent=2), encoding="utf-8"
-)
+Path("/private/cases/example.json").write_text(case.model_dump_json(indent=2), encoding="utf-8")
 ```
 
 The extractor replays the journal to the requested model anchor without model
