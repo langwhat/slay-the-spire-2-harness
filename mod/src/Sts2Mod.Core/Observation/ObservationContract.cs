@@ -249,7 +249,10 @@ public sealed record EnemyView(
     int Block,
     HpDisplay HpDisplay,
     ImmutableArray<PublicPower> Powers,
-    ImmutableArray<PublicIntent> Intents);
+    ImmutableArray<PublicIntent> Intents)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? NextMoveId { get; init; }
+}
 
 public sealed record AllyView(
     string Ref,
@@ -525,7 +528,10 @@ public sealed record EnemyEntry(
     int Block,
     HpDisplay HpDisplay,
     ImmutableArray<PublicPower> Powers,
-    ImmutableArray<PublicIntent> Intents) : ObservedObject;
+    ImmutableArray<PublicIntent> Intents) : ObservedObject
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? NextMoveId { get; init; }
+}
 
 public sealed record AllyEntry(
     string Name,

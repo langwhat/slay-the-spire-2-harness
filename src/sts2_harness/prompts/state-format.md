@@ -14,6 +14,8 @@ In Combat, `arrow_slots` lists the player's arrow slots in slot order. A `retrie
 
 `generated` and `mechanisms` supply rule details referenced by current objects. A mechanism is delivered once per distinct kind, name, and text in this conversation; a changed text is a new rule. A mechanism being retained in the catalog does not establish that its source is currently present.
 
+An enemy's `next_move_id` identifies its public next move in mechanism rules. Use the enemy's `ref` to target it.
+
 A tool result gives `outcome` and changed sections. completed: done. rejected: nothing happened. stopped: the listed steps ran and the rest did not. unknown: it may have happened, so read the state before acting again. failed: a read failed. Continue from the returned state and never repeat completed steps.
 
 `use.observed_plays` counts the base definition across all copies and upgrades, from sampled battle history, not complete fights. `deck_stats` counts the current deck and gives the native `base_draw` and `base_energy`. `notes` shows the strategy notes.

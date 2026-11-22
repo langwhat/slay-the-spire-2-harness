@@ -12,7 +12,9 @@ The repository has three parts:
 - `src/sts2_harness_eval`: offline replay and evaluation built on the core's recordings. See [evaluation.md](evaluation.md).
 - `mod/`: the C# game Mod. It reads native game state, checks legality, performs native operations, and serves them over loopback HTTP. See [mod/README.md](../mod/README.md).
 
-Curated card knowledge, act and Boss guidance, and monster move rules are not part of the core. They live in private document providers that plug in through [EXTENSIONS.md](../EXTENSIONS.md).
+Curated card and monster move knowledge, act guidance, and Boss guidance live in private document providers that plug in through [EXTENSIONS.md](../EXTENSIONS.md).
+
+The Mod reads the current encounter's native move graph and recognized effects and publishes their descriptions in Combat's `mechanisms` observation. The game owns move selection and effect resolution. Combat's Context delivers the descriptions through the existing mechanism catalog.
 
 ## Dependencies
 
@@ -133,7 +135,7 @@ Each agent owns one `Context`. It is the only record of that agent's current mod
 
 - Each role sees the relevant parts of the current public game state, including available actions, HP, cards, and visible map or combat information.
 - Run observations include the game's current card rarity offset from `PlayerOdds.CardRarity`. They also include question-mark room probabilities when available. [The Mod](../mod/src/Sts2Mod/Observation/MapObserver.cs) calculates the odds from current weights and room rules without advancing the game's RNG.
-- Combat observations keep hand order and sort the other card piles by card reference. The actual draw order stays hidden. The Mod reports both `Hidden` and `Unknown` enemy intents as `unknown`.
+- Combat observations keep hand order and sort the other card piles by card reference. The actual draw order stays hidden. The Mod reports both `Hidden` and `Unknown` enemy intents as `unknown`. The same move visibility policy governs `next_move_id` and move IDs in native rule descriptions.
 - The catalog comes from the running game's definitions via the Mod. Any extra card knowledge or guidance comes from the configured [document provider](../EXTENSIONS.md).
 
 This excerpt is from a recorded Fool run. It shows selected fields from the task message. Prompts, knowledge documents, and other fields are omitted.

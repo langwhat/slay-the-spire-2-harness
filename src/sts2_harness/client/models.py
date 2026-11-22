@@ -376,6 +376,7 @@ class Enemy(WireModel):
     definition_id: Nonempty
     intents: tuple[Intent, ...]
     hp_display: HpDisplay | MISSING = MISSING
+    next_move_id: Nonempty | MISSING = MISSING
 
 
 class Ally(WireModel):
@@ -635,6 +636,7 @@ class EnemyEntry(WireModel):
     definition_id: Nonempty
     intents: tuple[Intent, ...]
     hp_display: HpDisplay | MISSING = MISSING
+    next_move_id: Nonempty | MISSING = MISSING
     kind: Literal[ObjectKind.ENEMY]
 
 

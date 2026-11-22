@@ -87,6 +87,23 @@ def test_pile_membership_aggregates_without_order_or_instance_refs() -> None:
     assert "ref" not in state["draw"][0]
 
 
+def test_combat_projects_move_id_changes_with_identical_public_intents() -> None:
+    payload = json.loads(COMBAT)
+    enemy = payload["state"]["enemies"][0]
+    enemy["next_move_id"] = "JAB_MOVE"
+    context = Context(DecisionOwner.COMBAT)
+    context.append_task(CombatActInput(), Observation.model_validate_json(json.dumps(payload)))
+    first = json.loads(context.model_input()[-1].text)["observation"]["enemies"][0]
+
+    enemy["next_move_id"] = "JAB_MOVE_2"
+    context.append_task(CombatActInput(), Observation.model_validate_json(json.dumps(payload)))
+    second = json.loads(context.model_input()[-1].text)["observation"]["enemies"][0]
+
+    assert first["next_move_id"] == "JAB_MOVE"
+    assert second["next_move_id"] == "JAB_MOVE_2"
+    assert first["intents"] == second["intents"]
+
+
 def test_compaction_restores_defs_sections_and_opening_notes() -> None:
     observation = Observation.model_validate_json(COMBAT)
     context = Context(DecisionOwner.COMBAT)
@@ -309,6 +326,26 @@ def test_mechanisms_are_once_delivered_without_owners_and_restore_after_compacti
     context.append_task(CombatActInput(), changed)
     update = json.loads(context.model_input()[-1].text)["observation"]
     assert update["mechanisms"][0]["text"] == "Changed native rule"
+
+
+def test_combat_delivers_native_enemy_rule_text_verbatim() -> None:
+    observation = Observation.model_validate_json(COMBAT)
+    mechanism = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="MONSTER.LAGAVULIN_MATRIARCH",
+        name="樂加維林族母",
+        text=(
+            "First move: SLEEP_MOVE\n"
+            "沉睡 (POWER.ASLEEP_POWER) · After damage resolves: attempt to stun the holder\n"
+            "沉睡 (POWER.ASLEEP_POWER) · After side turn ends: attempt to subtract one stack"
+        ),
+    )
+    context = Context(DecisionOwner.COMBAT)
+    context.append_task(
+        CombatActInput(), observation.model_copy(update={"mechanisms": (mechanism,)})
+    )
+    delivered = json.loads(context.model_input()[-1].text)["observation"]["mechanisms"]
+    assert delivered == [json.loads(mechanism.to_json())]
 
 
 def test_current_unknown_values_override_known_card_text_and_cost() -> None:

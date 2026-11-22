@@ -388,6 +388,13 @@ internal sealed class GameObserver(
 
         var enemies = combat!.Enemies.Where(creature => creature.IsAlive).Select(ObserveEnemy).ToImmutableArray();
         var inactive = combat.Enemies.Where(creature => !creature.IsAlive).Select(ObserveEnemy).ToImmutableArray();
+        foreach (var creature in combat.Enemies)
+        {
+            if (EnemyMechanismReader.Read(creature, gameLanguage) is { } mechanics)
+                _mechanisms.Add(new MechanismView(
+                    MechanismKind.Other, creature.ModelId.ToString(), CreatureName(creature), mechanics,
+                    registry.GetRef(creature)));
+        }
         var allies = combat.Allies
             .Where(creature => creature.Player is null || !LocalContext.IsMe(creature.Player))
             .Select(ObserveAlly)
@@ -838,12 +845,22 @@ internal sealed class GameObserver(
         var (hp, maxHp, display) = ObserveHitPoints(creature);
         var name = CreatureName(creature);
         var powers = ObservePowers(creature);
+        var move = creature.Monster?.NextMove;
         var intents = ObserveIntents(creature);
         var id = creature.ModelId.ToString();
+        var moveId = move is not null && EnemyMechanismReader.IsPublicMove(move)
+            ? move.StateId
+            : null;
 
-        _objects.Add(reference, new EnemyEntry(name, id, hp, maxHp, creature.Block, display, powers, intents));
+        _objects.Add(reference, new EnemyEntry(name, id, hp, maxHp, creature.Block, display, powers, intents)
+        {
+            NextMoveId = moveId,
+        });
         _descriptions.Add(reference, null);
-        return new EnemyView(reference, name, id, hp, maxHp, creature.Block, display, powers, intents);
+        return new EnemyView(reference, name, id, hp, maxHp, creature.Block, display, powers, intents)
+        {
+            NextMoveId = moveId,
+        };
     }
 
     private AllyView ObserveAlly(Creature creature)
