@@ -22,6 +22,13 @@ internal static class NodeHierarchy
             yield return parent;
     }
 
+    public static NClickableControl? FindEnchantCloseButton(NDeckEnchantSelectScreen screen) =>
+        screen.GetNodeOrNull<NClickableControl>("%Close") is { IsEnabled: true } button
+        && !button.IsQueuedForDeletion()
+        && button.IsVisibleInTree()
+            ? button
+            : null;
+
     public static NClickableControl? FindRewardSkipButton(NCardRewardSelectionScreen screen)
     {
         var alternatives = RunSurfaceLifecycle.GetCardRewardAlternatives(screen);

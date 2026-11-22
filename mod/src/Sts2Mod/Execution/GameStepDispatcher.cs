@@ -47,8 +47,9 @@ internal sealed class GameStepDispatcher
     private readonly AgentControlState _control;
     private readonly StepGateway _gateway;
     private readonly MapInkPresenter _mapPresenter;
-    private Task? _visualPresentation;
+    private (StepRequest Request, Task Cue)? _visualPresentation;
     private object? _submittedChoice;
+    private StepRequest? _selectionRequest;
     private Node? _confirmationScreen;
     private Func<bool>? _confirmationStillValid;
     private ulong _confirmationNotBeforeMsec;
@@ -96,6 +97,17 @@ internal sealed class GameStepDispatcher
             ClearAutoSelection();
         }
 
+        if (_selectionRequest is { } selectionRequest && !_gateway.OwnsPendingStep(selectionRequest))
+        {
+            _selectionRequest = null;
+            _submittedChoice = null;
+            _confirmationScreen = null;
+            _confirmationStillValid = null;
+        }
+
+        if (_visualPresentation is { } visual && !_gateway.OwnsPendingStep(visual.Request))
+            _visualPresentation = null;
+
         if (_confirmationScreen is { } screen)
         {
             if (!ReferenceEquals(NOverlayStack.Instance?.Peek(), screen))
@@ -127,7 +139,7 @@ internal sealed class GameStepDispatcher
         else
             _submittedChoice = null;
 
-        if (_visualPresentation is { IsCompleted: false })
+        if (_visualPresentation is { Cue.IsCompleted: false })
             readiness = NativeInputReadiness.Busy;
 
         _gateway.Advance(
@@ -135,7 +147,10 @@ internal sealed class GameStepDispatcher
             readiness,
             sequence,
             Dispatch,
-            RunManager.Instance.DebugOnlyGetState()?.AscensionLevel);
+            RunManager.Instance.DebugOnlyGetState()?.AscensionLevel,
+            selectionOpen: CurrentChoice() is CardSelectionInterceptor.PendingCardSelection
+                or NCardGridSelectionScreen or NChooseACardSelectionScreen
+                or NChooseABundleSelectionScreen or NCardRewardSelectionScreen);
         _mapPresenter.Advance();
 
         if (_selectionOrigin is { } selectionOrigin
@@ -194,6 +209,8 @@ internal sealed class GameStepDispatcher
         if (request.Step is SelectStep || result is not null)
             ClearAutoSelection();
 
+        if (request.Step is SelectStep && result is null)
+            _selectionRequest = request;
         if (result is not null)
         {
             _submittedChoice = null;
@@ -625,6 +642,14 @@ internal sealed class GameStepDispatcher
             return PresentOverlayCardHolder(request, screen, holder, trackGatewayTask: true);
         }
 
+        if (screen is NDeckEnchantSelectScreen enchant && cards.Length == 0)
+        {
+            var close = NodeHierarchy.FindEnchantCloseButton(enchant);
+            if (close is null)
+                return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native enchant close control is unavailable.");
+            return PresentOverlayButton(request, enchant, close, trackGatewayTask: true);
+        }
+
         if (screen is not NCardGridSelectionScreen grid)
             return StepGateway.Reject(request, StepErrorCode.SelectionUnavailable, "The native selection screen cannot accept cards.");
 
@@ -842,22 +867,22 @@ internal sealed class GameStepDispatcher
             return null;
         }
 
-        var cue = RunFocusCueAsync(request.OperationId, focusNode, stillValid, focusSeconds, submit);
+        var cue = RunFocusCueAsync(request, focusNode, stillValid, focusSeconds, submit);
         if (trackGatewayTask)
         {
-            _visualPresentation = cue;
+            _visualPresentation = (request, cue);
             _gateway.TrackNativeTask(request, cue);
             _ = ObserveNativeFailureAsync(request.OperationId, cue);
         }
         else
         {
-            _visualPresentation = ObserveVisualCueOrReportUncertainAsync(request.OperationId, cue);
+            _visualPresentation = (request, ObserveVisualCueOrReportUncertainAsync(request, cue));
         }
         return null;
     }
 
     private async Task RunFocusCueAsync(
-        string operationId,
+        StepRequest request,
         Control focusNode,
         Func<bool> stillValid,
         double focusSeconds,
@@ -878,10 +903,13 @@ internal sealed class GameStepDispatcher
                 focusNode.EmitSignal(Control.SignalName.FocusExited);
         }
 
+        if (!_gateway.OwnsPendingStep(request))
+            return;
+
         if (!_control.IsRunning || !stillValid())
         {
             _gateway.RejectPendingBeforeTouch(
-                operationId,
+                request.OperationId,
                 StepErrorCode.ActionUnavailable,
                 !_control.IsRunning
                     ? "Agent control was paused before dispatch."
@@ -893,7 +921,7 @@ internal sealed class GameStepDispatcher
         submit();
     }
 
-    private async Task ObserveVisualCueOrReportUncertainAsync(string operationId, Task cue)
+    private async Task ObserveVisualCueOrReportUncertainAsync(StepRequest request, Task cue)
     {
         try
         {
@@ -901,8 +929,9 @@ internal sealed class GameStepDispatcher
         }
         catch (Exception error)
         {
-            GD.PrintErr($"[sts2agent] Viewer highlight aborted: operation_id={operationId} error={error.Message}");
-            _gateway.ReportUncertain(operationId);
+            GD.PrintErr($"[sts2agent] Viewer highlight aborted: operation_id={request.OperationId} error={error.Message}");
+            if (_gateway.OwnsPendingStep(request))
+                _gateway.ReportUncertain(request.OperationId);
         }
     }
 

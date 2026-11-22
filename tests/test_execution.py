@@ -730,3 +730,155 @@ def test_no_run_ends_the_old_lifetime_without_observation_or_recovery_failure(
         assert budget.failures == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("busy_observation", [False, True])
+def test_admission_reports_stalled_native_input(
+    monkeypatch: pytest.MonkeyPatch, busy_observation: bool
+) -> None:
+    from sts2_harness import game
+
+    monkeypatch.setattr(game, "_INPUT_READINESS_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        observation = native.Observation.model_validate_json(COMBAT)
+        data = observation.model_dump(mode="json", exclude_unset=True)
+        data["input_readiness"] = "busy"
+        data["state"]["control"] = "busy"
+        status_reads = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal status_reads
+            if request.url.path == "/state" and busy_observation:
+                return httpx.Response(200, json={"status": "completed", "observation": data})
+            assert request.url.path == "/status"
+            status_reads += 1
+            return httpx.Response(
+                200,
+                json={
+                    "location": data["location"],
+                    "presentation": None,
+                    "control_intent": "running",
+                    "input_readiness": (
+                        "selection" if busy_observation and status_reads == 1 else "busy"
+                    ),
+                    "receipt": None,
+                },
+            )
+
+        async def wait(seconds: float) -> None:
+            await asyncio.sleep(0.02)
+
+        async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+            live = LiveGame(
+                client, namespace="test", game_instance_id="game", run_id="run", wait=wait
+            )
+            result = await asyncio.wait_for(live.admit(), 0.3)
+        assert isinstance(result.outcome, game.ReadFailure)
+        assert "native input" in result.outcome.message.lower()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        native.Select(kind=native.StepKind.SELECT, refs=("c2",)),
+        native.Interact(kind=native.StepKind.INTERACT, action="open-selector"),
+    ],
+)
+def test_live_selection_confirmation_expires_without_resubmitting(
+    monkeypatch: pytest.MonkeyPatch, step: native.NativeStep
+) -> None:
+    from sts2_harness import game
+
+    monkeypatch.setattr(game, "_SETTLE_CONFIRMATION_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        observation = native.Observation.model_validate_json(
+            RUN if isinstance(step, native.Interact) else COMBAT
+        )
+        requests: list[native.StepRequest] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/action":
+                requests.append(native.StepRequest.model_validate_json(request.content))
+                return httpx.Response(200, json={"operation_id": "test:1", "status": "pending"})
+            assert request.url.path == "/status"
+            return httpx.Response(
+                200,
+                json={
+                    "location": observation.location.model_dump(mode="json"),
+                    "presentation": None,
+                    "control_intent": "running",
+                    "input_readiness": "busy",
+                    "receipt": {"operation_id": "test:1", "status": "pending"},
+                },
+            )
+
+        async def wait(seconds: float) -> None:
+            await asyncio.sleep(0.02)
+
+        async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+            live = LiveGame(
+                client, namespace="test", game_instance_id="game", run_id="run", wait=wait
+            )
+            route = native.RouteKey.model_validate(observation.location.model_dump())
+            reply = await asyncio.wait_for(live.settle(route, step), 0.3)
+        assert isinstance(reply.outcome, game.Settlement)
+        assert reply.outcome.receipt is None
+        assert [request.step for request in requests] == [step]
+
+    asyncio.run(scenario())
+
+
+def test_start_returns_to_pause_while_native_input_is_stalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sts2_harness import game
+
+    monkeypatch.setattr(game, "_INPUT_READINESS_SECONDS", 0.01)
+
+    async def scenario() -> None:
+        observation = native.Observation.model_validate_json(COMBAT)
+        selectable = observation.model_dump(mode="json", exclude_unset=True)
+        busy = observation.model_dump(mode="json", exclude_unset=True)
+        busy["input_readiness"] = "busy"
+        busy["state"]["control"] = "busy"
+        pauses = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal pauses
+            if request.url.path == "/control" and request.method == "POST":
+                pauses += 1
+                return httpx.Response(200, json={"mode": "paused"})
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": selectable["location"],
+                        "presentation": None,
+                        "control_intent": "running",
+                        "input_readiness": "busy" if pauses == 1 else "selection",
+                        "receipt": None,
+                    },
+                )
+            assert request.url.path == "/state"
+            return httpx.Response(
+                200,
+                json={"status": "completed", "observation": busy if pauses == 1 else selectable},
+            )
+
+        async def wait(seconds: float) -> None:
+            await asyncio.sleep(0.02)
+
+        async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+            live = LiveGame(
+                client, namespace="test", game_instance_id="game", run_id="run", wait=wait
+            )
+            result = await asyncio.wait_for(live.pause_until_resumed(None), 0.3)
+        assert isinstance(result.outcome, game.Resumed)
+        assert result.outcome.observation == observation
+        assert pauses == 2
+
+    asyncio.run(scenario())

@@ -13,6 +13,9 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import CatalogResult, ClientFailureKind, InspectResult
 from sts2_harness.results import Reason, ReasonCode
 
+_INPUT_READINESS_SECONDS = 10.0
+_SETTLE_CONFIRMATION_SECONDS = 30.0
+
 
 class RunEndReason(StrEnum):
     TERMINAL = "terminal"
@@ -282,7 +285,11 @@ class LiveGame:
         self._wait = wait
         self._stop_requested = stop_requested
         self._on_status = on_status
-        self._settle_confirmation_seconds = settle_confirmation_seconds
+        self._settle_confirmation_seconds = (
+            _SETTLE_CONFIRMATION_SECONDS
+            if settle_confirmation_seconds is None
+            else settle_confirmation_seconds
+        )
         self._observations: list[native.Observation] = []
         self._inflight = False
         self._presentation_verifications: set[str] = set()
@@ -445,6 +452,8 @@ class LiveGame:
             raise SessionStopped
 
     async def _admit(self) -> bool:
+        clock = asyncio.get_running_loop().time
+        waiting_since = clock()
         while True:
             self._check_stop()
             status = await self._status(waiting=True)
@@ -459,15 +468,22 @@ class LiveGame:
             if status.control_intent is native.ControlIntent.PAUSED:
                 if not self._wait_for_start:
                     return False
+                waiting_since = clock()
             elif status.input_readiness in (
                 native.InputReadiness.READY,
                 native.InputReadiness.SELECTION,
             ):
                 return True
+            elif clock() - waiting_since >= _INPUT_READINESS_SECONDS:
+                raise GameReadError(
+                    f"Native input stayed {status.input_readiness.value} while running."
+                )
             await self._wait(1.0 if status.control_intent is native.ControlIntent.PAUSED else 0.1)
 
     async def _fresh_observation(self) -> native.Observation:
         observation = await self._observe()
+        clock = asyncio.get_running_loop().time
+        deadline = clock() + _INPUT_READINESS_SECONDS
         while (
             self._same_run(observation.location)
             and observation.state.phase is not native.Phase.TERMINAL
@@ -489,8 +505,20 @@ class LiveGame:
                 native.InputReadiness.BUSY,
                 native.InputReadiness.UNAVAILABLE,
             ):
+                if clock() >= deadline:
+                    raise GameReadError(
+                        f"Native input stayed {status.input_readiness.value} after admission."
+                    )
                 continue
             observation = await self._observe()
+            if (
+                clock() >= deadline
+                and self._same_run(observation.location)
+                and observation.state.phase is not native.Phase.TERMINAL
+                and observation.input_readiness
+                not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
+            ):
+                raise GameReadError("Native input and observation did not agree after admission.")
         return observation
 
     async def _ensure_presentation(
@@ -575,13 +603,17 @@ class LiveGame:
 
     async def _pause_until_resumed(self, reason: Reason | None) -> native.Observation:
         """Write Pause, await explicit Start, then refresh; a dead run raises GameLifetimeEnded."""
+        clock = asyncio.get_running_loop().time
         while True:
             await self._pause()
+            resume_deadline: float | None = None
             while True:
                 self._check_stop()
                 try:
                     status = await self._status(waiting=True)
                 except (ClientUnavailable, GameReadError):
+                    if resume_deadline is not None and clock() >= resume_deadline:
+                        break
                     await self._wait(1.0)
                     continue
                 if (
@@ -590,13 +622,17 @@ class LiveGame:
                 ):
                     raise GameLifetimeEnded(status.location)
                 if status.control_intent is native.ControlIntent.RUNNING:
+                    if resume_deadline is None:
+                        resume_deadline = clock() + _INPUT_READINESS_SECONDS
                     try:
                         await self._ensure_presentation(status, retry_verification=True)
                     except (ClientUnavailable, GameReadError):
                         break
                     try:
-                        observation = await self._observe()
+                        observation = await self._fresh_observation()
                     except (ClientUnavailable, GameReadError):
+                        if clock() >= resume_deadline:
+                            break
                         await self._wait(1.0)
                         continue
                     if (
@@ -605,6 +641,7 @@ class LiveGame:
                     ):
                         raise GameLifetimeEnded(observation.location)
                     return observation
+                resume_deadline = None
                 await self._wait(1.0)
 
     async def _pause(self) -> None:
@@ -657,11 +694,8 @@ class LiveGame:
             reply = await self._attempt(Endpoint.SUBMIT, self._client.submit(request))
         except ClientUnavailable:
             reply = None
-        confirmation_deadline = (
-            asyncio.get_running_loop().time() + self._settle_confirmation_seconds
-            if self._settle_confirmation_seconds is not None
-            else None
-        )
+        clock = asyncio.get_running_loop().time
+        confirmation_deadline = clock() + self._settle_confirmation_seconds
         if isinstance(reply, native.InvalidRequestReply):
             return native.ReceiptRejected(
                 operation_id=request.operation_id,
@@ -675,10 +709,7 @@ class LiveGame:
         if reply is not None and not isinstance(reply, native.ReceiptPending):
             return reply
         while True:
-            if (
-                confirmation_deadline is not None
-                and asyncio.get_running_loop().time() >= confirmation_deadline
-            ):
+            if clock() >= confirmation_deadline:
                 return None
             try:
                 status = await self._attempt(Endpoint.STATUS, self._client.status())

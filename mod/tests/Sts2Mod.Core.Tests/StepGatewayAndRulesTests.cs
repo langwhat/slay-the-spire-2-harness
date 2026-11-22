@@ -29,6 +29,75 @@ public sealed class StepGatewayAndRulesTests
           }
           """;
 
+    private sealed class ManualClock : TimeProvider
+    {
+        public long Seconds { get; set; }
+
+        public override long TimestampFrequency => 1;
+
+        public override long GetTimestamp() => Seconds;
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void StalledSelectionReleasesInputAfterFreshObservation(bool selectionAlreadyOpen)
+    {
+        var clock = new ManualClock();
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var gateway = new StepGateway(control, "game-1", timeProvider: clock);
+        var initialReadiness = selectionAlreadyOpen ? NativeInputReadiness.Selection : NativeInputReadiness.Ready;
+        gateway.Advance(RunLocation, initialReadiness, sequence: 1, _ => null);
+        var step = selectionAlreadyOpen
+            ? "{\"kind\":\"select\",\"refs\":[\"card:1:1\"]}"
+            : "{\"kind\":\"interact\",\"action\":\"interaction:1:1\"}";
+        gateway.Submit(ActionJson("first", RunRoute, step));
+        StepRequest? dispatched = null;
+        gateway.Advance(RunLocation, initialReadiness, sequence: 1, request =>
+        {
+            dispatched = request;
+            return null;
+        });
+        var first = Assert.IsType<StepRequest>(dispatched);
+
+        clock.Seconds = 1;
+        gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: 2, _ => null, selectionOpen: true);
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+        Assert.True(gateway.OwnsPendingStep(first));
+
+        clock.Seconds = 60;
+        gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: 3, _ => null, selectionOpen: true);
+        Assert.False(gateway.OwnsPendingStep(first));
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 4, _ => null);
+        Assert.Equal("first", Assert.IsType<UnknownStep>(gateway.Status().Receipt).OperationId);
+        gateway.Submit(ActionJson("new", RunRoute, "{\"kind\":\"select\",\"refs\":[\"card:1:1\"]}"));
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 4,
+            request => new CompletedStep(request.OperationId, StepBoundary.Ready));
+        Assert.Equal("new", Assert.IsType<CompletedStep>(gateway.Status().Receipt).OperationId);
+    }
+
+    [Fact]
+    public void ExpiredQueuedStepDoesNotReachNativeDispatch()
+    {
+        var clock = new ManualClock();
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var gateway = new StepGateway(control, "game-1", timeProvider: clock);
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 1, _ => null);
+        gateway.Submit(ActionJson("expired", RunRoute, "{\"kind\":\"interact\",\"action\":\"interaction:1:1\"}"));
+
+        clock.Seconds = 60;
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 2,
+            _ => throw new InvalidOperationException("Expired input reached the game."));
+
+        var receipt = Assert.IsType<RejectedStep>(gateway.Status().Receipt);
+        Assert.Equal("expired", receipt.OperationId);
+        Assert.Equal(StepErrorCode.NativeBusy, receipt.Error.Code);
+    }
+
     [Fact]
     public void StepRules_BindTargetAndValidateSelection()
     {

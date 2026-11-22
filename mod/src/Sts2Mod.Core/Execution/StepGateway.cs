@@ -9,10 +9,19 @@ namespace Sts2Mod.Core.Execution;
 /// <summary>
 /// Owns admission, settlement, and receipt publication for a single native gameplay step or map presentation.
 /// </summary>
-public sealed class StepGateway(AgentControlState control, string gameInstanceId, object? inputAdmission = null)
+public sealed class StepGateway(
+    AgentControlState control,
+    string gameInstanceId,
+    object? inputAdmission = null,
+    TimeProvider? timeProvider = null)
 {
+    private static readonly TimeSpan DispatchLimit = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan SelectionSettlementLimit = TimeSpan.FromSeconds(8);
+
     private readonly object _sync = inputAdmission ?? new();
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
     private StepRequest? _pending;
+    private long _acceptedAt;
     private bool _dispatching;
     private Task? _nativeCompletion;
     private Func<bool>? _nativeInputBoundary;
@@ -21,6 +30,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
     private long? _nativeCompletionObservedSequence;
     private StepReceipt? _receipt;
     private long? _dispatchedSequence;
+    private long? _selectionWaitStarted;
     private long _latestObservationSequence = -1;
     private long _uncertainThroughSequence = -1;
     private bool _awaitingObservationAfterUncertain;
@@ -214,6 +224,12 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         return new HttpReply(200, JsonContract.Serialize(SubmitReceipt(request)));
     }
 
+    public bool OwnsPendingStep(StepRequest request)
+    {
+        lock (_sync)
+            return ReferenceEquals(_pending, request);
+    }
+
     public NativeStepStatus Status()
     {
         lock (_sync)
@@ -300,7 +316,8 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
         NativeInputReadiness readiness,
         long sequence,
         Func<StepRequest, StepReceipt?> dispatch,
-        int? ascension = null)
+        int? ascension = null,
+        bool selectionOpen = false)
     {
         lock (_sync)
         {
@@ -332,6 +349,22 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
 
             if (_dispatchedSequence is { } dispatched)
             {
+                if (request.Step is SelectStep
+                    || (selectionOpen && readiness is NativeInputReadiness.Busy or NativeInputReadiness.Unavailable))
+                {
+                    _selectionWaitStarted ??= _clock.GetTimestamp();
+                }
+                else
+                {
+                    _selectionWaitStarted = null;
+                }
+
+                if (_selectionWaitStarted is { } start && _clock.GetElapsedTime(start) >= SelectionSettlementLimit)
+                {
+                    ReportUncertain(request.OperationId);
+                    return;
+                }
+
                 _nativeAccepted |= _nativeAcceptance?.Invoke() == true;
                 if (_nativeCompletion is { } completion)
                 {
@@ -383,7 +416,11 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
             }
 
             var expected = request.ExpectedRoute;
-            if (!control.IsRunning)
+            if (_clock.GetElapsedTime(_acceptedAt) >= DispatchLimit)
+            {
+                _receipt = Reject(request, StepErrorCode.NativeBusy, "The native step expired before dispatch.");
+            }
+            else if (!control.IsRunning)
             {
                 _receipt = Reject(request, StepErrorCode.ActionUnavailable, "Agent control is paused.");
             }
@@ -419,6 +456,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
                 {
                     _presentation = null;
                     _dispatchedSequence = sequence;
+                    _selectionWaitStarted = request.Step is SelectStep ? _clock.GetTimestamp() : null;
                     return;
                 }
 
@@ -532,6 +570,7 @@ public sealed class StepGateway(AgentControlState control, string gameInstanceId
                 return Reject(request, StepErrorCode.ActionUnavailable, "Agent control is paused.");
 
             _pending = request;
+            _acceptedAt = _clock.GetTimestamp();
             _dispatchedSequence = null;
             _nativeCompletion = null;
             _nativeInputBoundary = null;
