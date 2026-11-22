@@ -802,11 +802,11 @@ internal sealed class GameStepDispatcher
         NClickableControl button,
         bool trackGatewayTask)
     {
-        var presentation = GetCardRewardPresentation(screen);
+        var presentation = GetCardChoicePresentation(request, screen);
         return PresentFocusAndSubmit(
             request,
             button,
-            () => IsOverlayPresentationCurrent(screen, presentation) && IsControlUsable(button),
+            () => IsOverlayPresentationCurrent(request, screen, presentation) && IsControlUsable(button),
             focusSeconds: CardRewardFocusSeconds(presentation, 0.24),
             () => button.EmitSignal(NClickableControl.SignalName.Released, button),
             trackGatewayTask);
@@ -818,11 +818,11 @@ internal sealed class GameStepDispatcher
         NCardHolder holder,
         bool trackGatewayTask)
     {
-        var presentation = GetCardRewardPresentation(screen);
+        var presentation = GetCardChoicePresentation(request, screen);
         return PresentFocusAndSubmit(
             request,
             holder,
-            () => IsOverlayPresentationCurrent(screen, presentation)
+            () => IsOverlayPresentationCurrent(request, screen, presentation)
                   && GodotObject.IsInstanceValid(holder)
                   && holder.IsVisibleInTree()
                   && IsControlUsable(holder.Hitbox),
@@ -831,19 +831,33 @@ internal sealed class GameStepDispatcher
             trackGatewayTask);
     }
 
-    private static RunSurfaceLifecycle.NativeRewardChoice? GetCardRewardPresentation(Node screen) =>
-        ViewerPacing.IsInteractiveGui
-        && screen is NCardRewardSelectionScreen reward
-        && RunSurfaceLifecycle.TryGetRewardChoice(reward, out var presentation)
-            ? presentation
-            : null;
+    private static RunSurfaceLifecycle.CardChoicePresentation? GetCardChoicePresentation(
+        StepRequest request,
+        Node screen)
+    {
+        if (!ViewerPacing.IsInteractiveGui)
+            return null;
+        if (screen is NCardRewardSelectionScreen reward
+            && RunSurfaceLifecycle.TryGetRewardChoice(reward, out var rewardChoice))
+            return rewardChoice;
+        if (request.ExpectedRoute.Owner == ObservationOwner.Run
+            && screen is NChooseACardSelectionScreen selection
+            && RunSurfaceLifecycle.TryGetCardChoice(selection, out var cardChoice))
+            return cardChoice;
+        return null;
+    }
 
     // A reward refresh can recycle a holder while leaving the overlay itself open.
-    private static bool IsOverlayPresentationCurrent(Node screen, RunSurfaceLifecycle.NativeRewardChoice? presentation) =>
+    private static bool IsOverlayPresentationCurrent(
+        StepRequest request,
+        Node screen,
+        RunSurfaceLifecycle.CardChoicePresentation? presentation) =>
         ReferenceEquals(NOverlayStack.Instance?.Peek(), screen)
-        && ReferenceEquals(GetCardRewardPresentation(screen), presentation);
+        && ReferenceEquals(GetCardChoicePresentation(request, screen), presentation);
 
-    private static double CardRewardFocusSeconds(RunSurfaceLifecycle.NativeRewardChoice? presentation, double focusSeconds)
+    private static double CardRewardFocusSeconds(
+        RunSurfaceLifecycle.CardChoicePresentation? presentation,
+        double focusSeconds)
     {
         if (presentation is null)
             return focusSeconds;
