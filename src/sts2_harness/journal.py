@@ -1,6 +1,7 @@
 """One dependency sequence with compressed content-addressed game and model evidence."""
 
 import hashlib
+import json
 import os
 import sqlite3
 import subprocess
@@ -979,8 +980,18 @@ class Journal:
             if connection is not None:
                 connection.execute(
                     "INSERT INTO card_choices VALUES (?,?,?)",
-                    (completion.stream, completion.call_id, self._blob(connection, completion)),
+                    (
+                        completion.stream,
+                        self._card_choice_key(completion),
+                        self._blob(connection, completion),
+                    ),
                 )
+
+    @staticmethod
+    def _card_choice_key(completion: CardChoiceCompletion) -> str:
+        if completion.batch_index is None:
+            return completion.call_id
+        return json.dumps((completion.call_id, completion.batch_index), separators=(",", ":"))
 
     def card_choices(self) -> tuple[CardChoiceCompletion, ...]:
         try:
@@ -993,7 +1004,7 @@ class Journal:
                     value = CardChoiceCompletion.model_validate_json(
                         self._read_blob(connection, raw)
                     )
-                    if (value.stream, value.call_id) != (stream, call_id):
+                    if (value.stream, self._card_choice_key(value)) != (stream, call_id):
                         raise ArchiveError("The card choice evidence identity is inconsistent.")
                     result.append(value)
                 return tuple(result)

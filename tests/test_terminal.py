@@ -102,7 +102,9 @@ class TerminalMod:
 class TerminalSource(Source):
     route_plan = None
 
-    def deck(self, observation: native.Observation, offer: native.Offer | None) -> DeckAgent:
+    def deck(
+        self, observation: native.Observation, offer: native.Offer | None, resolved: frozenset[str]
+    ) -> DeckAgent:
         raise AssertionError("This fixture has no card rewards.")
 
     def card_progress(self, progress: AutomaticProgress, result: ActionToolResult) -> None:

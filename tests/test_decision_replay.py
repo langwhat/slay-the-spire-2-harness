@@ -135,7 +135,8 @@ def test_replay_cli_and_journal_use_shared_effort(
             else (
                 "choice",
                 "run_deck_choice",
-                '{"offer":"offer","choice":"take","card":"candidate","reason":"Useful."}',
+                '{"choices":[{"offer":"offer","choice":"take",'
+                '"card":"candidate","reason":"Useful."}]}',
             )
         )
         return httpx.Response(
@@ -555,10 +556,14 @@ def test_real_loop_resolves_reward_without_writing_notes_or_native_action(
                         "run_deck_choice",
                         json.dumps(
                             {
-                                "offer": "offer",
-                                "choice": "take",
-                                "card": "candidate",
-                                "reason": "A better turn.",
+                                "choices": [
+                                    {
+                                        "offer": "offer",
+                                        "choice": "take",
+                                        "card": "candidate",
+                                        "reason": "A better turn.",
+                                    }
+                                ]
                             }
                         ),
                     ),

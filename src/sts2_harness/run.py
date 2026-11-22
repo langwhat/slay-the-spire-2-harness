@@ -29,7 +29,6 @@ from sts2_harness.decisions import (
     DecisionSource,
     DecisionTask,
     HandoffTask,
-    LocalProgress,
     TaskComplete,
 )
 from sts2_harness.diagnostics import AutoFinished, Diagnostics
@@ -285,7 +284,7 @@ class RunAgent(Agent):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult | LocalProgress:
+    ) -> ActionProposal | QueryToolResult:
         if call.name == ToolName.RUN_ACT:
             result = await self._tools.dispatch_action(call, task)
             return (

@@ -168,7 +168,7 @@ class TakeCard(native.WireModel):
     offer: native.Nonempty | MISSING = MISSING
     choice: Literal[DeckChoice.TAKE]
     card: native.Nonempty | Annotated[tuple[native.Nonempty, ...], Field(min_length=1)]
-    reason: str
+    reason: native.Nonempty
 
     @property
     def cards(self) -> tuple[str, ...]:
@@ -178,10 +178,12 @@ class TakeCard(native.WireModel):
 class SkipCard(native.WireModel):
     offer: native.Nonempty | MISSING = MISSING
     choice: Literal[DeckChoice.SKIP]
-    reason: str
+    reason: native.Nonempty
 
 
-class RunDeckChoice(RootModel[TakeCard | SkipCard]):
+class RunDeckChoice(native.WireModel):
+    choices: Annotated[tuple[TakeCard | SkipCard, ...], Field(min_length=1)]
+
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler

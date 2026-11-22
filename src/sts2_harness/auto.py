@@ -5,8 +5,17 @@ from enum import StrEnum
 from pydantic import MISSING
 
 from sts2_harness.client import models as native
+from sts2_harness.context.map_projection import MapRoom
 from sts2_harness.context.models import AutomaticProgress
-from sts2_harness.decisions import ActionKind, ActionProposal, ActionStep
+from sts2_harness.decisions import (
+    ActionDecision,
+    ActionKind,
+    ActionProposal,
+    ActionStep,
+    DecisionTask,
+)
+from sts2_harness.execution.recovery import DecisionInterrupted
+from sts2_harness.results import ActionCompleted, ActionToolResult, Reason, ReasonCode
 
 
 class _Reason(StrEnum):
@@ -209,3 +218,80 @@ def choose_auto(
         _Reason.CONTINUE: _CONTINUE_REASONS[language],
     }[kind]
     return ActionProposal((step,), reason), AutomaticProgress(label=label, reason=reason)
+
+
+_REWARD_REASONS = {
+    "eng": "Claim the reward before choosing cards.",
+    "zhs": "选择卡牌前领取奖励。",
+    "zht": "選擇卡牌前領取獎勵。",
+    "deu": "Die Belohnung vor der Kartenauswahl abholen.",
+    "esp": "Recoge la recompensa antes de elegir cartas.",
+    "fra": "Récupérer la récompense avant de choisir les cartes.",
+    "ind": "Ambil hadiah sebelum memilih kartu.",
+    "ita": "Riscatta la ricompensa prima di scegliere le carte.",
+    "jpn": "カードを選ぶ前に報酬を受け取る。",
+    "kor": "카드를 선택하기 전에 보상을 받습니다.",
+    "pol": "Odbierz nagrodę przed wyborem kart.",
+    "ptb": "Resgate a recompensa antes de escolher as cartas.",
+    "rus": "Забрать награду перед выбором карт.",
+    "spa": "Recoge la recompensa antes de elegir cartas.",
+    "tha": "รับรางวัลก่อนเลือกการ์ด",
+    "tur": "Kart seçmeden önce ödülü al.",
+}
+
+
+def battle_reward(observation: native.Observation) -> native.Action | None:
+    state = observation.state
+    if (
+        not isinstance(state, native.RunState)
+        or state.screen is not native.RunScreen.REWARDS
+        or state.control is not native.StateControl.READY
+        or state.progress.room_type not in (MapRoom.MONSTER, MapRoom.ELITE, MapRoom.BOSS)
+        or state.selection is not None
+        or observation.game_language not in _REWARD_REASONS
+    ):
+        return None
+    enabled = {action.ref: action for action in state.actions if action.enabled}
+    kinds = (native.OfferKind.RELIC, native.OfferKind.GOLD)
+    if state.player.empty_potion_slot_count > 0:
+        kinds = (*kinds, native.OfferKind.POTION)
+    for kind in kinds:
+        for offer in state.offers:
+            if offer.kind is kind:
+                for reference in offer.actions:
+                    if reference in enabled:
+                        return enabled[reference]
+    return None
+
+
+class BattleRewardAuto:
+    def __init__(self) -> None:
+        self.before: native.Observation | None = None
+        self.progress: AutomaticProgress | None = None
+        self.succeeded = False
+
+    async def decide(self, task: DecisionTask, observation: native.Observation) -> ActionDecision:
+        action = battle_reward(observation)
+        if action is None:
+            raise DecisionInterrupted(
+                Reason(
+                    code=ReasonCode.ROLE_CHANGED, message="The automatic battle reward changed."
+                ),
+                False,
+            )
+        self.before = observation
+        reason = _REWARD_REASONS[observation.game_language]
+        self.progress = AutomaticProgress(label=action.label, reason=reason)
+        proposal = ActionProposal(
+            (ActionStep(ActionKind.INTERACT, action.ref),), reason, allow_map_travel=False
+        )
+        return ActionDecision(proposal)
+
+    async def accept(self, outcome: ActionToolResult) -> None:
+        after = outcome.observation
+        self.succeeded = (
+            isinstance(outcome.outcome, ActionCompleted)
+            and after is not None
+            and self.before is not None
+            and after.model_copy(update={"stamp": self.before.stamp}) != self.before
+        )

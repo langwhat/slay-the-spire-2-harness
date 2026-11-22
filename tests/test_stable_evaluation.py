@@ -390,10 +390,14 @@ def test_fresh_decision_uses_production_task_without_old_notes_or_report(tmp_pat
                         "run_deck_choice",
                         json.dumps(
                             {
-                                "offer": "offer",
-                                "choice": "take",
-                                "card": "candidate",
-                                "reason": "A useful card.",
+                                "choices": [
+                                    {
+                                        "offer": "offer",
+                                        "choice": "take",
+                                        "card": "candidate",
+                                        "reason": "A useful card.",
+                                    }
+                                ]
                             }
                         ),
                     )
@@ -614,7 +618,11 @@ def test_plan_estimate_failure_usage_and_report(
             content = ("data: " + json.dumps(event) + "\n\n").encode()
         else:
             content = reply(
-                ("choice", "run_deck_choice", '{"offer":"offer","choice":"skip","reason":"Wait."}')
+                (
+                    "choice",
+                    "run_deck_choice",
+                    '{"choices":[{"offer":"offer","choice":"skip","reason":"Wait."}]}',
+                )
             )
         return httpx.Response(200, content=content, headers={"Content-Type": "text/event-stream"})
 
@@ -904,9 +912,9 @@ def test_report_compares_unscored_combat_proposals_and_reasons(tmp_path: Path) -
         ),
         (
             ToolName.RUN_DECK_CHOICE,
-            '{"choice":"take","card":"c1","reason":"First."}',
+            '{"choices":[{"choice":"take","card":"c1","reason":"First."}]}',
             ToolName.RUN_DECK_CHOICE,
-            '{"reason":"Second.","card":["c1"],"choice":"take"}',
+            '{"choices":[{"reason":"Second.","card":["c1"],"choice":"take"}]}',
             "same",
         ),
         (
@@ -1571,9 +1579,13 @@ def test_fresh_deck_scores_multiple_chosen_cards(tmp_path: Path) -> None:
                 "run_deck_choice",
                 json.dumps(
                     {
-                        "choice": "take",
-                        "card": ["candidate", "candidate-2"],
-                        "reason": "Take both.",
+                        "choices": [
+                            {
+                                "choice": "take",
+                                "card": ["candidate", "candidate-2"],
+                                "reason": "Take both.",
+                            }
+                        ]
                     }
                 ),
             )
@@ -1634,7 +1646,7 @@ def test_deck_choice_requires_ready_control_and_input(
             '{"complete":false,"catalog":{"categories":[],"card_filters":'
             '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
         )
-        arguments = '{"choice":"take","card":"candidate","reason":"Choose it."}'
+        arguments = '{"choices":[{"choice":"take","card":"candidate","reason":"Choose it."}]}'
         requests: list[httpx.Request] = []
 
         def respond(request: httpx.Request) -> httpx.Response:
@@ -1907,7 +1919,10 @@ def test_schema_valid_but_illegal_choice_is_not_scored(
         )
         if role is EvaluationRole.DECK:
             name = "run_deck_choice"
-            arguments = '{"offer":"WRONG-OFFER","choice":"take","card":"candidate","reason":"Try."}'
+            arguments = (
+                '{"choices":[{"offer":"WRONG-OFFER","choice":"take",'
+                '"card":"candidate","reason":"Try."}]}'
+            )
         else:
             name = "run_act"
             arguments = '{"steps":[{"kind":"select","refs":["owned"]}],"reason":"Try."}'

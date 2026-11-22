@@ -7,7 +7,7 @@ from typing import Annotated, Protocol
 from pydantic import MISSING, Field
 
 from sts2_harness.client import models as native
-from sts2_harness.results import ActionToolResult, QueryToolResult, SemanticValue
+from sts2_harness.results import ActionToolResult, SemanticValue
 
 
 class ActionKind(StrEnum):
@@ -41,6 +41,20 @@ class ActionProposal:
 
 
 @dataclass(frozen=True, slots=True)
+class CardRewardChoice:
+    offer: native.Offer | None
+    refs: tuple[str, ...]
+    reason: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CardRewardPlan(ActionProposal):
+    choices: tuple[CardRewardChoice, ...]
+    before: native.Observation
+    resolved: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class ActionDecision:
     proposal: ActionProposal
     handoff_processed: bool = False
@@ -51,12 +65,7 @@ class TaskComplete:
     text: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class LocalProgress:
-    result: QueryToolResult
-
-
-type Decision = ActionDecision | TaskComplete | LocalProgress
+type Decision = ActionDecision | TaskComplete
 
 
 class BattleLocation(SemanticValue):

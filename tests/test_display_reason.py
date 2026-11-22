@@ -20,10 +20,9 @@ from sts2_harness.decisions import (
     ActTask,
     Decision,
     DecisionTask,
-    LocalProgress,
 )
 from sts2_harness.deck_role import DeckAgent
-from sts2_harness.execution import Execution
+from sts2_harness.execution import Executed, Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import LiveGame
 from sts2_harness.interactive import InteractiveOptions, run_interactive
@@ -180,14 +179,16 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
     action_ref = map_obs.state.actions[0].ref
 
     published: list[str] = []
+    current = map_obs
 
     def respond(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/status":
             return httpx.Response(
                 200,
                 json={
-                    "location": map_obs.location.model_dump(mode="json"),
+                    "location": current.location.model_dump(mode="json"),
                     "control_intent": "running",
+                    "presentation": None,
                     "input_readiness": "ready",
                     "receipt": None,
                 },
@@ -196,7 +197,7 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
             return httpx.Response(
                 200,
                 content=native.StateCompleted(
-                    status=native.ResultStatus.COMPLETED, observation=map_obs
+                    status=native.ResultStatus.COMPLETED, observation=current
                 ).to_json(),
             )
         raise AssertionError(f"Unexpected path {request.url.path}")
@@ -230,9 +231,13 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
                     ToolName.RUN_DECK_CHOICE.value,
                     json.dumps(
                         {
-                            "choice": "skip",
-                            "offer": "offer:1",
-                            "reason": "Skip redundant attack to keep draw lean.",
+                            "choices": [
+                                {
+                                    "choice": "skip",
+                                    "offer": "offer:1",
+                                    "reason": "Skip redundant attack to keep draw lean.",
+                                }
+                            ]
                         }
                     ),
                 )
@@ -251,6 +256,7 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
         )
 
     async def exercise() -> None:
+        nonlocal current
         async with (
             ModClient("http://mod.test", transport=httpx.MockTransport(respond)) as client,
             Llm(configuration(tmp_path), transport=httpx.MockTransport(deck_model)) as model,
@@ -312,8 +318,9 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
                 user_input=UserInputQueue(),
             )
             reward_route = native.RouteKey.model_validate(reward_obs.location.model_dump())
-            decision = await deck.decide(ActTask(reward_route), reward_obs)
-            assert isinstance(decision, LocalProgress)
+            current = reward_obs
+            decision = await execution.run_unit(deck, ActTask(reward_route))
+            assert isinstance(decision, Executed)
             assert published == ["Skip redundant attack to keep draw lean."]
             assert len(material_reads) == 1
             assert "[viewer]" in deck_requests[0]

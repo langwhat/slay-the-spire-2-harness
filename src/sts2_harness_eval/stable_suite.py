@@ -331,16 +331,23 @@ def _proposal_action(proposal: CapturedProposal) -> tuple[ToolName, dict[str, Js
     try:
         json.loads(proposal.arguments, object_pairs_hook=unique_fields)
         parsed = schema.model_validate_json(proposal.arguments, strict=True)
-        value = (
-            parsed.root
-            if isinstance(parsed, (CombatActInput, RunActInput, RunDeckChoice))
-            else parsed
-        )
-        action = _JSON_OBJECT.validate_json(value.model_dump_json(exclude={"reason"}), strict=True)
+        value = parsed.root if isinstance(parsed, (CombatActInput, RunActInput)) else parsed
+        if isinstance(value, RunDeckChoice):
+            choices: list[JsonValue] = []
+            for item in value.choices:
+                decision = _JSON_OBJECT.validate_json(
+                    item.model_dump_json(exclude={"reason"}), strict=True
+                )
+                if isinstance(item, TakeCard):
+                    decision["card"] = list(item.cards)
+                choices.append(decision)
+            action: dict[str, JsonValue] = {"choices": choices}
+        else:
+            action = _JSON_OBJECT.validate_json(
+                value.model_dump_json(exclude={"reason"}), strict=True
+            )
     except (ValueError, ValidationError):
         return None
-    if isinstance(value, TakeCard):
-        action["card"] = list(value.cards)
     return proposal.tool, action
 
 

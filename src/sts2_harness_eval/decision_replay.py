@@ -23,7 +23,6 @@ from sts2_harness.decisions import (
     CombatHandoff,
     DecisionTask,
     HandoffTask,
-    LocalProgress,
     SelectStep,
 )
 from sts2_harness.deck import deck_context, deck_observation
@@ -179,6 +178,9 @@ class DecisionDeviation(ExtractionError):
 class DecisionRun(DeckAgent):
     """Restore harness-owned history and stop at its first proposed native decision."""
 
+    def offered(self, observation: native.Observation) -> bool:
+        return self.variant is DecisionVariant.RUN or super().offered(observation)
+
     def _reward_view(self, observation: native.Observation) -> native.Observation:
         return observation
 
@@ -188,7 +190,7 @@ class DecisionRun(DeckAgent):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult | LocalProgress:
+    ) -> ActionProposal | QueryToolResult:
         if self.variant is DecisionVariant.DECK and call.name != ToolName.RUN_DECK_CHOICE:
             raise DecisionDeviation("The deck role proposed a tool outside its tool set.")
         if call.name not in (
@@ -209,7 +211,9 @@ class DecisionRun(DeckAgent):
             raise DecisionDeviation(result.outcome.reason.message)
         if call.name == ToolName.RUN_DECK_CHOICE:
             arguments = _JSON.validate_json(call.arguments)
-            if arguments.get("offer") != self.case.decision_offer:
+            submitted = arguments.get("choices")
+            first = submitted[0] if isinstance(submitted, list) and len(submitted) == 1 else None
+            if not isinstance(first, dict) or first.get("offer") != self.case.decision_offer:
                 raise DecisionDeviation("The model chose a different native card offer.")
         if call.name == ToolName.RUN_ACT:
             if not isinstance(result, ActionProposal) or len(result.steps) != 1:
@@ -837,7 +841,9 @@ async def sample_case(
     except _ChoiceMade as chosen:
         choices = chosen.choices
         arguments = _JSON.validate_json(chosen.call.arguments)
-        value = arguments.get("reason")
+        submitted = arguments.get("choices")
+        first = submitted[0] if isinstance(submitted, list) and len(submitted) == 1 else None
+        value = first.get("reason") if isinstance(first, dict) else arguments.get("reason")
         reason = value if isinstance(value, str) else ""
         value = arguments.get("over")
         over = value if isinstance(value, str) else None

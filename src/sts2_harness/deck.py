@@ -20,6 +20,7 @@ class CardChoiceKind(StrEnum):
 class CardChoiceCompletion(native.WireModel):
     stream: str
     call_id: str
+    batch_index: int | None = None
     offer_ref: str | None
     choice: CardChoiceKind
     card_ref: str | tuple[str, ...] | None
@@ -66,20 +67,55 @@ def deck_context(
     return Context(native.DecisionOwner.RUN, system=system, minimal=minimal, focused_deck=True)
 
 
+def card_rewards(
+    observation: native.Observation,
+) -> tuple[tuple[native.Offer, ...], native.Offer | None]:
+    state = observation.state
+    if not isinstance(state, native.RunState) or state.screen is not native.RunScreen.REWARDS:
+        return (), None
+    offers = tuple(offer for offer in state.offers if offer.kind is native.OfferKind.CARD)
+    if state.selection is None:
+        return offers, None
+    candidates = set(state.selection.candidates)
+    matching = tuple(offer for offer in offers if set(offer.contents) == candidates)
+    if len(matching) == 2:
+        # The open overlay is published first, followed by its underlying reward.
+        overlay, active = matching
+        return tuple(offer for offer in offers if offer.ref != overlay.ref), active
+    return offers, matching[0] if len(matching) == 1 else None
+
+
+def same_card_options(
+    before: native.Observation, current: native.Observation, refs: tuple[str, ...]
+) -> bool:
+    return all(
+        before.objects.get(ref) == current.objects.get(ref)
+        and before.descriptions.get(ref) == current.descriptions.get(ref)
+        and before.upgrades.get(ref) == current.upgrades.get(ref)
+        and before.modifier_descriptions.get(ref) == current.modifier_descriptions.get(ref)
+        for ref in refs
+    )
+
+
 def deck_observation(
-    observation: native.Observation, offer: native.Offer | None
+    observation: native.Observation,
+    offers: native.Offer | tuple[native.Offer, ...] | None,
 ) -> native.Observation:
     state = observation.state
     assert isinstance(state, native.RunState)
-    actions = tuple(
-        action for action in state.actions if offer is not None and action.ref in offer.actions
-    )
-    selection = state.selection if offer is not None else adding_selection(observation)
-    if selection is not None and offer is not None:
-        candidates = tuple(ref for ref in selection.candidates if ref in offer.contents)
-        if not set(offer.contents).issubset(selection.candidates) or selection.min > len(
-            candidates
-        ):
+    if isinstance(offers, native.Offer):
+        offers = (offers,)
+    offers = offers or ()
+    action_refs = {ref for offer in offers for ref in offer.actions}
+    actions = tuple(action for action in state.actions if action.ref in action_refs)
+    selection = state.selection if offers else adding_selection(observation)
+    if selection is not None and offers:
+        candidates = tuple(
+            ref for ref in selection.candidates if any(ref in offer.contents for offer in offers)
+        )
+        if not any(
+            set(offer.contents) <= set(selection.candidates) for offer in offers
+        ) or selection.min > len(candidates):
             selection = None
         else:
             selection = selection.model_copy(
@@ -90,7 +126,7 @@ def deck_observation(
                 }
             )
     refs = set((*state.deck, *state.relics, *state.potions))
-    if offer is not None:
+    for offer in offers:
         refs.update((offer.ref, *offer.contents))
     if selection is not None:
         refs.update(selection.candidates)
@@ -104,7 +140,7 @@ def deck_observation(
         update={
             "state": state.model_copy(
                 update={
-                    "offers": (offer,) if offer is not None else (),
+                    "offers": offers,
                     "actions": actions,
                     "selection": selection,
                     "event": None,

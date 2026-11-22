@@ -177,9 +177,18 @@ type QueryData = (
 
 
 @dataclass(frozen=True, slots=True)
+class CardRewardResult:
+    before: native.Observation
+    after: native.Observation | None
+    outcome: ActionOutcome
+    local_decline: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ActionToolResult:
     outcome: ActionOutcome
     observation: native.Observation | None
+    card_rewards: tuple[CardRewardResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,7 +13,7 @@ from sts2_harness.combat import CombatAgent
 from sts2_harness.context import Context, same_observation
 from sts2_harness.context.map_projection import MapRoom, MapUnavailable, replace_stretches
 from sts2_harness.context.models import TaskMessage
-from sts2_harness.decisions import ActionProposal, ActTask, DecisionTask, LocalProgress
+from sts2_harness.decisions import ActionProposal, ActTask, DecisionTask
 from sts2_harness.deck_role import DeckAgent
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
@@ -133,7 +133,7 @@ class CaptureDecision(Agent):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult | LocalProgress:
+    ) -> ActionProposal | QueryToolResult:
         if call.name in self.all_decisions:
             definition = next(
                 (item for item in self._tools.definitions if item.name == call.name), None
@@ -294,7 +294,7 @@ class DeckProbe(CaptureDecision, DeckAgent):
             not in (native.InputReadiness.READY, native.InputReadiness.SELECTION)
         ):
             raise Captured(call, ProposalStatus.INVALID, "The card choice is not ready.")
-        result = await self._deck_choice(call, task)
+        result = await self._deck_choice(call, task, observation)
         if isinstance(result, QueryToolResult) and isinstance(result.outcome, (Rejected, Failed)):
             reason = result.outcome.reason
             status = (
@@ -589,7 +589,16 @@ def _proposal_details(call: ToolCall) -> tuple[CapturedProposal, dict[str, JsonV
     except (ValueError, ValidationError):
         arguments = {}
     value = arguments.get("reason") if sum(key == "reason" for key, _ in root_fields) == 1 else None
-    return proposal, arguments, value if isinstance(value, str) else ""
+    if isinstance(value, str):
+        return proposal, arguments, value
+    choices = arguments.get("choices")
+    reasons: list[str] = []
+    if isinstance(choices, list):
+        for choice in choices:
+            reason = choice.get("reason") if isinstance(choice, dict) else None
+            if isinstance(reason, str):
+                reasons.append(reason)
+    return proposal, arguments, "\n".join(reasons)
 
 
 def _verify_initial_selection(step: native.NativeStep, observation: native.Observation) -> None:

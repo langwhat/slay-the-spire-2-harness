@@ -183,7 +183,9 @@ class RunSession:
         self._run_stream += 1
         return self._dependencies.model(ModelPurpose.RUN, f"run:{self._run_stream}")
 
-    def _deck(self, opening: native.Observation, offer: native.Offer | None) -> DeckRole:
+    def _deck(
+        self, opening: native.Observation, offer: native.Offer | None, resolved: frozenset[str]
+    ) -> DeckRole:
         if self._deck_factory is not None:
             return self._deck_factory(self.execution, self.recovery, opening, offer)
         self._deck_stream += 1
@@ -192,7 +194,7 @@ class RunSession:
             lambda: self._dependencies.model(ModelPurpose.DECK, stream),
             self._tools(native.DecisionOwner.RUN, focused_deck=True),
             self.recovery,
-            offer_ref=offer.ref if offer is not None else None,
+            resolved=resolved,
             stream=stream,
             prompts=self._dependencies.prompts,
             materials=self._materials(MaterialRole.DECK),

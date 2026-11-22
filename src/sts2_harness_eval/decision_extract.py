@@ -116,7 +116,8 @@ class _SourceSession(RunSession):
         return self.run_role
 
 
-type DecisionInput = tool_inputs.RunAct | tool_inputs.TakeCard | tool_inputs.SkipCard
+type SingleDecisionInput = tool_inputs.RunAct | tool_inputs.TakeCard | tool_inputs.SkipCard
+type DecisionInput = SingleDecisionInput | tool_inputs.RunDeckChoice
 
 
 def decision_input(call: ToolCall) -> DecisionInput:
@@ -124,9 +125,15 @@ def decision_input(call: ToolCall) -> DecisionInput:
     try:
         match call.name:
             case ToolName.RUN_DECK_CHOICE:
-                return tool_inputs.RunDeckChoice.model_validate_json(
-                    call.arguments, strict=True
-                ).root
+                try:
+                    return tool_inputs.RunDeckChoice.model_validate_json(
+                        call.arguments, strict=True
+                    )
+                except ValidationError:
+                    # Frozen evidence from the single-reward interface retains its original shape.
+                    return TypeAdapter(tool_inputs.TakeCard | tool_inputs.SkipCard).validate_json(
+                        call.arguments, strict=True
+                    )
             case ToolName.RUN_ACT:
                 return tool_inputs.RunActInput.model_validate_json(call.arguments, strict=True).root
             case _:
@@ -283,6 +290,10 @@ def choices_for(decision: DecisionInput, observation: native.Observation) -> tup
     """Resolve native instance refs without guessing from localized labels."""
     refs: list[str] = []
     match decision:
+        case tool_inputs.RunDeckChoice():
+            return tuple(
+                choice for item in decision.choices for choice in choices_for(item, observation)
+            )
         case tool_inputs.SkipCard():
             return ("skip",)
         case tool_inputs.TakeCard():
@@ -440,9 +451,10 @@ def _native_observation(
         before, after = raw.state, delivered.state
         if not isinstance(before, native.RunState) or not isinstance(after, native.RunState):
             continue
-        for offer in before.offers:
-            if offer.kind is native.OfferKind.CARD and deck_observation(raw, offer) == delivered:
-                return raw, ()
+        if after.offers and deck_observation(raw, after.offers) == delivered:
+            return raw, ()
+        if not after.offers and deck_observation(raw, None) == delivered:
+            return raw, ()
         declined = tuple(offer.ref for offer in before.offers if offer not in after.offers)
         if run_observation(raw) == delivered:
             return raw, declined
@@ -631,7 +643,7 @@ def _deck_count(observation: native.Observation, identity: str) -> int:
     )
 
 
-def _source_decision(call: ToolCall, tools: tuple[ToolDefinition, ...]) -> DecisionInput:
+def _source_decision(call: ToolCall, tools: tuple[ToolDefinition, ...]) -> SingleDecisionInput:
     schema = next((tool.parameters for tool in tools if tool.name == call.name), None)
     if schema is None:
         raise ExtractionError("The recorded decision has no source tool schema.")
@@ -641,12 +653,14 @@ def _source_decision(call: ToolCall, tools: tuple[ToolDefinition, ...]) -> Decis
         raise ExtractionError(
             "The recorded decision was rejected by its source tool schema."
         ) from None
-    if not isinstance(validated, (tool_inputs.RunActInput, tool_inputs.RunDeckChoice)):
-        raise ExtractionError("The recorded decision has no labeled decision input.")
-    return validated.root
+    if isinstance(validated, tool_inputs.RunActInput):
+        return validated.root
+    if isinstance(validated, tool_inputs.RunDeckChoice) and len(validated.choices) == 1:
+        return validated.choices[0]
+    raise ExtractionError("A single-decision case requires one recorded card reward choice.")
 
 
-def _decision_offer(decision: DecisionInput) -> str | None:
+def _decision_offer(decision: SingleDecisionInput) -> str | None:
     if isinstance(decision, tool_inputs.RunAct) or decision.offer is MISSING:
         return None
     return decision.offer
@@ -656,7 +670,7 @@ def _recorded_completion(
     journal: Journal,
     source: DecisionSource,
     call: ToolCall,
-    decision: DecisionInput,
+    decision: SingleDecisionInput,
     observation: native.Observation,
 ) -> dict[str, JsonValue]:
     chosen = decision.card if isinstance(decision, tool_inputs.TakeCard) else None

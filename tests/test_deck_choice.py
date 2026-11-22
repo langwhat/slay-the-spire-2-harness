@@ -1,6 +1,5 @@
 import asyncio
 import json
-import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -15,7 +14,7 @@ from test_run import handoff
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
-from sts2_harness.context.models import RunActContent, RunActHandoffContent
+from sts2_harness.context.models import RunActHandoffContent
 from sts2_harness.deck_role import DeckAgent
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.fights import Fight, FightKind
@@ -24,16 +23,15 @@ from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import AutomaticSnapshot, ResultSnapshot, RunTaskSnapshot
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
-from sts2_harness.llm.messages import AssistantMessage, ModelClient
+from sts2_harness.llm.messages import ModelClient
 from sts2_harness.loop import DefaultFlow
 from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
-from sts2_harness.results import ActionCompleted, ActionUnknown, ReadCompleted
+from sts2_harness.results import ActionCompleted, ActionStopped, ActionUnknown, ReadCompleted
 from sts2_harness.tools import ToolCatalog, ToolName
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness.user_input_values import UserInput
-from sts2_harness_eval._replay import ReplayRejected
-from sts2_harness_eval.decision_cases import DecisionLabels, DecisionSource, TaskEvent
+from sts2_harness_eval.decision_cases import DecisionLabels, DecisionSource
 from sts2_harness_eval.decision_extract import ExtractionError, extract_case
 
 
@@ -47,6 +45,8 @@ class RewardGame:
         self.skip_regular = False
         self.event_handoff = False
         self.event_take: tuple[str, ...] = ("gift",)
+        self.event_followup = False
+        self.take_guaranteed_first = False
         self.event_min = 1
         self.event_max = 1
         self.inputs: list[dict[str, JsonValue]] = []
@@ -168,6 +168,13 @@ class RewardGame:
             else:
                 assert state.screen in (native.RunScreen.EVENT, native.RunScreen.SELECTION)
                 update["screen"] = native.RunScreen.EVENT
+                if self.event_followup and step.step.refs == ("gift",):
+                    assert state.selection is not None
+                    update["screen"] = native.RunScreen.SELECTION
+                    update["selection"] = state.selection.model_copy(
+                        update={"prompt": "Next event card", "candidates": ("shared",)}
+                    )
+                    self.event_take = ("shared",)
         else:
             assert isinstance(step.step, native.Interact)
             action = step.step.action
@@ -233,7 +240,9 @@ class RewardGame:
                         source=None,
                         min=self.event_min,
                         max=self.event_max,
-                        candidates=("gift", "shared") if self.event_handoff else ("gift",),
+                        candidates=("gift", "shared")
+                        if self.event_handoff and not self.event_followup
+                        else ("gift",),
                         selected=(),
                     ),
                 }
@@ -292,41 +301,58 @@ class RewardGame:
             assert names == {"run_deck_choice"}
             messages = body["input"]
             assert isinstance(messages, list)
-            first = next(m for m in messages if isinstance(m, dict) and m.get("role") == "user")
-            assert isinstance(first, dict) and isinstance(first["content"], str)
-            task = TypeAdapter(dict[str, JsonValue]).validate_json(first["content"])
-            observation = task["observation"]
-            assert isinstance(observation, dict)
-            choice = observation["choice"]
-            assert isinstance(choice, dict)
+            choice: dict[str, JsonValue] | None = None
+            for message in reversed(messages):
+                if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+                    continue
+                content = message["content"]
+                assert isinstance(content, str)
+                if not content.startswith("{"):
+                    continue
+                task = TypeAdapter(dict[str, JsonValue]).validate_json(content)
+                observation = task.get("observation")
+                if isinstance(observation, dict) and isinstance(observation.get("choice"), dict):
+                    candidate = observation["choice"]
+                    assert isinstance(candidate, dict)
+                    choice = candidate
+                    break
+            assert choice is not None
             offers = choice.get("offers", [])
             assert isinstance(offers, list)
-            if not offers:
+            plans: list[dict[str, object]] = []
+            for offered in offers:
+                assert isinstance(offered, dict) and isinstance(offered["ref"], str)
+                offer = offered["ref"]
+                cards = offered["candidates"]
+                assert isinstance(cards, list) and cards
+                card = cards[0]
+                skip = offer == "local" or (offer == "regular" and self.skip_regular)
                 args: dict[str, object] = {
+                    "offer": offer,
+                    "choice": "skip" if skip else "take",
+                    "reason": "Measured " + offer,
+                }
+                if not skip:
+                    args["card"] = card["ref"] if isinstance(card, dict) else card
+                plans.append(args)
+            if not offers:
+                args = {
                     "choice": "take" if self.event_take else "skip",
                     "reason": "Event addition.",
                 }
                 if self.event_take:
-                    args.update(card=list(self.event_take))
-                return httpx.Response(
-                    200,
-                    content=reply((f"event-choice-{index}", "run_deck_choice", json.dumps(args))),
-                    headers={"Content-Type": "text/event-stream"},
-                )
-            assert len(offers) == 1
-            focused = offers[0]
-            assert isinstance(focused, dict) and isinstance(focused["ref"], str)
-            offer = focused["ref"]
-            args = {
-                "offer": offer,
-                "choice": "skip"
-                if offer == "local" or (offer == "regular" and self.skip_regular)
-                else "take",
-                "reason": "Measured " + offer,
-            }
-            if args["choice"] == "take":
-                args.update(card=offer)
-            calls.append((f"choice-{index}", "run_deck_choice", json.dumps(args)))
+                    args["card"] = list(self.event_take)
+                plans.append(args)
+            if self.take_guaranteed_first:
+                plans.sort(key=lambda plan: plan.get("offer") == "local")
+                plans.sort(key=lambda plan: plan.get("offer") != "guaranteed")
+            selection = choice.get("selection")
+            if isinstance(selection, dict):
+                candidates = selection["candidates"]
+                assert isinstance(candidates, list)
+                active = [item["ref"] if isinstance(item, dict) else item for item in candidates]
+                plans.sort(key=lambda plan: plan.get("card") not in active)
+            calls.append((f"choice-{index}", "run_deck_choice", json.dumps({"choices": plans})))
         elif state.screen is native.RunScreen.REWARDS:
             if not self.minimal:
                 calls.append(
@@ -407,20 +433,16 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
         (tmp_path / "actual-request-bodies.json").write_text(
             json.dumps(game.inputs, ensure_ascii=False, indent=2)
         )
-        for body in game.inputs[:3]:
-            assert "progress.bosses_left" in json.dumps(body, ensure_ascii=False)
-        assert [body.get("prompt_cache_key") for body in game.inputs] == [
-            "rewards:deck",
-            "rewards:deck",
-            "rewards:deck",
-            "rewards:run",
-            "rewards:run",
-            "rewards:run",
-        ]
+        deck_count = 2 if unknown else 1
+        assert [body.get("prompt_cache_key") for body in game.inputs] == (
+            ["rewards:deck"] * deck_count + ["rewards:run"] * 3
+        )
         with closing(Journal.open(archive)) as journal:
             completions = journal.card_choices()
             assert len(completions) == 3
-            assert [c.stream for c in completions] == ["deck:1", "deck:2", "deck:3"]
+            assert [c.stream for c in completions] == ["deck:1"] * 3
+            assert [c.batch_index for c in completions] == [1, 2, 1 if unknown else 3]
+            assert (completions[0].call_id == completions[2].call_id) is not unknown
             assert (
                 isinstance(completions[0].outcome, ReadCompleted) and completions[0].local_decline
             )
@@ -431,52 +453,39 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
             stats, _ = session.deck_stats.view(completions[2].after)
             assert stats["added"] == (1 if unknown else 2) and stats["skipped"] == 1
             requests = journal.requests()
-            assert [
-                request.attempts[-1].reply.requested_effort
-                for request in requests
-                if request.attempts[-1].reply is not None
-            ] == ["low", "low", "low", "low", "low", "low"]
-            reasoning = [body["reasoning"] for body in game.inputs]
-            assert all(isinstance(item, dict) for item in reasoning)
-            assert [item["effort"] for item in reasoning if isinstance(item, dict)] == [
-                "low",
-                "low",
-                "low",
-                "low",
-                "low",
-                "low",
+            for request in requests:
+                reply = request.attempts[-1].reply
+                assert reply is not None and reply.requested_effort == "low"
+            assert [r.stream for r in requests] == ["deck:1"] * deck_count + ["run:1"] * 3
+            assert [step.action for step in game.steps if isinstance(step, native.Interact)] == [
+                "open-regular",
+                "open-guaranteed",
+                "gold",
+                "proceed",
+                "buy",
+                "close",
+                "finish",
             ]
-            assert [r.stream for r in requests] == [
-                "deck:1",
-                "deck:2",
-                "deck:3",
-                "run:1",
-                "run:1",
-                "run:1",
+            first_deck = requests[0]
+            task = next(m for m in first_deck.input if isinstance(m, RunTaskSnapshot))
+            payload = json.loads(task.text)["observation"]
+            assert "map" not in payload
+            assert "route" not in payload["progress"]
+            assert payload["deck_stats"]["circulating_avg_energy"] == 2.0
+            assert [offer["ref"] for offer in payload["choice"]["offers"]] == [
+                "local",
+                "regular",
+                "guaranteed",
             ]
-            assert not any(
-                isinstance(s, native.Interact) and s.action == "open-local" for s in game.steps
-            )
-            for record in requests[:3]:
-                task = next(m for m in record.input if isinstance(m, RunTaskSnapshot))
-                assert isinstance(task.content, RunActContent)
-                assert task.content.observation is not None
-                assert task.content.observation.map is MISSING
-                payload = json.loads(task.text)["observation"]
-                assert "map" not in payload
-                assert "route" not in payload["progress"]
-                assert payload["deck_stats"]["circulating_avg_energy"] == 2.0
-                assert len(payload["choice"]["offers"]) == 1
-            first_run = requests[3]
-            body_input = game.inputs[3]["input"]
+            first_run = requests[deck_count]
+            body_input = game.inputs[deck_count]["input"]
             assert isinstance(body_input, list)
-            texts: list[str] = []
-            for message in body_input:
-                assert isinstance(message, dict)
-                content = message.get("content")
-                if isinstance(content, str):
-                    texts.append(content)
-            first_run_text = "\n".join(texts)
+            texts = [
+                message["content"]
+                for message in body_input
+                if isinstance(message, dict) and isinstance(message.get("content"), str)
+            ]
+            first_run_text = "\n".join(text for text in texts if isinstance(text, str))
             assert '"circulating_avg_energy"' not in first_run_text
             assert "local mechanism" not in first_run_text
             assert "CARD.LOCAL" not in first_run_text
@@ -492,63 +501,301 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
             assert isinstance(reports[0].content.outcome, ActionCompleted)
             assert reports[0].content.outcome.completed_steps == 0
             assert isinstance(reports[1].content.outcome, ActionUnknown) is unknown
-            delivered = reports[0].content.observation
-            assert delivered is not None and isinstance(delivered.choice, dict)
-            offers = delivered.choice["offers"]
-            assert isinstance(offers, list) and len(offers) == 1
-            assert isinstance(offers[0], dict) and offers[0]["ref"] == "gold"
             if not minimal:
-                assert (
-                    "Existing Run note."
-                    in next(m for m in requests[2].input if isinstance(m, RunTaskSnapshot)).text
-                )
-            for record in requests[:3]:
-                model_reply = record.attempts[-1].reply
-                assert model_reply is not None
-                call = next(
-                    c
-                    for c in AssistantMessage(model_reply.native_reply).tool_calls
-                    if c.name == "run_deck_choice"
-                )
-                source = DecisionSource(
-                    round="fixture",
-                    seed="seed",
-                    floor=1,
-                    model_sequence=record.sequence,
-                    archive=archive,
-                )
-                if unknown and record.stream == "deck:2":
-                    with pytest.raises(ExtractionError, match="not confirmed complete"):
-                        await extract_case(source, DecisionLabels(comment="fixture"))
-                    continue
-                if unknown and record.stream == "deck:3":
-                    with pytest.raises(ReplayRejected):
-                        await extract_case(source, DecisionLabels(comment="fixture"))
-                    continue
-                case = await extract_case(source, DecisionLabels(comment="fixture"))
-                assert case.decision_offer == json.loads(call.arguments)["offer"]
-                assert isinstance(case.events[0], TaskEvent)
+                assert "Existing Run note." in task.text
             if not unknown:
                 source = DecisionSource(
                     round="fixture",
                     seed="seed",
                     floor=1,
-                    model_sequence=requests[2].sequence,
+                    model_sequence=first_deck.sequence,
                     archive=archive,
                 )
-                with closing(sqlite3.connect(archive)) as connection:
-                    row = connection.execute(
-                        "SELECT * FROM card_choices WHERE stream='deck:3'"
-                    ).fetchone()
-                    assert row is not None
-                    connection.execute("DELETE FROM card_choices WHERE stream='deck:3'")
-                    connection.commit()
-                    try:
-                        with pytest.raises(ExtractionError, match="no exact typed completion"):
-                            await extract_case(source, DecisionLabels(comment="fixture"))
-                    finally:
-                        connection.execute("INSERT INTO card_choices VALUES (?,?,?)", row)
-                        connection.commit()
+                with pytest.raises(ExtractionError, match="one recorded card reward choice"):
+                    await extract_case(source, DecisionLabels(comment="fixture"))
+
+    asyncio.run(scenario())
+
+
+def test_reward_candidate_change_stops_stale_choice_and_preserves_prior_take(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        game = RewardGame(minimal=False)
+        game.take_guaranteed_first = True
+        archive = tmp_path / "archive.sqlite"
+
+        def mod(request: httpx.Request) -> httpx.Response:
+            response = game.mod(request)
+            if request.url.path != "/action":
+                return response
+            current = game.observation
+            state = current.state
+            step = native.StepRequest.model_validate_json(request.content).step
+            if isinstance(step, native.Interact) and step.action == "open-regular":
+                assert isinstance(state, native.RunState) and state.selection is not None
+                regular = next(offer for offer in state.offers if offer.ref == "regular")
+                changed = regular.model_copy(update={"contents": ("shared",)})
+                overlay = changed.model_copy(update={"ref": "transient-overlay"})
+                game.observation = current.model_copy(
+                    update={
+                        "state": state.model_copy(
+                            update={
+                                "offers": (
+                                    overlay,
+                                    *(changed if o == regular else o for o in state.offers),
+                                ),
+                                "selection": state.selection.model_copy(
+                                    update={"candidates": ("shared",)}
+                                ),
+                            }
+                        )
+                    }
+                )
+            elif isinstance(step, native.Select) and step.refs == ("shared",):
+                assert isinstance(state, native.RunState)
+                game.observation = current.model_copy(
+                    update={
+                        "state": state.model_copy(
+                            update={
+                                "offers": tuple(
+                                    o for o in state.offers if o.ref != "transient-overlay"
+                                ),
+                            }
+                        )
+                    }
+                )
+            return response
+
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="changed-reward",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+            ),
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)),
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+        assert [step.action for step in game.steps if isinstance(step, native.Interact)][:2] == [
+            "open-guaranteed",
+            "open-regular",
+        ]
+        assert [step.refs for step in game.steps if isinstance(step, native.Select)] == [
+            ("shared",),
+            ("gift",),
+        ]
+        with closing(Journal.open(archive)) as journal:
+            first, stale, resolved, local = journal.card_choices()
+            assert [c.stream for c in (first, stale, resolved, local)] == ["deck:1"] * 4
+            assert first.call_id == stale.call_id and resolved.call_id == local.call_id
+            assert [first.offer_ref, stale.offer_ref, resolved.offer_ref] == [
+                "guaranteed",
+                "regular",
+                "regular",
+            ]
+            assert isinstance(first.outcome, ActionCompleted)
+            assert isinstance(stale.outcome, ActionStopped) and stale.outcome.completed_steps == 1
+            assert isinstance(resolved.outcome, ActionCompleted)
+            assert resolved.after is not None
+            assert resolved.after.state.deck == ("owned", "guaranteed", "shared")
+            second_request = journal.requests()[1]
+            task = next(m for m in reversed(second_request.input) if isinstance(m, RunTaskSnapshot))
+            offers = json.loads(task.text)["observation"]["choice"]["offers"]
+            assert [offer["ref"] for offer in offers] == ["local", "regular"]
+            assert any(
+                "The card reward groups or their available choices changed." in m.text
+                for m in second_request.input
+                if isinstance(m, ResultSnapshot)
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("full", (False, True))
+def test_battle_reward_order_and_full_potion_handoff(tmp_path: Path, full: bool) -> None:
+    async def scenario() -> None:
+        game = RewardGame(minimal=True)
+        observation = game.observation
+        state = observation.state
+        assert isinstance(state, native.RunState)
+        relic = native.RelicEntry(
+            kind=native.ObjectKind.RELIC, definition_id="RELIC.ONE", name="Relic"
+        )
+        potion = native.PotionEntry(
+            kind=native.ObjectKind.POTION,
+            definition_id="POTION.ONE",
+            name="Potion",
+            usable=False,
+            needs_target=False,
+            target_type=None,
+            usage=None,
+        )
+        offers = (
+            native.Offer(
+                ref="offered-potion",
+                kind=native.OfferKind.POTION,
+                contents=("new-potion",),
+                actions=("claim-potion",),
+            ),
+            native.Offer(
+                ref="offered-relic",
+                kind=native.OfferKind.RELIC,
+                contents=("reward-relic",),
+                actions=("claim-relic",),
+            ),
+        )
+        game.observation = observation.model_copy(
+            update={
+                "objects": {
+                    **observation.objects,
+                    "reward-relic": relic,
+                    "new-potion": potion,
+                    "old-potion": potion,
+                },
+                "state": state.model_copy(
+                    update={
+                        "progress": state.progress.model_copy(update={"room_type": "monster"}),
+                        "player": state.player.model_copy(
+                            update={"empty_potion_slot_count": int(not full)}
+                        ),
+                        "potions": ("old-potion",) if full else (),
+                        "offers": (*state.offers, *offers),
+                        "actions": (
+                            *state.actions,
+                            native.Action(ref="claim-potion", label="领取药水", enabled=True),
+                            native.Action(ref="claim-relic", label="领取遗物", enabled=True),
+                        ),
+                    }
+                ),
+            }
+        )
+
+        def mod(request: httpx.Request) -> httpx.Response:
+            if request.url.path != "/action":
+                return game.mod(request)
+            wire = native.StepRequest.model_validate_json(request.content)
+            step = wire.step
+            if not isinstance(step, native.Interact) or step.action not in {
+                "claim-potion",
+                "claim-relic",
+                "drop-potion",
+            }:
+                return game.mod(request)
+            current = game.observation
+            current_state = current.state
+            assert isinstance(current_state, native.RunState)
+            game.steps.append(step)
+            change: dict[str, object] = {}
+            if step.action == "claim-relic":
+                change["relics"] = ("reward-relic",)
+            elif step.action == "drop-potion":
+                change["potions"] = ()
+                change["player"] = current_state.player.model_copy(
+                    update={"empty_potion_slot_count": 1}
+                )
+            else:
+                assert current_state.player.empty_potion_slot_count == 1
+                change["potions"] = ("new-potion",)
+                change["player"] = current_state.player.model_copy(
+                    update={"empty_potion_slot_count": 0}
+                )
+            change["offers"] = tuple(
+                offer for offer in current_state.offers if step.action not in offer.actions
+            )
+            change["actions"] = tuple(a for a in current_state.actions if a.ref != step.action)
+            game.observation = current.model_copy(
+                update={"state": current_state.model_copy(update=change)}
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": wire.operation_id,
+                    "status": "completed",
+                    "boundary": "ready",
+                },
+            )
+
+        def model(request: httpx.Request) -> httpx.Response:
+            current = game.observation.state
+            assert isinstance(current, native.RunState)
+            body = TypeAdapter(dict[str, JsonValue]).validate_json(request.content)
+            if (
+                full
+                and current.screen is native.RunScreen.REWARDS
+                and body.get("prompt_cache_key") == "battle-rewards:run"
+            ):
+                assert [
+                    offer.ref for offer in current.offers if offer.kind is native.OfferKind.POTION
+                ] == ["offered-potion"]
+                game.inputs.append(body)
+                return httpx.Response(
+                    200,
+                    content=reply(
+                        (
+                            "replace-potion",
+                            "run_act",
+                            '{"steps":[{"kind":"interact","action":"drop-potion"},'
+                            '{"kind":"interact","action":"claim-potion"}]}',
+                        )
+                    ),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            return game.model(request)
+
+        if full:
+            current = game.observation.state
+            assert isinstance(current, native.RunState)
+            game.observation = game.observation.model_copy(
+                update={
+                    "state": current.model_copy(
+                        update={
+                            "actions": (
+                                *current.actions,
+                                native.Action(ref="drop-potion", label="弃掉药水", enabled=True),
+                            )
+                        }
+                    )
+                }
+            )
+        archive = tmp_path / "archive.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="battle-rewards",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=True,
+            ),
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+        interactions = [step.action for step in game.steps if isinstance(step, native.Interact)]
+        expected = ["claim-relic", "gold"]
+        if full:
+            expected += ["open-regular", "open-guaranteed", "drop-potion", "claim-potion"]
+        else:
+            expected += ["claim-potion", "open-regular", "open-guaranteed"]
+        assert interactions == [*expected, "proceed", "buy", "close", "finish"]
+        assert game.inputs[0]["prompt_cache_key"] == "battle-rewards:deck"
+        with closing(Journal.open(archive)) as journal:
+            first_deck = journal.requests()[0]
+            task = next(m for m in first_deck.input if isinstance(m, RunTaskSnapshot))
+            assert "RELIC.ONE" in task.text
+            if not full:
+                assert "POTION.ONE" in task.text
 
     asyncio.run(scenario())
 
@@ -589,7 +836,7 @@ def test_reward_http_input_includes_shared_battle_history(tmp_path: Path, minima
             session.execution.fights.observe(game.observation)
             session.execution.fights.recent = fights
             await session.run()
-        for body in game.inputs[:3]:
+        for body in game.inputs[:1]:
             messages = body["input"]
             assert isinstance(messages, list)
             observations: list[dict[str, JsonValue]] = []
@@ -855,17 +1102,15 @@ def test_completed_native_skip_is_not_reopened_and_preserves_run_handoff(
             requests = journal.requests()
             assert [r.stream for r in requests] == [
                 "deck:1",
-                "deck:2",
-                "deck:3",
                 "run:1",
                 "run:1",
                 "run:1",
             ]
-            task = next(m for m in requests[3].input if isinstance(m, RunTaskSnapshot))
+            task = next(m for m in requests[1].input if isinstance(m, RunTaskSnapshot))
             assert isinstance(task.content, RunActHandoffContent)
             assert task.content.battle_report == pending.report
             assert task.content.combat_review == pending.review
-            reports = [m for m in requests[3].input if isinstance(m, AutomaticSnapshot)]
+            reports = [m for m in requests[1].input if isinstance(m, AutomaticSnapshot)]
             assert [m.content.automatic_progress.label for m in reports] == [
                 "Skip",
                 "Skip",
@@ -934,7 +1179,7 @@ def test_stopped_selection_keeps_focused_context_and_does_not_reopen_reward(
         with closing(Journal.open(archive)) as journal:
             choices = journal.card_choices()
             assert len(choices) == 4
-            assert [c.stream for c in choices] == ["deck:1", "deck:2", "deck:2", "deck:3"]
+            assert [c.stream for c in choices] == ["deck:1"] * 4
             assert choices[1].outcome.status.value == "stopped"
             assert choices[2].outcome.status.value == "completed"
             assert (
@@ -944,7 +1189,7 @@ def test_stopped_selection_keeps_focused_context_and_does_not_reopen_reward(
                 )
                 == 1
             )
-            retried = [r for r in journal.requests() if r.stream == "deck:2"][1]
+            retried = [r for r in journal.requests() if r.stream == "deck:1"][1]
             assert "Paused before selection." in " ".join(
                 m.text for m in retried.input if isinstance(m, ResultSnapshot)
             )
@@ -1010,8 +1255,49 @@ def test_event_choice_submits_all_selected_cards_once_and_reports_to_run(
     asyncio.run(scenario())
 
 
+def test_consecutive_unpublished_selectors_share_one_deck_stream(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        game = RewardGame(minimal=False)
+        game.event_handoff = True
+        game.event_followup = True
+        archive = tmp_path / "archive.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(game.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="consecutive-rewards",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+            ),
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)),
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+        with closing(Journal.open(archive)) as journal:
+            first, second = journal.card_choices()[-2:]
+            assert first.stream == second.stream == "deck:2"
+            assert first.call_id != second.call_id
+            assert first.card_ref == ("gift",) and second.card_ref == ("shared",)
+            assert first.offer_ref is second.offer_ref is None
+            requests = [request for request in journal.requests() if request.stream == first.stream]
+            assert len(requests) == 2
+            for request, expected in zip(requests, ("CARD.GIFT", "CARD.SHARED"), strict=True):
+                task = next(m for m in reversed(request.input) if isinstance(m, RunTaskSnapshot))
+                candidates = json.loads(task.text)["observation"]["choice"]["selection"][
+                    "candidates"
+                ]
+                assert [card["id"] for card in candidates] == [expected]
+            assert any(isinstance(message, ResultSnapshot) for message in requests[1].input)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("has_map", (True, False))
-def test_deck_guidance_uses_only_the_focused_offer_and_its_selection(
+def test_deck_guidance_uses_all_rewards_and_the_active_selection(
     tmp_path: Path, has_map: bool
 ) -> None:
     from sts2_harness.knowledge import MaterialRole, SubjectId
@@ -1033,7 +1319,7 @@ def test_deck_guidance_uses_only_the_focused_offer_and_its_selection(
                         source=None,
                         min=0,
                         max=1,
-                        candidates=("local", "regular", "guaranteed"),
+                        candidates=("local",),
                         selected=(),
                     )
                 }
@@ -1125,11 +1411,11 @@ def test_deck_guidance_uses_only_the_focused_offer_and_its_selection(
                 await session.run()
         body = json.dumps(inputs[0], ensure_ascii=False)
         assert "RULE FOR owned" in body and "RULE FOR local" in body
-        assert "RULE FOR regular" not in body and "RULE FOR guaranteed" not in body
+        assert "RULE FOR regular" in body and "RULE FOR guaranteed" in body
         assert "REWARD PROBABILITY RULE" not in body
         assert "PUBLIC BOSS STRATEGY" in body
         assert inspections == 0 if has_map else inspections > 0
-        assert "CARD.REGULAR" not in body and "CARD.GUARANTEED" not in body
+        assert "CARD.REGULAR" in body and "CARD.GUARANTEED" in body
         messages = inputs[0]["input"]
         assert isinstance(messages, list)
         user = next(

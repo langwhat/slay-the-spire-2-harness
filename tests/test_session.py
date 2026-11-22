@@ -276,8 +276,8 @@ def test_live_code_roles_play_combat_and_take_a_card_without_a_model(tmp_path: P
     campaign.states = [campaign.states[1], opened, taken, terminal(taken)]
 
     class CodeDeck(Source):
-        resolution: CardResolution | None = None
-        feedback: CardResolution | None = None
+        def take_resolutions(self) -> tuple[CardResolution, ...]:
+            return ()
 
         def offered(self, observation: native.Observation) -> bool:
             return (
