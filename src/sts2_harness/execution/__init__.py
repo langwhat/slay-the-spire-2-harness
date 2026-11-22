@@ -101,11 +101,11 @@ class Execution:
         self.fights = FightHistory()
         self._observed: Callable[[native.Observation], None] | None = None
 
-    async def display_reason(self, reason: str | None) -> None:
+    async def display_reason(self, reason: str | None, *, repeat: bool = False) -> None:
         if self._display is None or reason is None:
             return
         text = reason.strip()
-        if not text or text == self._last_displayed_reason:
+        if not text or (not repeat and text == self._last_displayed_reason):
             return
         try:
             reply = await self._display(text)
@@ -274,7 +274,7 @@ class Execution:
             if steps is None:
                 break
             if not steps:
-                await self.display_reason(choice.reason)
+                await self.display_reason(choice.reason, repeat=True)
                 reports.append(
                     CardRewardResult(before, before, ActionCompleted(completed_steps=0), True)
                 )
@@ -415,7 +415,7 @@ class Execution:
                         uncertain_step = None
                         break
                 if index == 0:
-                    await self.display_reason(proposal.reason)
+                    await self.display_reason(proposal.reason, repeat=reward is not None)
                 settlement = await self._game.settle(route, step)
                 for observation in settlement.observations:
                     self.fights.observe(observation)

@@ -184,6 +184,12 @@ class SkipCard(native.WireModel):
 class RunDeckChoice(native.WireModel):
     choices: Annotated[tuple[TakeCard | SkipCard, ...], Field(min_length=1)]
 
+    @model_validator(mode="after")
+    def check_reasons(self) -> Self:
+        if any(not choice.reason.strip() for choice in self.choices):
+            raise ValueError("Write a reason for each card reward group.")
+        return self
+
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler

@@ -801,7 +801,7 @@
   },
   {
     "name": "run_deck_choice",
-    "description": "Resolve all current card reward groups together. Submit one choice for each group in the order to execute, using its offer and a short reason for that group. For a standalone selection without an offer, submit a single choice without offer. Choose only eligible card refs within the selection limits. If a group changes during execution, the result counts the confirmed groups in order and carries the current observation.",
+    "description": "Resolve all current card reward groups together. Submit one choice for each group in the order to execute, using its offer and a short reason for that group. If a reward is already open, put the group whose candidates match the active selection first. For a standalone selection without an offer, submit a single choice without offer. Choose only eligible card refs within the selection limits. If a group changes during execution, the result counts the confirmed groups in order and carries the current observation.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -842,7 +842,8 @@
                   "reason": {
                     "type": "string",
                     "description": "One short reason for this group, in the game language.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "pattern": "\\S"
                   }
                 },
                 "required": [
@@ -866,7 +867,8 @@
                   "reason": {
                     "type": "string",
                     "description": "One short reason for this group, in the game language.",
-                    "minLength": 1
+                    "minLength": 1,
+                    "pattern": "\\S"
                   }
                 },
                 "required": [

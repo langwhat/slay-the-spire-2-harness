@@ -1812,6 +1812,7 @@ def test_invalid_preparatory_response_ends_only_its_trial_and_keeps_usage(
 @pytest.mark.parametrize(
     "arguments, reason",
     (
+        ('{"choices":[{"offer":"offer","choice":"skip","reason":"  "}]}', "  "),
         ('{"offer":"offer","choice":"take","reason":"Missing card."}', "Missing card."),
         (
             '{"offer":"offer","choice":"take","card":"candidate","card":"candidate",'

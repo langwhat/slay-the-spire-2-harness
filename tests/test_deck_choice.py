@@ -47,6 +47,7 @@ class RewardGame:
         self.event_take: tuple[str, ...] = ("gift",)
         self.event_followup = False
         self.take_guaranteed_first = False
+        self.reward_reason: str | None = None
         self.event_min = 1
         self.event_max = 1
         self.inputs: list[dict[str, JsonValue]] = []
@@ -330,7 +331,7 @@ class RewardGame:
                 args: dict[str, object] = {
                     "offer": offer,
                     "choice": "skip" if skip else "take",
-                    "reason": "Measured " + offer,
+                    "reason": self.reward_reason or "Measured " + offer,
                 }
                 if not skip:
                     args["card"] = card["ref"] if isinstance(card, dict) else card
@@ -513,6 +514,48 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 )
                 with pytest.raises(ExtractionError, match="one recorded card reward choice"):
                     await extract_case(source, DecisionLabels(comment="fixture"))
+
+    asyncio.run(scenario())
+
+
+def test_reward_groups_display_the_same_reason_at_each_boundary(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        game = RewardGame(minimal=True)
+        reason = "保留卡组的过牌效率。"
+        game.reward_reason = reason
+        events: list[str] = []
+
+        def mod(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/display":
+                message = TypeAdapter(dict[str, JsonValue]).validate_json(request.content)
+                assert isinstance(message["reason"], str)
+                events.append(message["reason"])
+                return httpx.Response(200, json={"status": "shown"})
+            if request.url.path == "/action":
+                step = native.StepRequest.model_validate_json(request.content).step
+                events.append(step.action if isinstance(step, native.Interact) else "select")
+            return game.mod(request)
+
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="repeated-reward-reasons",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=True,
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(game.model)),
+            display_reasons=True,
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+
+        assert events[:6] == [reason, reason, "open-regular", "select", reason, "open-guaranteed"]
 
     asyncio.run(scenario())
 
