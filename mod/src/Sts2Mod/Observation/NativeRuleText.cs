@@ -287,7 +287,8 @@ internal sealed class NativeRuleText(MonsterModel monster)
             {
                 if (Guard(path) is not { } guard)
                     return null;
-                rendered.Add(When(guard, group.Key));
+                if (guard != Never)
+                    rendered.Add(When(guard, group.Key));
             }
         }
         return rendered.Distinct().ToList();
@@ -415,6 +416,8 @@ internal sealed class NativeRuleText(MonsterModel monster)
                         MarkIncomplete($"{method.Name}/condition");
                         continue;
                     }
+                    if (guard == Never)
+                        continue;
                     var sequence = extracted.Select(item => item with { Text = loop is null
                         ? When(guard, item.Text)
                         : $"{loop.Count.ToString(CultureInfo.InvariantCulture)} times: {When(guard, item.Text)}" }).ToArray();
@@ -765,7 +768,11 @@ internal sealed class NativeRuleText(MonsterModel monster)
         var candidates = new List<string>();
         foreach (var result in body.Returns)
         {
-            if (render(result.Value) is not { } text || Guard(result.Conditions) is not { } guard)
+            if (Guard(result.Conditions) is not { } guard)
+                return null;
+            if (guard == Never)
+                continue;
+            if (render(result.Value) is not { } text)
                 return null;
             candidates.Add(When(guard, text));
         }
@@ -779,11 +786,16 @@ internal sealed class NativeRuleText(MonsterModel monster)
         {
             if (Condition(test) is not { } text)
                 return null;
+            if (text == Never)
+                return Never;
             if (text.Length != 0)
                 conditions.Add(text);
         }
         return string.Join(" and ", conditions.Distinct());
     }
+
+    // A guard that can never hold marks a path the current run cannot take.
+    private const string Never = "never";
 
     private static string When(string guard, string text)
         => guard.Length == 0 ? text
@@ -819,6 +831,16 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 "blt" or "clt" => expected ? "<" : "≥",
                 _ => null,
             };
+            if (op is not null && Numeric(operation.Left) is { } leftNumber && Numeric(right) is { } rightNumber)
+                return op switch
+                {
+                    "=" => leftNumber == rightNumber,
+                    "≠" => leftNumber != rightNumber,
+                    ">" => leftNumber > rightNumber,
+                    "≤" => leftNumber <= rightNumber,
+                    "≥" => leftNumber >= rightNumber,
+                    _ => leftNumber < rightNumber,
+                } ? "" : Never;
             if (operation.Left is Call { Method.Name: "get_NextMove", Receiver: Input { Name: "this" } }
                 && MoveId(right) is { } move && ShowableMove(move) && op is "=" or "≠")
                 return $"next move{op}{move}";

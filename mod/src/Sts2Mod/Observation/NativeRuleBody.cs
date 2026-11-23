@@ -283,6 +283,20 @@ internal sealed class NativeRuleBody
                 }
                 else if (code.Name?.StartsWith("conv.", StringComparison.Ordinal) == true)
                     path.Stack.Add(new Operation(code.Name, path.Pop()));
+                // Arrays only carry results between calls; their elements are not tracked.
+                else if (code == OpCodes.Newarr)
+                    path.Stack.Add(new Operation("newarr", path.Pop(), new Constant(operand)));
+                else if (code.Name?.StartsWith("stelem", StringComparison.Ordinal) == true)
+                {
+                    _ = path.Pop();
+                    _ = path.Pop();
+                    _ = path.Pop();
+                }
+                else if (code.Name?.StartsWith("ldelem", StringComparison.Ordinal) == true)
+                {
+                    var element = path.Pop();
+                    path.Stack.Add(new Operation(code.Name, path.Pop(), element));
+                }
                 else if (code != OpCodes.Nop && code.OpCodeType != OpCodeType.Prefix)
                 {
                     Incomplete = true;
@@ -369,6 +383,9 @@ internal sealed class NativeRuleBody
 
     internal static bool TryTruth(Value value, out bool truth)
     {
+        // Async dispatch compares arithmetic over the constant initial state.
+        if (value is Operation { Right: { } comparedRight } compared)
+            value = compared with { Left = Fold(compared.Left) ?? compared.Left, Right = Fold(comparedRight) ?? comparedRight };
         switch (value)
         {
             case Constant { Data: null }:
@@ -433,6 +450,12 @@ internal sealed class NativeRuleBody
         truth = false;
         return false;
     }
+
+    private static Constant? Fold(Value value)
+        => value is Operation { Operator: "add" or "sub", Left: var left, Right: { } right } operation
+            && (left as Constant ?? Fold(left)) is { Data: int a } && (right as Constant ?? Fold(right)) is { Data: int b }
+            ? new Constant(operation.Operator == "add" ? a + b : a - b)
+            : null;
 
     private static bool RootedAtSelf(Value value) => value switch
     {
