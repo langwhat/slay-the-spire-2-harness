@@ -820,6 +820,55 @@ def test_scoring_distinguishes_alternatives_multiselect_and_unknown() -> None:
     assert score(multiple, ("CARD.A",)) is DecisionVerdict.FAILED
 
 
+def test_rebuild_retains_acknowledged_handoff_notes(tmp_path: Path) -> None:
+    from test_mod_client import COMBAT
+    from test_run import handoff
+
+    from sts2_harness.context import Context
+    from sts2_harness.context.models import RunActInput, RunHandoffInput, RunResultMessage
+    from sts2_harness.llm.messages import AssistantMessage
+    from sts2_harness.note_values import NotesView
+    from sts2_harness.results import NotesUpdated, QueryToolResult
+    from sts2_harness_eval.decision_extract import _events  # pyright: ignore[reportPrivateUsage]
+
+    async def run() -> None:
+        case = decision_case(tmp_path, multiselect=True)
+        opening = next(event.observation for event in case.events if isinstance(event, TaskEvent))
+        combat = native.Observation.model_validate_json(COMBAT)
+        context = Context(native.DecisionOwner.RUN, system=())
+        context.append_task(RunActInput(NotesView()), opening)
+        context.append_task(RunHandoffInput(handoff()))
+        assistant = AssistantMessage(
+            ResponsesReply.from_json(
+                '[{"type":"function_call","id":"fc","call_id":"write","name":"run_notes",'
+                '"arguments":"{\\"mode\\":\\"write\\",\\"other\\":\\"Save gold\\",'
+                '\\"summary\\":\\"Keep reserves.\\"}"}]'
+            )
+        )
+        context.append_reply(assistant)
+        notes = NotesView(other="Save gold")
+        context.set_notes(notes)
+        context.append_tool_result(
+            assistant.tool_calls[0],
+            QueryToolResult(ReadCompleted(), combat, NotesUpdated(summary="Keep reserves.")),
+        )
+        context.append_task(RunActInput(), opening)
+
+        events = _events(context.model_input(), (opening, combat))
+        assert isinstance(events[-1], TaskEvent)
+        assert events[-1].state.notes["other"] == "Save gold"
+        async with Llm(configuration(tmp_path)) as client:
+            rebuilt = await rebuild_case(case.model_copy(update={"events": events}), client)
+        result = next(
+            message for message in rebuilt.prepared.input if isinstance(message, RunResultMessage)
+        )
+        assert result.content.data == NotesUpdated(summary="Keep reserves.")
+        assert result.content.observation is not None
+        assert result.content.observation.notes == notes
+
+    asyncio.run(run())
+
+
 def test_rebuild_retains_rejected_query_history(tmp_path: Path) -> None:
     async def run() -> None:
         case = decision_case(tmp_path)

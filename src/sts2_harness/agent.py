@@ -3,6 +3,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 
+from pydantic import MISSING
+
 from sts2_harness.capacity import (
     CompactionDecision,
     CompactionValidation,
@@ -17,6 +19,7 @@ from sts2_harness.decisions import (
     ActTask,
     Decision,
     DecisionTask,
+    HandoffTask,
     ReviewTask,
     TaskComplete,
 )
@@ -41,6 +44,8 @@ from sts2_harness.results import (
     ActionCompleted,
     ActionToolResult,
     Failed,
+    HandoffCompletion,
+    NotesUpdated,
     QueryToolResult,
     ReadCompleted,
     Reason,
@@ -307,6 +312,17 @@ class Agent(ABC):
                         raise
                     if current is not None:
                         observation = latest = current
+                    if (
+                        len(calls) == 1
+                        and isinstance(task, HandoffTask)
+                        and isinstance(result.data, NotesUpdated)
+                        and result.data.summary is not MISSING
+                    ):
+                        if reply.record_handoff is not None:
+                            reply.record_handoff(
+                                HandoffCompletion(call_id=call.id, summary=result.data.summary)
+                            )
+                        return TaskComplete(result.data.summary)
                     if not isinstance(result.outcome, ReadCompleted):
                         if stopped is None:
                             stopped = (index + 1, call)
@@ -329,7 +345,7 @@ class Agent(ABC):
     ) -> ActionProposal | QueryToolResult:
         if call.name == self._tools.action_name:
             return await self._tools.dispatch_action(call, task)
-        return await self._tools.dispatch(call)
+        return await self._tools.dispatch(call, handoff=isinstance(task, HandoffTask))
 
     def _reject_action_layout(
         self, context: Context, calls: tuple[ToolCall, ...], observation: native.Observation

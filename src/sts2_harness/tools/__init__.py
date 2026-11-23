@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from enum import StrEnum
 
 from pydantic import MISSING, BaseModel, ValidationError
@@ -298,7 +299,7 @@ class ToolCatalog:
                 steps.append(ActionStep(ActionKind.END_TURN))
         return ActionProposal(tuple(steps), None if query.reason is MISSING else query.reason)
 
-    async def _notes(self, call: ToolCall) -> QueryToolResult:
+    async def _notes(self, call: ToolCall, *, handoff: bool) -> QueryToolResult:
         observation = await self._current()
         try:
             json.loads(call.arguments, object_pairs_hook=unique_fields)
@@ -311,7 +312,15 @@ class ToolCatalog:
         assert self.notes is not None
         if isinstance(query, NotesReadInput):
             return QueryToolResult(ReadCompleted(), observation, NotesText(notes=self.notes.read()))
-        return await self.write_notes(query, observation)
+        if query.summary is not MISSING and not handoff:
+            return QueryToolResult(
+                _problem(ReasonCode.WRONG_ROLE, "A notes summary is only allowed during handoff."),
+                observation,
+            )
+        result = await self.write_notes(query, observation)
+        if isinstance(result.data, NotesUpdated) and query.summary is not MISSING:
+            return replace(result, data=NotesUpdated(summary=query.summary))
+        return result
 
     async def write_notes(
         self, query: NotesPatch, observation: native.Observation | None
@@ -325,8 +334,9 @@ class ToolCatalog:
             refused = await self._notes_write_guard(observation)
             if refused is not None:
                 return refused
-        fields = NotesState.model_validate_json(query.model_dump_json(exclude={"mode"}))
-        self.notes.write(fields, query.model_fields_set - {"mode"})
+        note_fields = {"core", "plan", "other"}
+        fields = NotesState.model_validate_json(query.model_dump_json(include=note_fields))
+        self.notes.write(fields, query.model_fields_set & note_fields)
         return QueryToolResult(ReadCompleted(), observation, NotesUpdated())
 
     async def _read_skill(self, call: ToolCall) -> QueryToolResult:
@@ -410,14 +420,14 @@ class ToolCatalog:
     ) -> Presented | None:
         return await self._present(route, edges) if self._present is not None else None
 
-    async def dispatch(self, call: ToolCall) -> QueryToolResult:
+    async def dispatch(self, call: ToolCall, *, handoff: bool = False) -> QueryToolResult:
         if call.name not in self._names or call.name == self.action_name:
             return QueryToolResult(
                 _problem(ReasonCode.WRONG_ROLE, "This tool is not available to the current role."),
                 await self._current(),
             )
         if call.name == ToolName.RUN_NOTES:
-            return await self._notes(call)
+            return await self._notes(call, handoff=handoff)
         if ToolName(call.name) in (ToolName.RUN_SKILL, ToolName.COMBAT_SKILL):
             return await self._read_skill(call)
         try:

@@ -576,7 +576,23 @@ def _events(
                 elif isinstance(data, NotesText):
                     event = event.model_copy(update={"notes_read": True})
                 elif isinstance(data, NotesUpdated):
-                    event = event.model_copy(update={"notes_updated": True})
+                    shown = message.content.observation
+                    notes_after = shown.notes if shown is not None else MISSING
+                    event = event.model_copy(
+                        update={
+                            "notes_updated": True,
+                            "notes_summary": data.summary,
+                            "notes_after": notes_after,
+                        }
+                    )
+                    if notes_after is not MISSING:
+                        state = state.model_copy(
+                            update={
+                                "notes": TypeAdapter(dict[str, JsonValue]).validate_json(
+                                    notes_after.model_dump_json()
+                                )
+                            }
+                        )
                 elif isinstance(data, PlanData):
                     event = event.model_copy(update={"plan": data})
                 else:

@@ -2,6 +2,7 @@
 
 import hashlib
 import time
+from dataclasses import replace
 from typing import Literal
 
 from sts2_harness.capacity import CapacityPolicy, Measurement, ModelAttemptReference
@@ -58,6 +59,7 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
 from sts2_harness.prompts import PromptReader
+from sts2_harness.results import HandoffCompletion
 
 
 class _Attempts:
@@ -122,6 +124,10 @@ class _Attempts:
 
     def received(self, reply: ModelReply) -> None:
         self._attempt = self._attempt.model_copy(update={"reply": ReplySnapshot.of(reply)})
+        self._journal.model_attempt(self._sequence, self._attempt)
+
+    def record_handoff(self, completion: HandoffCompletion) -> None:
+        self._attempt = self._attempt.model_copy(update={"handoff": completion})
         self._journal.model_attempt(self._sequence, self._attempt)
 
     def failed(self, reason: FailureKind, *, capacity_signal: str | None = None) -> None:
@@ -304,7 +310,7 @@ class RecordedLlm:
         else:
             self._journal.finish_model(sequence)
             attempts.finished()
-            return reply
+            return replace(reply, record_handoff=attempts.record_handoff)
         finally:
             self._journal.end_model()
             self._journal.diagnostics.finished()

@@ -654,7 +654,7 @@
   },
   {
     "name": "run_act",
-    "description": "Perform non-combat operations other than travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Optional notes replaces the supplied plan, core, and other strategy-note fields and keeps the others, using the same fields and limits as run_notes mode=write, without mode. Notes are written before any step; if writing fails, no step runs. Include note updates with the action when both are ready. Use run_next for travel; run_plan is available when only replacing the route.",
+    "description": "Perform non-combat operations other than travel. Steps run in order: interact (a listed reward, shop, event, rest-site, or special operation), select (the complete final choice for an open selection), use_potion, discard_potion. Each step is checked when it is reached, so an earlier step can make a later one legal; execution stops at the first step that cannot run. Queue several steps when no later one depends on something still unrevealed. A screen may close itself after its last reward; do not queue a close for it. Optional notes replaces the supplied plan, core, and other strategy-note fields and keeps the others, using the strategy-note limits from run_notes. Notes are written before any step; if writing fails, no step runs. Include note updates with the action when both are ready. Use run_next for travel; run_plan is available when only replacing the route.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -889,7 +889,7 @@
   },
   {
     "name": "run_notes",
-    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each field it supplies and keeps the others. core: native definition IDs of the cards and relics the deck is built around. plan: how the core's turn goes and what it still lacks. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
+    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each note field it supplies and keeps the others. core: native definition IDs of the cards and relics the deck is built around. plan: how the core's turn goes and what it still lacks. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
     "input_schema": {
       "oneOf": [
         {
@@ -916,6 +916,12 @@
             },
             "other": {
               "type": "string"
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "\\S",
+              "description": "Short assessment for a handoff only. Submit this notes write as the only call in the response to finish the handoff on success."
             },
             "core": {
               "type": "array",
@@ -982,7 +988,7 @@
   },
   {
     "name": "run_next",
-    "description": "Enter the next node of the current plan. Optional stretches first replaces the remaining route with an ordered list beginning at a destination in map.next and continuing through connected stretches, using the same rules as run_plan. It may stop before the Boss; a node ID in map.next enters that stretch at the specified room. If the route is rejected, no movement occurs. Optional notes replaces the supplied plan, core, and other strategy-note fields and keeps the others, using the same fields and limits as run_notes mode=write, without mode. Notes are written before replacing the route or moving; if writing fails, neither occurs. Include note and route updates with this call when ready to travel. It fails without moving when a pending choice or the game blocks travel; resolve the choice or replace the plan.",
+    "description": "Enter the next node of the current plan. Optional stretches first replaces the remaining route with an ordered list beginning at a destination in map.next and continuing through connected stretches, using the same rules as run_plan. It may stop before the Boss; a node ID in map.next enters that stretch at the specified room. If the route is rejected, no movement occurs. Optional notes replaces the supplied plan, core, and other strategy-note fields and keeps the others, using the strategy-note limits from run_notes. Notes are written before replacing the route or moving; if writing fails, neither occurs. Include note and route updates with this call when ready to travel. It fails without moving when a pending choice or the game blocks travel; resolve the choice or replace the plan.",
     "input_schema": {
       "type": "object",
       "properties": {

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx2 as httpx
 import pytest
-from pydantic import JsonValue
+from pydantic import MISSING, JsonValue
 from test_combat import reply
 from test_mod_client import RUN
 from test_responses import configuration
@@ -357,7 +357,11 @@ def test_notes_replace_plan_and_preserve_other_fields(tmp_path: Path) -> None:
                 assert isinstance(result.data, NotesUpdated)
                 assert notes.read().plan == plan
                 assert notes.read().other == "Reserve potion."
-            for fields in ({"plan": "x" * 301}, {"wants": ["Old format."]}):
+            for fields in (
+                {"plan": "x" * 301},
+                {"wants": ["Old format."]},
+                {"plan": "Must not write.", "summary": "Only for a handoff."},
+            ):
                 result = await tools.dispatch(
                     ToolCall("invalid", "run_notes", json.dumps({"mode": "write", **fields}))
                 )
@@ -397,7 +401,15 @@ def test_notes_replace_plan_and_preserve_other_fields(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("combine_summary", [False, True])
+def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(
+    tmp_path: Path, combine_summary: bool
+) -> None:
+    from sts2_harness.journal import Journal, Manifest
+    from sts2_harness.model_journal import RecordedLlm
+    from sts2_harness.results import HandoffCompletion
+
+    summary = "Report assessed without acting."
     http = RunHTTP(
         [
             reply(
@@ -405,7 +417,11 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
                 ("write", "run_notes", '{"mode":"write","other":"must not write"}'),
             ),
             reply(
-                ("invalid", "run_notes", '{"mode":"write","other":"must not write","extra":true}')
+                (
+                    "invalid",
+                    "run_notes",
+                    '{"mode":"write","summary":"A write needs a note field."}',
+                ),
             ),
             reply(("read", "run_notes", '{"mode":"read"}')),
             reply(("forbidden", "run_act", '{"steps":[{"kind":"interact","action":"travel"}]}')),
@@ -413,15 +429,35 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
                 (
                     "update",
                     "run_notes",
-                    '{"mode":"write","other":"Use the next shop deliberately."}',
-                )
+                    json.dumps(
+                        {
+                            "mode": "write",
+                            "other": "Use the next shop deliberately.",
+                            **({"summary": summary} if combine_summary else {}),
+                        }
+                    ),
+                ),
             ),
-            reply(text="Report assessed without acting."),
+            *([] if combine_summary else [reply(text=summary)]),
+            reply(text="Next report assessed."),
         ]
     )
     notes = Notes("")
 
     async def scenario() -> None:
+        journal = Journal.create(
+            tmp_path / "handoff.sqlite",
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="handoff",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+            ),
+        )
         budget = ToolRecoveryBudget()
         async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
             execution = Execution(
@@ -440,10 +476,25 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
             async with Llm(
                 configuration(tmp_path), transport=httpx.MockTransport(http.model)
             ) as llm:
-                result = await execution.run_unit(
-                    RunAgent(lambda: llm, tools, budget), HandoffTask(handoff())
+                agent = RunAgent(
+                    lambda: RecordedLlm(
+                        llm, journal, role=native.DecisionOwner.RUN, stream="run:1"
+                    ),
+                    tools,
+                    budget,
                 )
-        assert isinstance(result, TaskComplete)
+                result = await execution.run_unit(agent, HandoffTask(handoff()))
+                assert result == TaskComplete(summary)
+                assert len(http.inputs) == (5 if combine_summary else 6)
+                assert journal.requests()[-1].attempts[-1].handoff == (
+                    HandoffCompletion(call_id="update", summary=summary)
+                    if combine_summary
+                    else MISSING
+                )
+                assert await execution.run_unit(
+                    agent, HandoffTask(handoff("Assess the next battle."))
+                ) == TaskComplete("Next report assessed.")
+        journal.close()
         assert notes.read().other == "Use the next shop deliberately."
         assert http.actions == [] and budget.failures == 0
         wire = http.inputs[-1]["input"]
@@ -467,6 +518,11 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(tmp_
         assert isinstance(outputs[3]["output"], str)
         assert json.loads(outputs[3]["output"])["data"] == {
             "notes": NotesView().model_dump(mode="json")
+        }
+        assert isinstance(outputs[-1]["output"], str)
+        assert json.loads(outputs[-1]["output"])["data"] == {
+            "updated": True,
+            **({"summary": summary} if combine_summary else {}),
         }
         first = http.inputs[0]["input"]
         assert isinstance(first, list) and isinstance(first[-1], dict)

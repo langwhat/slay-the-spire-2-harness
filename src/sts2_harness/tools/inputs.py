@@ -10,6 +10,7 @@ from pydantic import (
     GetJsonSchemaHandler,
     JsonValue,
     RootModel,
+    StringConstraints,
     TypeAdapter,
     model_validator,
 )
@@ -129,7 +130,7 @@ class NotesPatch(native.WireModel):
 
     @model_validator(mode="after")
     def supplied_fields(self) -> Self:
-        if not self.model_fields_set - {"mode"}:
+        if self.model_fields_set.isdisjoint(("core", "plan", "other")):
             raise ValueError("Supply at least one strategy field to replace.")
         return self
 
@@ -249,6 +250,7 @@ class NotesReadInput(native.WireModel):
 
 class NotesWriteInput(NotesPatch):
     mode: Literal[NotesMode.WRITE]
+    summary: Annotated[str, StringConstraints(pattern=r"\S")] | MISSING = MISSING
 
 
 class NotesInput(RootModel[NotesReadInput | NotesWriteInput]):

@@ -122,6 +122,12 @@ class NotesText(SemanticValue):
 
 class NotesUpdated(SemanticValue):
     updated: Literal[True] = True
+    summary: str | MISSING = MISSING
+
+
+class HandoffCompletion(SemanticValue):
+    call_id: str
+    summary: native.Nonempty
 
 
 class PlanAccepted(SemanticValue):

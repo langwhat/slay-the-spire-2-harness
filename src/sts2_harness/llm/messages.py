@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, Self
 
@@ -24,6 +25,7 @@ from sts2_harness.knowledge import GuidanceContent
 from sts2_harness.llm.chat_native import ChatCompletionsReply
 from sts2_harness.llm.messages_native import MessagesReply
 from sts2_harness.material_text import MaterialParts, MaterialText
+from sts2_harness.results import HandoffCompletion
 
 _NATIVE_OUTPUT = TypeAdapter(tuple[ResponseOutputItem, ...])
 
@@ -238,6 +240,9 @@ class ModelReply:
     assistant: AssistantMessage
     usage: Usage
     metadata: ModelMetadata
+    record_handoff: Callable[[HandoffCompletion], None] | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 @dataclass(frozen=True, slots=True)

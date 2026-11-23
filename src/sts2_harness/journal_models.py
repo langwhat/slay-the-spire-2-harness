@@ -68,7 +68,7 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.llm.messages_native import MessagesReply
 from sts2_harness.material_text import MaterialParts, MaterialText
-from sts2_harness.results import NotesText, NotesUpdated, Outcome, PlanData
+from sts2_harness.results import HandoffCompletion, NotesText, NotesUpdated, Outcome, PlanData
 
 
 class BlobKind(StrEnum):
@@ -645,6 +645,7 @@ class ModelAttempt(native.WireModel):
     capacity_signal: str | None = None
     reply: ReplySnapshot | None = None
     failure: FailureKind | None = None
+    handoff: HandoffCompletion | MISSING = MISSING
 
 
 class PreparationEvidence(native.WireModel):

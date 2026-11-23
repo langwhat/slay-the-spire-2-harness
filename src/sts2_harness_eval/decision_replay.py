@@ -305,6 +305,7 @@ class DecisionRun(DeckAgent):
         self._llm = self._client()
         self._context_location = first.observation.location
         calls: dict[str, ToolCall] = {}
+        only_call_id: str | None = None
         pending_routes: set[str] = set()
         current = first.observation
         anchored = False
@@ -344,9 +345,11 @@ class DecisionRun(DeckAgent):
             elif isinstance(event, AssistantEvent):
                 reply = AssistantMessage(event.reply.native_reply)
                 context.append_reply(reply)
-                calls.update((call.id, call) for call in reply.tool_calls)
+                reply_calls = reply.tool_calls
+                only_call_id = reply_calls[0].id if len(reply_calls) == 1 else None
+                calls.update((call.id, call) for call in reply_calls)
                 pending_routes.update(
-                    call.id for call in reply.tool_calls if call.name == ToolName.RUN_PLAN
+                    call.id for call in reply_calls if call.name == ToolName.RUN_PLAN
                 )
             elif isinstance(event, ResultEvent):
                 call = calls[event.call_id]
@@ -381,8 +384,24 @@ class DecisionRun(DeckAgent):
                     if context.has_active_group:
                         context.finish_group()
                 else:
+                    if event.notes_after is not MISSING:
+                        self._notes.write(
+                            NotesState.model_validate_json(event.notes_after.model_dump_json()),
+                            set(NotesState.model_fields),
+                        )
+                        self._sync_notes(context)
                     result = await _query_result(event, call, self._notes, execution, documents)
-                    context.append_tool_result(call, result, defer_observation=True)
+                    context.append_tool_result(
+                        call, result, defer_observation=isinstance(task, ActTask)
+                    )
+                    if (
+                        isinstance(task, HandoffTask)
+                        and isinstance(result.data, NotesUpdated)
+                        and result.data.summary is not MISSING
+                        and call.id == only_call_id
+                        and context.has_active_group
+                    ):
+                        context.finish_group()
                 if recorded_observation is not None:
                     game.observation = recorded_observation
             elif isinstance(event, AutomaticEvent):
@@ -541,7 +560,9 @@ async def _query_result(
     if event.notes_read:
         return QueryToolResult(outcome.outcome, event.observation, NotesText(notes=notes.read()))
     if event.notes_updated:
-        return QueryToolResult(outcome.outcome, event.observation, NotesUpdated())
+        return QueryToolResult(
+            outcome.outcome, event.observation, NotesUpdated(summary=event.notes_summary)
+        )
     if event.plan is not None:
         return QueryToolResult(outcome.outcome, event.observation, event.plan)
     if (
