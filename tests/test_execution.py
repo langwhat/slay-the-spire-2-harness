@@ -832,6 +832,68 @@ def test_live_selection_confirmation_expires_without_resubmitting(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(("native_ready_at", "expected_confirmation_at"), [(20, 20), (35, 30)])
+def test_live_selection_waits_for_a_matching_receipt_up_to_the_confirmation_deadline(
+    monkeypatch: pytest.MonkeyPatch, native_ready_at: int, expected_confirmation_at: int
+) -> None:
+    from sts2_harness import game
+
+    async def scenario() -> None:
+        observation = native.Observation.model_validate_json(COMBAT)
+        route = native.RouteKey.model_validate(observation.location.model_dump())
+        step = native.Select(kind=native.StepKind.SELECT, refs=("c2",))
+        requests: list[native.StepRequest] = []
+        polls = 0
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/action":
+                requests.append(native.StepRequest.model_validate_json(request.content))
+                return httpx.Response(200, json={"operation_id": "test:1", "status": "pending"})
+            assert request.url.path == "/status"
+            ready = polls >= native_ready_at * 10
+            receipt = (
+                {"operation_id": "test:1", "status": "completed", "boundary": "ready"}
+                if ready
+                else {"operation_id": "test:1", "status": "pending"}
+            )
+            return httpx.Response(
+                200,
+                json={
+                    "location": observation.location.model_dump(mode="json"),
+                    "presentation": None,
+                    "control_intent": "running",
+                    "input_readiness": "ready" if ready else "busy",
+                    "receipt": receipt,
+                },
+            )
+
+        async def wait(seconds: float) -> None:
+            nonlocal polls
+            assert seconds == 0.1
+            polls += 1
+
+        with monkeypatch.context() as clock:
+            clock.setattr(asyncio.get_running_loop(), "time", lambda: polls / 10)
+            async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+                live = LiveGame(
+                    client, namespace="test", game_instance_id="game", run_id="run", wait=wait
+                )
+                reply = await live.settle(route, step)
+        assert isinstance(reply.outcome, game.Settlement)
+        assert requests == [reply.outcome.request]
+        assert reply.outcome.request.step == step
+        assert polls == expected_confirmation_at * 10
+        if native_ready_at <= expected_confirmation_at:
+            receipt = reply.outcome.receipt
+            assert isinstance(receipt, native.ReceiptCompleted)
+            assert receipt.operation_id == reply.outcome.request.operation_id
+            assert receipt.boundary is native.InputReadiness.READY
+        else:
+            assert reply.outcome.receipt is None
+
+    asyncio.run(scenario())
+
+
 def test_start_returns_to_pause_while_native_input_is_stalled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

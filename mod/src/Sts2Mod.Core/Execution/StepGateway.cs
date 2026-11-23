@@ -30,7 +30,8 @@ public sealed class StepGateway(
     private long? _nativeCompletionObservedSequence;
     private StepReceipt? _receipt;
     private long? _dispatchedSequence;
-    private long? _selectionWaitStarted;
+    private object? _settlingSelection;
+    private long _selectionWaitStarted;
     private long _latestObservationSequence = -1;
     private long _uncertainThroughSequence = -1;
     private bool _awaitingObservationAfterUncertain;
@@ -317,7 +318,7 @@ public sealed class StepGateway(
         long sequence,
         Func<StepRequest, StepReceipt?> dispatch,
         int? ascension = null,
-        bool selectionOpen = false)
+        object? selectionIdentity = null)
     {
         lock (_sync)
         {
@@ -349,20 +350,24 @@ public sealed class StepGateway(
 
             if (_dispatchedSequence is { } dispatched)
             {
-                if (request.Step is SelectStep
-                    || (selectionOpen && readiness is NativeInputReadiness.Busy or NativeInputReadiness.Unavailable))
+                // Watch the selector itself. After it closes, native effects still own input until they settle.
+                if (selectionIdentity is not null
+                    && (request.Step is SelectStep || readiness is NativeInputReadiness.Busy or NativeInputReadiness.Unavailable))
                 {
-                    _selectionWaitStarted ??= _clock.GetTimestamp();
+                    if (!ReferenceEquals(_settlingSelection, selectionIdentity))
+                    {
+                        _settlingSelection = selectionIdentity;
+                        _selectionWaitStarted = _clock.GetTimestamp();
+                    }
+                    if (_clock.GetElapsedTime(_selectionWaitStarted) >= SelectionSettlementLimit)
+                    {
+                        ReportUncertain(request.OperationId);
+                        return;
+                    }
                 }
                 else
                 {
-                    _selectionWaitStarted = null;
-                }
-
-                if (_selectionWaitStarted is { } start && _clock.GetElapsedTime(start) >= SelectionSettlementLimit)
-                {
-                    ReportUncertain(request.OperationId);
-                    return;
+                    _settlingSelection = null;
                 }
 
                 _nativeAccepted |= _nativeAcceptance?.Invoke() == true;
@@ -411,6 +416,7 @@ public sealed class StepGateway(
                     NativeInputReadiness.Terminal => StepBoundary.Terminal,
                     _ => StepBoundary.Ready,
                 });
+                _settlingSelection = null;
                 _pending = null;
                 return;
             }
@@ -456,7 +462,8 @@ public sealed class StepGateway(
                 {
                     _presentation = null;
                     _dispatchedSequence = sequence;
-                    _selectionWaitStarted = request.Step is SelectStep ? _clock.GetTimestamp() : null;
+                    _settlingSelection = request.Step is SelectStep ? selectionIdentity : null;
+                    _selectionWaitStarted = _clock.GetTimestamp();
                     return;
                 }
 
@@ -499,6 +506,7 @@ public sealed class StepGateway(
             if (_pending is not { } request || request.OperationId != operationId)
                 return;
             _receipt = Reject(request, code, message);
+            _settlingSelection = null;
             _pending = null;
         }
     }
@@ -515,6 +523,7 @@ public sealed class StepGateway(
                 new StepCause(
                     StepErrorCode.ExecutionUncertain,
                     "The native step may have affected the game. Read the current state before making a new decision."));
+            _settlingSelection = null;
             _pending = null;
         }
     }

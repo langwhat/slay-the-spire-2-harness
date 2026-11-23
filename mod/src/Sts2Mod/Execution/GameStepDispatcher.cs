@@ -134,7 +134,8 @@ internal sealed class GameStepDispatcher
             }
         }
 
-        if (_submittedChoice is not null && ReferenceEquals(_submittedChoice, CurrentChoice()))
+        var currentChoice = CurrentChoice();
+        if (_submittedChoice is not null && ReferenceEquals(_submittedChoice, currentChoice))
             readiness = NativeInputReadiness.Busy;
         else
             _submittedChoice = null;
@@ -148,9 +149,11 @@ internal sealed class GameStepDispatcher
             sequence,
             Dispatch,
             RunManager.Instance.DebugOnlyGetState()?.AscensionLevel,
-            selectionOpen: CurrentChoice() is CardSelectionInterceptor.PendingCardSelection
+            selectionIdentity: currentChoice is CardSelectionInterceptor.PendingCardSelection
                 or NCardGridSelectionScreen or NChooseACardSelectionScreen
-                or NChooseABundleSelectionScreen or NCardRewardSelectionScreen);
+                or NChooseABundleSelectionScreen or NCardRewardSelectionScreen
+                    ? currentChoice
+                    : null);
         _mapPresenter.Advance();
 
         if (_selectionOrigin is { } selectionOrigin

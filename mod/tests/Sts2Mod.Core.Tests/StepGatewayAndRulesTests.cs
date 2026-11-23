@@ -48,7 +48,9 @@ public sealed class StepGatewayAndRulesTests
         control.SetMode(AgentControlMode.Running);
         var gateway = new StepGateway(control, "game-1", timeProvider: clock);
         var initialReadiness = selectionAlreadyOpen ? NativeInputReadiness.Selection : NativeInputReadiness.Ready;
-        gateway.Advance(RunLocation, initialReadiness, sequence: 1, _ => null);
+        var selector = new object();
+        var initialSelector = selectionAlreadyOpen ? selector : null;
+        gateway.Advance(RunLocation, initialReadiness, sequence: 1, _ => null, selectionIdentity: initialSelector);
         var step = selectionAlreadyOpen
             ? "{\"kind\":\"select\",\"refs\":[\"card:1:1\"]}"
             : "{\"kind\":\"interact\",\"action\":\"interaction:1:1\"}";
@@ -58,25 +60,90 @@ public sealed class StepGatewayAndRulesTests
         {
             dispatched = request;
             return null;
-        });
+        }, selectionIdentity: initialSelector);
         var first = Assert.IsType<StepRequest>(dispatched);
 
-        clock.Seconds = 1;
-        gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: 2, _ => null, selectionOpen: true);
-        Assert.IsType<PendingStep>(gateway.Status().Receipt);
-        Assert.True(gateway.OwnsPendingStep(first));
+        for (var second = 1; second < 8; second++)
+        {
+            clock.Seconds = second;
+            gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: second + 1, _ => null, selectionIdentity: selector);
+            Assert.IsType<PendingStep>(gateway.Status().Receipt);
+            Assert.True(gateway.OwnsPendingStep(first));
+        }
 
-        clock.Seconds = 60;
-        gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: 3, _ => null, selectionOpen: true);
+        clock.Seconds = 9;
+        gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: 10, _ => null, selectionIdentity: selector);
         Assert.False(gateway.OwnsPendingStep(first));
         Assert.IsType<PendingStep>(gateway.Status().Receipt);
 
-        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 4, _ => null);
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 11, _ => null, selectionIdentity: selector);
         Assert.Equal("first", Assert.IsType<UnknownStep>(gateway.Status().Receipt).OperationId);
         gateway.Submit(ActionJson("new", RunRoute, "{\"kind\":\"select\",\"refs\":[\"card:1:1\"]}"));
-        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 4,
-            request => new CompletedStep(request.OperationId, StepBoundary.Ready));
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 11,
+            request => new CompletedStep(request.OperationId, StepBoundary.Ready), selectionIdentity: selector);
         Assert.Equal("new", Assert.IsType<CompletedStep>(gateway.Status().Receipt).OperationId);
+    }
+
+    [Fact]
+    public void ClosedSelectionWaitsForNativeResolutionAcrossPause()
+    {
+        var clock = new ManualClock();
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var gateway = new StepGateway(control, "game-1", timeProvider: clock);
+        var selector = new object();
+        gateway.Advance(CombatLocation, NativeInputReadiness.Selection, sequence: 1, _ => null, selectionIdentity: selector);
+        gateway.Submit(ActionJson("select", CombatRoute, "{\"kind\":\"select\",\"refs\":[\"card:1:1\"]}"));
+
+        var cue = new TaskCompletionSource();
+        gateway.Advance(CombatLocation, NativeInputReadiness.Selection, sequence: 1, request =>
+        {
+            gateway.TrackNativeTask(request, cue.Task);
+            return null;
+        }, selectionIdentity: selector);
+        clock.Seconds = 1;
+        cue.SetResult();
+        gateway.Advance(CombatLocation, NativeInputReadiness.Busy, sequence: 2, _ => null);
+
+        for (var second = 2; second < 20; second++)
+        {
+            clock.Seconds = second;
+            gateway.Advance(CombatLocation, NativeInputReadiness.Busy, sequence: second + 1, _ => null);
+            Assert.Equal("select", Assert.IsType<PendingStep>(gateway.Status().Receipt).OperationId);
+        }
+
+        control.SetMode(AgentControlMode.Paused);
+        clock.Seconds = 20;
+        gateway.Advance(CombatLocation, NativeInputReadiness.Ready, sequence: 21, _ => null);
+        Assert.Equal(AgentControlMode.Paused, gateway.Status().ControlIntent);
+        var receipt = Assert.IsType<CompletedStep>(gateway.Status().Receipt);
+        Assert.Equal("select", receipt.OperationId);
+        Assert.Equal(StepBoundary.Ready, receipt.Boundary);
+    }
+
+    [Fact]
+    public void SuccessorSelectionKeepsTheOperationUntilItsOwnInputBoundary()
+    {
+        var clock = new ManualClock();
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var gateway = new StepGateway(control, "game-1", timeProvider: clock);
+        var firstSelector = new object();
+        var nextSelector = new object();
+        gateway.Advance(CombatLocation, NativeInputReadiness.Selection, sequence: 1, _ => null, selectionIdentity: firstSelector);
+        gateway.Submit(ActionJson("select", CombatRoute, "{\"kind\":\"select\",\"refs\":[\"card:1:1\"]}"));
+        gateway.Advance(CombatLocation, NativeInputReadiness.Selection, sequence: 1, _ => null, selectionIdentity: firstSelector);
+
+        clock.Seconds = 6;
+        gateway.Advance(CombatLocation, NativeInputReadiness.Busy, sequence: 2, _ => null, selectionIdentity: firstSelector);
+        clock.Seconds = 7;
+        gateway.Advance(CombatLocation, NativeInputReadiness.Busy, sequence: 3, _ => null, selectionIdentity: nextSelector);
+        clock.Seconds = 9;
+        gateway.Advance(CombatLocation, NativeInputReadiness.Selection, sequence: 4, _ => null, selectionIdentity: nextSelector);
+
+        var receipt = Assert.IsType<CompletedStep>(gateway.Status().Receipt);
+        Assert.Equal("select", receipt.OperationId);
+        Assert.Equal(StepBoundary.Selection, receipt.Boundary);
     }
 
     [Fact]
