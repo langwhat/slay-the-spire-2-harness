@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
+using MegaCrit.Sts2.Core.ValueProps;
 using static Sts2Mod.Observation.NativeRuleBody;
 using NativeHpDisplay = MegaCrit.Sts2.Core.Entities.Creatures.HpDisplay;
 
@@ -24,6 +25,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
     private readonly HashSet<Type> _powers = [];
     private readonly HashSet<Type> _readPowers = [];
     private readonly HashSet<string> _forcedMoves = [];
+    private readonly HashSet<Type> _summons = [];
     private readonly HashSet<string> _branchFlags = [];
     private readonly Dictionary<FieldInfo, string?> _flagNames = [];
     private readonly HashSet<string> _gaps = [];
@@ -47,9 +49,21 @@ internal sealed class NativeRuleText(MonsterModel monster)
         ("AfterPowerAmountChanged", "After a power changes stacks"),
         ("AfterApplied", "After this power is applied"),
         ("AfterRemoved", "After this power is removed"),
+        ("BeforeAttack", "Before an attack"),
+        ("AfterAttack", "After an attack resolves"),
+        ("BeforeDamageReceived", "Before damage resolves"),
+        ("AfterDamageGiven", "After dealing damage"),
+        ("AfterCurrentHpChanged", "After HP changes"),
+        ("AfterBlockBroken", "After block is broken"),
+        ("BeforeDeath", "Before death"),
+        ("BeforePotionUsed", "Before a potion is used"),
+        ("AfterCardGeneratedForCombat", "After a card is generated in combat"),
+        ("AfterCombatEnd", "After combat ends"),
     ];
 
     internal IReadOnlySet<string> ForcedMoves => _forcedMoves;
+    internal IReadOnlySet<Type> Summons => _summons;
+    internal string Label(Type model) => ModelLabel(model);
     internal IReadOnlySet<string> Gaps => _gaps;
     internal void Gap(string location) => _gaps.Add(location);
 
@@ -88,14 +102,11 @@ internal sealed class NativeRuleText(MonsterModel monster)
 
     internal List<string> ReadMove(MethodInfo method, MoveState move)
     {
-        var (effects, incomplete) = ReadEffects(method);
+        var (effects, _) = ReadEffects(method);
         if ((move.Intents.Any(intent => intent is AttackIntent) && !effects.Any(effect => effect.Attack))
             || (move.Intents.Any(intent => intent is BuffIntent or DebuffIntent or DefendIntent) && effects.Count == 0))
-        {
             Gap(move.Id);
-            incomplete = true;
-        }
-        return DescribeReadout(effects, incomplete);
+        return effects.Select(effect => effect.Text).ToList();
     }
 
     internal void ReadHooks(Type type, List<string> lines)
@@ -106,37 +117,159 @@ internal sealed class NativeRuleText(MonsterModel monster)
         {
             if (FindOverride(type, name) is not { } method)
                 continue;
-            var (effects, incomplete) = ReadEffects(method, power ? type : null);
-            if (effects.Count != 0 || incomplete)
-                lines.Add($"{powerPrefix}{timing}: {string.Join("; ", DescribeReadout(effects, incomplete))}");
+            var (effects, _) = ReadEffects(method, power ? type : null);
+            if (effects.Count != 0)
+                lines.Add($"{powerPrefix}{timing}: {string.Join("; ", effects.Select(effect => effect.Text))}");
         }
 
-        if (FindOverride(type, "ModifyDamageAdditive") is { } additive)
+        var handled = new HashSet<string>(Hooks.Select(hook => hook.Method), StringComparer.Ordinal);
+        foreach (var (name, neutral, timing, format) in ValueHooks)
         {
-            var result = Body(additive);
-            foreach (var value in result.Returns.Where(value => Numeric(value.Value) != 0))
+            if (FindOverride(type, name) is not { } hook)
+                continue;
+            handled.Add(name);
+            _hookOwner = power ? type : null;
+            var rendered = ReadValueHook(hook, neutral, format, out var adjusters);
+            _hookOwner = null;
+            if (rendered is null)
             {
-                var amount = ValueText(value.Value);
-                var guards = Guard(value.Conditions);
-                if (amount is null || guards is null)
-                {
-                    Gap(additive.Name);
-                    continue;
-                }
-                lines.Add($"{powerPrefix}Damage addition per hit, before global multipliers and block: {When(guards, $"+{amount}")}");
+                Gap($"{type.Name}.{name}");
+                continue;
             }
-            if (result.Incomplete)
-                Gap(additive.Name);
+            if (rendered.Count == 0)
+                continue;
+            var adjusted = adjusters.Count == 0 ? "" : $" (then adjusted by {string.Join(", ", adjusters)} when present)";
+            lines.Add($"{powerPrefix}{timing}: {string.Join("; ", rendered)}{adjusted}");
         }
+
+        // Combat queries are asked outside the shared dispatchers too, so read every override.
+        // Monster-level queries only drive presentation such as the bestiary.
+        foreach (var query in type.GetMethods(Declared).Where(method => method.ReturnType == typeof(bool)
+            && method.Name.StartsWith("Should", StringComparison.Ordinal) && IsHookOverride(method)
+            && method.GetBaseDefinition().DeclaringType != typeof(MonsterModel)))
+        {
+            handled.Add(query.Name);
+            var rendered = ReadQuery(query);
+            if (rendered is null)
+                Gap($"{type.Name}.{query.Name}");
+            else if (rendered.Count != 0)
+                lines.Add($"{powerPrefix}{Humanize(query.Name)}: {string.Join("; ", rendered)}");
+        }
+
         foreach (var unhandled in NativeHookDispatch.Overrides(type))
-            if (unhandled.Name != "ModifyDamageAdditive" && !Hooks.Any(hook => hook.Method == unhandled.Name))
+            if (!handled.Contains(unhandled.Name))
                 Gap($"{unhandled.DeclaringType?.Name}.{unhandled.Name}");
         foreach (var unread in NativeHookDispatch.Unread)
             Gap(unread);
+    }
 
-        // Card-specific consumers can query this outside the shared engine dispatchers.
-        if (FindOverride(type, "ShouldOwnerDeathTriggerFatal") is { } fatal)
-            Gap($"{fatal.DeclaringType?.Name}.{fatal.Name}");
+    private const BindingFlags Declared = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+    private static readonly Type[] BaseModels = [typeof(AbstractModel), typeof(MonsterModel), typeof(PowerModel), typeof(AfflictionModel)];
+
+    // Hooks that return a modified number, with the result that leaves the number unchanged.
+    // A null neutral result means the hook passes its `amount` argument through unchanged.
+    private static readonly (string Method, decimal? Neutral, string Timing, string Format)[] ValueHooks =
+    [
+        ("ModifyDamageAdditive", 0m, "Damage addition per hit, before multipliers and block", "+{0}"),
+        ("ModifyDamageMultiplicative", 1m, "Damage multiplier per hit, after additions", "×{0}"),
+        ("ModifyDamageMultiplicativeLate", 1m, "Damage multiplier per hit, after other multipliers", "×{0}"),
+        ("ModifyBlockAdditive", 0m, "Block addition, before multipliers", "+{0}"),
+        ("ModifyBlockMultiplicative", 1m, "Block multiplier, after additions", "×{0}"),
+        ("GetScaledAmountForMultiplayer", null, "Applied stacks scaled by player count", "{0}"),
+    ];
+
+    private Type? _hookOwner;
+
+    private List<string>? ReadValueHook(MethodInfo hook, decimal? neutral, string format, out SortedSet<string> adjusters)
+    {
+        adjusters = new SortedSet<string>(StringComparer.Ordinal);
+        var body = Body(hook);
+        if (body.Incomplete)
+            return null;
+        var outcomes = new List<(string Text, Test[] Conditions)>();
+        foreach (var result in body.Returns)
+        {
+            var value = Peel(result.Value, adjusters);
+            if (neutral is null ? value is Input { Name: "amount" } : Numeric(value) == neutral)
+            {
+                outcomes.Add(("", result.Conditions));
+                continue;
+            }
+            if (ValueText(value) is not { } amount)
+                return null;
+            outcomes.Add((string.Format(CultureInfo.InvariantCulture, format, amount), result.Conditions));
+        }
+        return RenderOutcomes(outcomes, body.Terminals.Where(terminal => !terminal.Returned).Select(terminal => terminal.Conditions));
+    }
+
+    // Report the answers that differ from the engine default.
+    private List<string>? ReadQuery(MethodInfo query)
+    {
+        if (Body(query.GetBaseDefinition()) is not { Incomplete: false, Returns: [{ Conditions.Length: 0 } fallback] }
+            || !TryTruth(fallback.Value, out var standard))
+            return null;
+        var body = Body(query);
+        if (body.Incomplete)
+            return null;
+        var outcomes = new List<(string Text, Test[] Conditions)>();
+        foreach (var result in body.Returns)
+        {
+            if (TryTruth(result.Value, out var answer))
+            {
+                outcomes.Add((answer == standard ? "" : AnswerText(answer), result.Conditions));
+                continue;
+            }
+            // A computed answer splits into the test that decides it.
+            outcomes.Add((AnswerText(!standard), [.. result.Conditions, new Test(result.Value, !standard)]));
+            outcomes.Add(("", [.. result.Conditions, new Test(result.Value, standard)]));
+        }
+        return RenderOutcomes(outcomes, body.Terminals.Where(terminal => !terminal.Returned).Select(terminal => terminal.Conditions));
+
+        static string AnswerText(bool answer) => answer ? "yes" : "no";
+    }
+
+    // Each distinct outcome gets the minimal guard that separates it from the other outcomes.
+    private List<string>? RenderOutcomes(List<(string Text, Test[] Conditions)> outcomes, IEnumerable<Test[]> excluded)
+    {
+        var excludedPaths = excluded.ToArray();
+        var rendered = new List<string>();
+        foreach (var group in outcomes.Where(outcome => outcome.Text.Length != 0).GroupBy(outcome => outcome.Text))
+        {
+            var reaching = group.Select(outcome => outcome.Conditions).ToArray();
+            var others = outcomes.Where(outcome => outcome.Text != group.Key).Select(outcome => outcome.Conditions)
+                .Concat(excludedPaths);
+            foreach (var path in NativeRuleGuards.Minimize(reaching, others, TestKey) ?? MergeTests(reaching))
+            {
+                if (Guard(path) is not { } guard)
+                    return null;
+                rendered.Add(When(guard, group.Key));
+            }
+        }
+        return rendered.Distinct().ToList();
+    }
+
+    // A relic or power that rewrites a number exposes its own rule; name it instead of restating it.
+    private static Value Peel(Value value, ISet<string> adjusters)
+    {
+        while (value is Call { Method: MethodInfo method, Receiver: not null, Arguments: var arguments }
+            && method.ReturnType == typeof(decimal) && method.DeclaringType is { } owner
+            && (typeof(RelicModel).IsAssignableFrom(owner) || typeof(PowerModel).IsAssignableFrom(owner))
+            && method.GetParameters().FirstOrDefault(parameter => parameter.Name == "amount") is { } amount)
+        {
+            adjusters.Add(ModelLabel(owner));
+            value = arguments[amount.Position];
+        }
+        return value;
+    }
+
+    private static bool IsHookOverride(MethodInfo method)
+        => method.IsVirtual && method.DeclaringType is { } owner && !BaseModels.Contains(owner)
+            && method.GetBaseDefinition().DeclaringType is { } origin && BaseModels.Contains(origin);
+
+    private static string Humanize(string name)
+    {
+        var words = System.Text.RegularExpressions.Regex.Replace(name, "(?<=[a-z])(?=[A-Z])", " ").ToLowerInvariant();
+        return char.ToUpperInvariant(words[0]) + words[1..];
     }
 
     internal void ReadPowerHooks(List<string> lines)
@@ -148,14 +281,9 @@ internal sealed class NativeRuleText(MonsterModel monster)
         }
     }
 
+    // Overloads can share a hook's name, so match the override of the engine hook itself.
     private static MethodInfo? FindOverride(Type type, string name)
-    {
-        var method = AccessTools.Method(type, name);
-        return method?.DeclaringType is { } owner && owner != typeof(AbstractModel)
-            && owner != typeof(MonsterModel) && owner != typeof(PowerModel)
-            ? method
-            : null;
-    }
+        => type.GetMethods(Declared).FirstOrDefault(method => method.Name == name && IsHookOverride(method));
 
     private NativeRuleBody Body(MethodInfo method)
     {
@@ -169,13 +297,6 @@ internal sealed class NativeRuleText(MonsterModel monster)
 
     private sealed record Effect(string Text, bool Attack = false);
 
-    private static List<string> DescribeReadout(List<Effect> effects, bool incomplete)
-    {
-        var lines = effects.Select(effect => effect.Text).ToList();
-        if (incomplete)
-            lines.Add("some effects unresolved");
-        return lines;
-    }
 
     private (List<Effect> Effects, bool Incomplete) ReadEffects(MethodInfo method, Type? power = null,
         int depth = 0, bool onOwnedMonster = false)
@@ -228,7 +349,11 @@ internal sealed class NativeRuleText(MonsterModel monster)
 
                 if (extracted.Count == 0)
                     continue;
-                foreach (var path in MergeTests(matching.Select(step => step.Conditions)))
+                var missing = body.Terminals.Where(terminal => !terminal.Visited.Contains(group.Key))
+                    .Select(terminal => terminal.Conditions)
+                    .Concat(group.Where(step => Key(step.Call) != alternative.Key).Select(step => step.Conditions));
+                var reaching = matching.Select(step => step.Conditions).ToArray();
+                foreach (var path in NativeRuleGuards.Minimize(reaching, missing, TestKey) ?? MergeTests(reaching))
                 {
                     if (Guard(path) is not { } guard)
                     {
@@ -346,8 +471,20 @@ internal sealed class NativeRuleText(MonsterModel monster)
             }
             if (effect == "Kill" && args.FirstOrDefault() is { } target)
                 return ValueText(target) is { } who ? new Effect($"kill {who}") : null;
+            if (effect == "Damage" && Argument(call, "target", "targets") is { } struck && Argument(call, "amount") is { } dealt)
+            {
+                if (ValueText(struck) is not { } who || ValueText(dealt) is not { } amount)
+                    return null;
+                var unpowered = Argument(call, "props") is Constant { Data: int props } && ((ValueProp)props).HasFlag(ValueProp.Unpowered);
+                return new Effect($"deal {amount}{(unpowered ? " unpowered" : "")} damage to {who}");
+            }
+            if (effect == "Escape" && args.FirstOrDefault() is { } escaping)
+                return ValueText(escaping) is { } who ? new Effect($"{who} escapes combat") : null;
             if (effect == "Add" && generic is not null && typeof(MonsterModel).IsAssignableFrom(generic))
+            {
+                _summons.Add(generic);
                 return new Effect($"summon {ModelLabel(generic)}");
+            }
             if (effect is "TriggerAnim" or "ChangeCreatureAnim")
                 recognized = false;
             return null;
@@ -374,6 +511,18 @@ internal sealed class NativeRuleText(MonsterModel monster)
             && flags.Contains(effect[4..]) && args is [Constant { Data: int flag }] && flag is 0 or 1)
             return new Effect($"{effect[4..]} = {(flag == 1 ? "true" : "false")}");
 
+        if (type == typeof(CardPileCmd) && effect == "AddToCombatAndPreview" && generic is not null
+            && typeof(CardModel).IsAssignableFrom(generic))
+        {
+            if (Argument(call, "target", "targets") is not { } owner || ValueText(owner) is not { } who
+                || Argument(call, "count") is not { } added || ValueText(added) is not { } count
+                || Argument(call, "pileType") is not Constant { Data: int pile })
+                return null;
+            var position = Argument(call, "position") is Constant { Data: int place } ? (CardPilePosition)place : CardPilePosition.Bottom;
+            var where = (PileType)pile == PileType.Draw && position != CardPilePosition.Bottom ? $" ({position.ToString().ToLowerInvariant()})" : "";
+            return new Effect($"add {count} {ModelLabel(generic)} to {who}'s {((PileType)pile).ToString().ToLowerInvariant()} pile{where}");
+        }
+
         if (type == typeof(CardCmd))
         {
             if (effect is "Afflict" or "AfflictAndPreview" && generic is not null && args.Length >= 2)
@@ -399,6 +548,13 @@ internal sealed class NativeRuleText(MonsterModel monster)
             && type.Name is not ("SfxCmd" or "VfxCmd" or "TalkCmd" or "Cmd" or "DamageCmd");
         return null;
     }
+
+    // Overloads order their operands differently, so bind by parameter name.
+    private static Value? Argument(Call call, params string[] names)
+        => call.Method.GetParameters().FirstOrDefault(parameter => names.Contains(parameter.Name)) is { } match
+            && match.Position < call.Arguments.Length
+            ? call.Arguments[match.Position]
+            : null;
 
     private Effect? Attack(Call receiver)
     {
@@ -478,11 +634,13 @@ internal sealed class NativeRuleText(MonsterModel monster)
     private static string ModelLabel(Type type)
     {
         var id = ModelDb.GetId(type);
-        var title = ModelDb.GetById<AbstractModel>(id) switch
+        var title = ModelDb.GetByIdOrNull<AbstractModel>(id) switch
         {
             PowerModel power => power.Title,
             AfflictionModel affliction => affliction.Title,
             MonsterModel monster => monster.Title,
+            RelicModel relic => relic.Title,
+            CardModel card => card.TitleLocString,
             _ => null,
         };
         return title?.Exists() == true ? $"{title.GetFormattedText()} ({id})" : id.ToString();
@@ -563,6 +721,9 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 return op == "=" ? "card has no affliction" : "card already has an affliction";
             if (operation.Left is Input { Name: "power" } && right == Self && op is "=" or "≠")
                 return op == "=" ? "this power changed" : "a different power changed";
+            if (operation.Left is Call { Method: { Name: "GetRelic" or "GetPower", IsGenericMethod: true } lookup, Receiver: { } holder }
+                && right is Constant { Data: null } && op is "=" or "≠" && ValueText(holder) is { } who)
+                return $"{who} {(op == "≠" ? "has" : "lacks")} {ModelLabel(lookup.GetGenericArguments()[0])}";
             if (ValueText(operation.Left) is { } leftText && ValueText(right) is { } rightText && op is not null)
                 return $"{leftText}{op}{rightText}";
             return null;
@@ -578,6 +739,8 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 return $"{(expected ? "has" : "lacks")} {PowerLabel(call.Method.GetGenericArguments()[0])}";
             if (name == "IsPoweredAttack")
                 return expected ? "hit has Move without Unpowered" : "hit is not a powered attack";
+            if (name == "IsPoweredCardOrMonsterMoveBlock")
+                return expected ? "block has Move without Unpowered" : "block is not from a powered card or move";
             if (name == "get_UnblockedDamage")
                 return expected ? "nonzero HP lost" : "no HP lost";
             if (name == "get_Affliction" && call.Receiver is Input { Name: "card" })
@@ -603,6 +766,11 @@ internal sealed class NativeRuleText(MonsterModel monster)
         if (value is Input { Name: "wasRemovalPrevented" })
             return expected ? "death was prevented" : "death was not prevented";
 
+        // A truth test on an object reference checks that it exists.
+        if ((value is Input { Type.IsValueType: false } || value is Call { Method: MethodInfo { ReturnType.IsValueType: false } })
+            && ValueText(value) is { } reference)
+            return expected ? $"{reference}≠none" : $"{reference}=none";
+
         return NativeRuleBody.TryTruth(value, out var truth)
             ? (truth == expected ? "" : "never")
             : null;
@@ -625,8 +793,10 @@ internal sealed class NativeRuleText(MonsterModel monster)
             Input { Name: "this" } => "self",
             Input { Name: "oldOwner" } => "former holder",
             Input { Name: "targets" } => "player targets",
-            Input { Name: "target" } => "hit target",
+            Input { Name: "target" } => "target",
             Input { Name: "dealer" } => "damage dealer",
+            Input { Name: "cardSource" } => "source card",
+            Input { Name: "amount" } => "amount",
             Input { Name: "power" } => "changed power",
             Input { Name: "card" } => "that card",
             Input { Name: "creature" } => "event target",
@@ -655,8 +825,21 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 => ValueText(amount),
             Call { Method.Name: "op_UnaryNegation", Method.DeclaringType: var type, Arguments: [var delta] }
                 when type == typeof(decimal) && ValueText(delta) is { } text => $"−{text}",
+            Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Players", Receiver: Input { Name: "combatState" } } }
+                => "number of players in combat",
+            Call { Method.Name: "get_Player", Method.DeclaringType: var type, Receiver: { } creature } when type == typeof(Creature)
+                => ValueText(creature),
+            Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: { } model } }
+                when ValueText(model) is { } owner => $"{owner}'s owner",
+            Call { Method.DeclaringType: var type, Arguments: [var left, var right] } arithmetic when type == typeof(decimal)
+                && Arithmetic(arithmetic.Method.Name) is { } symbol => Formula(left, symbol, right),
+            Operation { Right: { } right } operation when Arithmetic(operation.Operator) is { } symbol
+                => Formula(operation.Left, symbol, right),
             _ => null,
         };
+
+        string? Formula(Value left, string symbol, Value right)
+            => ValueText(left) is { } a && ValueText(right) is { } b ? $"({a} {symbol} {b})" : null;
     }
 
     private string? FilteredSet(Call filter)
@@ -695,11 +878,16 @@ internal sealed class NativeRuleText(MonsterModel monster)
             case Call { Method.DeclaringType: var type, Arguments: [var arg] } wrapper when type == typeof(decimal)
                 && wrapper.Method.Name is ".ctor" or "op_Implicit":
                 return Numeric(arg, depth + 1);
+            // The compiler emits decimal literals such as 0.75m through the five-part constructor.
+            case Call { Method: ConstructorInfo { DeclaringType: var type }, Arguments: [Constant { Data: int low }, Constant { Data: int middle },
+                Constant { Data: int high }, Constant { Data: int negative }, Constant { Data: int scale }] } when type == typeof(decimal):
+                return new decimal(low, middle, high, negative != 0, (byte)scale);
             case Call { Method.DeclaringType: var type, Method.Name: "GetValueIfAscension", Arguments: [Constant { Data: int level }, var high, var low] }
                 when type == typeof(AscensionHelper):
                 return Numeric(AscensionHelper.HasAscension((AscensionLevel)level) ? high : low, depth + 1);
-            case Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
-                when getter.Name.StartsWith("get_", StringComparison.Ordinal) && getter.ReturnType is { } returnType
+            case Call { Method: MethodInfo getter, Receiver: var receiver, Arguments.Length: 0 }
+                when (receiver == Self || receiver is null && getter.IsStatic)
+                    && getter.Name.StartsWith("get_", StringComparison.Ordinal) && getter.ReturnType is { } returnType
                     && (returnType == typeof(int) || returnType == typeof(decimal) || returnType == typeof(float))
                     && getter.DeclaringType?.IsInstanceOfType(monster) == true:
                 return NumericGetter(getter, depth + 1);
@@ -714,20 +902,39 @@ internal sealed class NativeRuleText(MonsterModel monster)
                     "conv.r8" => (decimal)(double)valueBeforeConversion,
                     _ => null,
                 };
-            case Operation { Right: { } right } operation:
-                var a = Numeric(operation.Left, depth + 1);
-                var b = Numeric(right, depth + 1);
-                return operation.Operator switch
-                {
-                    "add" => a + b,
-                    "sub" => a - b,
-                    "mul" => a * b,
-                    _ => null,
-                };
+            case Call { Method.DeclaringType: var type, Method.Name: "get_BaseValue", Receiver: var variable }
+                when type == typeof(DynamicVar) && _hookOwner is { } power && DynamicKey(variable) is { } key:
+                // A power's parameters come from its canonical model; no instance exists before it is applied.
+                return ModelDb.GetByIdOrNull<PowerModel>(ModelDb.GetId(power))?.DynamicVars.TryGetValue(key, out var parameter) == true
+                    ? parameter.BaseValue
+                    : null;
+            case Call { Method.DeclaringType: var type, Arguments: [var left, var right] } arithmetic when type == typeof(decimal)
+                && Arithmetic(arithmetic.Method.Name) is { } symbol:
+                return Calculate(symbol, Numeric(left, depth + 1), Numeric(right, depth + 1));
+            case Operation { Right: { } right } operation when Arithmetic(operation.Operator) is { } symbol:
+                return Calculate(symbol, Numeric(operation.Left, depth + 1), Numeric(right, depth + 1));
             default:
                 return null;
         }
     }
+
+    private static string? Arithmetic(string operation) => operation switch
+    {
+        "add" or "op_Addition" => "+",
+        "sub" or "op_Subtraction" => "−",
+        "mul" or "op_Multiply" => "×",
+        "div" or "op_Division" => "÷",
+        _ => null,
+    };
+
+    private static decimal? Calculate(string symbol, decimal? left, decimal? right) => symbol switch
+    {
+        "+" => left + right,
+        "−" => left - right,
+        "×" => left * right,
+        "÷" when right is not 0 => left / right,
+        _ => null,
+    };
 
     private decimal? NumericGetter(MethodInfo getter, int depth)
     {

@@ -15,7 +15,6 @@ namespace Sts2Mod.Observation;
 internal static class EnemyMechanismReader
 {
     private const string UnsetMoveId = "UNSET_MOVE";
-    private const string UnresolvedEffects = "Some native effects remain unresolved.";
     private sealed record Readout(string Language, string? Text);
     private static readonly ConditionalWeakTable<MonsterMoveStateMachine, Readout> Readouts = new();
     private static readonly FieldInfo? InitialState = AccessTools.Field(typeof(MonsterMoveStateMachine), "_initialState");
@@ -36,23 +35,30 @@ internal static class EnemyMechanismReader
         if (Readouts.TryGetValue(machine, out var cached) && cached.Language == language)
             return cached.Text;
 
-        string? text;
+        string? text = null;
         try
         {
-            text = ReadEncounterMember(monster, machine);
+            // Unresolved native paths are extractor work items. They stay in the diagnostics log.
+            (text, var gaps) = Describe(monster);
+            if (gaps.Count > 0)
+                GD.PushWarning($"[sts2agent] Unresolved native enemy rules for {monster.Id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
         }
         catch (Exception error)
         {
             GD.PushWarning($"[sts2agent] Enemy mechanism unavailable for {monster.Id}: {error.Message}");
-            text = UnresolvedEffects;
         }
         Readouts.Remove(machine);
         Readouts.Add(machine, new Readout(language, text));
         return text;
     }
 
-    private static string? ReadEncounterMember(MonsterModel monster, MonsterMoveStateMachine machine)
+    internal static (string? Text, IReadOnlySet<string> Gaps) Describe(MonsterModel monster)
+        => Describe(monster, [monster.GetType()]);
+
+    private static (string? Text, IReadOnlySet<string> Gaps) Describe(MonsterModel monster, HashSet<Type> described)
     {
+        if (monster.MoveStateMachine is not { } machine)
+            return (null, new HashSet<string>());
         if (InitialState?.GetValue(machine) is not MonsterState initial)
             throw new InvalidOperationException("The native initial move state is unavailable.");
         var text = new NativeRuleText(monster);
@@ -87,22 +93,20 @@ internal static class EnemyMechanismReader
                 continue;
             if (state is MoveState move)
             {
-                if (!IsPublicMove(move))
-                {
-                    text.Gap(state.Id);
-                    continue;
-                }
-
-                List<string> effects = [];
-                if (PerformMove?.GetValue(move) is Delegate handler)
-                    effects = text.ReadMove(handler.Method, move);
-                else
-                    text.Gap(move.Id);
                 var followUp = move.FollowUpState ?? (move.FollowUpStateId is { } followUpId
                     ? machine.States.GetValueOrDefault(followUpId)
                     : null);
                 if (followUp is not null)
                     pending.Enqueue(followUp);
+                // The game hides this move's intent. Withhold its ID and effects but keep walking the graph.
+                if (!IsPublicMove(move))
+                    continue;
+                if (followUp is null)
+                    text.Gap(move.Id);
+
+                List<string> effects = [];
+                if (PerformMove?.GetValue(move) is Delegate handler)
+                    effects = text.ReadMove(handler.Method, move);
                 else
                     text.Gap(move.Id);
 
@@ -117,6 +121,8 @@ internal static class EnemyMechanismReader
                 && ConditionalStates?.GetValue(conditional) is IEnumerable branches)
             {
                 var terms = new List<string>();
+                var destinations = new List<string>();
+                var allRead = true;
                 foreach (var branch in branches)
                 {
                     if (branch is null || AccessTools.Field(branch.GetType(), "id")?.GetValue(branch) is not string destination
@@ -130,13 +136,20 @@ internal static class EnemyMechanismReader
                         ? "otherwise"
                         : text.ReadCondition(condition.Method);
                     if (rule is null)
+                    {
                         text.Gap(state.Id);
-                    terms.Add($"{rule ?? "unresolved condition"} → {StateLabel(next)}");
+                        allRead = false;
+                    }
+                    terms.Add($"{rule} → {StateLabel(next)}");
+                    destinations.Add(StateLabel(next));
                     pending.Enqueue(next);
                     if (known && condition is null)
                         break;
                 }
-                lines.Add($"{state.Id} (first matching branch): {string.Join("; ", terms)}");
+                // Without every condition, state only the reachable moves.
+                lines.Add(allRead
+                    ? $"{state.Id} (first matching branch): {string.Join("; ", terms)}"
+                    : $"{state.Id}: one of {string.Join(", ", destinations.Distinct())}");
             }
             else if (state is RandomBranchState random)
             {
@@ -171,13 +184,24 @@ internal static class EnemyMechanismReader
 
         }
         lines.AddRange(powerLines);
-        if (text.Gaps.Count > 0)
+        var gaps = new HashSet<string>(text.Gaps);
+        foreach (var summon in text.Summons.Where(described.Add).OrderBy(type => type.FullName, StringComparer.Ordinal))
         {
-            GD.PushWarning($"[sts2agent] Unresolved native enemy rules for {monster.Id}: {string.Join(", ", text.Gaps)}");
-            lines.Add(UnresolvedEffects);
+            // A detached copy builds the summon's native graph without touching the combat.
+            if (ModelDb.GetByIdOrNull<MonsterModel>(ModelDb.GetId(summon))?.ToMutable() is not { } copy)
+            {
+                gaps.Add($"{summon.Name}/summoned move graph");
+                continue;
+            }
+            copy.SetUpForCombat();
+            var (nested, nestedGaps) = Describe(copy, described);
+            gaps.UnionWith(nestedGaps.Select(gap => $"{summon.Name}/{gap}"));
+            if (nested is null)
+                continue;
+            lines.Add($"Summoned {text.Label(summon)}:");
+            lines.AddRange(nested.Split('\n').Select(line => "  " + line));
         }
-
-        return lines.Count > 1 ? string.Join("\n", lines) : null;
+        return (lines.Count > 1 ? string.Join("\n", lines) : null, gaps);
 
         bool EnqueueForcedMoves()
         {

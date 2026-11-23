@@ -3,6 +3,9 @@ using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.TestSupport;
 
 namespace Sts2Mod.Observation;
 
@@ -12,13 +15,16 @@ internal sealed class NativeRuleBody
 {
     internal abstract record Value;
     internal sealed record Constant(object? Data) : Value;
-    internal sealed record Input(string Name) : Value;
+    internal sealed record Input(string Name, Type? Type = null) : Value;
     internal sealed record Field(FieldInfo Member, Value? Receiver) : Value;
     internal sealed record Call(MethodBase Method, Value? Receiver, Value[] Arguments) : Value;
     internal sealed record Operation(string Operator, Value Left, Value? Right = null) : Value;
     internal sealed record Test(Value Value, bool Expected, int Offset = -1);
     internal sealed record Step(int Index, Call Call, Test[] Conditions);
     internal sealed record Result(Value Value, Test[] Conditions);
+    // A completed path with the instructions it executed. Paths that miss an instruction
+    // bound the conditions under which that instruction runs.
+    internal sealed record Terminal(Test[] Conditions, IReadOnlySet<int> Visited, bool Returned);
 
     private sealed class Path
     {
@@ -59,6 +65,7 @@ internal sealed class NativeRuleBody
 
     public List<Step> Calls { get; } = [];
     public List<Result> Returns { get; } = [];
+    public List<Terminal> Terminals { get; } = [];
     public HashSet<FieldInfo> Writes { get; } = [];
     public bool Incomplete { get; private set; }
     public bool ReadsParameters { get; private set; }
@@ -88,7 +95,7 @@ internal sealed class NativeRuleBody
                 labels[label] = index;
         }
 
-        var arguments = original.GetParameters().Select(p => new Input(p.Name ?? "?")).ToArray();
+        var arguments = original.GetParameters().Select(p => new Input(p.Name ?? "?", p.ParameterType)).ToArray();
         var pending = new Stack<Path>();
         pending.Push(new Path());
         var remainingInstructions = 16000;
@@ -196,10 +203,14 @@ internal sealed class NativeRuleBody
                 {
                     if (stateMachine is null && original.ReturnType != typeof(void))
                         Returns.Add(new Result(path.Pop(), [.. path.Conditions]));
+                    Terminals.Add(new Terminal([.. path.Conditions], path.Visits.Keys.ToHashSet(), true));
                     break;
                 }
                 if (code.FlowControl == FlowControl.Throw || code == OpCodes.Endfinally)
+                {
+                    Terminals.Add(new Terminal([.. path.Conditions], path.Visits.Keys.ToHashSet(), false));
                     break;
+                }
 
                 if (code == OpCodes.Pop || code == OpCodes.Initobj)
                     _ = path.Pop();
@@ -223,9 +234,15 @@ internal sealed class NativeRuleBody
                     || code == OpCodes.Unbox_Any)
                 {
                     var value = path.Pop();
-                    path.Stack.Add(code == OpCodes.Isinst || code == OpCodes.Castclass
-                        ? new Operation(code.Name!, value, new Constant(operand))
-                        : value);
+                    // A monster reaching itself through its creature is the same receiver.
+                    if (code == OpCodes.Castclass && operand is Type cast && typeof(MonsterModel).IsAssignableFrom(cast)
+                        && value is Call { Method.Name: "get_Monster", Receiver: Call { Method.Name: "get_Creature", Receiver: var owner } }
+                        && owner == Self)
+                        path.Stack.Add(Self);
+                    else
+                        path.Stack.Add(code == OpCodes.Isinst || code == OpCodes.Castclass
+                            ? new Operation(code.Name!, value, new Constant(operand))
+                            : value);
                 }
                 else if (code == OpCodes.Neg || code == OpCodes.Not)
                     path.Stack.Add(new Operation(code.Name!, path.Pop()));
@@ -340,6 +357,16 @@ internal sealed class NativeRuleBody
                 truth = true;
                 return true;
             case Call { Method: ConstructorInfo }:
+                truth = true;
+                return true;
+            // Test-runner switches only guard presentation code. Read the running process's value.
+            case Call { Method: { Name: "get_IsOff" or "get_IsOn" } testMode, Receiver: null }
+                when testMode.DeclaringType == typeof(TestMode):
+                truth = testMode.Name == "get_IsOff" ? TestMode.IsOff : TestMode.IsOn;
+                return true;
+            // The rules describe a combat in progress.
+            case Call { Method: { Name: "IsLiveCombat" } live } when live.DeclaringType is { } combat
+                && typeof(ICombatState).IsAssignableFrom(combat):
                 truth = true;
                 return true;
             case Operation { Left: Constant left, Right: Constant right } operation:
