@@ -581,12 +581,13 @@ def _deck_case(case: DecisionCase) -> DecisionCase:
     state = observation.state
     if not isinstance(state, native.RunState):
         raise ExtractionError("The deck role requires a native Run reward.")
-    groups, _ = card_rewards(observation)
-    refs = (
-        {group.offer for group in case.recorded_reward_groups}
-        if case.recorded_reward_groups
-        else {case.decision_offer}
-    )
+    if case.recorded_reward_groups:
+        groups, _ = card_rewards(observation)
+        refs = {group.offer for group in case.recorded_reward_groups}
+    else:
+        # Older cases can identify the open overlay itself as the recorded offer.
+        groups = tuple(offer for offer in state.offers if offer.kind is native.OfferKind.CARD)
+        refs = {case.decision_offer}
     offers = tuple(offer for offer in groups if offer.ref in refs)
     if refs != {offer.ref for offer in offers} and (
         refs != {None} or adding_selection(observation) is None

@@ -682,6 +682,35 @@ def test_joint_deck_decision_compares_order_and_keeps_each_group(
     asyncio.run(run())
 
 
+def test_deck_replay_reuses_the_open_overlay_in_a_legacy_offer_case(tmp_path: Path) -> None:
+    raw = decision_case(tmp_path, multiselect=True).model_dump(mode="json")
+    raw.update(decision_tool="run_deck_choice", decision_offer="overlay")
+    observation = raw["events"][0]["observation"]
+    observation["input_readiness"] = "selection"
+    offers = observation["state"]["offers"]
+    offers.insert(0, {**offers[0], "ref": "overlay", "actions": []})
+    case = DecisionCase.model_validate_json(json.dumps(raw))
+    arguments = (
+        '{"choices":[{"offer":"overlay","choice":"take","card":"candidate",'
+        '"reason":"This card fits the deck."}]}'
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=reply(("overlay", "run_deck_choice", arguments)),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    async def run() -> None:
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            result = await sample_case(case, client, variant=DecisionVariant.DECK)
+        assert result.verdict is DecisionVerdict.PASSED
+        assert result.reward_groups[0].offer == "overlay"
+
+    asyncio.run(run())
+
+
 def test_deck_replay_reports_each_copy_added_by_one_selector(tmp_path: Path) -> None:
     raw = decision_case(tmp_path, multiselect=True).model_dump(mode="json")
     raw["decision_tool"] = "run_deck_choice"
