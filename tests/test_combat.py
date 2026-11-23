@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import httpx2 as httpx
+import pytest
 from pydantic import JsonValue
 from test_mod_client import COMBAT, RUN
 from test_responses import configuration
@@ -448,6 +449,48 @@ def test_review_admission_read_failure_recovers_without_losing_same_run_handoff(
     result = asyncio.run(battle.run(tmp_path))
     assert isinstance(result, CombatHandoff) and result.review == "Review after a recovered read."
     assert len(battle.actions) == 1
+
+
+@pytest.mark.parametrize(
+    ("act", "before", "after", "review"),
+    [(3, 1, 0, False), (3, 2, 1, True), (2, 1, 0, True)],
+)
+def test_boss_rewards_skip_review_only_after_the_last_boss(
+    tmp_path: Path, act: int, before: int, after: int, review: bool
+) -> None:
+    review_text = "Prepare for the next fight."
+    battle = BattleHTTP(
+        [
+            reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            reply(text=review_text),
+        ]
+    )
+    opening = battle.opening
+    ending = battle.ending
+    boss = opening.state.progress.model_copy(
+        update={"act": act, "acts": 3, "room_type": "boss", "bosses_left": before}
+    )
+    battle.opening = opening.model_copy(
+        update={"state": opening.state.model_copy(update={"progress": boss})}
+    )
+    battle.ending = ending.model_copy(
+        update={
+            "location": ending.location.model_copy(update={"node_id": opening.location.node_id}),
+            "state": ending.state.model_copy(
+                update={
+                    "progress": boss.model_copy(update={"bosses_left": after}),
+                    "screen": native.RunScreen.REWARDS,
+                }
+            ),
+        }
+    )
+
+    result = asyncio.run(battle.run(tmp_path))
+
+    assert isinstance(result, CombatHandoff)
+    assert result.report.result is BattleResult.WON
+    assert result.review == (review_text if review else None)
+    assert len(battle.inputs) == (2 if review else 1)
 
 
 class PlainCombat:

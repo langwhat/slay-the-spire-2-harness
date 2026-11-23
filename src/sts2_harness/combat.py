@@ -25,6 +25,7 @@ from sts2_harness.decisions import (
 from sts2_harness.diagnostics import BattleEnd, BattleFinished, BattleStarted, Diagnostics
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import Interrupted, ModelFailure, ToolRecoveryBudget
+from sts2_harness.fights import FightKind
 from sts2_harness.game import GameLifetimeEnded, GameReadError, RunEnded, SessionStopped
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
@@ -288,6 +289,17 @@ class CombatTask:
                     break
             report = self._report()
             if self._minimal:
+                return CombatHandoff(report)
+            progress = self._opening.state.progress
+            if (
+                report.result is BattleResult.WON
+                and progress.act == progress.acts
+                and progress.room_type == FightKind.BOSS
+                and progress.bosses_left == 1
+                and self._last.location.node_id == self._opening.location.node_id
+                and self._last.state.progress.bosses_left == 0
+            ):
+                # Victory may still have reward or event screens before the run ends.
                 return CombatHandoff(report)
             while True:
                 reviewed = await self._execution.run_unit(self._role, ReviewTask(report))
