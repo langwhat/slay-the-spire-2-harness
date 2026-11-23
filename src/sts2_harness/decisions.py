@@ -106,6 +106,7 @@ class ActTask:
     expected_route: native.RouteKey
     handoff: CombatHandoff | None = None
     previous_battle: CombatHandoff | None = None
+    resolved_card_rewards: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)

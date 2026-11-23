@@ -7,7 +7,7 @@ import pytest
 from pydantic import MISSING, JsonValue
 from test_combat import reply
 from test_lifecycle import terminal
-from test_mod_client import RUN
+from test_mod_client import CARD, RUN
 from test_responses import configuration
 
 from sts2_harness.client import ModClient
@@ -247,6 +247,214 @@ def scene(
             "state": observation.state.model_copy(update={"screen": screen, "actions": actions}),
         }
     )
+
+
+def reward_scene(
+    screen: native.RunScreen,
+    room_type: str,
+    items: tuple[str, ...],
+    *,
+    empty_slots: int = 1,
+    other_choice: bool = False,
+) -> native.Observation:
+    proceed = native.Action(
+        ref="continue", label="前进", enabled=True, operation=native.ActionOperation.PROCEED
+    )
+    actions = tuple(
+        native.Action(ref=f"claim-{item}", label=item, enabled=True, subject=item) for item in items
+    )
+    if other_choice:
+        actions += (native.Action(ref="alternative", label="另一选项", enabled=True),)
+    observation = scene(screen, room_type, (*actions, proceed))
+    state = observation.state
+    assert isinstance(state, native.RunState)
+    objects: dict[str, native.ObjectEntry] = {}
+    offers: list[native.Offer] = []
+    for item in items:
+        if screen is native.RunScreen.TREASURE:
+            objects[item] = native.RelicEntry(
+                kind=native.ObjectKind.RELIC, name=item, definition_id=f"RELIC.{item}"
+            )
+            continue
+        potion = f"potion-{item}"
+        objects[item] = native.OfferEntry(kind=native.ObjectKind.OFFER, name=item)
+        objects[potion] = native.PotionEntry(
+            kind=native.ObjectKind.POTION,
+            name=item,
+            definition_id=f"POTION.{item}",
+            usable=None,
+            needs_target=None,
+            target_type=None,
+            usage=None,
+        )
+        offers.append(
+            native.Offer(
+                ref=item,
+                kind=native.OfferKind.POTION,
+                contents=(potion,),
+                actions=(f"claim-{item}",),
+            )
+        )
+    return observation.model_copy(
+        update={
+            "objects": objects,
+            "state": state.model_copy(
+                update={
+                    "progress": state.progress.model_copy(update={"room_type": room_type}),
+                    "player": state.player.model_copy(
+                        update={"potion_slot_count": 2, "empty_potion_slot_count": empty_slots}
+                    ),
+                    "offers": tuple(offers),
+                }
+            ),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "room,screen,items,slots,other_choice,auto_actions",
+    [
+        ("treasure", native.RunScreen.TREASURE, ("relic",), 1, False, 2),
+        ("treasure", native.RunScreen.TREASURE, ("relic", "other"), 1, False, 0),
+        ("event", native.RunScreen.REWARDS, ("potion", "other"), 2, False, 3),
+        ("event", native.RunScreen.REWARDS, ("potion",), 0, False, 0),
+        ("event", native.RunScreen.REWARDS, ("potion", "other"), 1, False, 0),
+        ("event", native.RunScreen.REWARDS, ("potion",), 1, True, 0),
+        ("restsite", native.RunScreen.REWARDS, ("potion",), 1, False, 0),
+    ],
+)
+def test_native_reward_claims_continue_only_without_a_choice(
+    tmp_path: Path,
+    room: str,
+    screen: native.RunScreen,
+    items: tuple[str, ...],
+    slots: int,
+    other_choice: bool,
+    auto_actions: int,
+) -> None:
+    initial = reward_scene(screen, room, items, empty_slots=slots, other_choice=other_choice)
+    if auto_actions:
+        states = [initial]
+        for offset in range(1, len(items) + 1):
+            empty_slots = slots if screen is native.RunScreen.TREASURE else slots - offset
+            next_screen = (
+                native.RunScreen.EVENT
+                if screen is native.RunScreen.REWARDS and offset == len(items)
+                else screen
+            )
+            states.append(reward_scene(next_screen, room, items[offset:], empty_slots=empty_slots))
+        responses = []
+        expected = [*(f"claim-{item}" for item in items), "continue"]
+    else:
+        states = [initial]
+        responses = [
+            reply(("choose", "run_act", '{"steps":[{"kind":"interact","action":"continue"}]}'))
+        ]
+        expected = ["continue"]
+    http = AutoHTTP([*states, terminal(states[-1])], responses)
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="native-reward-auto",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(http.model)),
+        ) as session:
+            await session.run()
+        assert len(http.inputs) == (0 if auto_actions else 1)
+        assert [
+            step.step.action for step in http.actions if isinstance(step.step, native.Interact)
+        ] == expected
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("card_visible_at_routing", [True, False])
+def test_event_potion_is_claimed_after_deck_declines_the_other_reward(
+    tmp_path: Path, card_visible_at_routing: bool
+) -> None:
+    def with_card(observation: native.Observation) -> native.Observation:
+        state = observation.state
+        assert isinstance(state, native.RunState)
+        offer = native.Offer(
+            ref="card-reward",
+            kind=native.OfferKind.CARD,
+            contents=("card",),
+            actions=("open-card",),
+            requires_selection=False,
+        )
+        action = native.Action(ref="open-card", label="卡牌", enabled=True, subject=offer.ref)
+        return observation.model_copy(
+            update={
+                "objects": {
+                    **observation.objects,
+                    "card": native.CardEntry.model_validate_json(CARD),
+                },
+                "state": state.model_copy(
+                    update={"offers": (*state.offers, offer), "actions": (*state.actions, action)}
+                ),
+            }
+        )
+
+    potion = reward_scene(native.RunScreen.REWARDS, "event", ("potion",))
+    before = with_card(potion)
+    after = with_card(reward_scene(native.RunScreen.REWARDS, "event", (), empty_slots=0))
+    decline = '{"choices":[{"offer":"card-reward","choice":"skip","reason":"Skip this card."}]}'
+    http = AutoHTTP(
+        [before, after, terminal(after)], [reply(("decline", "run_deck_choice", decline))]
+    )
+    first_observation = True
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        nonlocal first_observation
+        if request.url.path == "/state" and first_observation and not card_visible_at_routing:
+            first_observation = False
+            return httpx.Response(
+                200,
+                content=native.StateCompleted(
+                    status=native.ResultStatus.COMPLETED, observation=potion
+                ).to_json(),
+            )
+        return http.mod(request)
+
+    def model(request: httpx.Request) -> httpx.Response:
+        assert [tool["name"] for tool in json.loads(request.content)["tools"]] == [
+            "run_deck_choice"
+        ]
+        return http.model(request)
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="mixed-event-reward",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+        ) as session:
+            await session.run()
+        assert len(http.inputs) == 1
+        assert [
+            step.step.action for step in http.actions if isinstance(step.step, native.Interact)
+        ] == ["claim-potion", "continue"]
+
+    asyncio.run(scenario())
 
 
 def test_mechanical_rules_use_verified_languages_and_keep_event_choices_for_strategy(

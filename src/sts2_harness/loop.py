@@ -14,7 +14,7 @@ from sts2_harness.decisions import (
     HandoffTask,
     TaskComplete,
 )
-from sts2_harness.deck import adding_selection, card_rewards
+from sts2_harness.deck import adding_selection, next_card_reward
 from sts2_harness.deck_role import DeckRole
 from sts2_harness.diagnostics import ActEntered, AutoFinished, Diagnostics, RoleChanged
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged, UnitResult
@@ -124,18 +124,9 @@ class DefaultFlow:
             self._reward_auto_finished = True
             self._deck = self._deck_factory(observation, None, frozenset(self._resolved_cards))
             return self._deck
-        offers, active = card_rewards(observation)
         if state.screen is native.RunScreen.REWARDS:
             self._reward_auto_finished = True
-        offer = next(
-            (
-                offer
-                for offer in offers
-                if offer.ref not in self._resolved_cards
-                and (state.selection is None or offer == active)
-            ),
-            None,
-        )
+        offer = next_card_reward(observation, self._resolved_cards)
         if offer is None:
             return self._run
         self._deck = self._deck_factory(observation, offer, frozenset(self._resolved_cards))
@@ -225,6 +216,8 @@ class DefaultFlow:
                 source: DecisionSource = (
                     self._card_source(observation) if isinstance(task, ActTask) else self._run
                 )
+                if source is self._run and isinstance(task, ActTask):
+                    task = replace(task, resolved_card_rewards=frozenset(self._resolved_cards))
                 deck = self._deck
                 if deck is not None and source is deck:
                     deck.set_route_plan(self._run.route_plan)

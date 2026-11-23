@@ -8,7 +8,7 @@ from typing import Protocol
 from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
 
 from sts2_harness.agent import Agent, MaterialReader
-from sts2_harness.auto import choose_auto, shop_controls
+from sts2_harness.auto import choose_auto, event_reward_surface, shop_controls
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
@@ -31,6 +31,7 @@ from sts2_harness.decisions import (
     HandoffTask,
     TaskComplete,
 )
+from sts2_harness.deck import next_card_reward
 from sts2_harness.diagnostics import AutoFinished, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.game import GameReadError
@@ -516,6 +517,17 @@ class RunAgent(Agent):
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         if self._pending_auto is not None or self._pending_call is not None:
             raise RuntimeError("Accept the previous action result before another decision.")
+        native_state = observation.state
+        if (
+            isinstance(task, ActTask)
+            and isinstance(native_state, native.RunState)
+            and event_reward_surface(native_state)
+            and next_card_reward(observation, task.resolved_card_rewards) is not None
+        ):
+            raise DecisionInterrupted(
+                Reason(code=ReasonCode.ROLE_CHANGED, message="An event card reward is ready."),
+                False,
+            )
         observation = self._reward_view(observation)
         if self._context is None:
             await self.enter_act(ActStart(observation))
@@ -527,7 +539,9 @@ class RunAgent(Agent):
             and not self._context.has_active_group
         ):
             automatic = choose_auto(
-                observation, shop_strategy=self._shop_strategy_node == observation.location
+                observation,
+                shop_strategy=self._shop_strategy_node == observation.location,
+                allow_event_potion=native_state.selection is None,
             )
             if automatic is not None:
                 self._context.begin_group(

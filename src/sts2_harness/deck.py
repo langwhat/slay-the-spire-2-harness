@@ -85,6 +85,21 @@ def card_rewards(
     return offers, matching[0] if len(matching) == 1 else None
 
 
+def next_card_reward(
+    observation: native.Observation, resolved: set[str] | frozenset[str]
+) -> native.Offer | None:
+    offers, active = card_rewards(observation)
+    return next(
+        (
+            offer
+            for offer in offers
+            if offer.ref not in resolved
+            and (observation.state.selection is None or offer == active)
+        ),
+        None,
+    )
+
+
 def same_card_options(
     before: native.Observation, current: native.Observation, refs: tuple[str, ...]
 ) -> bool:

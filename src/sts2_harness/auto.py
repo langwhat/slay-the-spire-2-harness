@@ -23,6 +23,7 @@ class _Reason(StrEnum):
     SHOP = "shop"
     MAP = "map"
     CHEST = "chest"
+    CLAIM = "claim"
     CONTINUE = "continue"
 
 
@@ -125,6 +126,24 @@ _CONTINUE_REASONS = {
     "tha": "ไม่มีรางวัลหรือทางเลือกที่ใช้ได้เหลืออยู่ จึงไปต่อ",
     "tur": "Ödül veya kullanılabilir seçenek kalmadı; devam et.",
 }
+_CLAIM_REASONS = {
+    "eng": "Claim the available reward.",
+    "zhs": "领取可直接获得的奖励。",
+    "zht": "領取可直接獲得的獎勵。",
+    "deu": "Die verfügbare Belohnung abholen.",
+    "esp": "Recoge la recompensa disponible.",
+    "fra": "Récupérer la récompense disponible.",
+    "ind": "Ambil hadiah yang tersedia.",
+    "ita": "Riscatta la ricompensa disponibile.",
+    "jpn": "受け取れる報酬を受け取る。",
+    "kor": "받을 수 있는 보상을 받습니다.",
+    "pol": "Odbierz dostępną nagrodę.",
+    "ptb": "Resgate a recompensa disponível.",
+    "rus": "Забрать доступную награду.",
+    "spa": "Recoge la recompensa disponible.",
+    "tha": "รับรางวัลที่มีให้",
+    "tur": "Mevcut ödülü al.",
+}
 
 
 def shop_controls(state: native.RunState) -> bool:
@@ -135,18 +154,59 @@ def shop_controls(state: native.RunState) -> bool:
     )
 
 
+def event_reward_surface(state: native.RunState) -> bool:
+    return state.screen is native.RunScreen.REWARDS and state.progress.room_type == "event"
+
+
+def _event_potion_action(
+    state: native.RunState, enabled: tuple[native.Action, ...]
+) -> native.Action | None:
+    if (
+        not event_reward_surface(state)
+        or not 0 < len(state.offers) <= state.player.empty_potion_slot_count
+    ):
+        return None
+    # When only some potions fit, the choice of which to take belongs to Run.
+    claims = {
+        action.ref: action
+        for action in enabled
+        if action.operation is not native.ActionOperation.PROCEED
+    }
+    if len(claims) != len(state.offers) or any(
+        offer.kind is not native.OfferKind.POTION
+        or len(offer.actions) != 1
+        or offer.actions[0] not in claims
+        or claims[offer.actions[0]].subject != offer.ref
+        for offer in state.offers
+    ):
+        return None
+    return claims[state.offers[0].actions[0]]
+
+
 def _candidate(
-    observation: native.Observation, shop_strategy: bool
+    observation: native.Observation, shop_strategy: bool, allow_event_potion: bool
 ) -> tuple[ActionStep, str, _Reason] | None:
     state = observation.state
     if (
         not isinstance(state, native.RunState)
         or state.control is not native.StateControl.READY
         or state.selection is not None
-        or state.offers
     ):
         return None
     enabled = tuple(action for action in state.actions if action.enabled)
+    if state.offers:
+        potion_claim = _event_potion_action(state, enabled) if allow_event_potion else None
+        if potion_claim is None:
+            return None
+        contents = state.offers[0].contents
+        potion = observation.objects.get(contents[0]) if len(contents) == 1 else None
+        if not isinstance(potion, native.PotionEntry):
+            return None
+        return (
+            ActionStep(ActionKind.INTERACT, potion_claim.ref),
+            f"{potion.name} ({potion.definition_id})",
+            _Reason.CLAIM,
+        )
     if shop_controls(state):
         shop_operations = {
             native.ActionOperation.OPEN_SHOP,
@@ -193,6 +253,22 @@ def _candidate(
         if len(chests) == 1:
             action = chests[0]
             return ActionStep(ActionKind.INTERACT, action.ref), action.label, _Reason.CHEST
+        if state.progress.room_type == MapRoom.TREASURE:
+            available = tuple(
+                action
+                for action in enabled
+                if action.operation is not native.ActionOperation.PROCEED
+            )
+            if len(available) == 1:
+                action = available[0]
+                if isinstance(action.subject, str) and action.subject not in state.relics:
+                    relic = observation.objects.get(action.subject)
+                    if isinstance(relic, native.RelicEntry):
+                        return (
+                            ActionStep(ActionKind.INTERACT, action.ref),
+                            f"{relic.name} ({relic.definition_id})",
+                            _Reason.CLAIM,
+                        )
     if len(enabled) == 1 and enabled[0].operation is native.ActionOperation.PROCEED:
         action = enabled[0]
         return ActionStep(ActionKind.INTERACT, action.ref), action.label, _Reason.CONTINUE
@@ -200,13 +276,13 @@ def _candidate(
 
 
 def choose_auto(
-    observation: native.Observation, *, shop_strategy: bool
+    observation: native.Observation, *, shop_strategy: bool, allow_event_potion: bool = True
 ) -> tuple[ActionProposal, AutomaticProgress] | None:
     language = observation.game_language
     shop_reasons = _SHOP_REASONS.get(language)
     if shop_reasons is None:
         return None
-    candidate = _candidate(observation, shop_strategy)
+    candidate = _candidate(observation, shop_strategy, allow_event_potion)
     if candidate is None:
         return None
     step, label, kind = candidate
@@ -215,6 +291,7 @@ def choose_auto(
         _Reason.SHOP: shop_reasons[1],
         _Reason.MAP: _MAP_REASONS[language],
         _Reason.CHEST: _CHEST_REASONS[language],
+        _Reason.CLAIM: _CLAIM_REASONS[language],
         _Reason.CONTINUE: _CONTINUE_REASONS[language],
     }[kind]
     return ActionProposal((step,), reason), AutomaticProgress(label=label, reason=reason)
