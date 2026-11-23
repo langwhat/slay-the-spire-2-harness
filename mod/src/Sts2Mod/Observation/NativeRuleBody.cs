@@ -19,14 +19,16 @@ internal sealed class NativeRuleBody
     internal sealed record Field(FieldInfo Member, Value? Receiver) : Value;
     internal sealed record Call(MethodBase Method, Value? Receiver, Value[] Arguments) : Value;
     internal sealed record Operation(string Operator, Value Left, Value? Right = null) : Value;
+    internal sealed record Assignment(Field Target, Value Assigned) : Value;
     internal sealed record Test(Value Value, bool Expected, int Offset = -1);
     internal sealed record Step(int Index, Call Call, Test[] Conditions);
+    internal sealed record FieldStep(int Index, Assignment Assignment, Test[] Conditions);
     internal sealed record Result(Value Value, Test[] Conditions);
     // A completed path with the instructions it executed. Paths that miss an instruction
     // bound the conditions under which that instruction runs.
     internal sealed record Terminal(Test[] Conditions, IReadOnlySet<int> Visited, bool Returned);
     // A counted loop runs the instructions from Start up to its back branch at End Count times.
-    internal sealed record Loop(int Start, int End, int Count);
+    internal sealed record Loop(int Start, int End, Value Count);
 
     private sealed class Path
     {
@@ -66,6 +68,7 @@ internal sealed class NativeRuleBody
     internal static readonly Input Self = new("this");
 
     public List<Step> Calls { get; } = [];
+    public List<FieldStep> FieldSteps { get; } = [];
     public List<Result> Returns { get; } = [];
     public List<Terminal> Terminals { get; } = [];
     public HashSet<FieldInfo> Writes { get; } = [];
@@ -188,18 +191,29 @@ internal sealed class NativeRuleBody
                             path.Index = destination;
                         continue;
                     }
-                    if (destination < index && condition is Operation { Right: Constant { Data: int bound } } counter)
+                    if (destination < index && condition is Operation { Right: var limit } counter)
                     {
                         // A counter loop also runs one representative iteration and records its count.
                         if (visits == 0 && expected && counter is { Operator: "blt" or "ble", Left: Constant { Data: int start } })
                         {
-                            var count = bound - start + (counter.Operator == "ble" ? 1 : 0);
-                            if (count > 0)
+                            if (limit is Constant { Data: int bound })
                             {
-                                Loops.Add(new Loop(destination, index, count));
-                                path.Index = destination;
+                                var count = bound - start + (counter.Operator == "ble" ? 1 : 0);
+                                if (count > 0)
+                                {
+                                    Loops.Add(new Loop(destination, index, new Constant(count)));
+                                    path.Index = destination;
+                                }
+                                continue;
                             }
-                            continue;
+                            if (start == 0 && counter.Operator == "blt" && limit is Call
+                                { Method.DeclaringType: var owner, Method.Name: "get_Amount", Receiver: Input { Name: "this" } }
+                                && owner == typeof(PowerModel))
+                            {
+                                Loops.Add(new Loop(destination, index, limit));
+                                path.Index = destination;
+                                continue;
+                            }
                         }
                         if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
                             && counter.Left is Operation { Operator: "add", Left: Constant { Data: int }, Right: Constant { Data: 1 } })
@@ -246,10 +260,11 @@ internal sealed class NativeRuleBody
                 else if (code == OpCodes.Stfld && operand is FieldInfo field)
                 {
                     var value = path.Pop();
-                    if (path.Pop() == StateMachine)
+                    var receiver = path.Pop();
+                    if (receiver == StateMachine)
                         path.StateFields[field] = value;
                     else
-                        Writes.Add(field);
+                        FieldSteps.Add(new FieldStep(index, new Assignment(new Field(field, receiver), value), [.. path.Conditions]));
                 }
                 else if (code == OpCodes.Stsfld && operand is FieldInfo staticField)
                 {

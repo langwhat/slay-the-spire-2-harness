@@ -19,7 +19,7 @@ using NativeHpDisplay = MegaCrit.Sts2.Core.Entities.Creatures.HpDisplay;
 namespace Sts2Mod.Observation;
 
 // Translate engine operations after the native receiver, operands and branch paths are known.
-internal sealed class NativeRuleText(MonsterModel monster)
+internal sealed partial class NativeRuleText(MonsterModel monster)
 {
     private readonly Dictionary<MethodInfo, NativeRuleBody> _bodies = [];
     private readonly HashSet<Type> _powers = [];
@@ -133,7 +133,10 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 continue;
             var (effects, _) = ReadEffects(method, power ? type : null);
             if (effects.Count != 0)
-                lines.Add($"{powerPrefix}{timing}: {string.Join("; ", effects.Select(effect => effect.Text))}");
+            {
+                var trigger = effects.Select(effect => effect.Trigger).FirstOrDefault(trigger => trigger is not null) ?? timing;
+                lines.Add($"{powerPrefix}{trigger}: {string.Join("; ", effects.Select(effect => effect.Text))}");
+            }
         }
 
         var handled = new HashSet<string>(Hooks.Select(hook => hook.Method), StringComparer.Ordinal);
@@ -277,7 +280,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
     private List<string>? RenderOutcomes(List<(string Text, Test[] Conditions)> outcomes, IEnumerable<Test[]> excluded)
     {
         var excludedPaths = excluded.ToArray();
-        var rendered = new List<string>();
+        var rendered = new List<GuardedEffects>();
         foreach (var group in outcomes.Where(outcome => outcome.Text.Length != 0).GroupBy(outcome => outcome.Text))
         {
             var reaching = group.Select(outcome => outcome.Conditions).ToArray();
@@ -288,10 +291,10 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 if (Guard(path) is not { } guard)
                     return null;
                 if (guard != Never)
-                    rendered.Add(When(guard, group.Key));
+                    rendered.Add(new(path, guard, [new Effect(group.Key)]));
             }
         }
-        return rendered.Distinct().ToList();
+        return RenderBranches(rendered).Select(effect => effect.Text).Distinct().ToList();
     }
 
     // A relic or power that rewrites a number exposes its own rule; name it instead of restating it.
@@ -341,8 +344,109 @@ internal sealed class NativeRuleText(MonsterModel monster)
         return result;
     }
 
-    private sealed record Effect(string Text, bool Attack = false);
+    private sealed record Effect(string Text, bool Attack = false, string? Trigger = null, bool ChangesGuard = false);
 
+    private sealed record GuardedEffects(Test[] Path, string Guard, Effect[] Effects, string? Repetitions = null);
+
+    private IEnumerable<Effect> RenderBranches(List<GuardedEffects> effects)
+    {
+        for (var start = 0; start < effects.Count;)
+        {
+            var first = effects[start];
+            if (FindExclusiveBranch(effects, start) is { } branch)
+            {
+                yield return branch.Effect;
+                start = branch.End;
+                continue;
+            }
+            if (first.Repetitions is null && first.Guard.Length != 0 && first.Effects.Length > 1
+                && first.Effects.Any(effect => effect.ChangesGuard))
+            {
+                yield return Combine(first.Effects, When(first.Guard, $"({string.Join("; ", first.Effects.Select(effect => effect.Text))})"));
+                start++;
+                continue;
+            }
+            foreach (var effect in first.Effects)
+            {
+                var text = When(first.Guard, effect.Text);
+                yield return effect with { Text = first.Repetitions is { } count
+                    ? $"{count} times: {text}"
+                    : text };
+            }
+            start++;
+        }
+    }
+
+    private (Effect Effect, int End)? FindExclusiveBranch(List<GuardedEffects> effects, int start)
+    {
+        var candidates = new List<GuardedEffects>();
+        for (var end = start; end < effects.Count && effects[end] is { Guard.Length: > 0 } candidate; end++)
+            candidates.Add(candidate with
+            {
+                Path = candidate.Path.Where(test => Condition(test) is { Length: > 0 })
+                    .DistinctBy(test => (TestKey(test), test.Expected)).ToArray(),
+            });
+        var paths = candidates.ToArray().AsSpan();
+        for (var count = paths.Length; count > 1; count--)
+            if (ExclusiveBranch(paths[..count], 0) is { } branch)
+                return (Combine(candidates.Take(count).SelectMany(candidate => candidate.Effects), branch),
+                    start + count);
+        return null;
+    }
+
+    // A test's identity includes its instruction for mutable values. Two tests of the
+    // same flag on opposite sides of an effect therefore cannot form an otherwise.
+    private string? ExclusiveBranch(ReadOnlySpan<GuardedEffects> paths, int index)
+    {
+        var common = new List<Test>();
+        while (true)
+        {
+            if (paths[0].Path.Length <= index)
+                return null;
+            var first = paths[0].Path[index];
+            var key = TestKey(first);
+            var whenTruePaths = new List<GuardedEffects>();
+            var otherwisePaths = new List<GuardedEffects>();
+            foreach (var candidate in paths)
+            {
+                if (candidate.Path.Length <= index || TestKey(candidate.Path[index]) != key)
+                    return null;
+                (candidate.Path[index].Expected == first.Expected ? whenTruePaths : otherwisePaths).Add(candidate);
+            }
+            if (otherwisePaths.Count == 0)
+            {
+                common.Add(first);
+                index++;
+                continue;
+            }
+            if (BranchArm(whenTruePaths.ToArray(), index + 1, wrapBranch: true) is not { } whenTrue
+                || BranchArm(otherwisePaths.ToArray(), index + 1, wrapBranch: false) is not { } otherwise
+                || Condition(first) is not { } condition || Guard(common.ToArray()) is not { } guard)
+                return null;
+            var branch = $"if {condition}: {whenTrue}; otherwise{(otherwise.StartsWith("if ", StringComparison.Ordinal) ? " " : ": ")}{otherwise}";
+            return guard.Length == 0 ? branch : $"if {guard}: ({branch})";
+        }
+    }
+
+    private string? BranchArm(ReadOnlySpan<GuardedEffects> paths, int index, bool wrapBranch)
+    {
+        var texts = new List<string>();
+        foreach (var path in paths)
+        {
+            if (path.Path.Length != index)
+                return ExclusiveBranch(paths, index) is { } nested
+                    ? wrapBranch ? $"({nested})" : nested
+                    : null;
+            texts.AddRange(path.Effects.Select(effect => path.Repetitions is { } count ? $"{count} times: {effect.Text}" : effect.Text));
+        }
+        return texts.Count == 1 ? texts[0] : $"({string.Join("; ", texts)})";
+    }
+
+    private static Effect Combine(IEnumerable<Effect> effects, string text)
+        => new(text, effects.Any(effect => effect.Attack), effects.Select(effect => effect.Trigger).FirstOrDefault(trigger => trigger is not null),
+            effects.Any(effect => effect.ChangesGuard));
+
+    private sealed record EffectStep(int Index, Value Action, Test[] Conditions);
 
     private (List<Effect> Effects, bool Incomplete) ReadEffects(MethodInfo method, Type? power = null,
         int depth = 0, bool onOwnedMonster = false, IReadOnlyDictionary<string, Value>? bindings = null)
@@ -353,13 +457,18 @@ internal sealed class NativeRuleText(MonsterModel monster)
             MarkIncomplete(method.Name);
         foreach (var field in body.Writes)
             MarkIncomplete($"{method.Name}/{field.Name}");
+        foreach (var field in body.FieldSteps.Select(step => step.Assignment.Target).Distinct())
+            if (CardSlot(field) is null)
+                MarkIncomplete($"{method.Name}/{field.Member.Name}");
 
         // A helper reads its parameters as the operands its caller passed.
-        IEnumerable<Step> calls = body.Calls;
+        IEnumerable<EffectStep> calls = body.Calls.Select(step => new EffectStep(step.Index, step.Call, step.Conditions))
+            .Concat(body.FieldSteps.Where(step => CardSlot(step.Assignment.Target) is not null)
+                .Select(step => new EffectStep(step.Index, step.Assignment, step.Conditions)));
         IEnumerable<Terminal> terminals = body.Terminals;
         if (bindings is not null)
         {
-            calls = body.Calls.Select(step => step with { Call = (Call)Bind(step.Call, bindings), Conditions = Bind(step.Conditions, bindings) }).ToList();
+            calls = calls.Select(step => step with { Action = Bind(step.Action, bindings), Conditions = Bind(step.Conditions, bindings) }).ToList();
             terminals = body.Terminals.Select(terminal => terminal with { Conditions = Bind(terminal.Conditions, bindings) }).ToList();
         }
 
@@ -368,27 +477,31 @@ internal sealed class NativeRuleText(MonsterModel monster)
             flags = _branchFlags.Concat(calls.SelectMany(step => step.Conditions)
                 .Select(test => BooleanField(test.Value)).OfType<string>()).ToHashSet();
 
-        var effects = new List<Effect>();
+        var effects = new List<GuardedEffects>();
         foreach (var group in calls.GroupBy(step => step.Index).OrderBy(group => group.Key))
         {
             var loop = body.Loops.Where(loop => group.Key >= loop.Start && group.Key < loop.End).MaxBy(loop => loop.Start);
-            var rendered = new List<Effect[]>();
-            var alternatives = group.GroupBy(step => Key(step.Call));
+            var repetitions = loop is null ? null : ValueText(loop.Count);
+            var rendered = new List<GuardedEffects>();
+            var alternatives = group.GroupBy(step => Key(step.Action));
             foreach (var alternative in alternatives)
             {
-                var matching = alternative.Where(step => step.Conditions.All(IsCurrentRun)).ToArray();
+                var matching = alternative.Where(step => step.Conditions.All(IsCurrentRun) && !IsUnchangedAssignment(step)).ToArray();
                 if (matching.Length == 0)
                     continue;
-                var call = matching[0].Call;
-                if (call.Method.IsSpecialName && call.Method.DeclaringType == typeof(Creature)
+                var action = matching[0].Action;
+                var call = action as Call;
+                if (call is not null && call.Method.IsSpecialName && call.Method.DeclaringType == typeof(Creature)
                     && call.Method.Name.StartsWith("add_", StringComparison.Ordinal))
                     MarkIncomplete($"{method.Name}/{call.Method.Name}");
-                var effect = DescribeEffect(call, power, flags, out var recognized);
+                var recognized = true;
+                var effect = call is not null ? DescribeEffect(call, method, power, flags, out recognized)
+                    : action is Assignment assignment ? DescribeCardSlot(assignment, method) : null;
 
                 List<Effect> extracted;
                 if (effect is not null)
                     extracted = [effect];
-                else if (!recognized && depth < 2 && ReadableHelper(call, method, power, matching) is { } helper)
+                else if (call is not null && !recognized && depth < 2 && ReadableHelper(call, method, power, matching.Select(step => step.Conditions)) is { } helper)
                 {
                     var nested = ReadEffects(helper.Method, helper.OwnedMonster ? null : power,
                         depth + 1, onOwnedMonster || helper.OwnedMonster, helper.Bindings);
@@ -398,18 +511,30 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 }
                 else
                 {
-                    if (recognized || IsModelEffect(call.Method))
+                    if (call is null)
+                        MarkIncomplete($"{method.Name}/card instance");
+                    else if (recognized || IsModelEffect(call.Method))
                         MarkIncomplete($"{method.Name}/{call.Method.DeclaringType?.Name}.{call.Method.Name}");
                     continue;
                 }
 
                 if (extracted.Count == 0)
                     continue;
+                if (method.Name == "AfterDamageReceived" && action is Call { Method.Name: "AddGeneratedCardToCombat" })
+                    extracted = extracted.Select(item => item with { Trigger = AfterEachReceivedHit }).ToList();
+                if (method.Name == "AfterAttack" && matching.Any(step => step.Conditions.Any(test =>
+                    test.Value is Call { Method.DeclaringType: var result, Receiver: { } hit }
+                    && result == typeof(DamageResult) && AttackHit(hit) is not null)))
+                    extracted = extracted.Select(item => item with { Trigger = "Once after the entire attack resolves" }).ToList();
                 var missing = terminals.Where(terminal => !terminal.Visited.Contains(group.Key))
                     .Select(terminal => terminal.Conditions)
-                    .Concat(group.Where(step => Key(step.Call) != alternative.Key).Select(step => step.Conditions));
+                    .Concat(group.Where(step => Key(step.Action) != alternative.Key || IsUnchangedAssignment(step)).Select(step => step.Conditions));
                 var reaching = matching.Select(step => step.Conditions).ToArray();
-                foreach (var path in NativeRuleGuards.Minimize(reaching, missing, TestKey) ?? MergeTests(reaching))
+                // A stack comparison is reached only after the corresponding power was found.
+                // Keep that short-circuit test in the rendered branch.
+                var minimized = reaching.Any(path => path.Any(test => ReadsOwnedPowerStacks(test.Value)))
+                    ? null : NativeRuleGuards.Minimize(reaching, missing, TestKey);
+                foreach (var path in minimized ?? MergeTests(reaching))
                 {
                     if (Guard(path) is not { } guard)
                     {
@@ -418,18 +543,14 @@ internal sealed class NativeRuleText(MonsterModel monster)
                     }
                     if (guard == Never)
                         continue;
-                    var sequence = extracted.Select(item => item with { Text = loop is null
-                        ? When(guard, item.Text)
-                        : $"{loop.Count.ToString(CultureInfo.InvariantCulture)} times: {When(guard, item.Text)}" }).ToArray();
-                    if (!rendered.Any(previous => previous.SequenceEqual(sequence)))
-                        rendered.Add(sequence);
+                    if (!rendered.Any(previous => previous.Guard == guard && previous.Effects.SequenceEqual(extracted)))
+                        rendered.Add(new(path, guard, extracted.ToArray(), repetitions));
                 }
             }
             // Equivalent paths can reach one instruction. Separate instructions still run separately.
-            foreach (var sequence in rendered)
-                effects.AddRange(sequence);
+            effects.AddRange(rendered);
         }
-        return (effects, incomplete);
+        return (RenderBranches(GroupGuardedChanges(effects)).ToList(), incomplete);
 
         void MarkIncomplete(string location)
         {
@@ -441,6 +562,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
     private static Value Bind(Value value, IReadOnlyDictionary<string, Value> bindings) => value switch
     {
         Input { Name: var name } when bindings.TryGetValue(name, out var bound) => bound,
+        Assignment assignment => assignment with { Target = (Field)Bind(assignment.Target, bindings), Assigned = Bind(assignment.Assigned, bindings) },
         Field field when field.Receiver is { } receiver => field with { Receiver = Bind(receiver, bindings) },
         Call call => call with
         {
@@ -459,7 +581,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
         => tests.Select(test => test with { Value = Bind(test.Value, bindings) }).ToArray();
 
     private (MethodInfo Method, bool OwnedMonster, IReadOnlyDictionary<string, Value>? Bindings)? ReadableHelper(Call call,
-        MethodInfo caller, Type? power, IReadOnlyList<Step> paths)
+        MethodInfo caller, Type? power, IEnumerable<Test[]> paths)
     {
         if (call.Method is not MethodInfo helper || helper == caller || helper.ReturnType != typeof(Task)
             || helper.ContainsGenericParameters || helper.DeclaringType is not { } type)
@@ -470,7 +592,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
             && call.Receiver is Operation { Operator: "castclass", Left: Call { Method.DeclaringType: var declaring,
                 Method.Name: "get_Monster", Receiver: { } creature } }
             && declaring == typeof(Creature) && (IsOwner(creature)
-                || paths.All(path => path.Conditions.Any(test => EstablishesOwner(test, creature))));
+                || paths.All(path => path.Any(test => EstablishesOwner(test, creature))));
         if (!onSelf && !onOwner)
             return null;
         if (call.Arguments.Length == 0 || Body(helper) is { ReadsParameters: false, Incomplete: false })
@@ -494,7 +616,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
             && typeof(AbstractModel).IsAssignableFrom(type)
             && (info.ReturnType == typeof(Task) || info.ReturnType == typeof(void) && !info.IsSpecialName);
 
-    private Effect? DescribeEffect(Call call, Type? power, IReadOnlySet<string> flags, out bool recognized)
+    private Effect? DescribeEffect(Call call, MethodInfo caller, Type? power, IReadOnlySet<string> flags, out bool recognized)
     {
         recognized = true;
         var type = call.Method.DeclaringType;
@@ -557,6 +679,10 @@ internal sealed class NativeRuleText(MonsterModel monster)
             {
                 if (ValueText(args[0]) is not { } who || ValueText(args[1]) is not { } amount)
                     return null;
+                // GainBlock returns zero if the receiver is dead or combat is ending.
+                if (effect == "GainBlock" && power is not null && IsOwner(args[0])
+                    && caller.Name is "AfterAttack" or "AfterCardPlayed")
+                    return new Effect($"if the holder is alive and combat continues: {who} gains base {amount} Block");
                 return new Effect(effect switch
                 {
                     "GainBlock" => $"{who} gains base {amount} Block",
@@ -607,7 +733,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
             && args is [Constant { Data: int flag }] && flag is 0 or 1
             && (flags.Contains(effect[4..]) || power is not null && type == power
                 && call.Method.GetParameters() is [{ ParameterType: var flagType }] && flagType == typeof(bool)))
-            return new Effect($"{effect[4..]} = {(flag == 1 ? "true" : "false")}");
+            return new Effect($"{effect[4..]} = {(flag == 1 ? "true" : "false")}", ChangesGuard: caller.Name == "AfterAttack");
 
         if (type == typeof(CardPileCmd) && effect == "AddToCombatAndPreview" && generic is not null
             && typeof(CardModel).IsAssignableFrom(generic))
@@ -621,8 +747,16 @@ internal sealed class NativeRuleText(MonsterModel monster)
             return new Effect($"add {count} {ModelLabel(generic)} to {who}'s {((PileType)pile).ToString().ToLowerInvariant()} pile{where}");
         }
 
+        if (type == typeof(CardPileCmd) && effect == "AddGeneratedCardToCombat" && caller.Name == "AfterDamageReceived" && power is not null)
+            return ReadGeneratedCard(call);
+
         if (type == typeof(CardCmd))
         {
+            if (effect == "PreviewCardPileAdd" && caller.Name == "AfterDamageReceived" && power is not null)
+            {
+                recognized = false;
+                return null;
+            }
             if (effect is "Afflict" or "AfflictAndPreview" && generic is not null && args.Length >= 2)
                 return ValueText(args[0]) is { } cards && ValueText(args[1]) is { } amount
                     ? new Effect($"attempt to apply {ModelLabel(generic)} ({amount}) to {cards}")
@@ -645,6 +779,9 @@ internal sealed class NativeRuleText(MonsterModel monster)
 
         if (effect == "Execute" && type?.Name == "AttackCommand")
             return call.Receiver is Call attack ? Attack(attack) : null;
+
+        if (power is null && ReadImmediateChoice(call, caller) is { } choice)
+            return new Effect(choice);
 
         recognized = type is not null && type.Namespace == typeof(CreatureCmd).Namespace
             && type.Name is not ("SfxCmd" or "VfxCmd" or "TalkCmd" or "Cmd" or "DamageCmd");
@@ -765,7 +902,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
         var body = Body(method);
         if (body.Incomplete || body.Returns.Count == 0)
             return null;
-        var candidates = new List<string>();
+        var candidates = new List<GuardedEffects>();
         foreach (var result in body.Returns)
         {
             if (Guard(result.Conditions) is not { } guard)
@@ -774,9 +911,9 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 continue;
             if (render(result.Value) is not { } text)
                 return null;
-            candidates.Add(When(guard, text));
+            candidates.Add(new(result.Conditions, guard, [new Effect(text)]));
         }
-        return string.Join("; ", candidates.Distinct());
+        return string.Join("; ", RenderBranches(candidates).Select(effect => effect.Text).Distinct());
     }
 
     private string? Guard(Test[] tests)
@@ -813,9 +950,12 @@ internal sealed class NativeRuleText(MonsterModel monster)
         var expected = test.Expected;
         if (IsDreadTest(test))
             return IsCurrentRun(test) ? "" : "never";
+        if (CombatCondition(test) is { } combat)
+            return combat;
         if (value is Operation { Operator: "ceq", Right: Constant { Data: 0 } } negation
-            && negation.Left is Call { Method: MethodInfo { ReturnType: var type } } && type == typeof(bool))
-            return Condition(new Test(negation.Left, !expected));
+            && (negation.Left is Call { Method: MethodInfo { ReturnType: var type } } && type == typeof(bool)
+                || negation.Left is Operation { Operator: "clt", Left: Field { Member: var choiceCounter } } && _choiceCursors.Contains(choiceCounter)))
+            return Condition(test with { Value = negation.Left, Expected = !expected });
         if (value is Operation { Operator: "isinst", Left: var operand, Right: Constant { Data: Type target } }
             && ValueText(operand) is { } entity)
             return $"{entity} {(expected ? "is" : "is not")} {ModelLabel(target)}";
@@ -938,6 +1078,8 @@ internal sealed class NativeRuleText(MonsterModel monster)
     {
         if (Numeric(value) is { } number)
             return Number(number);
+        if (CombatValue(value) is { } combat)
+            return combat;
 
         return value switch
         {
@@ -992,6 +1134,9 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 when type == typeof(decimal) && ValueText(delta) is { } text => $"−{text}",
             Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Players", Receiver: Input { Name: "combatState" } } }
                 => "number of players in combat",
+            Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Players",
+                Receiver: Call { Method.Name: "get_CombatState", Receiver: Input { Name: "this" } } } }
+                => "number of players in combat",
             Call { Method.Name: "get_Player", Method.DeclaringType: var type, Receiver: { } creature } when type == typeof(Creature)
                 => ValueText(creature),
             Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: { } model } }
@@ -1042,6 +1187,9 @@ internal sealed class NativeRuleText(MonsterModel monster)
                 return Convert.ToDecimal(literal.Data, CultureInfo.InvariantCulture);
             case Field { Member.DeclaringType: var type, Receiver: null } field when type == typeof(decimal):
                 return (decimal?)field.Member.GetValue(null);
+            case Call { Method.Name: "get_Count", Receiver: Field { Member: var table, Receiver: null } }
+                when _choiceRoundCounts.TryGetValue(table, out var rounds):
+                return rounds;
             case Call { Method.DeclaringType: var type, Arguments: [var arg] } wrapper when type == typeof(decimal)
                 && wrapper.Method.Name is ".ctor" or "op_Implicit":
                 return Numeric(arg, depth + 1);
@@ -1166,6 +1314,7 @@ internal sealed class NativeRuleText(MonsterModel monster)
         Constant => "[null]",
         Input input => input.Name,
         Field field => $"{Key(field.Receiver)}.{field.Member.DeclaringType?.Name}.{field.Member.Name}",
+        Assignment assignment => $"{Key(assignment.Target)} := {Key(assignment.Assigned)}",
         Call call => $"{Key(call.Receiver)}.{call.Method.DeclaringType?.FullName}.{call.Method}({string.Join(",", call.Arguments.Select(Key))})",
         Operation operation => $"({Key(operation.Left)} {operation.Operator} {Key(operation.Right)})",
         _ => "",
