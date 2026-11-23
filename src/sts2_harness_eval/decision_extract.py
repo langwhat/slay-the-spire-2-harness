@@ -323,6 +323,8 @@ def choices_for(decision: DecisionInput, observation: native.Observation) -> tup
         if entry is None or not isinstance(entry.definition_id, str):
             raise ExtractionError("The selected native object exposes no definition ID.")
         identities.append(entry.definition_id)
+    if isinstance(decision, tool_inputs.TakeCard):
+        return tuple(identities)
     return tuple(dict.fromkeys(identities))
 
 

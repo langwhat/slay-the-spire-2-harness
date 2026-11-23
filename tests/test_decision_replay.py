@@ -682,6 +682,37 @@ def test_joint_deck_decision_compares_order_and_keeps_each_group(
     asyncio.run(run())
 
 
+def test_deck_replay_reports_each_copy_added_by_one_selector(tmp_path: Path) -> None:
+    raw = decision_case(tmp_path, multiselect=True).model_dump(mode="json")
+    raw["decision_tool"] = "run_deck_choice"
+    raw["labels"]["multiselect"] = True
+    observation = raw["events"][0]["observation"]
+    observation["objects"]["another-copy"] = observation["objects"]["candidate"]
+    state = observation["state"]
+    state.update(screen="selection", offers=[], actions=[])
+    state["selection"].update(max=2, candidates=["candidate", "another-copy"])
+    case = DecisionCase.model_validate_json(json.dumps(raw))
+    arguments = (
+        '{"choices":[{"choice":"take","card":["candidate","another-copy"],'
+        '"reason":"Those copies fit the deck."}]}'
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=reply(("copies", "run_deck_choice", arguments)),
+            headers={"Content-Type": "text/event-stream"},
+        )
+
+    async def run() -> None:
+        async with Llm(configuration(tmp_path), transport=httpx.MockTransport(respond)) as client:
+            result = await sample_case(case, client, variant=DecisionVariant.DECK)
+        assert result.verdict is DecisionVerdict.PASSED
+        assert result.reward_groups[0].choices == ("CARD.ONE", "CARD.ONE")
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("wrong", ("offer", "selection"))
 def test_wrong_native_target_or_illegal_selection_is_deviation(tmp_path: Path, wrong: str) -> None:
     async def run() -> None:
