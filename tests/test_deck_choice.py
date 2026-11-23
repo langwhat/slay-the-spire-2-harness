@@ -502,6 +502,24 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
             assert isinstance(reports[0].content.outcome, ActionCompleted)
             assert reports[0].content.outcome.completed_steps == 0
             assert isinstance(reports[1].content.outcome, ActionUnknown) is unknown
+            assert [report.content.automatic_progress.reason for report in reports] == [
+                "Measured local",
+                "Measured regular",
+                "Measured guaranteed",
+            ]
+            assert all(report.content.observation is None for report in reports[:-1])
+            observations = [
+                json.loads(text).get("observation")
+                for text in texts
+                if isinstance(text, str) and text.startswith("{")
+            ]
+            decks = [state["deck"] for state in observations if state and "deck" in state]
+            assert len(decks) == 1
+            assert {card["id"] for card in decks[0]} == {
+                "CARD.OWNED",
+                "CARD.REGULAR",
+                "CARD.GUARANTEED",
+            }
             if not minimal:
                 assert "Existing Run note." in task.text
             if not unknown:
