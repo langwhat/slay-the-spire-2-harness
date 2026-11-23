@@ -388,7 +388,7 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
         sample = trial.sample
         usage, unknown_usage, reasoning, unknown_reasoning = _totals(trial.attempts)
         reason = sample.reason if sample is not None else trial.error or ""
-        choices = ", ".join(sample.choices) if sample is not None else ""
+        choices = ", ".join(sample.display_choices()) if sample is not None else ""
         proposal = sample.proposal.to_json() if sample is not None and sample.proposal else ""
         proposal_status = (
             sample.proposal_status.value if sample is not None and sample.proposal_status else ""
@@ -488,14 +488,15 @@ def report(plan: EvaluationPlan, trials: tuple[Trial, ...]) -> str:
             if first_action is not None and first_action == second_action:
                 continue
             if first.choices and second.choices:
-                if first.choices != second.choices:
+                first_choices, second_choices = first.display_choices(), second.display_choices()
+                if first_choices != second_choices:
                     differences += 1
                     rows.append(
                         f"- {_escape(left.case_id)}: {_escape(left.configuration)} "
                         f"#{left.repetition} "
-                        f"chose {_escape(', '.join(first.choices))}: {_escape(first.reason)}; "
+                        f"chose {_escape(', '.join(first_choices))}: {_escape(first.reason)}; "
                         f"{_escape(right.configuration)} #{right.repetition} "
-                        f"chose {_escape(', '.join(second.choices))}: {_escape(second.reason)}."
+                        f"chose {_escape(', '.join(second_choices))}: {_escape(second.reason)}."
                     )
                 continue
             if first.proposal is None or second.proposal is None:

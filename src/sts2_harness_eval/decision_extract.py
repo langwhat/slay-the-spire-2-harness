@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections import Counter
 from contextlib import closing
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -20,7 +21,9 @@ from sts2_harness.context.models import (
     RunResultMessage,
     TaskMessage,
 )
-from sts2_harness.deck import CardChoiceKind, deck_observation
+from sts2_harness.decisions import CardRewardChoice, CardRewardPlan, SelectStep
+from sts2_harness.deck import CardChoiceKind, card_rewards, deck_observation
+from sts2_harness.execution.rewards import reward_steps
 from sts2_harness.fights import Fight, FightHistory
 from sts2_harness.game import Catalog, Cataloged, Inspect, Inspected, Pause, Settle, Settlement
 from sts2_harness.journal import Journal, Record
@@ -92,6 +95,7 @@ from sts2_harness_eval.decision_cases import (
     HistoryEvent,
     NativeRead,
     ResultEvent,
+    RewardGroupDecision,
     RouteState,
     TaskEvent,
 )
@@ -322,6 +326,22 @@ def choices_for(decision: DecisionInput, observation: native.Observation) -> tup
     return tuple(dict.fromkeys(identities))
 
 
+def reward_groups_for(
+    decision: DecisionInput, observation: native.Observation
+) -> tuple[RewardGroupDecision, ...]:
+    if isinstance(decision, tool_inputs.RunAct):
+        return ()
+    choices = decision.choices if isinstance(decision, tool_inputs.RunDeckChoice) else (decision,)
+    return tuple(
+        RewardGroupDecision(
+            offer=None if item.offer is MISSING else item.offer,
+            choices=choices_for(item, observation),
+            reason=item.reason,
+        )
+        for item in choices
+    )
+
+
 def _state(
     message: TaskMessage,
     previous: HarnessState,
@@ -451,10 +471,10 @@ def _native_observation(
         before, after = raw.state, delivered.state
         if not isinstance(before, native.RunState) or not isinstance(after, native.RunState):
             continue
-        if after.offers and deck_observation(raw, after.offers) == delivered:
-            return raw, ()
-        if not after.offers and deck_observation(raw, None) == delivered:
-            return raw, ()
+        if deck_observation(raw, after.offers) == delivered:
+            offers, _ = card_rewards(raw)
+            visible = {offer.ref for offer in after.offers}
+            return raw, tuple(offer.ref for offer in offers if offer.ref not in visible)
         declined = tuple(offer.ref for offer in before.offers if offer not in after.offers)
         if run_observation(raw) == delivered:
             return raw, declined
@@ -643,7 +663,9 @@ def _deck_count(observation: native.Observation, identity: str) -> int:
     )
 
 
-def _source_decision(call: ToolCall, tools: tuple[ToolDefinition, ...]) -> SingleDecisionInput:
+def _source_decision(
+    call: ToolCall, tools: tuple[ToolDefinition, ...]
+) -> tool_inputs.RunAct | tool_inputs.RunDeckChoice:
     schema = next((tool.parameters for tool in tools if tool.name == call.name), None)
     if schema is None:
         raise ExtractionError("The recorded decision has no source tool schema.")
@@ -655,160 +677,147 @@ def _source_decision(call: ToolCall, tools: tuple[ToolDefinition, ...]) -> Singl
         ) from None
     if isinstance(validated, tool_inputs.RunActInput):
         return validated.root
-    if isinstance(validated, tool_inputs.RunDeckChoice) and len(validated.choices) == 1:
-        return validated.choices[0]
-    raise ExtractionError("A single-decision case requires one recorded card reward choice.")
+    if isinstance(validated, tool_inputs.RunDeckChoice):
+        return validated
+    raise ExtractionError("The recorded decision has no labeled decision input.")
 
 
-def _decision_offer(decision: SingleDecisionInput) -> str | None:
-    if isinstance(decision, tool_inputs.RunAct) or decision.offer is MISSING:
-        return None
-    return decision.offer
-
-
-def _recorded_completion(
+def _recorded_reward_batch(
     journal: Journal,
     source: DecisionSource,
     call: ToolCall,
-    decision: SingleDecisionInput,
+    decision: tool_inputs.RunDeckChoice,
+    task: TaskEvent,
+) -> dict[str, JsonValue]:
+    observation = task.observation
+    available, _ = card_rewards(observation)
+    by_ref = {offer.ref: offer for offer in available}
+    choices: list[CardRewardChoice] = []
+    for item in decision.choices:
+        offer = None if item.offer is MISSING else by_ref.get(item.offer)
+        if item.offer is not MISSING and offer is None:
+            raise ExtractionError("The source frame does not contain the recorded reward group.")
+        refs = item.cards if isinstance(item, tool_inputs.TakeCard) else ()
+        choices.append(CardRewardChoice(offer, refs, item.reason))
+    plan = CardRewardPlan(
+        (), choices=tuple(choices), before=observation, resolved=frozenset(task.declined_offers)
+    )
+    record = journal.request(source.model_sequence)
+    completions = tuple(
+        item
+        for item in journal.card_choices()
+        if item.stream == record.stream and item.call_id == call.id
+    )
+    if len(completions) != len(choices):
+        raise ExtractionError("The reward batch has incomplete typed group evidence.")
+    following = journal.requests(start=source.model_sequence + 1, stop=source.model_sequence + 200)
+    stop = following[0].sequence - 1 if following else source.model_sequence + 200
+    settlements = iter(
+        (operation.sequence, operation.request, operation.reply)
+        for operation in journal.operations(start=source.model_sequence + 1, stop=stop)
+        if isinstance(operation.request, Settle)
+    )
+    route = native.RouteKey.model_validate(observation.location.model_dump())
+    groups: list[JsonValue] = []
+    for index, (item, completion) in enumerate(zip(decision.choices, completions, strict=True)):
+        steps = reward_steps(plan, index, completion.before)
+        offer_ref = None if item.offer is MISSING else item.offer
+        chosen = item.card if isinstance(item, tool_inputs.TakeCard) else None
+        if (
+            completion.batch_index != index + 1
+            or completion.offer_ref != offer_ref
+            or completion.choice.value != item.choice
+            or completion.card_ref != chosen
+            or steps is None
+        ):
+            raise ExtractionError("The reward completion does not match its ordered source group.")
+        sequences: list[JsonValue] = []
+        after = completion.after
+        if steps:
+            if (
+                completion.local_decline
+                or not isinstance(completion.outcome, ActionCompleted)
+                or completion.outcome.completed_steps != len(steps)
+                or after is None
+            ):
+                raise ExtractionError("The recorded reward group was not confirmed complete.")
+            gained = Counter(
+                entry.definition_id
+                for ref in plan.choices[index].refs
+                if isinstance(entry := observation.objects.get(ref), native.CardEntry)
+            )
+            if sum(gained.values()) != len(plan.choices[index].refs) or any(
+                _deck_count(after, identity) - _deck_count(completion.before, identity) < count
+                for identity, count in gained.items()
+            ):
+                raise ExtractionError("The source deck does not confirm the selected reward cards.")
+        elif (
+            not completion.local_decline
+            or completion.choice is not CardChoiceKind.SKIP
+            or not isinstance(completion.outcome, ReadCompleted)
+            or after != completion.before
+        ):
+            raise ExtractionError("The local reward decline has no valid completion proof.")
+        for step in steps:
+            expected: native.NativeStep
+            if isinstance(step, SelectStep):
+                expected = native.Select(kind=native.StepKind.SELECT, refs=step.refs)
+            else:
+                assert step.ref is not None
+                expected = native.Interact(kind=native.StepKind.INTERACT, action=step.ref)
+            settled = next(settlements, None)
+            if settled is None:
+                raise ExtractionError("The reward batch has missing native receipts.")
+            sequence, request, reply = settled
+            if (
+                request.route != route
+                or request.step != expected
+                or reply is None
+                or not isinstance(reply.outcome, Settlement)
+                or not isinstance(reply.outcome.receipt, native.ReceiptCompleted)
+            ):
+                raise ExtractionError(
+                    "The native receipts do not follow the submitted reward order."
+                )
+            sequences.append(sequence)
+        groups.append({"offer": offer_ref, "native_sequences": sequences})
+    return {"kind": "reward_batch", "stream": record.stream, "call_id": call.id, "groups": groups}
+
+
+def _recorded_selection(
+    journal: Journal,
+    source: DecisionSource,
+    call: ToolCall,
+    decision: tool_inputs.RunAct,
     observation: native.Observation,
 ) -> dict[str, JsonValue]:
-    chosen = decision.card if isinstance(decision, tool_inputs.TakeCard) else None
-    choice = None if isinstance(decision, tool_inputs.RunAct) else decision.choice
-    offer_ref = _decision_offer(decision)
-    record = journal.request(source.model_sequence)
-    completion = next(
-        (
-            item
-            for item in journal.card_choices()
-            if item.stream == record.stream
-            and item.call_id == call.id
-            and item.offer_ref == offer_ref
-        ),
-        None,
-    )
-    if not isinstance(decision, tool_inputs.RunAct) and completion is None:
-        raise ExtractionError("The card decision has no exact typed completion evidence.")
-    if completion is not None:
-        state = completion.before.state
-        offer = (
-            next((offer for offer in state.offers if offer.ref == completion.offer_ref), None)
-            if isinstance(state, native.RunState)
-            else None
-        )
-        source_state = observation.state
-        source_offer = (
-            next(
-                (offer for offer in source_state.offers if offer.ref == completion.offer_ref), None
-            )
-            if isinstance(source_state, native.RunState)
-            else None
-        )
-        # Native publication numbers advance every frame, including unchanged reads.
-        before = completion.before.model_copy(update={"stamp": observation.stamp})
-        if (
-            completion.choice.value != choice
-            or completion.card_ref != chosen
-            or offer is None
-            or source_offer is None
-            or deck_observation(before, offer) != deck_observation(observation, source_offer)
-        ):
-            raise ExtractionError("The card completion does not match its source decision.")
-        if completion.local_decline:
-            if (
-                not isinstance(state, native.RunState)
-                or state.screen is not native.RunScreen.REWARDS
-                or state.selection is not None
-                or offer.requires_selection is not False
-                or completion.choice is not CardChoiceKind.SKIP
-                or not isinstance(completion.outcome, ReadCompleted)
-                or completion.after != completion.before
-            ):
-                raise ExtractionError("The local card decline has no valid completion proof.")
-            return {
-                "kind": "local_decline",
-                "stream": completion.stream,
-                "call_id": completion.call_id,
-                "offer": completion.offer_ref,
-                "native_steps": 0,
-            }
-        if not isinstance(completion.outcome, ActionCompleted):
-            raise ExtractionError("The recorded card action was not confirmed complete.")
-    if isinstance(decision, tool_inputs.RunAct):
-        if len(decision.steps) != 1 or not isinstance(decision.steps[0], native.Select):
-            raise ExtractionError("The recorded decision is not one native selection.")
-        step = decision.steps[0]
-    else:
-        step = native.Select(
-            kind=native.StepKind.SELECT, refs=(chosen,) if isinstance(chosen, str) else ()
-        )
-        state = observation.state
-        offer = (
-            next((offer for offer in state.offers if offer.ref == offer_ref), None)
-            if isinstance(state, native.RunState)
-            else None
-        )
-        if isinstance(chosen, str) and offer is not None and offer.requires_selection is False:
-            action = next(
-                (
-                    action
-                    for action in state.actions
-                    if action.ref in offer.actions and action.enabled
-                ),
-                None,
-            )
-            if action is None:
-                raise ExtractionError("The guaranteed card reward has no native interaction.")
-            step = native.Interact(kind=native.StepKind.INTERACT, action=action.ref)
+    if len(decision.steps) != 1 or not isinstance(decision.steps[0], native.Select):
+        raise ExtractionError("The recorded decision is not one native selection.")
+    step = decision.steps[0]
     following = journal.requests(start=source.model_sequence + 1, stop=source.model_sequence + 200)
     next_request = following[0] if following else None
     if next_request is not None:
         for message in next_request.input:
             if not isinstance(message, ResultSnapshot) or message.call_id != call.id:
                 continue
-            completed = (
-                isinstance(message.outcome, ActionCompleted) and message.outcome.completed_steps > 0
-            )
-            skipped = isinstance(decision, tool_inputs.SkipCard) and isinstance(
-                message.outcome, ReadCompleted
-            )
-            if not completed and not skipped:
+            if (
+                not isinstance(message.outcome, ActionCompleted)
+                or not message.outcome.completed_steps
+            ):
                 raise ExtractionError("The recorded decision did not complete in its source run.")
             return {"kind": "tool_result", "sequence": next_request.sequence, "call_id": call.id}
     stop = next_request.sequence - 1 if next_request is not None else source.model_sequence + 200
     route = native.RouteKey.model_validate(observation.location.model_dump())
-    operations = journal.operations(start=source.model_sequence + 1, stop=stop)
-    for index, operation in enumerate(operations):
+    for operation in journal.operations(start=source.model_sequence + 1, stop=stop):
         if (
-            not isinstance(operation.request, Settle)
-            or operation.request.route != route
-            or operation.request.step != step
-            or operation.reply is None
-            or not isinstance(operation.reply.outcome, Settlement)
-            or not isinstance(operation.reply.outcome.receipt, native.ReceiptCompleted)
+            isinstance(operation.request, Settle)
+            and operation.request.route == route
+            and operation.request.step == step
+            and operation.reply is not None
+            and isinstance(operation.reply.outcome, Settlement)
+            and isinstance(operation.reply.outcome.receipt, native.ReceiptCompleted)
         ):
-            continue
-        if isinstance(chosen, str):
-            candidate = observation.objects.get(chosen)
-            if not isinstance(candidate, native.CardEntry):
-                raise ExtractionError("The recorded card has no native definition identity.")
-            identity = candidate.definition_id
-            following_write = next(
-                (
-                    record.sequence
-                    for record in operations[index + 1 :]
-                    if isinstance(record.request, Settle)
-                ),
-                stop + 1,
-            )
-            if not any(
-                _deck_count(after, identity) > _deck_count(observation, identity)
-                for record in operations[index:]
-                if record.sequence < following_write and record.reply is not None
-                for after in record.reply.observations
-            ):
-                continue
-        return {"kind": "native_completed", "sequence": operation.sequence, "call_id": call.id}
+            return {"kind": "native_completed", "sequence": operation.sequence, "call_id": call.id}
     raise ExtractionError("The recorded decision has no bounded source completion proof.")
 
 
@@ -914,13 +923,12 @@ async def extract_case(
             raise ExtractionError("The source reply must contain one labeled game decision.")
         action = actions[0]
         decision = _source_decision(action, captured_tools)
-        evidence.recorded_completion = _recorded_completion(
-            journal,
-            source,
-            action,
-            decision,
-            last_task.observation,
+        evidence.recorded_completion = (
+            _recorded_reward_batch(journal, source, action, decision, last_task)
+            if isinstance(decision, tool_inputs.RunDeckChoice)
+            else _recorded_selection(journal, source, action, decision, last_task.observation)
         )
+        groups = reward_groups_for(decision, last_task.observation)
         reads: list[NativeRead] = []
         for operation in journal.operations(stop=source.model_sequence):
             if operation.reply is None:
@@ -944,7 +952,14 @@ async def extract_case(
             events=events,
             native_reads=tuple(reads),
             decision_tool=action.name,
-            decision_offer=_decision_offer(decision),
+            decision_offer=(groups[0].offer if len(groups) == 1 else None),
             recorded_choices=choices_for(decision, last_task.observation),
-            recorded_reason="" if decision.reason is MISSING else decision.reason,
+            recorded_reason=(
+                "\n".join(group.reason for group in groups)
+                if groups
+                else decision.reason
+                if isinstance(decision, tool_inputs.RunAct) and decision.reason is not MISSING
+                else ""
+            ),
+            recorded_reward_groups=groups,
         )

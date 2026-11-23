@@ -32,7 +32,7 @@ from sts2_harness.tools import ToolCatalog, ToolName
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness.user_input_values import UserInput
 from sts2_harness_eval.decision_cases import DecisionLabels, DecisionSource
-from sts2_harness_eval.decision_extract import ExtractionError, extract_case
+from sts2_harness_eval.decision_extract import ExtractionAudit, extract_case
 
 
 class RewardGame:
@@ -530,8 +530,35 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                     model_sequence=first_deck.sequence,
                     archive=archive,
                 )
-                with pytest.raises(ExtractionError, match="one recorded card reward choice"):
-                    await extract_case(source, DecisionLabels(comment="fixture"))
+                audit = ExtractionAudit()
+                case = await extract_case(source, DecisionLabels(comment="fixture"), audit=audit)
+                assert [(group.offer, group.choices) for group in case.recorded_reward_groups] == [
+                    ("local", ("skip",)),
+                    ("regular", ("CARD.REGULAR",)),
+                    ("guaranteed", ("CARD.GUARANTEED",)),
+                ]
+                assert audit.recorded_completion is not None
+                assert audit.recorded_completion["kind"] == "reward_batch"
+                evidence = audit.recorded_completion["groups"]
+                assert isinstance(evidence, list)
+                proof: dict[str, list[JsonValue]] = {}
+                for group in evidence:
+                    assert isinstance(group, dict)
+                    offer, sequences = group["offer"], group["native_sequences"]
+                    assert isinstance(offer, str) and isinstance(sequences, list)
+                    proof[offer] = sequences
+                assert [(offer, len(receipts)) for offer, receipts in proof.items()] == [
+                    ("local", 0),
+                    ("regular", 2),
+                    ("guaranteed", 1),
+                ]
+                sequences = [
+                    sequence
+                    for receipts in proof.values()
+                    for sequence in receipts
+                    if isinstance(sequence, int)
+                ]
+                assert sequences == sorted(set(sequences)) and len(sequences) == 3
 
     asyncio.run(scenario())
 

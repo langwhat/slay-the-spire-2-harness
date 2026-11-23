@@ -25,7 +25,7 @@ from sts2_harness.decisions import (
     HandoffTask,
     SelectStep,
 )
-from sts2_harness.deck import deck_context, deck_observation
+from sts2_harness.deck import adding_selection, card_rewards, deck_context, deck_observation
 from sts2_harness.deck_role import DeckAgent
 from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.entry_materials import EntryMaterials, MaterialContext, entry_materials
@@ -97,10 +97,16 @@ from sts2_harness_eval.decision_cases import (
     RecordedDecision,
     RequestSize,
     ResultEvent,
+    RewardGroupDecision,
     TaskEvent,
-    score,
+    score_decision,
 )
-from sts2_harness_eval.decision_extract import ExtractionError, choices_for, decision_input
+from sts2_harness_eval.decision_extract import (
+    ExtractionError,
+    choices_for,
+    decision_input,
+    reward_groups_for,
+)
 
 _JSON = TypeAdapter(dict[str, JsonValue])
 
@@ -166,9 +172,12 @@ class CaseStatistics(DeckStatistics):
 
 
 class _ChoiceMade(Exception):
-    def __init__(self, call: ToolCall, choices: tuple[str, ...]) -> None:
+    def __init__(
+        self, call: ToolCall, choices: tuple[str, ...], groups: tuple[RewardGroupDecision, ...]
+    ) -> None:
         self.call = call
         self.choices = choices
+        self.groups = groups
 
 
 class DecisionDeviation(ExtractionError):
@@ -209,12 +218,6 @@ class DecisionRun(DeckAgent):
         )
         if isinstance(result, QueryToolResult) and isinstance(result.outcome, Rejected):
             raise DecisionDeviation(result.outcome.reason.message)
-        if call.name == ToolName.RUN_DECK_CHOICE:
-            arguments = _JSON.validate_json(call.arguments)
-            submitted = arguments.get("choices")
-            first = submitted[0] if isinstance(submitted, list) and len(submitted) == 1 else None
-            if not isinstance(first, dict) or first.get("offer") != self.case.decision_offer:
-                raise DecisionDeviation("The model chose a different native card offer.")
         if call.name == ToolName.RUN_ACT:
             if not isinstance(result, ActionProposal) or len(result.steps) != 1:
                 raise DecisionDeviation("The labeled selection requires one native select step.")
@@ -228,7 +231,10 @@ class DecisionRun(DeckAgent):
                 or not selection.min <= len(step.refs) <= selection.max
             ):
                 raise DecisionDeviation("The selection violates the current native menu.")
-        raise _ChoiceMade(call, choices_for(decision_input(call), observation))
+        decision = decision_input(call)
+        raise _ChoiceMade(
+            call, choices_for(decision, observation), reward_groups_for(decision, observation)
+        )
 
     case: DecisionCase
     variant: DecisionVariant = DecisionVariant.RUN
@@ -575,10 +581,18 @@ def _deck_case(case: DecisionCase) -> DecisionCase:
     state = observation.state
     if not isinstance(state, native.RunState):
         raise ExtractionError("The deck role requires a native Run reward.")
-    offer = next((offer for offer in state.offers if offer.ref == case.decision_offer), None)
-    if offer is None or offer.kind is not native.OfferKind.CARD:
-        raise ExtractionError("The source does not identify one native card offer.")
-    filtered = deck_observation(observation, offer)
+    groups, _ = card_rewards(observation)
+    refs = (
+        {group.offer for group in case.recorded_reward_groups}
+        if case.recorded_reward_groups
+        else {case.decision_offer}
+    )
+    offers = tuple(offer for offer in groups if offer.ref in refs)
+    if refs != {offer.ref for offer in offers} and (
+        refs != {None} or adding_selection(observation) is None
+    ):
+        raise ExtractionError("The source does not identify the native card reward groups.")
+    filtered = deck_observation(observation, offers)
     previous = event.previous_battle or event.handoff
     if previous is None:
         previous = next(
@@ -830,6 +844,7 @@ async def sample_case(
     started = monotonic()
     measured = MeasuredModel(client)
     choices: tuple[str, ...] = ()
+    groups: tuple[RewardGroupDecision, ...] = ()
     reason, error, over = "", None, None
     verdict = DecisionVerdict.DEVIATED
     try:
@@ -841,13 +856,16 @@ async def sample_case(
     except _ChoiceMade as chosen:
         choices = chosen.choices
         arguments = _JSON.validate_json(chosen.call.arguments)
-        submitted = arguments.get("choices")
-        first = submitted[0] if isinstance(submitted, list) and len(submitted) == 1 else None
-        value = first.get("reason") if isinstance(first, dict) else arguments.get("reason")
-        reason = value if isinstance(value, str) else ""
+        groups = chosen.groups
+        value = arguments.get("reason")
+        reason = (
+            "\n".join(group.reason for group in groups)
+            if groups
+            else (value if isinstance(value, str) else "")
+        )
         value = arguments.get("over")
         over = value if isinstance(value, str) else None
-        verdict = score(case.labels, choices)
+        verdict = score_decision(case.labels, choices, groups)
     except DecisionDeviation as failure:
         error = str(failure)
     except DecisionInterrupted as failure:
@@ -871,6 +889,7 @@ async def sample_case(
         verdict=verdict,
         choices=choices,
         reason=reason,
+        reward_groups=groups,
         error=error,
         requests=tuple(measured.sizes),
         usage=tuple(measured.usage),
@@ -887,8 +906,9 @@ def recorded(case: RecordedDecision) -> DecisionSample:
     return DecisionSample(
         source=case.source,
         sample=0,
-        verdict=score(case.labels, case.recorded_choices),
+        verdict=score_decision(case.labels, case.recorded_choices, case.recorded_reward_groups),
         choices=case.recorded_choices,
+        reward_groups=case.recorded_reward_groups,
         reason=case.recorded_reason,
     )
 
@@ -914,7 +934,7 @@ def _report(samples: tuple[DecisionSample, ...]) -> str:
         reason = (sample.error or sample.reason).replace("|", "\\|").replace("\n", " ")
         rows.append(
             f"| {source.round} / {source.seed} / {source.floor} | {sample.sample} | "
-            f"{', '.join(sample.choices)} | {sample.verdict.value} | {reason} |"
+            f"{', '.join(sample.display_choices())} | {sample.verdict.value} | {reason} |"
         )
     verdict_counts = {
         verdict: sum(sample.verdict is verdict for sample in samples) for verdict in DecisionVerdict
@@ -984,7 +1004,7 @@ def load_case(path: Path, *, replay: bool = True) -> RecordedDecision:
     text = path.read_text(encoding="utf-8")
     fields = _JSON.validate_json(text)
     header = RecordedDecision.model_validate_json(
-        json.dumps({key: fields.get(key) for key in RecordedDecision.model_fields})
+        json.dumps({key: fields[key] for key in RecordedDecision.model_fields if key in fields})
     )
     if not replay:
         return header

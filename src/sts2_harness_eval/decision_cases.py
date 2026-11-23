@@ -24,11 +24,34 @@ class DecisionSource(native.WireModel):
     archive: Path
 
 
-class DecisionLabels(native.WireModel):
+class ChoiceLabels(native.WireModel):
     good: tuple[str, ...] = ()
     bad: tuple[str, ...] = ()
-    comment: str
     multiselect: bool = False
+
+
+class RewardGroupLabels(ChoiceLabels):
+    offer: native.Nonempty
+
+
+class DecisionLabels(ChoiceLabels):
+    comment: str
+    reward_groups: tuple[RewardGroupLabels, ...] = ()
+    reward_order: tuple[native.Nonempty, ...] = ()
+
+    @model_validator(mode="after")
+    def distinct_reward_groups(self) -> Self:
+        if len({group.offer for group in self.reward_groups}) != len(self.reward_groups):
+            raise ValueError("Each card reward group can have one label.")
+        if len(set(self.reward_order)) != len(self.reward_order):
+            raise ValueError("Each card reward group can appear once in the expected order.")
+        return self
+
+
+class RewardGroupDecision(native.WireModel):
+    offer: str | None
+    choices: tuple[str, ...]
+    reason: str
 
 
 class RouteState(native.WireModel):
@@ -115,6 +138,7 @@ class RecordedDecision(native.WireModel):
     labels: DecisionLabels
     recorded_choices: tuple[str, ...]
     recorded_reason: str
+    recorded_reward_groups: tuple[RewardGroupDecision, ...] = ()
 
 
 class DecisionCase(RecordedDecision):
@@ -152,7 +176,7 @@ class DecisionVariant(StrEnum):
     DECK = "deck"
 
 
-def score(labels: DecisionLabels, choices: tuple[str, ...]) -> DecisionVerdict:
+def score(labels: ChoiceLabels, choices: tuple[str, ...]) -> DecisionVerdict:
     selected = set(choices)
     if selected.intersection(labels.bad):
         return DecisionVerdict.FAILED
@@ -167,6 +191,27 @@ def score(labels: DecisionLabels, choices: tuple[str, ...]) -> DecisionVerdict:
         if len(selected) == 1 and selected.issubset(labels.good)
         else DecisionVerdict.UNLABELED
     )
+
+
+def score_decision(
+    labels: DecisionLabels,
+    choices: tuple[str, ...],
+    groups: tuple[RewardGroupDecision, ...],
+) -> DecisionVerdict:
+    if not labels.reward_groups and not labels.reward_order:
+        return DecisionVerdict.UNLABELED if len(groups) > 1 else score(labels, choices)
+    if labels.reward_order and tuple(group.offer for group in groups) != labels.reward_order:
+        return DecisionVerdict.FAILED
+    by_offer = {group.offer: group.choices for group in groups}
+    results = tuple(
+        score(label, by_offer[label.offer]) if label.offer in by_offer else DecisionVerdict.FAILED
+        for label in labels.reward_groups
+    )
+    if DecisionVerdict.FAILED in results:
+        return DecisionVerdict.FAILED
+    if DecisionVerdict.UNLABELED in results:
+        return DecisionVerdict.UNLABELED
+    return DecisionVerdict.PASSED
 
 
 class RequestSize(native.WireModel):
@@ -200,6 +245,7 @@ class DecisionSample(native.WireModel):
     verdict: DecisionVerdict
     choices: tuple[str, ...]
     reason: str
+    reward_groups: tuple[RewardGroupDecision, ...] = ()
     error: str | None = None
     proposal: CapturedProposal | None = None
     proposal_status: ProposalStatus | None = None
@@ -212,6 +258,11 @@ class DecisionSample(native.WireModel):
     request_bodies: tuple[dict[str, JsonValue], ...] = ()
     model_replies: tuple[str, ...] = ()
     attempts: tuple[dict[str, JsonValue], ...] = ()
+
+    def display_choices(self) -> tuple[str, ...]:
+        if len(self.reward_groups) <= 1:
+            return self.choices
+        return tuple(f"{group.offer} [{', '.join(group.choices)}]" for group in self.reward_groups)
 
     @model_validator(mode="after")
     def require_proposal_and_status_together(self) -> Self:

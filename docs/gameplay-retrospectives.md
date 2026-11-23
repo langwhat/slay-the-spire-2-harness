@@ -96,6 +96,12 @@ Route, shop, event, and rest-site checks remain public-state probes unless nativ
 
 Keep verified recovery facts immutable in `CaseStore`. Append findings with public evidence references in `AnnotationStore`. Preserve the true human or agent origin of annotations, rubrics, and judgments. Append reviews separately: accepting an agent finding never changes its origin. Do not create human records without an actual human decision.
 
+For a joint card reward decision, record the ordered groups by native offer ref, with
+the selected card definition IDs or skip and the reason for each group. Per-group
+labels and an optional expected order stay in the evaluator. Source extraction checks
+the ordered receipts for each native step and retains local skips as separate group
+results. A model-only replay checks its submitted order without dispatching game actions.
+
 Historical takeover replays the recorded prefix and changes only declared materials. Prompts and tool descriptions delivered before the anchor come from the recording, so test a change to them with a `MaterialVariant` that declares every recorded source version and the complete replacement text. Supplying a different prompt reader to an arm affects only reads after the anchor.
 
 **Done when:** the selected experiment can test the proposed claim, or the claim is explicitly blocked by a documented capability gap.

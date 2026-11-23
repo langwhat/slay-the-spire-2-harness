@@ -50,11 +50,17 @@ from sts2_harness_eval.decision_cases import (
     DecisionSample,
     DecisionVerdict,
     ProposalStatus,
+    RewardGroupDecision,
     RouteMetrics,
     TaskEvent,
-    score,
+    score_decision,
 )
-from sts2_harness_eval.decision_extract import ExtractionError, choices_for, decision_input
+from sts2_harness_eval.decision_extract import (
+    ExtractionError,
+    choices_for,
+    decision_input,
+    reward_groups_for,
+)
 from sts2_harness_eval.decision_replay import CaseGame, CaseStatistics, MeasuredModel
 from sts2_harness_eval.frozen_catalog import FrozenCatalog, SnapshotIncomplete
 from sts2_harness_eval.frozen_documents import FrozenDocuments
@@ -417,6 +423,7 @@ async def sample_fresh(
     started = monotonic()
     measured = FreshModel(client)
     choices: tuple[str, ...] = ()
+    groups: tuple[RewardGroupDecision, ...] = ()
     reason, error = "", None
     proposal: CapturedProposal | None = None
     proposal_status: ProposalStatus | None = None
@@ -492,6 +499,7 @@ async def sample_fresh(
                 tools,
                 ToolRecoveryBudget(),
                 offer_ref=case.decision_offer,
+                resolved=frozenset(task_event.declined_offers),
                 user_input=UserInputQueue() if case.viewer else None,
                 prompts=selected_prompts,
                 materials=materials,
@@ -523,11 +531,15 @@ async def sample_fresh(
                 error = f"{prefix}: {captured.error}"
             else:
                 route_metrics = agent.route_metrics
-                if captured.call.name in (ToolName.RUN_DECK_CHOICE, ToolName.RUN_ACT) and (
-                    case.labels.good or case.labels.bad
-                ):
+                labels = case.labels
+                if captured.call.name == ToolName.RUN_DECK_CHOICE:
+                    decision = decision_input(captured.call)
+                    groups = reward_groups_for(decision, observation)
+                    choices = choices_for(decision, observation)
+                    verdict = score_decision(labels, choices, groups)
+                elif captured.call.name == ToolName.RUN_ACT and (labels.good or labels.bad):
                     choices = choices_for(decision_input(captured.call), observation)
-                    verdict = score(case.labels, choices)
+                    verdict = score_decision(labels, choices, ())
                 else:
                     action = {key: value for key, value in arguments.items() if key != "reason"}
                     choices = (json.dumps({"tool": captured.call.name, **action}, sort_keys=True),)
@@ -558,6 +570,7 @@ async def sample_fresh(
         verdict=verdict,
         choices=choices,
         reason=reason,
+        reward_groups=groups,
         error=error,
         proposal=proposal,
         proposal_status=proposal_status,

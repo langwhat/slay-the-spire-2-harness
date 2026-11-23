@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 
 import httpx2 as httpx
@@ -64,6 +65,8 @@ from sts2_harness_eval.decision_replay import (
     sample_case,
     write_results,
 )
+from sts2_harness_eval.frozen_catalog import FrozenCatalog
+from sts2_harness_eval.stable_decisions import EvaluationRole, sample_fresh
 
 
 def decision_case(tmp_path: Path, *, multiselect: bool = False) -> DecisionCase:
@@ -595,6 +598,86 @@ def test_real_loop_resolves_reward_without_writing_notes_or_native_action(
         assert result.reason == "A better turn."
         assert "PRIVATE-LABEL-DO-NOT-SEND" not in bodies[0]
         assert result.raw_calls[0]["name"] == "run_deck_choice"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fresh", (False, True))
+@pytest.mark.parametrize("reverse", (False, True))
+def test_joint_deck_decision_compares_order_and_keeps_each_group(
+    tmp_path: Path, reverse: bool, fresh: bool
+) -> None:
+    async def run() -> None:
+        raw = decision_case(tmp_path).model_dump(mode="json")
+        raw["decision_offer"] = None
+        raw["labels"] = {
+            "comment": "PRIVATE-LABEL-DO-NOT-SEND",
+            "reward_groups": [
+                {"offer": "offer", "good": ["CARD.ONE"]},
+                {"offer": "other", "good": ["CARD.ONE"]},
+            ],
+            "reward_order": ["offer", "other"],
+        }
+        raw["recorded_reward_groups"] = [
+            {"offer": "offer", "choices": ["CARD.ONE"], "reason": "Original first."},
+            {"offer": "other", "choices": ["CARD.ONE"], "reason": "Original second."},
+        ]
+        observation = raw["events"][0]["observation"]
+        observation["objects"]["other-card"] = observation["objects"]["candidate"]
+        observation["state"]["offers"].append(
+            {
+                "ref": "other",
+                "kind": "card",
+                "contents": ["other-card"],
+                "actions": ["open-other"],
+                "requires_selection": True,
+            }
+        )
+        observation["state"]["actions"].append(
+            {"ref": "open-other", "label": "Other reward", "enabled": True}
+        )
+        case = DecisionCase.model_validate_json(json.dumps(raw))
+        choices = [
+            {"offer": "offer", "choice": "take", "card": "candidate", "reason": "First reason."},
+            {"offer": "other", "choice": "take", "card": "other-card", "reason": "Second reason."},
+        ]
+        if reverse:
+            choices.reverse()
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            payload = request.content.decode()
+            assert "other-card" in payload and "candidate" in payload
+            assert "PRIVATE-LABEL-DO-NOT-SEND" not in payload
+            assert "Original first." not in payload and "Original second." not in payload
+            return httpx.Response(
+                200,
+                content=reply(("joint", "run_deck_choice", json.dumps({"choices": choices}))),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            if fresh:
+                catalog = FrozenCatalog.model_validate_json(
+                    '{"complete":false,"catalog":{"categories":[],"card_filters":'
+                    '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+                )
+                result = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.DECK)
+            else:
+                result = await sample_case(case, client, variant=DecisionVariant.DECK)
+        assert result.verdict is (DecisionVerdict.FAILED if reverse else DecisionVerdict.PASSED)
+        assert result.choices == ("CARD.ONE", "CARD.ONE")
+        expected = [
+            ("offer", ("CARD.ONE",), "First reason."),
+            ("other", ("CARD.ONE",), "Second reason."),
+        ]
+        if reverse:
+            expected.reverse()
+        assert [
+            (group.offer, group.choices, group.reason) for group in result.reward_groups
+        ] == expected
 
     asyncio.run(run())
 
