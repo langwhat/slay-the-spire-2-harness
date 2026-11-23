@@ -213,11 +213,11 @@ class DefaultFlow:
                         self._latest_handoff,
                     )
                 self._enter_role(native.DecisionOwner.RUN)
-                source: DecisionSource = (
-                    self._card_source(observation) if isinstance(task, ActTask) else self._run
-                )
-                if source is self._run and isinstance(task, ActTask):
+                if isinstance(task, ActTask):
+                    source = self._card_source(observation)
                     task = replace(task, resolved_card_rewards=frozenset(self._resolved_cards))
+                else:
+                    source = self._run
                 deck = self._deck
                 if deck is not None and source is deck:
                     deck.set_route_plan(self._run.route_plan)
