@@ -19,13 +19,15 @@ internal sealed partial class NativeRuleText
     {
         if (Argument(call, "card") is not Call { Method: { Name: "CreateCard", IsGenericMethod: true } create, Arguments: [var player] }
             || create.DeclaringType != typeof(ICombatState) || !typeof(CardModel).IsAssignableFrom(create.GetGenericArguments()[0])
-            || ValueText(player) is not { } recipient || Argument(call, "newPileType") is not Constant { Data: int pile }
-            || Argument(call, "position") is not Constant { Data: int position })
+            || ValueText(player) is not { } recipient || Numeric(Argument(call, "newPileType")) is not { } pileNum)
             return null;
-        var where = (PileType)pile == PileType.Draw && (CardPilePosition)position != CardPilePosition.Bottom
-            ? $" ({((CardPilePosition)position).ToString().ToLowerInvariant()} position)"
+        var pile = (int)pileNum;
+        var cardType = create.GetGenericArguments()[0];
+        var position = Numeric(Argument(call, "position")) is { } rawPos ? (CardPilePosition)(int)rawPos : CardPilePosition.Bottom;
+        var where = (PileType)pile == PileType.Draw && position != CardPilePosition.Bottom
+            ? $" ({position.ToString().ToLowerInvariant()} position)"
             : "";
-        return new Effect($"add 1 {ModelLabel(create.GetGenericArguments()[0])} to {recipient}'s {((PileType)pile).ToString().ToLowerInvariant()} pile{where}");
+        return new Effect($"add 1 {ModelLabel(cardType)} to {Possessive(recipient)} {((PileType)pile).ToString().ToLowerInvariant()} pile{where}", AddedCard: cardType);
     }
 
     private static string? CardSlot(Field field)
@@ -36,15 +38,50 @@ internal sealed partial class NativeRuleText
                 ? "recorded card instance"
                 : null;
 
-    private static Effect? DescribeCardSlot(Assignment assignment, MethodInfo method)
-        => assignment.Assigned switch
+    private static string? PowerBoolSlot(Field field)
+    {
+        if (field.Member.FieldType != typeof(bool))
+            return null;
+        if (InternalDataField(field) is { } internalBool)
+            return UpperFirst(internalBool.Name.TrimStart('_'));
+        if (field.Receiver is Input { Name: "this" } && typeof(PowerModel).IsAssignableFrom(field.Member.DeclaringType))
+            return UpperFirst(field.Member.Name.TrimStart('_'));
+        return null;
+    }
+
+    private static string UpperFirst(string name)
+        => name.Length == 0 ? name : char.ToUpperInvariant(name[0]) + name[1..];
+
+    private static Effect? DescribeSlotAssignment(Assignment assignment, MethodInfo method)
+    {
+        if (CardSlot(assignment.Target) is not null)
         {
-            Constant { Data: null } => new Effect("clear the recorded card instance",
-                Trigger: method.Name == "AfterCardPlayed" ? "After each card play fully resolves (after all its hits)" : null, ChangesGuard: true),
-            Input { Name: "cardSource", Type: var type } when type == typeof(CardModel) && method.Name == "AfterDamageReceived"
-                => new Effect("record the source card instance", Trigger: AfterEachReceivedHit, ChangesGuard: true),
-            _ => null,
-        };
+            return assignment.Assigned switch
+            {
+                Constant { Data: null } => new Effect("clear the recorded card instance",
+                    Trigger: method.Name == "AfterCardPlayed" ? "After each card play fully resolves (after all its hits)" : null, ChangesGuard: true),
+                Input { Name: "cardSource", Type: var type } when type == typeof(CardModel) && method.Name == "AfterDamageReceived"
+                    => new Effect("record the source card instance", Trigger: AfterEachReceivedHit, ChangesGuard: true),
+                _ => null,
+            };
+        }
+        if (PowerBoolSlot(assignment.Target) is { } flagName)
+        {
+            return assignment.Assigned switch
+            {
+                Constant { Data: int flag } when flag is 0 or 1
+                    => new Effect($"{flagName} = {(flag == 1 ? "true" : "false")}", ChangesGuard: true),
+                Operation { Operator: "ceq", Left: Field toggled, Right: Constant { Data: 0 } }
+                    when PowerBoolSlot(toggled) == flagName
+                    => new Effect($"toggle {flagName} (starts false)", ChangesGuard: true),
+                _ => null,
+            };
+        }
+        return null;
+    }
+
+    private static bool IsTrackedSlot(Field field)
+        => CardSlot(field) is not null || PowerBoolSlot(field) is not null;
 
     private static bool IsUnchangedAssignment(EffectStep step)
         => step.Action is Assignment { Assigned: Input { Name: "cardSource" } source } assignment
@@ -107,40 +144,170 @@ internal sealed partial class NativeRuleText
         if (AttackHit(test.Value) is { } first)
             return expected ? $"{first} exists" : $"{first} does not exist";
 
-        if (test.Value is Field field && CardSlot(field) is { } slot)
-            return expected ? $"{slot} exists" : $"no {slot}";
+        if (test.Value is Field field)
+        {
+            if (CardSlot(field) is { } slot)
+                return expected ? $"{slot} exists" : $"no {slot}";
+            if (PowerBoolSlot(field) is { } flagSlot)
+                return $"{flagSlot}={expected.ToString().ToLowerInvariant()}";
+        }
+
+        if (test.Value is Call { Method: MethodInfo boolGetter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+            && boolGetter.ReturnType == typeof(bool) && typeof(PowerModel).IsAssignableFrom(boolGetter.DeclaringType)
+            && Body(boolGetter) is { Incomplete: false, Returns: [{ Value: Field innerField, Conditions.Length: 0 }] }
+            && PowerBoolSlot(innerField) is { } getterFlag)
+            return $"{getterFlag}={expected.ToString().ToLowerInvariant()}";
 
         if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un", Left: Input { Name: "side" },
             Right: Call { Method.DeclaringType: var creature, Method.Name: "get_Side", Receiver: var holder } } comparison
             && creature == typeof(Creature) && IsOwner(holder))
             return expected == (comparison.Operator != "bne.un") ? "turn side is holder's side" : "turn side is opposing side";
 
+        if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un",
+            Left: Call { Method.Name: "get_CurrentSide" },
+            Right: Call { Method.DeclaringType: var sideOwner, Method.Name: "get_Side", Receiver: var sideReceiver } } sideCheck
+            && sideOwner == typeof(Creature) && IsOwner(sideReceiver))
+            return expected == (sideCheck.Operator != "bne.un") ? "acting side=holder's side" : "acting side≠holder's side";
+
+        if (test.Value is Call { Method.Name: "CanAfflict", Receiver: Call { Method: { Name: "Affliction", IsGenericMethod: true } aff },
+            Arguments: [var targetCard] } && ValueText(targetCard) is { } cardLabel)
+            return $"{cardLabel} {(expected ? "can" : "cannot")} receive {ModelLabel(aff.GetGenericArguments()[0])}";
+
+        if (test.Value is Call { Method.Name: "get_IsDupe", Receiver: var dupeCard } && ValueText(dupeCard) is { } dupeLabel)
+            return $"{dupeLabel} {(expected ? "is" : "is not")} a dupe";
+
+        if (test.Value is Call { Method.Name: nameof(Enumerable.Any), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, var predArg] }
+            && CardPlayStartedFilterLabel(predArg, expected) is { } startedLabel)
+            return startedLabel;
+
+        if (test.Value is Call { Method: MethodInfo segmentCheck, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+            && TeammatePowerAllDeadType(segmentCheck) is { } sharedPower)
+            return expected
+                ? $"all other teammates with {PowerLabel(sharedPower)} are dead"
+                : $"another teammate with {PowerLabel(sharedPower)} is alive";
+
+        if (test.Value is Call { Method.Name: "op_Equality" or "op_Inequality", Method.DeclaringType: var strType, Arguments: [var leftStr, var rightStr] }
+            && strType == typeof(string) && ValueText(leftStr) is { } ls && ValueText(rightStr) is { } rs)
+            return $"{ls}{(test.Value is Call { Method.Name: "op_Equality" } == expected ? "=" : "≠")}{rs}";
+
+        return null;
+    }
+
+    private string? CardPlayStartedFilterLabel(Value predArg, bool expected)
+    {
+        if (predArg is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }
+            || pred.ContainsGenericParameters || Body(pred) is not { Incomplete: false } body)
+            return null;
+        CardType? filteredType = null;
+        foreach (var cond in body.Returns.SelectMany(r => r.Conditions))
+        {
+            if (cond.Value is Operation { Left: Call { Method.Name: "get_Type" }, Right: var rhs } op
+                && Numeric(rhs) is { } ct && (op.Operator is "beq" or "ceq" == cond.Expected))
+                filteredType = (CardType)(int)ct;
+        }
+        var noun = filteredType is { } kind ? $"{kind} play" : "card play";
+        return expected ? $"holder has started a {noun} this turn" : $"holder has not started a {noun} this turn";
+    }
+
+    private Type? TeammatePowerAllDeadType(MethodInfo method)
+    {
+        if (method.ReturnType != typeof(bool) || Body(method) is not { Incomplete: false,
+            Returns: [{ Value: Call { Method.Name: nameof(Enumerable.All), Arguments: [Call { Method: MethodInfo sourceMethod, Receiver: Input { Name: "this" } },
+                Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] }, Conditions.Length: 0 }] })
+            return null;
+        if (Body(pred) is not { Incomplete: false, Returns: [{ Value: Call { Method.Name: "get_IsDead" }, Conditions.Length: 0 }] })
+            return null;
+        var srcBody = Body(sourceMethod);
+        var filter = srcBody.Calls.Select(s => s.Call.Arguments.OfType<Call>()
+                .SelectMany(c => c.Arguments.OfType<Constant>())
+                .Select(c => c.Data as MethodInfo).FirstOrDefault(m => m is not null))
+            .FirstOrDefault(m => m is not null);
+        if (filter is null)
+            filter = srcBody.Returns.SelectMany(r => r.Value is Call { Arguments: var a } ? a : [])
+                .OfType<Call>().SelectMany(c => c.Arguments.OfType<Constant>())
+                .Select(c => c.Data as MethodInfo).FirstOrDefault();
+        if (filter is not null && Body(filter) is { Incomplete: false, Returns: [{ Value: Call { Method: { Name: "HasPower", IsGenericMethod: true } hasPower } }] })
+            return hasPower.GetGenericArguments()[0];
         return null;
     }
 
     private string? CombatValue(Value value) => value switch
     {
         Field { Member: var field, Receiver: Input { Name: "this" } } when _choiceCursors.Contains(field) => "choice rounds completed",
-        Field field => CardSlot(field),
+        Field field when CardSlot(field) is { } slot => slot,
         Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
             when getter.DeclaringType == monster.GetType() && _choiceCursors.Count != 0
             && Body(getter) is { Incomplete: false, Returns: [{ Value: Field { Receiver: Input { Name: "this" }, Member: var cursor }, Conditions.Length: 0 }] }
             && _choiceCursors.Contains(cursor) => "choice rounds completed",
+        Call { Method: MethodInfo scalarGetter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+            when scalarGetter.ReturnType == typeof(int) && scalarGetter.Name.StartsWith("get_", StringComparison.Ordinal)
+                && scalarGetter.DeclaringType?.IsInstanceOfType(monster) == true
+                && MonsterScalarText(scalarGetter) is { } scalar => scalar,
+        Call { Method.Name: "get_CurrentHp", Method.DeclaringType: var creatureType, Receiver: { } who }
+            when creatureType == typeof(Creature) && ValueText(who) is { } targetLabel => $"{Possessive(targetLabel)} current HP",
+        Call { Method.Name: "get_SlotName", Method.DeclaringType: var slotOwner }
+            when slotOwner == typeof(Creature) => "encounter slot",
+        Call { Method.Name: "get_Target", Method.DeclaringType: var powerType, Receiver: Input { Name: "this" } }
+            when powerType == typeof(PowerModel) => "this power's target",
+        Call { Method.Name: "get_AllAffectedCreatures", Receiver: Input { Name: "this" } }
+            => "this power's target and its pets",
+        Call { Method.Name: "GetOpponentsOf", Arguments: [var selfCreature] }
+            when selfCreature == Self || selfCreature is Call { Method.Name: "get_Creature", Receiver: Input { Name: "this" } }
+            => "player targets",
         Call { Method.Name: "get_Monster", Method.DeclaringType: var type, Receiver: Input { Name: "dealer" } } when type == typeof(Creature)
             => "damage dealer",
         Call { Method.Name: "get_PetOwner", Method.DeclaringType: var type, Receiver: Input { Name: "dealer" } } when type == typeof(Creature)
             => "damage dealer's owner",
+        Call { Method.Name: "get_PetOwner", Method.DeclaringType: var type, Receiver: { } targetPet }
+            when type == typeof(Creature) && ValueText(targetPet) == "player targets"
+            => "player targets",
         Call { Method.Name: "get_Player", Method.DeclaringType: var type, Receiver: Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_PetOwner" } pet } }
             when type == typeof(Creature) => ValueText(pet),
         Call { Method.Name: "get_UnblockedDamage" or "get_TotalDamage", Method.DeclaringType: var type, Receiver: { } hit } damage
             when type == typeof(DamageResult) && (AttackHit(hit) ?? ValueText(hit)) is { } label
             => $"{label} {(damage.Method.Name == "get_UnblockedDamage" ? "unblocked" : "total")} damage",
         Input { Type: var type } when type == typeof(DamageResult) => "this hit's",
+        Call { Method: { Name: "GetPowerAmount", IsGenericMethod: true } getAmt, Method.DeclaringType: var cType, Receiver: { } holder }
+            when cType == typeof(Creature) && ValueText(holder) is { } who
+            => $"{Possessive(who)} {ModelLabel(getAmt.GetGenericArguments()[0])} stacks",
         Call { Method.Name: "get_Amount", Method.DeclaringType: var type, Receiver: { } power }
             when type == typeof(PowerModel) && OwnedPower(power) is { } kind => $"self's {ModelLabel(kind)} stacks",
         Call call when OwnedPower(call) is { } power => $"self's {ModelLabel(power)}",
+        Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
+            Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo countPred }] }] }
+            when ofType.GetGenericArguments()[0].Name == "CardAfflictedEntry" && AfflictionFromPredicate(countPred) is { } affType
+            => $"holder's cards afflicted with {ModelLabel(affType)} this turn",
         _ => AttackHit(value),
     };
+
+    private Type? AfflictionFromPredicate(MethodInfo predicate)
+        => Body(predicate).Returns.SelectMany(r => FindAfflictionTypes(r.Value)).FirstOrDefault();
+
+    private static IEnumerable<Type> FindAfflictionTypes(Value value) => value switch
+    {
+        Operation { Operator: "isinst", Right: Constant { Data: Type t } } when typeof(AfflictionModel).IsAssignableFrom(t) => [t],
+        Operation op => FindAfflictionTypes(op.Left).Concat(op.Right is { } r ? FindAfflictionTypes(r) : []),
+        Call call => (call.Receiver is { } rec ? FindAfflictionTypes(rec) : []).Concat(call.Arguments.SelectMany(FindAfflictionTypes)),
+        _ => [],
+    };
+
+    private string? MonsterScalarText(MethodInfo getter)
+    {
+        if (getter.DeclaringType is { } owner && BackingField(owner, getter) is { } backing)
+        {
+            if (!IsGameplayField(backing))
+                return null;
+            _trackedMonsterInts.Add((getter.Name[4..], backing));
+            return getter.Name[4..];
+        }
+        var body = Body(getter);
+        if (body.Incomplete)
+            return null;
+        var active = body.Returns.Where(r => r.Conditions.All(IsCurrentRun)).ToArray();
+        return active is [var ret] && ret.Conditions.All(IsDreadTest) ? ValueText(ret.Value) : null;
+    }
+
+    private readonly HashSet<(string Name, FieldInfo Field)> _trackedMonsterInts = [];
 
     private static Type? OwnedPower(Value source)
         => source is Call { Method.DeclaringType: var first, Method.Name: nameof(Enumerable.FirstOrDefault),

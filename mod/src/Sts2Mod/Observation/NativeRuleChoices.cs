@@ -190,10 +190,10 @@ internal sealed partial class NativeRuleText
             || !body.Calls.All(step => IsChoiceResolutionCall(step.Call.Method, apply.Method)))
             return null;
         var power = apply.Method.GetGenericArguments()[0];
-        var rule = ReadChoicePower(power);
-        if (rule is null)
+        if (!HasReadableChoicePower(power))
             return null;
-        return $"{ModelLabel(cardType)} (attempt to apply {Number(stacks)} {ModelLabel(power)} to the chooser; {rule})";
+        _powers.Add(power);
+        return $"{ModelLabel(cardType)} (attempt to apply {Number(stacks)} {ModelLabel(power)} to the chooser)";
     }
 
     private decimal? ChoiceAmount(Value amount, CardModel card, List<ChoiceOverride> overrides, int round)

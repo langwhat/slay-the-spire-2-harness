@@ -1,33 +1,187 @@
+using System.Reflection;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
+using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Models;
-using MegaCrit.Sts2.Core.ValueProps;
 using static Sts2Mod.Observation.NativeRuleBody;
 
 namespace Sts2Mod.Observation;
 
 internal sealed partial class NativeRuleText
 {
-    private string? ReadChoicePower(Type power)
+    private bool HasReadableChoicePower(Type power)
     {
-        if (FindOverride(power, "AfterSideTurnEndLate") is { } endTurn && Body(endTurn) is { Incomplete: false } end
-            && end.Calls.Where(step => step.Call.Method.DeclaringType == typeof(CreatureCmd)
-                && step.Call.Method.Name == nameof(CreatureCmd.Damage)).DistinctBy(step => step.Index).ToArray() is [var damage]
-            && damage.Conditions is [var participating] && IsHolderParticipating(participating)
-            && IsOwner(Argument(damage.Call, "target")) && IsOwner(Argument(damage.Call, "dealer"))
-            && IsStackAmount(Argument(damage.Call, "amount"))
-            && Argument(damage.Call, "props") is Constant { Data: (int)ValueProp.Unpowered })
-            return "at the end of the holder's turn, deal unpowered damage equal to the power's current stacks to the holder";
-
-        if (PlayerSubtraction(power, "ModifyHandDraw", "count", floorAtZero: true))
-            return "reduce the holder's turn-start draw by the power's current stacks, to a minimum of 0";
-        if (PlayerSubtraction(power, "ModifyMaxEnergy", "amount", floorAtZero: false))
-            return "reduce the holder's maximum Energy by the power's current stacks";
-        if (HasCardPlayLimit(power))
-            return "prevent the holder from starting another card play once the turn's play count, including replays and autoplay, reaches the power's current stacks";
-        return null;
+        var probe = new NativeRuleText(monster);
+        var lines = new List<string>();
+        probe.ReadHooks(power, lines);
+        return lines.Count > 0 && probe.Gaps.Count == 0;
     }
+
+    private void ReadPlayerResourceHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
+    {
+        if (FindOverride(type, "ModifyHandDraw") is { } drawHook)
+        {
+            handled.Add(drawHook.Name);
+            if (PlayerSubtraction(type, drawHook.Name, "count", floorAtZero: true))
+                lines.Add($"{powerPrefix}Turn-start card draw: if player=holder: reduce by this power's current stacks (minimum 0)");
+            else
+                Gap($"{type.Name}.{drawHook.Name}");
+        }
+        if (FindOverride(type, "ModifyMaxEnergy") is { } energyHook)
+        {
+            handled.Add(energyHook.Name);
+            if (PlayerSubtraction(type, energyHook.Name, "amount", floorAtZero: false))
+                lines.Add($"{powerPrefix}Maximum Energy: if player=holder: reduce by this power's current stacks");
+            else
+                Gap($"{type.Name}.{energyHook.Name}");
+        }
+        if (HasCardPlayLimit(type))
+        {
+            handled.Add("BeforeCardPlayed");
+            handled.Add("BeforeSideTurnStart");
+            handled.Add("ShouldPlay");
+            lines.Add($"{powerPrefix}Card play limit: prevent holder from starting another card play once the turn's play count (including replays and autoplay) reaches this power's current stacks; resets before holder's turn starts");
+        }
+    }
+
+    private void ReadPowerReceptionHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
+    {
+        if (FindOverride(type, "TryModifyPowerAmountReceived") is not { } modify)
+            return;
+        handled.Add(modify.Name);
+        if (IsVisibleDebuffNegation(modify))
+        {
+            var decrement = FindOverride(type, "AfterModifyingPowerAmountReceived") is { } after && IsSelfDecrement(after);
+            if (decrement)
+                handled.Add("AfterModifyingPowerAmountReceived");
+            var outcome = decrement
+                ? $"(reduce applied stacks to 0; attempt to subtract one {PowerLabel(type)} stack)"
+                : "reduce applied stacks to 0";
+            lines.Add($"{powerPrefix}When a power would be applied to holder: if applied power is a visible Debuff: {outcome}");
+        }
+        else
+            Gap($"{type.Name}.{modify.Name}");
+    }
+
+    private bool IsVisibleDebuffNegation(MethodInfo method)
+    {
+        if (Body(method) is not { Incomplete: false } body)
+            return false;
+        var blocked = body.Returns.Where(result => TryTruth(result.Value, out var modified) && modified).ToArray();
+        var passed = body.Returns.Where(result => TryTruth(result.Value, out var modified) && !modified).ToArray();
+        if (blocked.Length != 1 || passed.Length == 0)
+            return false;
+        var writesZero = body.OutStores.Any(store => store.Parameter.Name == "modifiedAmount" && Numeric(store.Assigned) == 0m);
+        if (!writesZero)
+            return false;
+        var conditions = blocked[0].Conditions;
+        var checksOwner = conditions.Any(test => IsEquality(test, true, out var left, out var right)
+            && left is Input { Name: "target" } && IsOwner(right));
+        var checksDebuff = conditions.Any(test => IsEquality(test, true, out var left, out var right)
+            && left is Call { Method.Name: "GetTypeForAmount", Receiver: Input { Name: "canonicalPower" } }
+            && Numeric(right) == (int)PowerType.Debuff);
+        var checksVisible = conditions.Any(test => test is { Expected: true, Value: Call
+            { Method.Name: "get_IsVisible", Receiver: Input { Name: "canonicalPower" } } });
+        return checksOwner && checksDebuff && checksVisible;
+    }
+
+    private bool IsSelfDecrement(MethodInfo method)
+        => Body(method) is { Incomplete: false, Writes.Count: 0, FieldSteps.Count: 0 } body
+            && body.Calls.Where(step => step.Call.Method.DeclaringType == typeof(PowerCmd)).DistinctBy(step => step.Index).ToArray()
+                is [{ Conditions.Length: 0, Call: { Method.Name: nameof(PowerCmd.Decrement), Arguments: [Input { Name: "this" }] } }];
+
+    private void ReadDamageCapHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
+    {
+        if (FindOverride(type, "ModifyDamageCap") is { } capHook)
+        {
+            handled.Add(capHook.Name);
+            var rendered = ReadDamageCap(capHook);
+            if (rendered is null)
+                Gap($"{type.Name}.{capHook.Name}");
+            else if (rendered.Count > 0)
+                lines.Add($"{powerPrefix}Damage cap per hit: {string.Join("; ", rendered)}");
+        }
+        if (FindOverride(type, "ModifyHpLostAfterOsty") is { } hpCapHook)
+        {
+            handled.Add(hpCapHook.Name);
+            var rendered = ReadHpLossCap(hpCapHook);
+            if (rendered is null)
+                Gap($"{type.Name}.{hpCapHook.Name}");
+            else if (rendered.Count > 0)
+                lines.Add($"{powerPrefix}HP loss cap per hit, after block: {string.Join("; ", rendered)}");
+        }
+        if (HasSideTurnHpLossCap(type))
+        {
+            handled.Add("ModifyHpLostBeforeOstyLate");
+            handled.Add("AfterDamageReceived");
+            handled.Add("BeforeSideTurnStart");
+            lines.Add($"{powerPrefix}HP loss cap per side turn: total unblocked HP lost by holder during each side turn is capped at this power's current stacks (resets before every side turn starts)");
+        }
+    }
+
+    private List<string>? ReadDamageCap(MethodInfo hook)
+    {
+        var body = Body(hook);
+        if (body.Incomplete)
+            return null;
+        var outcomes = new List<(string Text, Test[] Conditions)>();
+        foreach (var result in body.Returns)
+        {
+            if (Numeric(result.Value) == decimal.MaxValue)
+                outcomes.Add(("", result.Conditions));
+            else if (ValueText(result.Value) is { } cap)
+                outcomes.Add(($"at most {cap}", result.Conditions));
+            else
+                return null;
+        }
+        return RenderOutcomes(outcomes, body.Terminals.Where(terminal => !terminal.Returned).Select(terminal => terminal.Conditions));
+    }
+
+    private List<string>? ReadHpLossCap(MethodInfo hook)
+    {
+        var body = Body(hook);
+        if (body.Incomplete)
+            return null;
+        var capped = body.Returns.Where(result => result.Value is not Input { Name: "amount" }).ToArray();
+        if (capped is not [var active] || ValueText(active.Value) is not { } bound)
+            return null;
+        var ownerOnly = active.Conditions.Where(test =>
+            !(test.Value is Call { Method.Name: "op_LessThan", Method.DeclaringType: var d, Arguments: [Input { Name: "amount" }, var limit] }
+              && d == typeof(decimal) && ValueText(limit) == bound)).ToArray();
+        return Guard(ownerOnly) is { } guard && guard != Never
+            ? [When(guard, $"at most {bound}")]
+            : null;
+    }
+
+    private bool HasSideTurnHpLossCap(Type power)
+    {
+        if (FindOverride(power, "ModifyHpLostBeforeOstyLate") is not { } cap
+            || FindOverride(power, "AfterDamageReceived") is not { } track
+            || FindOverride(power, "BeforeSideTurnStart") is not { } reset
+            || Body(cap) is not { Incomplete: false } capBody
+            || Body(track) is not { Incomplete: false } trackBody
+            || Body(reset) is not { Incomplete: false, FieldSteps: [var clear] })
+            return false;
+        if (clear.Conditions.Length != 0 || InternalDataField(clear.Assignment.Target) is not { } counter
+            || Numeric(clear.Assignment.Assigned) != 0m)
+            return false;
+        var usesRemaining = capBody.Returns.Any(result => result.Value is Call
+            { Method.Name: nameof(Math.Min), Arguments: [Input { Name: "amount" },
+                Call { Method.Name: "op_Subtraction", Arguments: [var max, Field recorded] }] }
+            && IsStackAmount(max) && InternalDataField(recorded) == counter);
+        var addsUnblocked = trackBody.FieldSteps.Any(step => InternalDataField(step.Assignment.Target) == counter
+            && step.Assignment.Assigned is Call { Method.Name: "op_Addition" });
+        return usesRemaining && addsUnblocked;
+    }
+
+    private static FieldInfo? InternalDataField(Field field)
+        => field.Receiver is Call { Method: { Name: "GetInternalData", IsGenericMethod: true } getter,
+            Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+            && getter.DeclaringType == typeof(PowerModel)
+            && getter.GetGenericArguments()[0] == field.Member.DeclaringType
+                ? field.Member
+                : null;
 
     private bool PlayerSubtraction(Type power, string hook, string operand, bool floorAtZero)
     {
@@ -70,9 +224,9 @@ internal sealed partial class NativeRuleText
 
     private static bool IsCardOwner(Test test, bool expected)
         => IsEquality(test, expected, out var left, out var right)
-            && left is Call { Method.Name: "get_Creature", Receiver: Call { Method.DeclaringType: var model,
-                Method.Name: "get_Owner", Receiver: Input { Name: "card" } } }
-            && model == typeof(CardModel) && IsOwner(right);
+            && left is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner",
+                Receiver: Input { Name: "card" } } }
+            && IsOwner(right);
 
     private static bool IsHolderPlayer(Test test, string operand, bool expected)
         => IsEquality(test, expected, out var left, out var right)

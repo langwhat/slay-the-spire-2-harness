@@ -474,3 +474,15 @@ def test_compaction_baseline_definition_order_does_not_follow_set_iteration(
     _, baseline = context.compaction_input()
     definitions = json.loads(baseline.text)["context_baseline"]["observation"]["defs"]
     assert [row["id"] for row in definitions] == ["CARD.ONE", "CARD.TWO", "ENEMY.ONE"]
+
+
+def test_combat_state_format_explains_unpowered_vs_unblockable_damage() -> None:
+    from sts2_harness.combat import _system  # pyright: ignore[reportPrivateUsage]
+    from sts2_harness.prompts import PackagedPrompts
+
+    text = _system(PackagedPrompts(), viewer_input=False, minimal=True).body
+    assert (
+        "Unpowered damage ignores attack modifiers such as POWER.STRENGTH_POWER, "
+        "POWER.WEAK_POWER, and POWER.VULNERABLE_POWER, "
+        "and is still blockable unless marked unblockable."
+    ) in text

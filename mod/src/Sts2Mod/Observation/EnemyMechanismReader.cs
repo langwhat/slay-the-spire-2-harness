@@ -184,6 +184,7 @@ internal static class EnemyMechanismReader
 
         }
         lines.AddRange(powerLines);
+        text.ReadGeneratedCards(lines);
         var gaps = new HashSet<string>(text.Gaps);
         foreach (var summon in text.Summons.Where(described.Add).OrderBy(type => type.FullName, StringComparer.Ordinal))
         {
@@ -193,6 +194,7 @@ internal static class EnemyMechanismReader
                 gaps.Add($"{summon.Name}/summoned move graph");
                 continue;
             }
+            text.ConfigureSummon(copy);
             copy.SetUpForCombat();
             var (nested, nestedGaps) = Describe(copy, described);
             gaps.UnionWith(nestedGaps.Select(gap => $"{summon.Name}/{gap}"));

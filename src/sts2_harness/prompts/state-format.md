@@ -14,7 +14,7 @@ In Combat, `arrow_slots` lists the player's arrow slots in slot order. A `retrie
 
 `generated` and `mechanisms` supply rule details referenced by current objects. A mechanism is delivered once per distinct kind, name, and text in this conversation; a changed text is a new rule. A mechanism being retained in the catalog does not establish that its source is currently present.
 
-An enemy's `next_move_id` identifies its public next move in mechanism rules. Use the enemy's `ref` to target it. A move's effects happen in the listed order, so Strength the move gains after its attack does not add to that attack. An effect without an `if` happens even when the attack is fully blocked.
+An enemy's `next_move_id` identifies its public next move in mechanism rules. Use the enemy's `ref` to target it. A move's effects happen in the listed order, so Strength the move gains after its attack does not add to that attack. An effect without an `if` happens even when the attack is fully blocked. Unpowered damage ignores attack modifiers such as POWER.STRENGTH_POWER, POWER.WEAK_POWER, and POWER.VULNERABLE_POWER, and is still blockable unless marked unblockable.
 
 A tool result gives `outcome` and changed sections. completed: done. rejected: nothing happened. stopped: the listed steps ran and the rest did not. unknown: it may have happened, so read the state before acting again. failed: a read failed. Continue from the returned state and never repeat completed steps.
 
