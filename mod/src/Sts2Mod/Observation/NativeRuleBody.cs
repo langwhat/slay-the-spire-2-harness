@@ -25,6 +25,8 @@ internal sealed class NativeRuleBody
     // A completed path with the instructions it executed. Paths that miss an instruction
     // bound the conditions under which that instruction runs.
     internal sealed record Terminal(Test[] Conditions, IReadOnlySet<int> Visited, bool Returned);
+    // A counted loop runs the instructions from Start up to its back branch at End Count times.
+    internal sealed record Loop(int Start, int End, int Count);
 
     private sealed class Path
     {
@@ -67,6 +69,7 @@ internal sealed class NativeRuleBody
     public List<Result> Returns { get; } = [];
     public List<Terminal> Terminals { get; } = [];
     public HashSet<FieldInfo> Writes { get; } = [];
+    public HashSet<Loop> Loops { get; } = [];
     public bool Incomplete { get; private set; }
     public bool ReadsParameters { get; private set; }
 
@@ -185,9 +188,33 @@ internal sealed class NativeRuleBody
                             path.Index = destination;
                         continue;
                     }
+                    if (destination < index && condition is Operation { Right: Constant { Data: int bound } } counter)
+                    {
+                        // A counter loop also runs one representative iteration and records its count.
+                        if (visits == 0 && expected && counter is { Operator: "blt" or "ble", Left: Constant { Data: int start } })
+                        {
+                            var count = bound - start + (counter.Operator == "ble" ? 1 : 0);
+                            if (count > 0)
+                            {
+                                Loops.Add(new Loop(destination, index, count));
+                                path.Index = destination;
+                            }
+                            continue;
+                        }
+                        if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
+                            && counter.Left is Operation { Operator: "add", Left: Constant { Data: int }, Right: Constant { Data: 1 } })
+                            continue;
+                    }
                     if (TryTruth(condition, out var truth))
                     {
                         if (truth == expected)
+                            path.Index = destination;
+                        continue;
+                    }
+                    // A value stored in a local and tested again keeps the outcome of its first test.
+                    if (path.Conditions.FirstOrDefault(test => ReferenceEquals(test.Value, condition)) is { } decided)
+                    {
+                        if (decided.Expected == expected)
                             path.Index = destination;
                         continue;
                     }
@@ -369,6 +396,10 @@ internal sealed class NativeRuleBody
                 && typeof(ICombatState).IsAssignableFrom(combat):
                 truth = true;
                 return true;
+            // The model's own creature is in that combat, and the combat has an encounter.
+            case Call { Method.Name: "get_CombatState" or "get_Encounter" } member when RootedAtSelf(member):
+                truth = true;
+                return true;
             case Operation { Left: Constant left, Right: Constant right } operation:
                 if (left.Data is int a && right.Data is int b)
                 {
@@ -402,6 +433,15 @@ internal sealed class NativeRuleBody
         truth = false;
         return false;
     }
+
+    private static bool RootedAtSelf(Value value) => value switch
+    {
+        _ when value == Self => true,
+        Call { Method.Name: "get_Owner" or "get_Creature" or "get_CombatState", Arguments.Length: 0, Receiver: { } receiver }
+            => RootedAtSelf(receiver),
+        Call { Method.Name: "get_Encounter", Receiver: { } receiver } => RootedAtSelf(receiver),
+        _ => false,
+    };
 
     private static bool IsAwaitCompletion(MethodBase method)
         => method.Name == "get_IsCompleted"
