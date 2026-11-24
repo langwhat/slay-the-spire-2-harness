@@ -43,6 +43,8 @@ def deck_context(
     blocks: tuple[str | MaterialText, ...] = (
         prompts.read("deck-tasks"),
         "\n",
+        prompts.read("run-report-reader"),
+        "\n",
         prompts.read("state-format"),
         "\n",
         prompts.read("deck"),

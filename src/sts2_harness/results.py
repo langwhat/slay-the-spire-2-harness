@@ -66,6 +66,8 @@ class Suggestion(SemanticValue):
 type Suggestions = Annotated[tuple[Suggestion, ...], Field(min_length=1)]
 type StepCount = Annotated[int, Field(ge=0)]
 type StepPosition = Annotated[int, Field(ge=1)]
+type GroupCount = Annotated[int, Field(ge=0)]
+type GroupPosition = Annotated[int, Field(ge=1)]
 
 
 class ReadCompleted(SemanticValue):
@@ -111,9 +113,31 @@ class WriteUnknown(SemanticValue):
     suggested_actions: Suggestions
 
 
+class RewardBatchCompleted(SemanticValue):
+    status: Literal[OutcomeStatus.COMPLETED] = OutcomeStatus.COMPLETED
+    completed_groups: GroupCount
+
+
+class RewardBatchStopped(SemanticValue):
+    status: Literal[OutcomeStatus.STOPPED] = OutcomeStatus.STOPPED
+    completed_groups: GroupCount
+    next_group: GroupPosition
+    reason: Reason
+    suggested_actions: Suggestions
+
+
+class RewardBatchUnknown(SemanticValue):
+    status: Literal[OutcomeStatus.UNKNOWN] = OutcomeStatus.UNKNOWN
+    confirmed_groups: GroupCount
+    uncertain_group: GroupPosition
+    reason: Reason
+    suggested_actions: Suggestions
+
+
 type ActionOutcome = ActionCompleted | ActionStopped | Rejected | ActionUnknown
+type RewardBatchOutcome = RewardBatchCompleted | RewardBatchStopped | Rejected | RewardBatchUnknown
 type QueryOutcome = ReadCompleted | Rejected | Failed | WriteUnknown
-type Outcome = ActionOutcome | QueryOutcome
+type Outcome = ActionOutcome | RewardBatchOutcome | QueryOutcome
 
 
 class NotesText(SemanticValue):
@@ -184,6 +208,7 @@ type QueryData = (
 
 @dataclass(frozen=True, slots=True)
 class CardRewardResult:
+    offer_ref: str | None
     before: native.Observation
     after: native.Observation | None
     outcome: ActionOutcome
@@ -194,7 +219,17 @@ class CardRewardResult:
 class ActionToolResult:
     outcome: ActionOutcome
     observation: native.Observation | None
-    card_rewards: tuple[CardRewardResult, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CardRewardBatchResult:
+    outcome: RewardBatchOutcome
+    observation: native.Observation | None
+    groups: tuple[CardRewardResult, ...] = ()
+
+    @property
+    def completed_groups(self) -> tuple[CardRewardResult, ...]:
+        return tuple(group for group in self.groups if isinstance(group.outcome, ActionCompleted))
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,4 +239,5 @@ class QueryToolResult:
     data: QueryData | MISSING = MISSING
 
 
-type ToolResult = ActionToolResult | QueryToolResult
+type ExecutionResult = ActionToolResult | CardRewardBatchResult
+type ToolResult = ExecutionResult | QueryToolResult

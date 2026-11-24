@@ -20,13 +20,14 @@ from sts2_harness.context.map_projection import MapUnavailable, replace_stretche
 from sts2_harness.decisions import (
     ActionProposal,
     ActTask,
+    CardRewardPlan,
     CombatHandoff,
     DecisionTask,
     HandoffTask,
     SelectStep,
 )
 from sts2_harness.deck import adding_selection, card_rewards, deck_context, deck_observation
-from sts2_harness.deck_role import DeckAgent
+from sts2_harness.deck_role import deck_offered, validate_deck_choice
 from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.entry_materials import EntryMaterials, MaterialContext, entry_materials
 from sts2_harness.execution import Execution
@@ -71,6 +72,7 @@ from sts2_harness.notes import Notes
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import (
     ActionToolResult,
+    CardRewardBatchResult,
     NotesText,
     NotesUpdated,
     PlanAccepted,
@@ -80,6 +82,9 @@ from sts2_harness.results import (
     Reason,
     ReasonCode,
     Rejected,
+    RewardBatchCompleted,
+    RewardBatchStopped,
+    RewardBatchUnknown,
 )
 from sts2_harness.route_plan import Edge, RoutePlan, reconcile_plan
 from sts2_harness.run import RunAgent
@@ -184,22 +189,20 @@ class DecisionDeviation(ExtractionError):
     """The sample proposed an action outside the labeled native decision."""
 
 
-class DecisionRun(DeckAgent):
+class DecisionRun(RunAgent):
     """Restore harness-owned history and stop at its first proposed native decision."""
 
-    def offered(self, observation: native.Observation) -> bool:
-        return self.variant is DecisionVariant.RUN or super().offered(observation)
+    def offered(
+        self, observation: native.Observation, resolved: frozenset[str] = frozenset()
+    ) -> bool:
+        return self.variant is DecisionVariant.RUN or deck_offered(observation, resolved)
 
     def _reward_view(self, observation: native.Observation) -> native.Observation:
         return observation
 
-    def _accepts_tools(self, tools: ToolCatalog) -> bool:
-        # Each replay variant supplies its own Run or Deck catalog.
-        return True
-
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult:
+    ) -> ActionProposal | CardRewardPlan | QueryToolResult:
         if self.variant is DecisionVariant.DECK and call.name != ToolName.RUN_DECK_CHOICE:
             raise DecisionDeviation("The deck role proposed a tool outside its tool set.")
         if call.name not in (
@@ -211,11 +214,14 @@ class DecisionRun(DeckAgent):
             return await super()._dispatch(call, task, observation)
         if call.name != self.case.decision_tool:
             raise DecisionDeviation("The model proposed a different game action.")
-        result = (
-            await super()._dispatch(call, task, observation)
-            if self.variant is DecisionVariant.DECK
-            else await RunAgent._dispatch(self, call, task, observation)
-        )
+        if self.variant is DecisionVariant.DECK:
+            raw = await self._tools.current()
+            validated = validate_deck_choice(call, task, observation, raw, filter_view=False)
+            result: ActionProposal | CardRewardPlan | QueryToolResult = (
+                validated if isinstance(validated, QueryToolResult) else validated[0]
+            )
+        else:
+            result = await super()._dispatch(call, task, observation)
         if isinstance(result, QueryToolResult) and isinstance(result.outcome, Rejected):
             raise DecisionDeviation(result.outcome.reason.message)
         if call.name == ToolName.RUN_ACT:
@@ -279,7 +285,7 @@ class DecisionRun(DeckAgent):
         self, documents: tuple[DocumentView, ...], observation: native.Observation
     ) -> Context:
         if self.variant is DecisionVariant.RUN:
-            return RunAgent._initial_context(self, documents, observation)
+            return super()._initial_context(documents, observation)
         return deck_context(
             self._prompts,
             documents,
@@ -377,9 +383,17 @@ class DecisionRun(DeckAgent):
                 elif event.action and not isinstance(event.outcome, Rejected):
                     anchored = False
                 if event.action:
-                    outcome = TypeAdapter(ActionToolResult).validate_python(
-                        {"outcome": event.outcome, "observation": event.observation}
-                    )
+                    if isinstance(
+                        event.outcome,
+                        (RewardBatchCompleted, RewardBatchStopped, RewardBatchUnknown),
+                    ):
+                        outcome: ActionToolResult | CardRewardBatchResult = CardRewardBatchResult(
+                            event.outcome, event.observation
+                        )
+                    else:
+                        outcome = TypeAdapter(ActionToolResult).validate_python(
+                            {"outcome": event.outcome, "observation": event.observation}
+                        )
                     context.append_tool_result(call, outcome, defer_observation=True)
                     if context.has_active_group:
                         context.finish_group()

@@ -23,7 +23,7 @@ _Avoid_: Action index, menu position
 Makes overall run strategy and non-combat choices: routes, rewards, shops, events, and rest sites. It reads combat outcomes and uses them to guide later fights.
 
 **Deck role**:
-Makes one focused card choice for the Run side: take an offered card or skip it.
+Plans the node's visible card reward groups jointly (or resolves a standalone card-adding selection) for the Run side: choosing which offered cards to take and which groups to skip.
 
 **Combat role**:
 Makes the actions and choices inside a fight.
@@ -78,7 +78,7 @@ A role's view of a raw observation, delivered into its context. It contains only
 _Avoid_: Raw observation, public observation
 
 **Role context**:
-The conversation and delivery record owned by one role agent. A Run context covers one map node inside an act-scoped Run agent. A Deck context covers one card choice. A Combat context covers one battle through its review. It holds dialogue, projections, handoffs, and delivered knowledge. Another role's history and archived Journal evidence are not part of it.
+The conversation and delivery record owned by one role agent. A Run context covers one map node inside an act-scoped Run agent. A Deck context covers a node's visible card reward groups (or a card-adding selection) across any re-decisions until they resolve or the node changes. A Combat context covers one battle through its review. It holds dialogue, projections, handoffs, and delivered knowledge. Another role's history and archived Journal evidence are not part of it.
 
 **Projection profile**:
 An immutable description of observed game content, shared by instances with identical content within one role context. It is neither a native game definition nor a single game instance.

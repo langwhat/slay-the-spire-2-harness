@@ -15,7 +15,13 @@ from sts2_harness.decisions import (
     DecisionTask,
 )
 from sts2_harness.execution.recovery import DecisionInterrupted
-from sts2_harness.results import ActionCompleted, ActionToolResult, Reason, ReasonCode
+from sts2_harness.results import (
+    ActionCompleted,
+    ActionToolResult,
+    ExecutionResult,
+    Reason,
+    ReasonCode,
+)
 
 
 class _Reason(StrEnum):
@@ -364,7 +370,9 @@ class BattleRewardAuto:
         )
         return ActionDecision(proposal)
 
-    async def accept(self, outcome: ActionToolResult) -> None:
+    async def accept(self, outcome: ExecutionResult) -> None:
+        if not isinstance(outcome, ActionToolResult):
+            raise TypeError("BattleRewardAuto accepts action results only.")
         after = outcome.observation
         self.succeeded = (
             isinstance(outcome.outcome, ActionCompleted)

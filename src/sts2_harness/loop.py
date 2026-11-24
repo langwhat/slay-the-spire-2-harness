@@ -1,7 +1,7 @@
 """Schedule one run's roles, act entry, and pending battle handoff."""
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Protocol, assert_never
 
 from sts2_harness.auto import BattleRewardAuto, battle_reward
@@ -28,12 +28,48 @@ from sts2_harness.execution.recovery import (
 from sts2_harness.game import GameLifetimeEnded, RunEnded
 from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
-from sts2_harness.results import ActionCompleted, Reason, ReasonCode
+from sts2_harness.results import (
+    ActionCompleted,
+    ActionToolResult,
+    CardRewardBatchResult,
+    Reason,
+    ReasonCode,
+)
 from sts2_harness.route_plan import RoutePlan, reconcile_plan
 from sts2_harness.run import ActStart, RunRole
 
 type CombatFactory = Callable[[native.Observation, NotesView, RoutePlan | None], DecisionSource]
-type DeckFactory = Callable[[native.Observation, native.Offer | None, frozenset[str]], DeckRole]
+type DeckFactory = Callable[[native.Observation, native.Offer | None], DeckRole]
+
+
+@dataclass(frozen=True, slots=True)
+class NodeKey:
+    game_instance_id: str
+    run_id: str | None
+    node_id: str | None
+
+
+@dataclass
+class NodeRewardProgress:
+    node: NodeKey | None = None
+    resolved_offers: set[str] = field(default_factory=lambda: set[str]())
+    reward_auto_finished: bool = False
+
+    def sync_node(self, location: native.Location) -> bool:
+        node = NodeKey(location.game_instance_id, location.run_id, location.node_id)
+        if node == self.node:
+            return False
+        self.node = node
+        self.resolved_offers.clear()
+        self.reward_auto_finished = False
+        return True
+
+    def mark_resolved(self, offer_ref: str) -> None:
+        self.resolved_offers.add(offer_ref)
+
+    @property
+    def resolved(self) -> frozenset[str]:
+        return frozenset(self.resolved_offers)
 
 
 class RunFlow(Protocol):
@@ -69,9 +105,7 @@ class DefaultFlow:
         self._minimal = minimal
         self._deck_factory = deck
         self._deck: DeckRole | None = None
-        self._deck_node: tuple[str, str | None, str | None] | None = None
-        self._resolved_cards: set[str] = set()
-        self._reward_auto_finished = False
+        self._rewards = NodeRewardProgress()
 
     def _enter_role(self, role: native.DecisionOwner) -> None:
         if self._active_role is role:
@@ -96,40 +130,31 @@ class DefaultFlow:
             if result.observation is None:
                 result = replace(result, observation=observation)
             self._run.card_progress(resolution.progress, result)
-            if resolution.resolved_offer is not None:
-                self._resolved_cards.add(resolution.resolved_offer)
 
     def _card_source(self, observation: native.Observation) -> DecisionSource:
         state = observation.state
         if not isinstance(state, native.RunState):
             self._deck = None
             return self._run
-        node = (
-            observation.location.game_instance_id,
-            observation.location.run_id,
-            observation.location.node_id,
-        )
-        if node != self._deck_node:
-            self._resolved_cards.clear()
+        if self._rewards.sync_node(observation.location):
             self._deck = None
-            self._deck_node = node
-            self._reward_auto_finished = False
+        resolved = self._rewards.resolved
         if self._deck is not None:
-            if self._deck.offered(observation):
+            if self._deck.offered(observation, resolved):
                 return self._deck
             self._deck = None
-        if not self._reward_auto_finished and battle_reward(observation) is not None:
+        if not self._rewards.reward_auto_finished and battle_reward(observation) is not None:
             return BattleRewardAuto()
         if adding_selection(observation) is not None:
-            self._reward_auto_finished = True
-            self._deck = self._deck_factory(observation, None, frozenset(self._resolved_cards))
+            self._rewards.reward_auto_finished = True
+            self._deck = self._deck_factory(observation, None)
             return self._deck
         if state.screen is native.RunScreen.REWARDS:
-            self._reward_auto_finished = True
-        offer = next_card_reward(observation, self._resolved_cards)
+            self._rewards.reward_auto_finished = True
+        offer = next_card_reward(observation, resolved)
         if offer is None:
             return self._run
-        self._deck = self._deck_factory(observation, offer, frozenset(self._resolved_cards))
+        self._deck = self._deck_factory(observation, offer)
         return self._deck
 
     async def run(self) -> RunEnded:
@@ -215,7 +240,7 @@ class DefaultFlow:
                 self._enter_role(native.DecisionOwner.RUN)
                 if isinstance(task, ActTask):
                     source = self._card_source(observation)
-                    task = replace(task, resolved_card_rewards=frozenset(self._resolved_cards))
+                    task = replace(task, resolved_card_rewards=self._rewards.resolved)
                 else:
                     source = self._run
                 deck = self._deck
@@ -230,13 +255,18 @@ class DefaultFlow:
                     continue
                 match outcome:
                     case Executed():
+                        if isinstance(outcome.outcome, CardRewardBatchResult):
+                            for group in outcome.outcome.completed_groups:
+                                if group.offer_ref is not None:
+                                    self._rewards.mark_resolved(group.offer_ref)
                         if outcome.ended is not None:
                             return outcome.ended
                         if outcome.handoff_processed:
                             self._pending = None
                         observation = outcome.outcome.observation
                         if isinstance(source, BattleRewardAuto):
-                            self._reward_auto_finished = not source.succeeded
+                            assert isinstance(outcome.outcome, ActionToolResult)
+                            self._rewards.reward_auto_finished = not source.succeeded
                             assert source.progress is not None
                             self._run.card_progress(source.progress, outcome.outcome)
                             if self._diagnostics is not None:

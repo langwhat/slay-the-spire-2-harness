@@ -224,7 +224,7 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
     from sts2_harness.game import OperationKind, Settlement, Stopped
     from sts2_harness.interactive import InteractiveOptions, run_interactive
     from sts2_harness.notes import Notes
-    from sts2_harness.results import ActionCompleted, ActionToolResult
+    from sts2_harness.results import ActionCompleted, ActionToolResult, ExecutionResult
     from sts2_harness.run import ActStart
 
     stop = asyncio.Event()
@@ -236,7 +236,7 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
     pending = False
     operation_id = ""
     status_polls = 0
-    outcomes: list[ActionToolResult] = []
+    outcomes: list[ExecutionResult] = []
     sessions: list[RunSession] = []
     paths: list[Path] = []
 
@@ -252,7 +252,7 @@ def test_disconnect_keeps_session_and_shutdown_settles_an_admitted_unit(tmp_path
         async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
             return ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "travel"),)))
 
-        async def accept(self, outcome: ActionToolResult) -> None:
+        async def accept(self, outcome: ExecutionResult) -> None:
             outcomes.append(outcome)
             assert stop.is_set()
             assert isinstance(outcome.outcome, ActionCompleted)

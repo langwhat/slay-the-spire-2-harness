@@ -2,6 +2,7 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import assert_never
 
 from pydantic import MISSING, ValidationError
 
@@ -9,6 +10,7 @@ from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.client.http import CatalogResult, DisplayResult, InspectResult
 from sts2_harness.decisions import (
+    ActionDecision,
     ActionKind,
     ActionProposal,
     ActionStep,
@@ -17,12 +19,13 @@ from sts2_harness.decisions import (
     DecisionSource,
     DecisionTask,
     ReviewTask,
+    RewardDecision,
     SelectStep,
     TaskComplete,
 )
 from sts2_harness.diagnostics import BatchSettled, BatchStatus, BatchSubmitted, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, Interrupted, ToolRecoveryBudget
-from sts2_harness.execution.rewards import reward_steps, reward_stopped
+from sts2_harness.execution.rewards import reward_batch_stopped, reward_steps, reward_stopped
 from sts2_harness.fights import FightHistory
 from sts2_harness.game import (
     ControlWriteError as ControlWriteError,
@@ -46,9 +49,15 @@ from sts2_harness.results import (
     ActionStopped,
     ActionToolResult,
     ActionUnknown,
+    CardRewardBatchResult,
     CardRewardResult,
+    ExecutionResult,
     Reason,
     ReasonCode,
+    RewardBatchCompleted,
+    RewardBatchOutcome,
+    RewardBatchStopped,
+    RewardBatchUnknown,
     Suggestion,
 )
 from sts2_harness.results import (
@@ -58,8 +67,8 @@ from sts2_harness.results import (
 
 @dataclass(frozen=True, slots=True)
 class Executed:
-    proposal: ActionProposal
-    outcome: ActionToolResult
+    proposal: ActionProposal | CardRewardPlan
+    outcome: ExecutionResult
     pause_required: bool = False
     handoff_processed: bool = False
     ended: RunEnded | None = None
@@ -198,6 +207,19 @@ class Execution:
             return RouteChanged(observation)
         return observation
 
+    async def _reject_decision(
+        self,
+        source: DecisionSource,
+        rejected: ExecutionResult,
+        problem: Reason,
+        observation: native.Observation,
+    ) -> Rejected:
+        await source.accept(rejected)
+        pause_required = (
+            self._recovery.record_outcome(rejected) if self._recovery is not None else False
+        )
+        return Rejected(problem, observation, pause_required)
+
     async def _run_unit(self, source: DecisionSource, task: DecisionTask) -> UnitResult:
         """Close feedback; no-run raises GameLifetimeEnded without retry cost."""
         admitted = await self.admit()
@@ -213,57 +235,78 @@ class Execution:
             decision = await source.decide(task, observation)
         except DecisionInterrupted as error:
             return Interrupted(error.reason, error.pause_required)
-        if isinstance(decision, TaskComplete):
-            if isinstance(task, ActTask):
-                raise TypeError("An action task requires an action proposal.")
-            return decision
-        if isinstance(task, ActTask):
-            problem = _proposal_problem(decision.proposal, task.expected_route.owner)
-            suggestion = "Submit a complete valid action proposal."
-        else:
-            task_name = "review" if isinstance(task, ReviewTask) else "handoff"
-            problem = Reason(
-                code=ReasonCode.WRONG_ROLE,
-                message=f"This {task_name} cannot take game actions.",
-            )
-            suggestion = f"Complete this {task_name} without taking game actions."
-        if problem is not None:
-            result = ActionToolResult(
-                OutcomeRejected(
-                    reason=problem,
-                    suggested_actions=(Suggestion(message=suggestion),),
-                ),
-                observation,
-            )
-            await source.accept(result)
-            pause_required = (
-                self._recovery.record_outcome(result) if self._recovery is not None else False
-            )
-            return Rejected(problem, observation, pause_required)
-        assert isinstance(task, ActTask)
-        if isinstance(decision.proposal, CardRewardPlan):
-            result, final_read_failed, ended = await self._execute_rewards(
-                decision.proposal, task.expected_route
-            )
-        else:
-            result, final_read_failed, ended = await self._execute_plan(
-                decision.proposal, task.expected_route
-            )
-        await source.accept(result)
+        match decision:
+            case TaskComplete():
+                if isinstance(task, ActTask):
+                    raise TypeError("An action task requires an action proposal.")
+                return decision
+            case ActionDecision():
+                if isinstance(task, ActTask):
+                    problem = _proposal_problem(decision.proposal, task.expected_route.owner)
+                    suggestion = "Submit a complete valid action proposal."
+                else:
+                    problem, suggestion = _non_action_problem(task, "game actions")
+                if problem is not None:
+                    return await self._reject_decision(
+                        source,
+                        ActionToolResult(
+                            OutcomeRejected(
+                                reason=problem,
+                                suggested_actions=(Suggestion(message=suggestion),),
+                            ),
+                            observation,
+                        ),
+                        problem,
+                        observation,
+                    )
+                assert isinstance(task, ActTask)
+                result, final_read_failed, ended = await self._execute_plan(
+                    decision.proposal, task.expected_route
+                )
+                proposal: ActionProposal | CardRewardPlan = decision.proposal
+                execution_result: ExecutionResult = result
+                handoff_processed = decision.handoff_processed
+            case RewardDecision():
+                if isinstance(task, ActTask):
+                    problem = _reward_plan_problem(decision.plan, task.expected_route.owner)
+                    suggestion = "Submit a complete valid card reward plan."
+                else:
+                    problem, suggestion = _non_action_problem(task, "card rewards")
+                if problem is not None:
+                    return await self._reject_decision(
+                        source,
+                        CardRewardBatchResult(
+                            OutcomeRejected(
+                                reason=problem,
+                                suggested_actions=(Suggestion(message=suggestion),),
+                            ),
+                            observation,
+                        ),
+                        problem,
+                        observation,
+                    )
+                assert isinstance(task, ActTask)
+                reward_result, final_read_failed, ended = await self._execute_rewards(
+                    decision.plan, task.expected_route
+                )
+                proposal = decision.plan
+                execution_result = reward_result
+                handoff_processed = False
+            case _:
+                assert_never(decision)
+        await source.accept(execution_result)
         pause_required = False
         if self._recovery is not None:
             pause_required = (
                 self._recovery.record_failure()
                 if final_read_failed
-                else self._recovery.record_outcome(result)
+                else self._recovery.record_outcome(execution_result)
             )
-        return Executed(
-            decision.proposal, result, pause_required, decision.handoff_processed, ended
-        )
+        return Executed(proposal, execution_result, pause_required, handoff_processed, ended)
 
     async def _execute_rewards(
         self, plan: CardRewardPlan, route: native.RouteKey
-    ) -> tuple[ActionToolResult, bool, RunEnded | None]:
+    ) -> tuple[CardRewardBatchResult, bool, RunEnded | None]:
         reports: list[CardRewardResult] = []
         current: native.Observation | None = plan.before
         for index, choice in enumerate(plan.choices):
@@ -273,10 +316,13 @@ class Execution:
             steps = reward_steps(plan, index, before)
             if steps is None:
                 break
+            offer_ref = choice.offer.ref if choice.offer is not None else None
             if not steps:
                 await self.display_reason(choice.reason, repeat=True)
                 reports.append(
-                    CardRewardResult(before, before, ActionCompleted(completed_steps=0), True)
+                    CardRewardResult(
+                        offer_ref, before, before, ActionCompleted(completed_steps=0), True
+                    )
                 )
                 continue
             result, read_failed, ended = await self._execute_plan(
@@ -286,14 +332,20 @@ class Execution:
             )
             current = result.observation
             outcome = result.outcome
-            reports.append(CardRewardResult(before, current, outcome))
+            reports.append(CardRewardResult(offer_ref, before, current, outcome))
             if isinstance(outcome, ActionCompleted):
                 if ended is not None or index + 1 == len(plan.choices):
-                    completed = ActionCompleted(completed_steps=index + 1)
-                    return ActionToolResult(completed, current, tuple(reports)), read_failed, ended
+                    completed = RewardBatchCompleted(completed_groups=index + 1)
+                    return (
+                        CardRewardBatchResult(completed, current, tuple(reports)),
+                        read_failed,
+                        ended,
+                    )
                 if read_failed:
                     return (
-                        ActionToolResult(reward_stopped(index + 1), current, tuple(reports)),
+                        CardRewardBatchResult(
+                            reward_batch_stopped(index + 1), current, tuple(reports)
+                        ),
                         True,
                         None,
                     )
@@ -306,35 +358,45 @@ class Execution:
                         current = admitted.observation
                         ended = self.run_ended(current)
                         return (
-                            ActionToolResult(reward_stopped(index + 1), current, tuple(reports)),
+                            CardRewardBatchResult(
+                                reward_batch_stopped(index + 1), current, tuple(reports)
+                            ),
                             False,
                             ended,
                         )
                     if not isinstance(admitted, native.Observation):
                         return (
-                            ActionToolResult(reward_stopped(index + 1), current, tuple(reports)),
+                            CardRewardBatchResult(
+                                reward_batch_stopped(index + 1), current, tuple(reports)
+                            ),
                             isinstance(admitted, Interrupted),
                             None,
                         )
                     current = admitted
                 continue
             if isinstance(outcome, ActionUnknown):
-                batch_outcome: ActionOutcome = outcome.model_copy(
-                    update={"confirmed_steps": index, "uncertain_step": index + 1}
+                batch_outcome: RewardBatchOutcome = RewardBatchUnknown(
+                    confirmed_groups=index,
+                    uncertain_group=index + 1,
+                    reason=outcome.reason,
+                    suggested_actions=outcome.suggested_actions,
                 )
             elif isinstance(outcome, ActionStopped):
-                batch_outcome = outcome.model_copy(
-                    update={"completed_steps": index, "next_step": index + 1}
+                batch_outcome = RewardBatchStopped(
+                    completed_groups=index,
+                    next_group=index + 1,
+                    reason=outcome.reason,
+                    suggested_actions=outcome.suggested_actions,
                 )
             else:
                 batch_outcome = outcome
-            return ActionToolResult(batch_outcome, current, tuple(reports)), read_failed, ended
-        outcome = (
-            ActionCompleted(completed_steps=len(reports))
+            return CardRewardBatchResult(batch_outcome, current, tuple(reports)), read_failed, ended
+        batch_result_outcome: RewardBatchOutcome = (
+            RewardBatchCompleted(completed_groups=len(reports))
             if len(reports) == len(plan.choices)
-            else reward_stopped(len(reports))
+            else reward_batch_stopped(len(reports))
         )
-        return ActionToolResult(outcome, current, tuple(reports)), False, None
+        return CardRewardBatchResult(batch_result_outcome, current, tuple(reports)), False, None
 
     async def _execute_plan(
         self,
@@ -546,13 +608,24 @@ def _native_step(step: ActionStep | SelectStep) -> native.NativeStep:
     return native.Interact(kind=native.StepKind.INTERACT, action=step.ref)
 
 
+def _non_action_problem(task: DecisionTask, action_label: str) -> tuple[Reason, str]:
+    task_name = "review" if isinstance(task, ReviewTask) else "handoff"
+    return (
+        Reason(
+            code=ReasonCode.WRONG_ROLE,
+            message=f"This {task_name} cannot take {action_label}.",
+        ),
+        f"Complete this {task_name} without taking {action_label}.",
+    )
+
+
+def _reward_plan_problem(plan: CardRewardPlan, owner: native.DecisionOwner) -> Reason | None:
+    if owner is not native.DecisionOwner.RUN or not plan.choices:
+        return Reason(code=ReasonCode.WRONG_ROLE, message="Card rewards require a Run decision.")
+    return None
+
+
 def _proposal_problem(proposal: ActionProposal, owner: native.DecisionOwner) -> Reason | None:
-    if isinstance(proposal, CardRewardPlan):
-        if owner is not native.DecisionOwner.RUN or not proposal.choices:
-            return Reason(
-                code=ReasonCode.WRONG_ROLE, message="Card rewards require a Run decision."
-            )
-        return None
     if not proposal.steps:
         return Reason(code=ReasonCode.INVALID_ARGUMENTS, message="An action proposal needs steps.")
     for step in proposal.steps:

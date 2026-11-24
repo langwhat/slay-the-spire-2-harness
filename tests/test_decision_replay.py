@@ -434,6 +434,7 @@ def test_deck_and_run_use_the_act_valuation_with_deck_only_choice_steps(
         run_ids = tuple(part.id for part in run_parts)
         assert deck_ids == (
             "prompt:deck-tasks",
+            "prompt:run-report-reader",
             "prompt:state-format",
             "prompt:deck",
             act_id,

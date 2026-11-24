@@ -30,7 +30,7 @@ from sts2_harness.journal import Journal
 from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.client import Llm
 from sts2_harness.notes import Notes
-from sts2_harness.results import ActionToolResult, OutcomeStatus
+from sts2_harness.results import ExecutionResult, OutcomeStatus
 from sts2_harness.tools import ToolCatalog, ToolName
 from sts2_harness.user_input import UserInputQueue
 
@@ -212,7 +212,7 @@ def test_locally_stopped_map_travel_skips_display_and_local_deck_skip_publishes(
                 )
             )
 
-        async def accept(self, outcome: ActionToolResult) -> None:
+        async def accept(self, outcome: ExecutionResult) -> None:
             assert outcome.outcome.status is OutcomeStatus.STOPPED
 
     async def read_materials(observation: native.Observation) -> tuple[DocumentView, ...]:

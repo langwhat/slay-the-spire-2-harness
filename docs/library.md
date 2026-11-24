@@ -208,7 +208,7 @@ While a role is active, action receipts and query data arrive in tool results, a
 
 `RunAgent`, `DeckAgent`, and `CombatAgent` share the `Agent` loop and `Execution.run_unit`. `DefaultFlow` sends card-adding selections and card offers on the reward screen to a `DeckAgent`; every other Run decision, including shop purchases, stays with `RunAgent`. A Deck role is created for the current reward occasion. It considers all known groups together and stays active through any consecutive selections in that occasion. The ordered `run_deck_choice` plan settles each group separately and keeps confirmed choices if a later group changes. Resolved offers are tracked within the node.
 
-`DeckAgent` extends `RunAgent` to reuse its notes, state enrichment, and route-plan view. It has its own initial context, reward view, and tool dispatch. It only accepts a catalog built with `ToolCatalog(..., focused_deck=True)`, which offers `run_deck_choice` alone; an ordinary Run catalog excludes that tool. Each `ToolCatalog` owns its tool set. Tool descriptions and role prompts are the source of truth for model-visible rules.
+`DeckAgent` is an independent `Agent` that composes the run's notes, shared state enrichment, and route-plan projection without extending `RunAgent`. It has its own initial context (including battle-report reading rules), reward view, and tool dispatch, while `DefaultFlow` owns the node's resolved reward progress. It only accepts a catalog built with `ToolCatalog(..., focused_deck=True)`, which offers `run_deck_choice` alone; an ordinary Run catalog excludes that tool. Each `ToolCatalog` owns its tool set. Tool descriptions and role prompts are the source of truth for model-visible rules.
 
 ### Notes
 

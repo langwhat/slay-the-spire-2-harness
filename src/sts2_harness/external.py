@@ -19,6 +19,7 @@ from sts2_harness.notes import Notes
 from sts2_harness.raw import RawResult, render
 from sts2_harness.results import (
     ActionToolResult,
+    ExecutionResult,
     Failed,
     QueryToolResult,
     Reason,
@@ -51,7 +52,8 @@ class _SubmittedDecision:
     async def decide(self, task: DecisionTask, observation: native.Observation) -> ActionDecision:
         return ActionDecision(self._proposal)
 
-    async def accept(self, outcome: ActionToolResult) -> None:
+    async def accept(self, outcome: ExecutionResult) -> None:
+        assert isinstance(outcome, ActionToolResult)
         self.feedback = outcome
 
 

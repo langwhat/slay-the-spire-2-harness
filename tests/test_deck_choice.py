@@ -14,24 +14,36 @@ from test_run import handoff
 
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
-from sts2_harness.context.models import RunActHandoffContent
+from sts2_harness.context.models import RunActContent, RunActHandoffContent
+from sts2_harness.decisions import ActTask
 from sts2_harness.deck_role import DeckAgent
-from sts2_harness.execution.recovery import ToolRecoveryBudget
+from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.fights import Fight, FightKind
 from sts2_harness.game import RunEnded, RunEndReason
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.journal_models import AutomaticSnapshot, ResultSnapshot, RunTaskSnapshot
+from sts2_harness.knowledge import DocumentView
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient
 from sts2_harness.loop import DefaultFlow
+from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.note_values import NotesState
 from sts2_harness.notes import Notes
-from sts2_harness.results import ActionCompleted, ActionStopped, ActionUnknown, ReadCompleted
+from sts2_harness.results import (
+    ActionCompleted,
+    ActionStopped,
+    ActionUnknown,
+    ReadCompleted,
+    Reason,
+    ReasonCode,
+    RewardBatchStopped,
+    RewardBatchUnknown,
+)
 from sts2_harness.tools import ToolCatalog, ToolName
 from sts2_harness.user_input import UserInputQueue
 from sts2_harness.user_input_values import UserInput
-from sts2_harness_eval.decision_cases import DecisionLabels, DecisionSource
+from sts2_harness_eval.decision_cases import DecisionLabels, DecisionSource, ResultEvent
 from sts2_harness_eval.decision_extract import ExtractionAudit, extract_case
 
 
@@ -458,6 +470,12 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 reply = request.attempts[-1].reply
                 assert reply is not None and reply.requested_effort == "low"
             assert [r.stream for r in requests] == ["deck:1"] * deck_count + ["run:1"] * 3
+            if unknown:
+                retried_results = [m for m in requests[1].input if isinstance(m, ResultSnapshot)]
+                assert len(retried_results) == 1
+                assert isinstance(retried_results[0].outcome, RewardBatchUnknown)
+                assert retried_results[0].outcome.confirmed_groups == 1
+                assert retried_results[0].outcome.uncertain_group == 2
             assert [step.action for step in game.steps if isinstance(step, native.Interact)] == [
                 "open-regular",
                 "open-guaranteed",
@@ -1194,6 +1212,11 @@ def test_completed_native_skip_is_not_reopened_and_preserves_run_handoff(
                 "run:1",
                 "run:1",
             ]
+            deck_task = next(m for m in requests[0].input if isinstance(m, RunTaskSnapshot))
+            assert type(deck_task.content) is RunActContent
+            assert deck_task.content.previous_battle is not MISSING
+            assert deck_task.content.previous_battle.battle_report == pending.report
+            assert deck_task.content.previous_battle.combat_review == pending.review
             task = next(m for m in requests[1].input if isinstance(m, RunTaskSnapshot))
             assert isinstance(task.content, RunActHandoffContent)
             assert task.content.battle_report == pending.report
@@ -1278,9 +1301,25 @@ def test_stopped_selection_keeps_focused_context_and_does_not_reopen_reward(
                 == 1
             )
             retried = [r for r in journal.requests() if r.stream == "deck:1"][1]
-            assert "Paused before selection." in " ".join(
-                m.text for m in retried.input if isinstance(m, ResultSnapshot)
+            results = [m for m in retried.input if isinstance(m, ResultSnapshot)]
+            assert len(results) == 1
+            assert isinstance(results[0].outcome, RewardBatchStopped)
+            assert results[0].outcome.completed_groups == 1
+            assert results[0].outcome.next_group == 2
+            assert "Paused before selection." in results[0].text
+            retried_case = await extract_case(
+                DecisionSource(
+                    round="fixture",
+                    seed="seed",
+                    floor=1,
+                    model_sequence=retried.sequence,
+                    archive=archive,
+                ),
+                DecisionLabels(comment="fixture"),
             )
+            result_events = [e for e in retried_case.events if isinstance(e, ResultEvent)]
+            assert len(result_events) == 1
+            assert result_events[0].declined_offers == ("local",)
         (tmp_path / "actual-request-bodies.json").write_text(
             json.dumps(game.inputs, ensure_ascii=False, indent=2)
         )
@@ -1556,5 +1595,57 @@ def test_deck_agent_rejects_a_run_tool_catalog() -> None:
     with pytest.raises(ValueError, match="focused Deck tool catalog"):
         DeckAgent(unused_model, catalog(focused_deck=False), ToolRecoveryBudget())
     focused = catalog(focused_deck=True)
-    DeckAgent(unused_model, focused, ToolRecoveryBudget())
+    agent = DeckAgent(unused_model, focused, ToolRecoveryBudget())
     assert [tool.name for tool in focused.definitions] == [ToolName.RUN_DECK_CHOICE]
+
+    game = RewardGame(minimal=False)
+    assert agent.offered(game.observation)
+    assert not agent.offered(game.observation, frozenset({"local", "regular", "guaranteed"}))
+
+
+def test_deck_agent_defers_client_creation_until_entry_materials_succeed() -> None:
+    async def unused_observe() -> native.Observation:
+        raise AssertionError
+
+    async def unused_inspect(query: native.InspectQuery) -> native.InspectReply:
+        raise AssertionError(query)
+
+    async def unused_catalog(request: native.CatalogRequest) -> native.CatalogReply:
+        raise AssertionError(request)
+
+    async def failing_materials(observation: native.Observation) -> tuple[DocumentView, ...]:
+        raise MaterialUnavailable("Entry guidance unavailable.")
+
+    created = 0
+
+    def model_factory() -> ModelClient:
+        nonlocal created
+        created += 1
+        raise AssertionError("Client factory must not run before entry materials succeed.")
+
+    tools = ToolCatalog(
+        native.DecisionOwner.RUN,
+        observe=unused_observe,
+        inspect=unused_inspect,
+        catalog=unused_catalog,
+        notes=Notes(""),
+        focused_deck=True,
+    )
+    agent = DeckAgent(
+        model_factory,
+        tools,
+        ToolRecoveryBudget(),
+        materials=failing_materials,
+    )
+    game = RewardGame(minimal=False)
+    route = native.RouteKey.model_validate(game.observation.location.model_dump())
+
+    async def scenario() -> None:
+        with pytest.raises(DecisionInterrupted) as exc_info:
+            await agent.decide(ActTask(route), game.observation)
+        assert isinstance(exc_info.value.reason, Reason)
+        assert exc_info.value.reason.code is ReasonCode.CONTENT_UNAVAILABLE
+        assert exc_info.value.pause_required is True
+
+    asyncio.run(scenario())
+    assert created == 0

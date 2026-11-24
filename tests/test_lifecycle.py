@@ -27,7 +27,7 @@ from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.note_values import NotesState, NotesView
-from sts2_harness.results import ActionToolResult
+from sts2_harness.results import ActionToolResult, ExecutionResult
 
 
 def run_state(act: int, node: str) -> native.Observation:
@@ -233,7 +233,7 @@ class CodeCombat:
             return TaskComplete()
         return ActionDecision(ActionProposal((ActionStep(ActionKind.END_TURN),)))
 
-    async def accept(self, outcome: ActionToolResult) -> None:
+    async def accept(self, outcome: ExecutionResult) -> None:
         pass
 
 
@@ -448,7 +448,7 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
         terminal(battle_state(1, "battle2")),
     ]
     openings: list[str] = []
-    rejected: list[ActionToolResult] = []
+    rejected: list[ExecutionResult] = []
 
     class Run:
         route_plan = None
@@ -481,7 +481,7 @@ def test_handoff_survives_interruption_and_rejection_before_constructing_next_co
             self.notes.write(NotesState(other="Handoff assessed before opening."), {"other"})
             return TaskComplete()
 
-        async def accept(self, outcome: ActionToolResult) -> None:
+        async def accept(self, outcome: ExecutionResult) -> None:
             if isinstance(outcome.outcome, Rejected):
                 rejected.append(outcome)
 

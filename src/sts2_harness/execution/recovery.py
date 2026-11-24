@@ -10,6 +10,8 @@ from sts2_harness.results import (
     ReadCompleted,
     Reason,
     ReasonCode,
+    RewardBatchCompleted,
+    RewardBatchStopped,
     ToolResult,
 )
 
@@ -34,10 +36,10 @@ class ToolRecoveryBudget:
 
     def record_outcome(self, result: ToolResult) -> bool:
         outcome = result.outcome
-        if isinstance(outcome, (ActionCompleted, ReadCompleted)):
+        if isinstance(outcome, (ActionCompleted, RewardBatchCompleted, ReadCompleted)):
             self.reset()
             return False
-        if isinstance(outcome, ActionStopped) and outcome.reason.code not in (
+        if isinstance(outcome, (ActionStopped, RewardBatchStopped)) and outcome.reason.code not in (
             ReasonCode.CONTROL_UNAVAILABLE,
             ReasonCode.INVALID_ARGUMENTS,
         ):

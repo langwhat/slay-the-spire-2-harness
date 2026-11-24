@@ -279,7 +279,9 @@ def test_live_code_roles_play_combat_and_take_a_card_without_a_model(tmp_path: P
         def take_resolutions(self) -> tuple[CardResolution, ...]:
             return ()
 
-        def offered(self, observation: native.Observation) -> bool:
+        def offered(
+            self, observation: native.Observation, resolved: frozenset[str] = frozenset()
+        ) -> bool:
             return (
                 isinstance(observation.state, native.RunState) and offer in observation.state.offers
             )

@@ -32,7 +32,7 @@ from sts2_harness.game import LiveGame, RunEnded
 from sts2_harness.llm.client import Llm
 from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.note_values import NotesView
-from sts2_harness.results import ActionToolResult
+from sts2_harness.results import ActionToolResult, ExecutionResult
 from sts2_harness.tools import ToolCatalog
 
 
@@ -504,7 +504,8 @@ class PlainCombat:
             return ActionDecision(ActionProposal((ActionStep(ActionKind.END_TURN),)))
         return TaskComplete()
 
-    async def accept(self, outcome: ActionToolResult) -> None:
+    async def accept(self, outcome: ExecutionResult) -> None:
+        assert isinstance(outcome, ActionToolResult)
         self.accepted.append(outcome)
 
 

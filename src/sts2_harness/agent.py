@@ -17,10 +17,12 @@ from sts2_harness.decisions import (
     ActionDecision,
     ActionProposal,
     ActTask,
+    CardRewardPlan,
     Decision,
     DecisionTask,
     HandoffTask,
     ReviewTask,
+    RewardDecision,
     TaskComplete,
 )
 from sts2_harness.diagnostics import Diagnostics
@@ -42,7 +44,7 @@ from sts2_harness.llm.messages import (
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import (
     ActionCompleted,
-    ActionToolResult,
+    ExecutionResult,
     Failed,
     HandoffCompletion,
     NotesUpdated,
@@ -51,6 +53,7 @@ from sts2_harness.results import (
     Reason,
     ReasonCode,
     Rejected,
+    RewardBatchCompleted,
     Suggestion,
     WriteUnknown,
 )
@@ -77,7 +80,7 @@ class Agent(ABC):
     ) -> None:
         self._diagnostics = diagnostics
         self._user_input = user_input
-        self._llm = llm
+        self._llm: ModelClient | None = llm
         self._tools = tools
         self._recovery = recovery
         self._materials = materials
@@ -305,6 +308,9 @@ class Agent(ABC):
                         return ActionDecision(
                             result, isinstance(task, ActTask) and task.handoff is not None
                         )
+                    if isinstance(result, CardRewardPlan):
+                        self._pending_call = call
+                        return RewardDecision(result)
                     try:
                         current = self._close_query(context, task, bound, call, result)
                     except DecisionInterrupted:
@@ -342,7 +348,7 @@ class Agent(ABC):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult:
+    ) -> ActionProposal | CardRewardPlan | QueryToolResult:
         if call.name == self._tools.action_name:
             return await self._tools.dispatch_action(call, task)
         return await self._tools.dispatch(call, handoff=isinstance(task, HandoffTask))
@@ -427,7 +433,7 @@ class Agent(ABC):
             )
         return observation
 
-    async def accept(self, outcome: ActionToolResult) -> None:
+    async def accept(self, outcome: ExecutionResult) -> None:
         if self._pending_call is None or self._context is None:
             raise RuntimeError("No model action is awaiting feedback.")
         if self._diagnostics is not None:
@@ -435,6 +441,7 @@ class Agent(ABC):
         self._context.append_tool_result(self._pending_call, outcome, defer_observation=True)
         self._pending_call = None
         if not self._tools.minimal or (
-            isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None
+            isinstance(outcome.outcome, (ActionCompleted, RewardBatchCompleted))
+            and outcome.observation is not None
         ):
             self._context.finish_group()

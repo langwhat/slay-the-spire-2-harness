@@ -61,9 +61,11 @@ from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.results import (
     ActionCompleted,
     ActionToolResult,
+    CardRewardBatchResult,
     NotesText,
     NotesUpdated,
     PlanData,
+    QueryToolResult,
     ReadCompleted,
 )
 from sts2_harness.route_plan import reconcile_plan
@@ -546,13 +548,13 @@ def _events(
             event = ResultEvent(
                 call_id=message.call_id,
                 outcome=source.outcome,
-                action=isinstance(source, ActionToolResult),
+                action=isinstance(source, (ActionToolResult, CardRewardBatchResult)),
                 observation=source.observation,
             )
             if source.observation is not None:
                 raw, declined = _native_observation(source.observation, originals)
                 event = event.model_copy(update={"observation": raw, "declined_offers": declined})
-            if not isinstance(source, ActionToolResult) and source.data is not MISSING:
+            if isinstance(source, QueryToolResult) and source.data is not MISSING:
                 data = source.data
                 if isinstance(data, DocumentView):
                     event = event.model_copy(
@@ -718,7 +720,7 @@ def _recorded_reward_batch(
         refs = item.cards if isinstance(item, tool_inputs.TakeCard) else ()
         choices.append(CardRewardChoice(offer, refs, item.reason))
     plan = CardRewardPlan(
-        (), choices=tuple(choices), before=observation, resolved=frozenset(task.declined_offers)
+        choices=tuple(choices), before=observation, resolved=frozenset(task.declined_offers)
     )
     record = journal.request(source.model_sequence)
     completions = tuple(

@@ -13,7 +13,7 @@ from sts2_harness.combat import CombatAgent
 from sts2_harness.context import Context, same_observation
 from sts2_harness.context.map_projection import MapRoom, MapUnavailable, replace_stretches
 from sts2_harness.context.models import TaskMessage
-from sts2_harness.decisions import ActionProposal, ActTask, DecisionTask
+from sts2_harness.decisions import ActionProposal, ActTask, CardRewardPlan, DecisionTask
 from sts2_harness.deck_role import DeckAgent
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
@@ -100,7 +100,9 @@ class CaptureDecision(Agent):
     _tools: ToolCatalog
     route_metrics: RouteMetrics | None = None
 
-    def focus_observation(self, observation: native.Observation) -> native.Observation:
+    def focus_observation(
+        self, observation: native.Observation, resolved: frozenset[str] = frozenset()
+    ) -> native.Observation:
         return observation
 
     async def prepare_fresh(self, observation: native.Observation) -> None:
@@ -139,7 +141,7 @@ class CaptureDecision(Agent):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult:
+    ) -> ActionProposal | CardRewardPlan | QueryToolResult:
         if call.name in self.all_decisions:
             definition = next(
                 (item for item in self._tools.definitions if item.name == call.name), None
@@ -250,7 +252,9 @@ class RunProbe(CaptureDecision, RunAgent):
             self.route_metrics = _route_metrics(observation, update.plan)
             return
 
-    def focus_observation(self, observation: native.Observation) -> native.Observation:
+    def focus_observation(
+        self, observation: native.Observation, resolved: frozenset[str] = frozenset()
+    ) -> native.Observation:
         return self._reward_view(observation)
 
 
@@ -310,8 +314,10 @@ class DeckProbe(CaptureDecision, DeckAgent):
             )
             raise Captured(call, status, reason.message)
 
-    def focus_observation(self, observation: native.Observation) -> native.Observation:
-        return self._reward_view(observation)
+    def focus_observation(
+        self, observation: native.Observation, resolved: frozenset[str] = frozenset()
+    ) -> native.Observation:
+        return self._reward_view(observation, resolved)
 
 
 class FreshModel(MeasuredModel):
@@ -499,7 +505,6 @@ async def sample_fresh(
                 tools,
                 ToolRecoveryBudget(),
                 offer_ref=case.decision_offer,
-                resolved=frozenset(task_event.declined_offers),
                 user_input=UserInputQueue() if case.viewer else None,
                 prompts=selected_prompts,
                 materials=materials,
@@ -513,11 +518,16 @@ async def sample_fresh(
                 prompts=selected_prompts,
                 materials=materials,
             )
-        observation = agent.focus_observation(observation)
+        resolved = frozenset(task_event.declined_offers)
+        observation = agent.focus_observation(observation, resolved)
         await agent.prepare_fresh(observation)
         route = native.RouteKey.model_validate_json(observation.location.to_json())
         try:
-            await Agent.decide(agent, ActTask(route), observation)
+            await Agent.decide(
+                agent,
+                ActTask(route, resolved_card_rewards=resolved),
+                observation,
+            )
             raise NoProposal("The decision loop returned without an action proposal.")
         except Captured as captured:
             proposal, arguments, reason = _proposal_details(captured.call)

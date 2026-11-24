@@ -10,13 +10,25 @@ from sts2_harness.decisions import (
     SelectStep,
 )
 from sts2_harness.deck import adding_selection, card_rewards, same_card_options
-from sts2_harness.results import ActionStopped, Reason, ReasonCode, Suggestion
+from sts2_harness.results import ActionStopped, Reason, ReasonCode, RewardBatchStopped, Suggestion
 
 
 def reward_stopped(completed: int) -> ActionStopped:
     return ActionStopped(
         completed_steps=completed,
         next_step=completed + 1,
+        reason=Reason(
+            code=ReasonCode.REFERENCE_EXPIRED,
+            message="The card reward groups or their available choices changed.",
+        ),
+        suggested_actions=(Suggestion(message="Review the current groups and submit a new plan."),),
+    )
+
+
+def reward_batch_stopped(completed_groups: int) -> RewardBatchStopped:
+    return RewardBatchStopped(
+        completed_groups=completed_groups,
+        next_group=completed_groups + 1,
         reason=Reason(
             code=ReasonCode.REFERENCE_EXPIRED,
             message="The card reward groups or their available choices changed.",

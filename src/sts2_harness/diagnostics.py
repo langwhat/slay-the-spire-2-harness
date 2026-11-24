@@ -20,7 +20,14 @@ from pydantic import AfterValidator, Field
 from sts2_harness.client import models as native
 from sts2_harness.config import AuthKind, Configuration, Driver, Protocol
 from sts2_harness.game import Endpoint, OperationKind, RunEndReason
-from sts2_harness.results import ActionCompleted, Outcome, OutcomeStatus, ReadCompleted, ReasonCode
+from sts2_harness.results import (
+    ActionCompleted,
+    Outcome,
+    OutcomeStatus,
+    ReadCompleted,
+    ReasonCode,
+    RewardBatchCompleted,
+)
 from sts2_harness.tools import ToolName
 
 
@@ -556,7 +563,9 @@ class Diagnostics:
         except ValueError:
             tool = None
         reason = (
-            None if isinstance(outcome, (ReadCompleted, ActionCompleted)) else outcome.reason.code
+            None
+            if isinstance(outcome, (ReadCompleted, ActionCompleted, RewardBatchCompleted))
+            else outcome.reason.code
         )
         self.emit(
             ToolFinished(

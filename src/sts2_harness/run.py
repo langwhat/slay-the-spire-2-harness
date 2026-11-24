@@ -25,6 +25,7 @@ from sts2_harness.decisions import (
     ActionProposal,
     ActionStep,
     ActTask,
+    CardRewardPlan,
     Decision,
     DecisionSource,
     DecisionTask,
@@ -47,6 +48,7 @@ from sts2_harness.prompts import PackagedPrompts, PromptReader, deck_act_prompt
 from sts2_harness.results import (
     ActionCompleted,
     ActionToolResult,
+    ExecutionResult,
     PlanAccepted,
     PlanData,
     PlanPresentation,
@@ -148,6 +150,19 @@ def run_observation(observation: native.Observation) -> native.Observation:
     )
 
 
+def enrich_run_context(
+    context: Context, tools: ToolCatalog, observation: native.Observation
+) -> None:
+    if not tools.minimal and tools.notes is not None:
+        context.set_notes(tools.notes.read())
+    if tools.fights is not None:
+        context.set_fights(tools.fights.recent)
+        context.set_elites_fought(tools.fights.act_elites)
+    if tools.deck_stats is not None and isinstance(observation.state, native.RunState):
+        stats, use = tools.deck_stats.view(observation)
+        context.set_deck_stats(stats, use)
+
+
 @dataclass(frozen=True, slots=True)
 class ActStart:
     observation: native.Observation
@@ -209,13 +224,7 @@ class RunAgent(Agent):
         self._card_reports.append((progress, result))
 
     async def _enrich(self, context: Context, observation: native.Observation) -> None:
-        self._sync_notes(context)
-        if self._tools.fights is not None:
-            context.set_fights(self._tools.fights.recent)
-            context.set_elites_fought(self._tools.fights.act_elites)
-        if self._tools.deck_stats is not None and isinstance(observation.state, native.RunState):
-            stats, use = self._tools.deck_stats.view(observation)
-            context.set_deck_stats(stats, use)
+        enrich_run_context(context, self._tools, observation)
 
     def _sync_notes(self, context: Context) -> None:
         if self._tools.minimal:
@@ -285,7 +294,7 @@ class RunAgent(Agent):
 
     async def _dispatch(
         self, call: ToolCall, task: DecisionTask, observation: native.Observation
-    ) -> ActionProposal | QueryToolResult:
+    ) -> ActionProposal | CardRewardPlan | QueryToolResult:
         if call.name == ToolName.RUN_ACT:
             result = await self._tools.dispatch_action(call, task)
             return (
@@ -592,7 +601,9 @@ class RunAgent(Agent):
             self._force_strategy = False
         return decision
 
-    async def accept(self, outcome: ActionToolResult) -> None:
+    async def accept(self, outcome: ExecutionResult) -> None:
+        if not isinstance(outcome, ActionToolResult):
+            raise TypeError("RunAgent accepts action results only.")
         if outcome.observation is not None:
             outcome = replace(outcome, observation=self._reward_view(outcome.observation))
         # A closed group can still contain uncertain execution feedback.

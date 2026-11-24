@@ -66,7 +66,8 @@ An execution unit is one complete decision plus its resulting action batch, thro
 
 Decisions are plain data:
 
-- `ActionProposal` holds ordered action and selection steps. It has no HTTP methods, SDK objects, or tool-call IDs.
+- `ActionDecision` carries an `ActionProposal` with ordered action and selection steps. It has no HTTP methods, SDK objects, or tool-call IDs.
+- `RewardDecision` carries a `CardRewardPlan` with ordered per-group reward choices and the observation snapshot they were planned against.
 - `TaskComplete` ends a task that allows finishing without a game action, such as a handoff-only task or a review.
 - Tasks are `ActTask`, `HandoffTask`, and `ReviewTask`.
 
@@ -81,7 +82,7 @@ Decisions are plain data:
 | Role | Agent lifetime | Context | Tools |
 | --- | --- | --- | --- |
 | Run | One native act | Rebuilt at each confirmed node change | `run_act`, `run_plan`, `run_next`, `run_notes`, `run_inspect`, `run_knowledge`, `run_skill` |
-| Deck | One card offer or card-adding selection | Its own, for that choice | `run_deck_choice` |
+| Deck | One node's visible card reward groups or card-adding selection | Its own, across re-decisions until those rewards resolve or the node changes | `run_deck_choice` |
 | Combat | One battle, including its review | One per battle | `combat_act`, `combat_inspect`, `combat_knowledge`, `combat_skill` |
 
 See [ADR 0004](adr/0004-role-agent-and-context-lifetimes.md) for why the lifetimes are set this way.
@@ -94,7 +95,7 @@ See [ADR 0004](adr/0004-role-agent-and-context-lifetimes.md) for why the lifetim
 
 Queries and actions inside one node stay in one conversation, so opening a reward screen or continuing a shop visit keeps the local back-and-forth. The full history stays in the archive.
 
-**Deck** makes one focused card choice: take a card or skip. `DeckAgent` reuses `RunAgent`'s notes, state enrichment, and route-plan view, with its own prompt and only the `run_deck_choice` tool. If an offer is declined in a node, it is not offered to Deck again in that node. The result goes back to Run as progress.
+**Deck** plans the node's visible card reward groups jointly (or resolves a standalone card-adding selection). `DeckAgent` is an independent `Agent` that composes shared notes, fight history, deck statistics, and route-plan projection without inheriting `RunAgent`, using its own prompt (including battle-report reading rules) and only the `run_deck_choice` tool. Execution resolves the submitted `CardRewardPlan` sequentially, re-validating each group against the live native state and stopping on any change or failure so Deck can re-decide in the same context. `DefaultFlow` owns the node's resolved reward progress; attempted group outcomes are reported back to Run as progress without consuming Run's pending combat handoff.
 
 **Combat** plays one battle from the opening state, with a fixed copy of the strategy notes taken at the start. After a nonterminal battle it writes a review in the same context. Run then reads the report and review and may update the notes.
 
@@ -104,18 +105,18 @@ Queries and actions inside one node stay in one conversation, so opening a rewar
 
 ### Replacing a role
 
-[`DecisionSource`](../src/sts2_harness/decisions.py#L115) is the decision contract
+[`DecisionSource`](../src/sts2_harness/decisions.py#L130) is the decision contract
 shared by all three roles. Combat uses it directly. Run and Deck also implement
-[`RunRole`](../src/sts2_harness/run.py#L156) and
-[`DeckRole`](../src/sts2_harness/deck_role.py#L77), respectively.
+[`RunRole`](../src/sts2_harness/run.py#L171) and
+[`DeckRole`](../src/sts2_harness/deck_role.py#L70), respectively.
 
 ```python
 class DecisionSource(Protocol):
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision: ...
-    async def accept(self, outcome: ActionToolResult) -> None: ...
+    async def accept(self, outcome: ExecutionResult) -> None: ...
 ```
 
-A fixed-code strategy does not need to inherit `Agent`, build model messages, or configure an LLM. It returns the same `ActionProposal` values and gets the same execution, settlement, reporting, and pause handling. `RunSession` accepts optional factories for Run, Combat, Deck, and the flow. A custom [`RunFlow`](../src/sts2_harness/loop.py#L39) owns card choice and can omit the Deck factory. Replacing Combat does not affect Run, and the reverse is also true. A non-model Combat may return no review; the program report is always produced.
+A fixed-code strategy does not need to inherit `Agent`, build model messages, or configure an LLM. It returns the same `ActionDecision` or `RewardDecision` values and gets the same execution, settlement, reporting, and pause handling. `RunSession` accepts optional factories for Run, Combat, Deck, and the flow. A custom [`RunFlow`](../src/sts2_harness/loop.py#L75) owns card choice and can omit the Deck factory. Replacing Combat does not affect Run, and the reverse is also true. A non-model Combat may return no review; the program report is always produced.
 
 ## Context and model input
 
@@ -169,7 +170,7 @@ Each role's tool set is fixed when the role is created. The model-visible rules 
 
 - **`run_act` / `combat_act`** submit ordered steps. Combat has `play_card`, `use_potion`, `discard_potion`, `end_turn`, and `select`. Run uses `interact` for listed operations, plus potion and selection steps. A selection can be planned before its screen opens (an anticipated choice). If the actual options do not allow it, the batch stops there.
 - **`run_plan` / `run_next`** set a partial route plan through the current act and travel to the next planned node. Plans are drawn on the in-game map.
-- **`run_deck_choice`** takes or skips cards for the current card addition. It is only available to Deck.
+- **`run_deck_choice`** resolves the current card reward groups together (or a standalone card-adding selection). It is only available to Deck.
 - **`run_notes`** reads or writes the strategy notes. `write` replaces only the fields supplied: `core` (up to five distinct entries), `plan` (up to 300 characters), and `other`. Notes can also be written through `run_act` and `run_next`.
 - **`*_inspect`** reads public information missing from the current view: `state` and `map`, plus `combat_history` in Combat.
 - **`*_knowledge`** queries the native game catalog with `catalog`, `search`, and `lookup` modes, with any configured supplements attached to native matches.
@@ -177,14 +178,14 @@ Each role's tool set is fixed when the role is created. The model-visible rules 
 
 ### Action results
 
-Every action result has an outcome status:
+Every action and reward-batch result has an outcome status:
 
 | Status | Meaning |
 | --- | --- |
-| `completed` | The submitted steps finished. |
+| `completed` | The submitted steps or reward groups finished. |
 | `rejected` | Nothing ran (invalid arguments, wrong role, busy, or paused). |
-| `stopped` | Some steps ran. The result gives the completed steps, the next step, the reason, and suggested next actions. |
-| `unknown` | A step may have taken effect but could not be confirmed. |
+| `stopped` | Some steps or reward groups ran. Action results count steps (`completed_steps`, `next_step`); reward batches count groups (`completed_groups`, `next_group`), alongside the reason and suggested next actions. |
+| `unknown` | A step or reward group may have taken effect but could not be confirmed (`confirmed_steps`/`uncertain_step` for actions, `confirmed_groups`/`uncertain_group` for reward batches). |
 | `failed` | A query or read failed. |
 
 When the current state cannot be trusted, the result has `state: null`.

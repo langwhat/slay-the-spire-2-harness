@@ -18,20 +18,20 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.execution import Executed, Execution, ToolRecoveryBudget
 from sts2_harness.game import LiveGame
-from sts2_harness.results import ActionCompleted, ActionToolResult
+from sts2_harness.results import ActionCompleted, ExecutionResult
 
 
 class Source:
     def __init__(self, decision: Decision) -> None:
         self.decision = decision
         self.observations: list[native.Observation] = []
-        self.outcomes: list[ActionToolResult] = []
+        self.outcomes: list[ExecutionResult] = []
 
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         self.observations.append(observation)
         return self.decision
 
-    async def accept(self, outcome: ActionToolResult) -> None:
+    async def accept(self, outcome: ExecutionResult) -> None:
         self.outcomes.append(outcome)
 
 
