@@ -12,7 +12,7 @@ In Combat, `arrow_slots` lists the player's arrow slots in slot order. A `retrie
 
 `choice` is the complete current decision: `selection` holds its prompt, min, max, and candidates; `actions` and `offers` list operations and rewards. A selection candidate already in the current hand may carry only its identity; read its details from the hand. With selection min 0, selecting nothing declines. Unavailable options carry `enabled=false` and the game's reason when supplied. A deck row's or candidate's `upgrade` carries its native status and only the fields that differ from the current card; overlay those fields on that card to read the upgraded version.
 
-`generated` and `mechanisms` supply rule details referenced by current objects. A mechanism is delivered once per distinct kind, name, and text in this conversation; a changed text is a new rule. A mechanism being retained in the catalog does not establish that its source is currently present.
+`generated` and `mechanisms` supply rule details referenced by current objects. A mechanism is delivered once per distinct kind, definition identity (or name when no ID is present), and text in this conversation; a changed text is a new rule. A mechanism being retained in the catalog does not establish that its source is currently present.
 
 An enemy's `next_move_id` identifies its public next move in mechanism rules. Use the enemy's `ref` to target it. A move's effects happen in the listed order, so Strength the move gains after its attack does not add to that attack. An effect without an `if` happens even when the attack is fully blocked. Unpowered damage ignores attack modifiers such as POWER.STRENGTH_POWER, POWER.WEAK_POWER, and POWER.VULNERABLE_POWER, and is still blockable unless marked unblockable.
 

@@ -119,7 +119,19 @@ public sealed class ObservationTests
                 0,
                 HpDisplay.Numeric,
                 [new PublicPower("Strength", "POWER.STRENGTH", 3m, 3, "buff")],
-                [new PublicIntent("attack") { DamagePerHit = 11, Hits = 1 }]));
+                [new PublicIntent("attack") { DamagePerHit = 11, Hits = 1 }])
+            {
+                NextMoveId = "CHOMP_MOVE",
+            })
+            .Add("enemy:2:2", new EnemyEntry(
+                "Hidden Foe",
+                "MONSTER.HIDDEN_FOE",
+                20,
+                20,
+                0,
+                HpDisplay.Numeric,
+                [],
+                [new PublicIntent("hidden")]));
 
         var state = new CombatStateView(
             PublicInputControl.Ready,
@@ -144,7 +156,10 @@ public sealed class ObservationTests
             Turn: 2,
             Deck: ["card:1:1"],
             new PileMembership(["card:2:1"], [], [], [], []),
-            [new EnemyView("enemy:2:1", "Jaw Worm", "MONSTER.JAW_WORM", 40, 42, 0, HpDisplay.Numeric, [], [])],
+            [
+                new EnemyView("enemy:2:1", "Jaw Worm", "MONSTER.JAW_WORM", 40, 42, 0, HpDisplay.Numeric, [], []) { NextMoveId = "CHOMP_MOVE" },
+                new EnemyView("enemy:2:2", "Hidden Foe", "MONSTER.HIDDEN_FOE", 20, 20, 0, HpDisplay.Numeric, [], []),
+            ],
             []);
 
         var observation = new NativeObservation(
@@ -221,6 +236,14 @@ public sealed class ObservationTests
     public void Inspect_HandlesCombatAreasEventOptionsAndStructuredFailures()
     {
         var combat = SampleCombatPublication();
+        var combatStateJson = ObservationReader.Read(combat);
+        using var combatStateDoc = JsonDocument.Parse(combatStateJson);
+        var enemies = combatStateDoc.RootElement.GetProperty("observation").GetProperty("state").GetProperty("enemies");
+        Assert.Equal("CHOMP_MOVE", enemies[0].GetProperty("next_move_id").GetString());
+        Assert.False(enemies[1].TryGetProperty("next_move_id", out _));
+        var combatObjects = combatStateDoc.RootElement.GetProperty("observation").GetProperty("objects");
+        Assert.Equal("CHOMP_MOVE", combatObjects.GetProperty("enemy:2:1").GetProperty("next_move_id").GetString());
+        Assert.False(combatObjects.GetProperty("enemy:2:2").TryGetProperty("next_move_id", out _));
 
         var (historyCode, historyJson) = ObservationReader.Inspect(combat, "{\"query\":{\"area\":\"combat_history\"}}");
         Assert.Equal(200, historyCode);
@@ -282,7 +305,7 @@ public sealed class ObservationTests
         var terminalView = Assert.IsType<TerminalStateView>(completed.Observation.State);
         Assert.Equal(RunResult.Defeat, terminalView.Result);
         Assert.Equal(2, terminalView.LastObservedTurn);
-        Assert.Single(terminalView.Enemies!.Value);
+        Assert.Equal(2, terminalView.Enemies!.Value.Length);
         Assert.Equal(new[] { "card:1:1" }, terminalView.Deck.ToArray());
 
         Assert.Throws<InvalidOperationException>(() =>

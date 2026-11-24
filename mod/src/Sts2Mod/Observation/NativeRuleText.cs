@@ -592,13 +592,29 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     private sealed record Effect(string Text, bool Attack = false, string? Trigger = null, bool ChangesGuard = false,
         Type? AddedPower = null, Type? AddedCard = null, Type? AddedSummon = null, string? ForcedMove = null, bool KillsSelf = false);
 
-    private sealed record GuardedEffects(Test[] Path, string Guard, Effect[] Effects, string? Repetitions = null);
+    private sealed record GuardedEffects(Test[] Path, string Guard, Effect[] Effects, string? Repetitions = null, Loop? Loop = null);
 
     private IEnumerable<Effect> RenderBranches(List<GuardedEffects> effects)
     {
         for (var start = 0; start < effects.Count;)
         {
             var first = effects[start];
+            if (first.Loop is { } activeLoop && first.Repetitions is { } loopCount)
+            {
+                var span = 1;
+                while (start + span < effects.Count && effects[start + span].Loop == activeLoop)
+                    span++;
+                var innerItems = effects.Skip(start).Take(span)
+                    .Select(item => item with { Repetitions = null, Loop = null })
+                    .ToList();
+                var innerRendered = RenderBranches(GroupGuardedChanges(CollapseRepeatedUnrolled(innerItems))).ToList();
+                if (innerRendered.Count == 1)
+                    yield return Combine(innerRendered, $"{loopCount} times: {innerRendered[0].Text}");
+                else if (innerRendered.Count > 1)
+                    yield return Combine(innerRendered, $"{loopCount} times: ({string.Join("; ", innerRendered.Select(e => e.Text))})");
+                start += span;
+                continue;
+            }
             if (FindExclusiveBranch(effects, start) is { } branch)
             {
                 yield return branch.Effect;
@@ -610,6 +626,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 var span = 1;
                 while (start + span < effects.Count
                     && effects[start + span].Repetitions is null
+                    && effects[start + span].Loop is null
                     && effects[start + span].Guard == first.Guard)
                 {
                     span++;
@@ -723,13 +740,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     }
 
     private sealed record EffectStep(int Index, Value Action, Test[] Conditions, int Epoch = 0, int Order = 0);
+    private sealed record MutablePowerTarget(string InstanceKey, int Epoch, int Order, Test[] Conditions, string TargetText);
 
     private (List<Effect> Effects, bool Incomplete) ReadEffects(MethodInfo method, Type? power = null,
         int depth = 0, bool onOwnedMonster = false, IReadOnlyDictionary<string, Value>? bindings = null)
     {
-        if (power is null && depth == 0 && bindings is null && TryReadSpecialMove(method) is { } specialEffects)
-            return (specialEffects, false);
-
         var body = Body(method);
         var incomplete = false;
         if (body.Incomplete)
@@ -737,6 +752,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             MarkIncomplete(method.Name);
             return ([], true);
         }
+        if (power is null && depth == 0 && bindings is null && TryReadSpecialMove(method, body) is { } specialEffects)
+            return (specialEffects, false);
+
         foreach (var field in body.Writes)
             if (IsGameplayField(field))
                 MarkIncomplete($"{method.Name}/{field.Name}");
@@ -797,7 +815,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 }
 
                 var recognized = true;
-                var effect = call is not null ? DescribeEffect(call, method, power, flags, powerTargets, powerHolders, out recognized)
+                var effect = call is not null ? DescribeEffect(call, method, power, flags, powerTargets, powerHolders, matching, out recognized)
                     : action is Assignment assignment ? DescribeSlotAssignment(assignment, method) : null;
 
                 List<Effect> extracted;
@@ -859,17 +877,17 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 GuardedEffects combinedGuardEffect;
                 if (pathGuards.Any(pg => pg.Guard.Length == 0))
                 {
-                    combinedGuardEffect = new([], "", extracted.ToArray(), repetitions);
+                    combinedGuardEffect = new([], "", extracted.ToArray(), repetitions, loop);
                 }
                 else if (pathGuards.Count == 1)
                 {
-                    combinedGuardEffect = new(pathGuards[0].Path, pathGuards[0].Guard, extracted.ToArray(), repetitions);
+                    combinedGuardEffect = new(pathGuards[0].Path, pathGuards[0].Guard, extracted.ToArray(), repetitions, loop);
                 }
                 else
                 {
                     var joinedGuard = string.Join(" or ", pathGuards.Select(pg =>
                         pg.Guard.Contains(" and ", StringComparison.Ordinal) ? $"({pg.Guard})" : pg.Guard));
-                    combinedGuardEffect = new([], joinedGuard, extracted.ToArray(), repetitions);
+                    combinedGuardEffect = new([], joinedGuard, extracted.ToArray(), repetitions, loop);
                 }
 
                 if (!rendered.Any(previous => previous.Guard == combinedGuardEffect.Guard && previous.Effects.SequenceEqual(extracted)))
@@ -930,23 +948,37 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     {
         foreach (var step in body.Calls)
         {
-            if (step.Conditions.All(IsCurrentRun)
+            if (step.Conditions.All(test => IsCurrentRun(test) && IsStaticRunCheck(test))
                 && step.Call.Method is MethodInfo { Name: var name } setter && name.StartsWith("set_", StringComparison.Ordinal)
                 && step.Call.Arguments is [Constant { Data: 1 or true }]
-                && step.Call.Receiver is Operation { Operator: "castclass" or "isinst", Right: Constant { Data: Type monsterType } }
+                && SummonedMonsterType(step.Call.Receiver) is { } monsterType
                 && typeof(MonsterModel).IsAssignableFrom(monsterType)
-                && monsterType.GetProperty(name[4..], Declared) is { CanWrite: true } prop && prop.PropertyType == typeof(bool))
+                && BackingField(monsterType, setter) is { } backing && backing.FieldType == typeof(bool)
+                && IsPlainBackingFieldSetter(setter, backing))
             {
                 if (!_summonTrueFlags.TryGetValue(monsterType, out var list))
                 {
                     list = [];
                     _summonTrueFlags[monsterType] = list;
                 }
-                if (!list.Contains(prop))
-                    list.Add(prop);
+                if (!list.Contains(backing))
+                    list.Add(backing);
             }
         }
     }
+
+    private bool IsPlainBackingFieldSetter(MethodInfo setter, FieldInfo backing)
+    {
+        var setterBody = Body(setter);
+        if (setterBody.Incomplete || setterBody.Writes.Count > 0)
+            return false;
+        if (!setterBody.FieldSteps.All(fs => fs.Assignment.Target.Member == backing))
+            return false;
+        return setterBody.Calls.All(c => c.Call.Method.Name is "AssertMutable" or "get_IsMutable");
+    }
+
+    private static bool IsStaticRunCheck(Test test)
+        => test.Value is Call { Method.Name: "HasAscension" or "IsDread" };
 
     private Dictionary<string, string> CollectAppliedPowerHolders(NativeRuleBody body)
     {
@@ -962,17 +994,96 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         return map;
     }
 
-    private Dictionary<string, string> CollectMutablePowerTargets(NativeRuleBody body)
+    private List<MutablePowerTarget> CollectMutablePowerTargets(NativeRuleBody body)
     {
-        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        var list = new List<MutablePowerTarget>();
         foreach (var step in body.Calls)
         {
             if (step.Call.Method.Name == "set_Target" && step.Call.Method.DeclaringType == typeof(PowerModel)
                 && step.Call.Receiver is { } instance && step.Call.Arguments is [var target]
                 && ValueText(target) is { } who)
-                map[Key(instance)] = who;
+            {
+                list.Add(new MutablePowerTarget(Key(instance), step.Epoch, step.Order, step.Conditions, who));
+            }
         }
-        return map;
+        return list;
+    }
+
+    private static bool ResolveMutablePowerTarget(
+        IReadOnlyList<MutablePowerTarget> targets,
+        string instanceKey,
+        EffectStep[] matching,
+        out string? resolvedTarget)
+    {
+        resolvedTarget = null;
+        var relevant = targets.Where(t => t.InstanceKey == instanceKey).ToArray();
+        if (relevant.Length == 0)
+            return true;
+
+        var perStepTargets = new HashSet<string?>(StringComparer.Ordinal);
+        foreach (var step in matching)
+        {
+            var compatible = relevant
+                .Where(t => (t.Epoch < step.Epoch || (t.Epoch == step.Epoch && t.Order < step.Order))
+                    && ConditionsCompatible(t.Conditions, step.Conditions))
+                .OrderByDescending(t => (t.Epoch, t.Order))
+                .ToArray();
+            if (compatible.Length == 0)
+            {
+                perStepTargets.Add(null);
+                continue;
+            }
+            // If multiple distinct target assignments can reach this same step along compatible paths, fail closed.
+            var distinctOnPath = compatible.Select(t => t.TargetText).Distinct(StringComparer.Ordinal).ToArray();
+            if (distinctOnPath.Length > 1 && compatible.Any(t => ConditionsImply(step.Conditions, t.Conditions) && t.TargetText != compatible[0].TargetText))
+                return false;
+            var latestImplied = compatible.FirstOrDefault(t => ConditionsImply(step.Conditions, t.Conditions));
+            if (latestImplied is not null)
+            {
+                perStepTargets.Add(latestImplied.TargetText);
+            }
+            else if (distinctOnPath.Length == 1)
+            {
+                perStepTargets.Add(distinctOnPath[0]);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        if (perStepTargets.Count > 1)
+            return false;
+        resolvedTarget = perStepTargets.FirstOrDefault();
+        return true;
+    }
+
+    private static bool ConditionsCompatible(Test[] left, Test[] right)
+        => !ConditionsContradict(left, right);
+
+    private static bool ConditionsContradict(Test[] left, Test[] right)
+    {
+        foreach (var a in left)
+        {
+            var ka = TestKey(a);
+            foreach (var b in right)
+            {
+                if (TestKey(b) == ka && a.Expected != b.Expected)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool ConditionsImply(Test[] stronger, Test[] weaker)
+    {
+        foreach (var req in weaker)
+        {
+            var key = TestKey(req);
+            if (!stronger.Any(s => TestKey(s) == key && s.Expected == req.Expected))
+                return false;
+        }
+        return true;
     }
 
     private static bool IsSameMonsterTypeLookup(Value? receiver, Type? declaringType)
@@ -993,6 +1104,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         {
             Left = Bind(operation.Left, bindings),
             Right = operation.Right is { } right ? Bind(right, bindings) : null,
+        },
+        ArrayValue array => array with
+        {
+            Length = Bind(array.Length, bindings),
+            Elements = array.Elements.Select(e => Bind(e, bindings)).ToArray(),
         },
         _ => value,
     };
@@ -1068,7 +1184,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     }
 
     private Effect? DescribeEffect(Call call, MethodInfo caller, Type? power, IReadOnlySet<string> flags,
-        IReadOnlyDictionary<string, string> powerTargets, IReadOnlyDictionary<string, string> powerHolders, out bool recognized)
+        IReadOnlyList<MutablePowerTarget> powerTargets, IReadOnlyDictionary<string, string> powerHolders,
+        EffectStep[] matching, out bool recognized)
     {
         recognized = true;
         var type = call.Method.DeclaringType;
@@ -1107,7 +1224,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 if (Argument(call, "target") is not { } receiving || ValueText(receiving) is not { } who
                     || Argument(call, "amount") is not { } stacks || ValueText(stacks) is not { } amount)
                     return null;
-                var forTarget = powerTargets.TryGetValue(Key(instance), out var trackedTarget)
+                if (!ResolveMutablePowerTarget(powerTargets, Key(instance), matching, out var trackedTarget))
+                    return null;
+                var forTarget = trackedTarget is not null
                     ? $" (with target={trackedTarget})"
                     : "";
                 return new Effect($"attempt to apply {amount} {PowerLabel(applied)} to {who}{forTarget}", AddedPower: applied);
@@ -1472,8 +1591,19 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     : null;
             if (effect == "ApplyKeyword" && args.Length >= 2)
             {
-                // ApplyKeyword(card, params CardKeyword[]) — keyword values are stored in a newly created array; keep concise.
-                return new Effect("apply keyword to generated card");
+                if (ValueText(args[0]) is not { } targetCard)
+                    return null;
+                if (args[1] is not ArrayValue { Elements.Length: > 0 } keywordArray)
+                    return null;
+                var keywords = new List<string>(keywordArray.Elements.Length);
+                foreach (var elem in keywordArray.Elements)
+                {
+                    if (elem is Constant { Data: int rawKw } && Enum.IsDefined(typeof(CardKeyword), rawKw))
+                        keywords.Add(((CardKeyword)rawKw).ToString());
+                    else
+                        return null;
+                }
+                return new Effect($"apply {string.Join(", ", keywords)} to {targetCard}");
             }
             return null;
         }
@@ -1561,6 +1691,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         Call { Method.Name: "ToMutable", Receiver: var canonical } => SummonedMonsterType(canonical),
         Call { Method: { Name: "Monster", IsGenericMethod: true } lookup } when lookup.DeclaringType == typeof(ModelDb)
             => lookup.GetGenericArguments()[0],
+        Call { Method.Name: "get_Monster", Receiver: Call { Method: { Name: "Add", IsGenericMethod: true } add } }
+            when add.DeclaringType == typeof(CreatureCmd)
+            => add.GetGenericArguments()[0],
         _ => null,
     };
 
@@ -1796,17 +1929,20 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     || monster.GetType().GetProperty(nameof(MonsterModel.Title))?.DeclaringType == typeof(MonsterModel)
                         ? monster.Title
                         : MonsterModel.L10NMonsterLookup($"{monster.Id.Entry}.name"),
+                EncounterModel encounter => encounter.Title,
                 RelicModel relic => relic.Title,
                 CardModel card => card.TitleLocString,
                 _ => null,
             };
+            if (title is not null && !title.Exists())
+                title = null;
         }
         catch
         {
             title = null;
         }
 
-        if (title?.Exists() != true)
+        if (title is null)
         {
             if (typeof(MonsterModel).IsAssignableFrom(type))
             {
@@ -1915,8 +2051,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             return IsCurrentRun(test) ? "" : "never";
         if (value is Call { Method.DeclaringType.Name: "LocalContext", Method.Name: "IsMe" })
             return expected ? "" : Never;
+        var hadCycleBefore = _getterCycleDetected;
         if (CombatCondition(test) is { } combat)
             return combat;
+        if (!hadCycleBefore && _getterCycleDetected)
+            return null;
         if (value is Operation { Operator: "ceq", Right: Constant { Data: 0 or null } } negation
             && (negation.Left is Call { Method: MethodInfo { ReturnType: var type } } && type == typeof(bool)
                 || negation.Left is Operation { Operator: "ceq" or "cgt" or "cgt.un" or "clt" or "clt.un" }
@@ -2469,6 +2608,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         Assignment assignment => $"{Key(assignment.Target)} := {Key(assignment.Assigned)}",
         Call call => $"{Key(call.Receiver)}.{call.Method.DeclaringType?.FullName}.{call.Method}({string.Join(",", call.Arguments.Select(Key))})",
         Operation operation => $"({Key(operation.Left)} {operation.Operator} {Key(operation.Right)})",
+        ArrayValue array => $"[{string.Join(",", array.Elements.Select(Key))}]",
         _ => "",
     };
 }

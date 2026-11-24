@@ -18,124 +18,211 @@ internal static class ModifierMechanismReader
     private static readonly ConcurrentDictionary<SimpleCacheKey, string?> EnchantmentCache = new();
     private static readonly ConcurrentDictionary<SimpleCacheKey, string?> AfflictionCache = new();
     private static readonly ConcurrentDictionary<SimpleCacheKey, string?> OrbCache = new();
+    private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
+
+    private static void PushWarning(string message)
+    {
+        if (MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)
+            Godot.GD.PushWarning(message);
+    }
 
     public static string? ReadEnchantment(EnchantmentModel enchantment, string language)
     {
-        var key = new SimpleCacheKey(enchantment.Id.ToString(), language);
+        var id = enchantment.Id.ToString();
+        var key = new SimpleCacheKey(id, language);
         if (EnchantmentCache.TryGetValue(key, out var cached))
             return cached;
 
-        string? text = null;
         try
         {
-            text = DescribeEnchantment(enchantment.GetType());
+            var (text, gaps) = DescribeEnchantmentWithGaps(enchantment.GetType());
+            if (gaps.Count > 0 && LoggedGaps.TryAdd($"enchant:{id}", 0))
+                PushWarning($"[sts2agent] Unresolved native enchantment rules for {id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
+            EnchantmentCache[key] = text;
+            return text;
         }
-        catch
+        catch (Exception error)
         {
-            text = null;
+            if (LoggedGaps.TryAdd($"enchant-err:{id}", 0))
+                PushWarning($"[sts2agent] Enchantment mechanism unavailable for {id}: {error.Message}");
+            return null;
         }
-
-        EnchantmentCache[key] = text;
-        return text;
     }
 
     public static string? ReadAffliction(AfflictionModel affliction, string language)
     {
-        var key = new SimpleCacheKey(affliction.Id.ToString(), language);
+        var id = affliction.Id.ToString();
+        var key = new SimpleCacheKey(id, language);
         if (AfflictionCache.TryGetValue(key, out var cached))
             return cached;
 
-        string? text = null;
         try
         {
-            text = DescribeAffliction(affliction.GetType());
+            var (text, gaps) = DescribeAfflictionWithGaps(affliction.GetType());
+            if (gaps.Count > 0 && LoggedGaps.TryAdd($"afflict:{id}", 0))
+                PushWarning($"[sts2agent] Unresolved native affliction rules for {id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
+            AfflictionCache[key] = text;
+            return text;
         }
-        catch
+        catch (Exception error)
         {
-            text = null;
+            if (LoggedGaps.TryAdd($"afflict-err:{id}", 0))
+                PushWarning($"[sts2agent] Affliction mechanism unavailable for {id}: {error.Message}");
+            return null;
         }
-
-        AfflictionCache[key] = text;
-        return text;
     }
 
     public static string? ReadOrb(OrbModel orb, string language)
     {
-        var key = new SimpleCacheKey(orb.Id.ToString(), language);
+        var id = orb.Id.ToString();
+        var key = new SimpleCacheKey(id, language);
         if (OrbCache.TryGetValue(key, out var cached))
             return cached;
 
-        string? text = null;
         try
         {
-            text = DescribeOrb(orb.GetType());
+            var (text, gaps) = DescribeOrbWithGaps(orb.GetType());
+            if (gaps.Count > 0 && LoggedGaps.TryAdd($"orb:{id}", 0))
+                PushWarning($"[sts2agent] Unresolved native orb rules for {id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
+            OrbCache[key] = text;
+            return text;
         }
-        catch
+        catch (Exception error)
         {
-            text = null;
+            if (LoggedGaps.TryAdd($"orb-err:{id}", 0))
+                PushWarning($"[sts2agent] Orb mechanism unavailable for {id}: {error.Message}");
+            return null;
         }
-
-        OrbCache[key] = text;
-        return text;
     }
 
     internal static string? DescribeEnchantment(Type type)
+        => DescribeEnchantmentWithGaps(type).Text;
+
+    internal static (string? Text, IReadOnlySet<string> Gaps) DescribeEnchantmentWithGaps(Type type)
     {
+        var gaps = new HashSet<string>(StringComparer.Ordinal);
         if (!typeof(EnchantmentModel).IsAssignableFrom(type) || type.IsAbstract)
-            return null;
+            return (null, gaps);
 
         var parts = new List<string>();
 
         if (DescribeEnchantmentEligibility(type) is { } elig)
             parts.Add(elig);
 
-        var disablesAfterPlay = type.GetMethod("AfterCardPlayed", DeclaredInstance) is { } afterPlay
-            && NativeRuleBody.Read(afterPlay) is { Incomplete: false } afterBody
-            && afterBody.Calls.Any(s => s.Call.Method.Name == "set_Status"
+        var afterPlayMethod = type.GetMethod("AfterCardPlayed", DeclaredInstance);
+        var afterPlayBody = afterPlayMethod is not null ? NativeRuleBody.Read(afterPlayMethod) : null;
+        var disablesAfterPlay = afterPlayBody is { Incomplete: false }
+            && afterPlayBody.Calls.Any(s => s.Call.Method.Name == "set_Status"
                 && s.Call.Arguments is [Constant { Data: int statusVal }] && statusVal != 0);
+        var incrementsAmountAfterPlay = afterPlayBody is { Incomplete: false }
+            && afterPlayBody.Calls.Any(s => s.Call.Method.Name == "set_Amount"
+                && s.Call.Arguments is [Operation { Operator: "add", Left: Call { Method.Name: "get_Amount" }, Right: Constant { Data: 1 } }]);
+        var updatesDeckVersionAfterPlay = afterPlayBody is { Incomplete: false }
+            && afterPlayBody.Calls.Any(s => s.Call.Method.Name == "get_DeckVersion");
 
-        if (type.GetMethod("EnchantDamageAdditive", DeclaredInstance) is { } dmgAdd
-            && NativeRuleBody.Read(dmgAdd) is { Incomplete: false } dmgAddBody)
+        var onPlayMethod = type.GetMethod("OnPlay", DeclaredInstance);
+        var onPlayBody = onPlayMethod is not null ? NativeRuleBody.Read(onPlayMethod) : null;
+        var accumulatedPropName = (string?)null;
+        if (onPlayBody is { Incomplete: false })
         {
-            var poweredOnly = dmgAddBody.Returns.Any(r => r.Conditions.Any(c => c.Value is Call { Method.Name: "IsPoweredAttack" }));
-            var scope = poweredOnly ? "powered attack damage per hit" : "attack damage per hit";
-            var suffix = disablesAfterPlay ? " (first play each combat only)" : "";
-            parts.Add($"Adds +amount {scope}{suffix}.");
+            var accumCall = onPlayBody.Calls.FirstOrDefault(s =>
+                s.Call.Method.DeclaringType == type
+                && s.Call.Method.Name.StartsWith("set_", StringComparison.Ordinal)
+                && s.Call.Arguments is [Operation { Operator: "add", Left: Call { Method.Name: var getterName }, Right: Call { Method.Name: "get_Amount" } }]
+                && getterName == "get_" + s.Call.Method.Name[4..]);
+            if (accumCall is not null)
+                accumulatedPropName = accumCall.Call.Method.Name[4..];
         }
 
-        if (type.GetMethod("EnchantDamageMultiplicative", DeclaredInstance) is { } dmgMult
-            && NativeRuleBody.Read(dmgMult) is { Incomplete: false } dmgMultBody)
+        if (type.GetMethod("EnchantDamageAdditive", DeclaredInstance) is { } dmgAdd)
         {
-            var factor = dmgMultBody.Returns
-                .Select(r => ReadDecimalLiteral(r.Value))
-                .FirstOrDefault(v => v is not null && v != 1m);
-            if (factor is { } f)
+            var dmgAddBody = NativeRuleBody.Read(dmgAdd);
+            if (dmgAddBody.Incomplete)
             {
-                var poweredOnly = dmgMultBody.Returns.Any(r => r.Conditions.Any(c => c.Value is Call { Method.Name: "IsPoweredAttack" }));
-                var scope = poweredOnly ? "powered attack damage" : "attack damage";
-                parts.Add($"Multiplies {scope} by ×{f.ToString("0.########", CultureInfo.InvariantCulture)}.");
+                gaps.Add("EnchantDamageAdditive");
+            }
+            else if (DescribeEnchantDamageAdditive(type, dmgAddBody, disablesAfterPlay, accumulatedPropName) is { } dmgClause)
+            {
+                parts.Add(dmgClause);
+            }
+            else
+            {
+                gaps.Add("EnchantDamageAdditive");
             }
         }
 
-        if (type.GetMethod("EnchantBlockAdditive", DeclaredInstance) is { } blkAdd
-            && NativeRuleBody.Read(blkAdd) is { Incomplete: false })
+        if (type.GetMethod("EnchantDamageMultiplicative", DeclaredInstance) is { } dmgMult)
         {
-            parts.Add("Adds +amount Block (before multipliers).");
-        }
-
-        if (type.GetMethod("EnchantPlayCount", DeclaredInstance) is { } playCnt
-            && NativeRuleBody.Read(playCnt) is { Incomplete: false } playCntBody)
-        {
-            var addsOne = playCntBody.Returns.Any(r => r.Value is Operation { Operator: "add", Right: Constant { Data: 1 } });
-            if (addsOne)
+            var dmgMultBody = NativeRuleBody.Read(dmgMult);
+            if (dmgMultBody.Incomplete)
             {
-                var suffix = disablesAfterPlay ? " on its first play each combat" : " every time it is played";
-                parts.Add($"Replays this card 1 additional time{suffix}.");
+                gaps.Add("EnchantDamageMultiplicative");
+            }
+            else
+            {
+                var factor = dmgMultBody.Returns
+                    .Select(r => ReadDecimalLiteral(r.Value))
+                    .FirstOrDefault(v => v is not null && v != 1m);
+                if (factor is { } f)
+                {
+                    var poweredOnly = dmgMultBody.Returns.Any(r => r.Conditions.Any(c => c.Value is Call { Method.Name: "IsPoweredAttack" }));
+                    var scope = poweredOnly ? "powered attack damage" : "attack damage";
+                    parts.Add($"Multiplies {scope} by ×{f.ToString("0.########", CultureInfo.InvariantCulture)}.");
+                }
+                else
+                {
+                    gaps.Add("EnchantDamageMultiplicative");
+                }
             }
         }
 
-        if (type.GetMethod("OnPlay", DeclaredInstance) is { } onPlay
-            && NativeRuleBody.Read(onPlay) is { Incomplete: false } onPlayBody)
+        if (type.GetMethod("EnchantBlockAdditive", DeclaredInstance) is { } blkAdd)
+        {
+            var blkAddBody = NativeRuleBody.Read(blkAdd);
+            if (blkAddBody.Incomplete)
+            {
+                gaps.Add("EnchantBlockAdditive");
+            }
+            else if (DescribeEnchantBlockAdditive(blkAddBody) is { } blkClause)
+            {
+                parts.Add(blkClause);
+            }
+            else
+            {
+                gaps.Add("EnchantBlockAdditive");
+            }
+        }
+
+        if (incrementsAmountAfterPlay)
+        {
+            parts.Add(updatesDeckVersionAfterPlay
+                ? "Permanently increases this enchantment's amount by +1 each time this card is played."
+                : "Increases this enchantment's amount by +1 each time this card is played this combat.");
+        }
+
+        if (type.GetMethod("EnchantPlayCount", DeclaredInstance) is { } playCnt)
+        {
+            var playCntBody = NativeRuleBody.Read(playCnt);
+            if (playCntBody.Incomplete)
+            {
+                gaps.Add("EnchantPlayCount");
+            }
+            else
+            {
+                var addsOne = playCntBody.Returns.Any(r => r.Value is Operation { Operator: "add", Right: Constant { Data: 1 } });
+                if (addsOne)
+                {
+                    var suffix = disablesAfterPlay ? " on its first play each combat" : " every time it is played";
+                    parts.Add($"Replays this card 1 additional time{suffix}.");
+                }
+                else
+                {
+                    gaps.Add("EnchantPlayCount");
+                }
+            }
+        }
+
+        if (onPlayBody is { Incomplete: false })
         {
             var oncePrefix = disablesAfterPlay ? "First play each combat: " : "On play: ";
             if (onPlayBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardPileCmd) && s.Call.Method.Name == nameof(CardPileCmd.Draw)))
@@ -155,8 +242,15 @@ internal static class ModifierMechanismReader
                 var pt = pwrCall.Call.Method.GetGenericArguments()[0];
                 parts.Add($"{oncePrefix}applies {NativeRuleText.ModelLabel(pt)}.");
             }
-            if (onPlayBody.Calls.Any(s => s.Call.Method.Name == "set_Amount" || s.Call.Method.Name == "UpgradeValueBy"))
+            if (accumulatedPropName is null
+                && onPlayBody.Calls.Any(s => s.Call.Method.Name == "set_Amount" || s.Call.Method.Name == "UpgradeValueBy"))
+            {
                 parts.Add("Increases this enchantment's bonus each time this card is played this combat.");
+            }
+        }
+        else if (onPlayMethod is not null)
+        {
+            gaps.Add("OnPlay");
         }
 
         if (type.GetMethod("OnEnchant", DeclaredInstance) is { } onEnchant
@@ -178,7 +272,7 @@ internal static class ModifierMechanismReader
                     .Distinct(StringComparer.Ordinal);
                 parts.Add($"Removes keyword(s): {string.Join(", ", kws)}.");
             }
-            if (enchBody.Calls.Any(s => s.Call.Method.Name == "WithBaseCost" || s.Call.Method.Name == "SetWithModifiers" || s.Call.Method.Name == "AddModifier" || s.Call.Method.Name == "ChangeBaseCost"))
+            if (enchBody.Calls.Any(s => s.Call.Method.Name == "WithBaseCost" || s.Call.Method.Name == "SetWithModifiers" || s.Call.Method.Name == "AddModifier" || s.Call.Method.Name == "ChangeBaseCost" || s.Call.Method.Name == "UpgradeBy"))
                 parts.Add("Permanently modifies the enchanted card's Energy cost.");
         }
 
@@ -203,12 +297,121 @@ internal static class ModifierMechanismReader
             parts.Add("Randomizes this card's Energy cost when drawn.");
         }
 
-        if (type.GetMethod("ModifyShuffleOrder", DeclaredInstance) is not null)
+        if (type.GetMethod("ModifyShuffleOrder", DeclaredInstance) is { } shuffleOrder)
         {
-            parts.Add("Places this card at the top of the draw pile whenever the draw pile is shuffled.");
+            var shuffleBody = NativeRuleBody.Read(shuffleOrder);
+            if (shuffleBody.Incomplete)
+            {
+                gaps.Add("ModifyShuffleOrder");
+            }
+            else if (DescribeModifyShuffleOrder(shuffleBody) is { } shuffleClause)
+            {
+                parts.Add(shuffleClause);
+            }
+            else
+            {
+                gaps.Add("ModifyShuffleOrder");
+            }
         }
 
-        return parts.Count > 0 ? string.Join(" ", parts) : null;
+        return (parts.Count > 0 ? string.Join(" ", parts) : null, gaps);
+    }
+
+    private static string? DescribeEnchantDamageAdditive(
+        Type type,
+        NativeRuleBody body,
+        bool disablesAfterPlay,
+        string? accumulatedPropName)
+    {
+        var nonZeroReturns = body.Returns
+            .Where(r => ReadDecimalLiteral(UnwrapImplicit(r.Value)) is not 0m)
+            .ToArray();
+        if (nonZeroReturns.Length != 1)
+            return null;
+
+        var ret = nonZeroReturns[0];
+        var expr = UnwrapImplicit(ret.Value);
+        var poweredOnly = body.Returns.Any(r => r.Conditions.Any(c => c.Value is Call { Method.Name: "IsPoweredAttack" }));
+        var scope = poweredOnly ? "powered attack damage per hit" : "attack damage per hit";
+        var suffix = disablesAfterPlay ? " (first play each combat only)" : "";
+
+        if (expr is Call { Method.Name: "get_Amount", Receiver: Input { Name: "this" } })
+            return $"Adds +amount {scope}{suffix}.";
+
+        if (accumulatedPropName is not null
+            && expr is Call { Method.Name: var propGetter, Receiver: Input { Name: "this" } }
+            && propGetter == "get_" + accumulatedPropName)
+        {
+            return $"Adds accumulated bonus {scope} (starts at +0; increases by +amount each time this card is played this combat).";
+        }
+
+        if (expr is Call { Method.Name: "get_BaseValue" or "get_IntValue", Receiver: Call { Method.Name: "get_Item", Arguments: [Constant { Data: string varKey }] } }
+            && ModelDb.GetByIdOrNull<EnchantmentModel>(ModelDb.GetId(type)) is { } canonical
+            && canonical.DynamicVars.TryGetValue(varKey, out var dv))
+        {
+            return $"Adds +{dv.BaseValue.ToString("0.########", CultureInfo.InvariantCulture)} {scope}{suffix}.";
+        }
+
+        if (ReadDecimalLiteral(expr) is { } literal && literal > 0m)
+            return $"Adds +{literal.ToString("0.########", CultureInfo.InvariantCulture)} {scope}{suffix}.";
+
+        return null;
+    }
+
+    private static string? DescribeEnchantBlockAdditive(NativeRuleBody body)
+    {
+        var nonZeroReturns = body.Returns
+            .Where(r => ReadDecimalLiteral(UnwrapImplicit(r.Value)) is not 0m)
+            .ToArray();
+        if (nonZeroReturns.Length != 1)
+            return null;
+
+        var expr = UnwrapImplicit(nonZeroReturns[0].Value);
+        if (expr is Call { Method.Name: "get_Amount", Receiver: Input { Name: "this" } })
+            return "Adds +amount Block (before multipliers).";
+
+        if (expr is Operation { Operator: "sub", Left: Call { Method.Name: "get_Amount", Receiver: Input { Name: "this" } }, Right: Constant { Data: int delta } } && delta > 0)
+            return $"Adds +(amount - {delta.ToString(CultureInfo.InvariantCulture)}) Block (before multipliers).";
+
+        if (expr is Call { Method.Name: "op_Subtraction", Arguments: [var lhs, var rhs] }
+            && UnwrapImplicit(lhs) is Call { Method.Name: "get_Amount", Receiver: Input { Name: "this" } }
+            && ReadDecimalLiteral(UnwrapImplicit(rhs)) is { } decDelta && decDelta > 0m)
+        {
+            return $"Adds +(amount - {decDelta.ToString("0.########", CultureInfo.InvariantCulture)}) Block (before multipliers).";
+        }
+
+        if (ReadDecimalLiteral(expr) is { } literal && literal > 0m)
+            return $"Adds +{literal.ToString("0.########", CultureInfo.InvariantCulture)} Block (before multipliers).";
+
+        return null;
+    }
+
+    private static string? DescribeModifyShuffleOrder(NativeRuleBody body)
+    {
+        var insertStep = body.Calls.FirstOrDefault(s =>
+            s.Call.Method.Name == "Insert"
+            && s.Call.Arguments is [Constant { Data: 0 }, Call { Method.Name: "get_Card", Receiver: Input { Name: "this" } }]);
+        var hasRemove = body.Calls.Any(s =>
+            s.Call.Method.Name == "Remove"
+            && s.Call.Arguments is [Call { Method.Name: "get_Card", Receiver: Input { Name: "this" } }]);
+        if (insertStep is null || !hasRemove)
+            return null;
+
+        var initialChecks = insertStep.Conditions
+            .Where(c => c.Value is Input { Name: "isInitialShuffle" })
+            .ToArray();
+        if (initialChecks.Any(c => !c.Expected))
+            return "Places this card at the top of the draw pile on non-initial shuffles (not the opening combat shuffle).";
+        if (initialChecks.Length == 0)
+            return "Places this card at the top of the draw pile whenever the draw pile is shuffled.";
+        return null;
+    }
+
+    private static Value UnwrapImplicit(Value value)
+    {
+        while (value is Call { Method.Name: "op_Implicit", Arguments: [var inner] })
+            value = inner;
+        return value;
     }
 
     private static string? DescribeEnchantmentEligibility(Type type)
@@ -235,52 +438,78 @@ internal static class ModifierMechanismReader
     }
 
     internal static string? DescribeAffliction(Type type)
+        => DescribeAfflictionWithGaps(type).Text;
+
+    internal static (string? Text, IReadOnlySet<string> Gaps) DescribeAfflictionWithGaps(Type type)
     {
+        var gaps = new HashSet<string>(StringComparer.Ordinal);
         if (!typeof(AfflictionModel).IsAssignableFrom(type) || type.IsAbstract)
-            return null;
+            return (null, gaps);
 
         var parts = new List<string>();
-        if (type.GetMethod("AfterCardEnteredCombat", DeclaredInstance) is { } entered
-            && NativeRuleBody.Read(entered) is { Incomplete: false } enteredBody
-            && enteredBody.Calls.Any(s => s.Call.Method.Name == "AddKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw)))
+        if (type.GetMethod("AfterCardEnteredCombat", DeclaredInstance) is { } entered)
         {
-            var kws = enteredBody.Calls
-                .Where(s => s.Call.Method.Name == "AddKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw))
-                .Select(s => ((CardKeyword)(int)((Constant)s.Call.Arguments[0]).Data!).ToString())
-                .Distinct(StringComparer.Ordinal);
-            parts.Add($"Grants {string.Join(", ", kws)} to the afflicted card in combat.");
+            var enteredBody = NativeRuleBody.Read(entered);
+            if (enteredBody.Incomplete)
+            {
+                gaps.Add("AfterCardEnteredCombat");
+            }
+            else if (enteredBody.Calls.Any(s => s.Call.Method.Name == "AddKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw)))
+            {
+                var kws = enteredBody.Calls
+                    .Where(s => s.Call.Method.Name == "AddKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw))
+                    .Select(s => ((CardKeyword)(int)((Constant)s.Call.Arguments[0]).Data!).ToString())
+                    .Distinct(StringComparer.Ordinal);
+                parts.Add($"Grants {string.Join(", ", kws)} to the afflicted card in combat.");
+            }
         }
 
-        if (type.GetMethod("CanAfflictCardType", DeclaredInstance) is { } canType
-            && NativeRuleBody.Read(canType) is { Incomplete: false } canBody)
+        if (type.GetMethod("CanAfflictCardType", DeclaredInstance) is { } canType)
         {
-            var types = canBody.Returns
-                .SelectMany(r => r.Value is Operation { Operator: "ceq", Right: Constant { Data: int ct } } && Enum.IsDefined(typeof(CardType), ct)
-                    ? [(CardType)ct]
-                    : Array.Empty<CardType>())
-                .Distinct()
-                .ToArray();
-            if (types.Length > 0)
-                parts.Add($"Applies only to {string.Join("/", types)} cards.");
+            var canBody = NativeRuleBody.Read(canType);
+            if (canBody.Incomplete)
+            {
+                gaps.Add("CanAfflictCardType");
+            }
+            else
+            {
+                var types = canBody.Returns
+                    .SelectMany(r => r.Value is Operation { Operator: "ceq", Right: Constant { Data: int ct } } && Enum.IsDefined(typeof(CardType), ct)
+                        ? [(CardType)ct]
+                        : Array.Empty<CardType>())
+                    .Distinct()
+                    .ToArray();
+                if (types.Length > 0)
+                    parts.Add($"Applies only to {string.Join("/", types)} cards.");
+            }
         }
 
-        return parts.Count > 0 ? string.Join(" ", parts) : null;
+        return (parts.Count > 0 ? string.Join(" ", parts) : null, gaps);
     }
 
     internal static string? DescribeOrb(Type type)
+        => DescribeOrbWithGaps(type).Text;
+
+    internal static (string? Text, IReadOnlySet<string> Gaps) DescribeOrbWithGaps(Type type)
     {
+        var gaps = new HashSet<string>(StringComparer.Ordinal);
         if (!typeof(OrbModel).IsAssignableFrom(type) || type.IsAbstract)
-            return null;
+            return (null, gaps);
 
         var passiveProp = type.GetProperty("PassiveVal", DeclaredInstance)?.GetMethod;
         var evokeProp = type.GetProperty("EvokeVal", DeclaredInstance)?.GetMethod;
-        var passiveScales = passiveProp is not null
-            && NativeRuleBody.Read(passiveProp) is { Incomplete: false } pBody
-            && pBody.Calls.Any(s => s.Call.Method.Name == "ModifyOrbValue");
-        var evokeScales = evokeProp is not null
-            && NativeRuleBody.Read(evokeProp) is { Incomplete: false } eBody
-            && (eBody.Calls.Any(s => s.Call.Method.Name == "ModifyOrbValue")
-                || (passiveScales && eBody.Calls.Any(s => s.Call.Method.Name == "get_PassiveVal")));
+        var passiveBody = passiveProp is not null ? NativeRuleBody.Read(passiveProp) : null;
+        var evokeBody = evokeProp is not null ? NativeRuleBody.Read(evokeProp) : null;
+        if (passiveBody?.Incomplete == true)
+            gaps.Add("PassiveVal");
+        if (evokeBody?.Incomplete == true)
+            gaps.Add("EvokeVal");
+
+        var passiveScales = passiveBody is { Incomplete: false }
+            && passiveBody.Calls.Any(s => s.Call.Method.Name == "ModifyOrbValue");
+        var evokeScales = evokeBody is { Incomplete: false }
+            && (evokeBody.Calls.Any(s => s.Call.Method.Name == "ModifyOrbValue")
+                || (passiveScales && evokeBody.Calls.Any(s => s.Call.Method.Name == "get_PassiveVal")));
 
         var focusClause = (passiveScales, evokeScales) switch
         {
@@ -297,10 +526,14 @@ internal static class ModifierMechanismReader
                 : "";
 
         var effectClause = "";
-        if (type.GetMethod("Evoke", DeclaredInstance) is { } evokeMethod
-            && NativeRuleBody.Read(evokeMethod) is { Incomplete: false } evBody)
+        if (type.GetMethod("Evoke", DeclaredInstance) is { } evokeMethod)
         {
-            if (evBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy)))
+            var evBody = NativeRuleBody.Read(evokeMethod);
+            if (evBody.Incomplete)
+            {
+                gaps.Add("Evoke");
+            }
+            else if (evBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy)))
                 effectClause = "Grants Energy on passive/evoke.";
             else if (evBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.GainBlock)))
                 effectClause = "Grants unpowered Block on passive/evoke.";
@@ -310,16 +543,21 @@ internal static class ModifierMechanismReader
                 effectClause = "Passive increases this orb's stored Evoke damage; Evoke deals unpowered damage to the lowest-HP hittable enemy.";
             else if (evBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage)))
                 effectClause = "Deals unpowered orb damage to all hittable enemies; passive value decreases by 1 after each trigger.";
+            else
+                gaps.Add("Evoke");
         }
 
         var parts = new[] { timingClause, focusClause, effectClause }.Where(s => s.Length > 0);
-        return string.Join(" ", parts);
+        return (gaps.Count == 0 ? string.Join(" ", parts) : null, gaps);
     }
 
     private static decimal? ReadDecimalLiteral(Value value) => value switch
     {
         Constant { Data: int i } => i,
         Constant { Data: decimal d } => d,
+        Field { Member: { Name: "Zero", DeclaringType: var zt } } when zt == typeof(decimal) => 0m,
+        Field { Member: { Name: "One", DeclaringType: var ot } } when ot == typeof(decimal) => 1m,
+        Field { Member: { Name: "MinusOne", DeclaringType: var mt } } when mt == typeof(decimal) => -1m,
         Call { Method: ConstructorInfo { DeclaringType: var t }, Arguments: [Constant { Data: int lo }, Constant { Data: int mid },
             Constant { Data: int hi }, Constant { Data: int neg }, Constant { Data: int scale }] } when t == typeof(decimal)
             => new decimal(lo, mid, hi, neg != 0, (byte)scale),

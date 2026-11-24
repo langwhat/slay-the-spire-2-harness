@@ -434,7 +434,22 @@ internal sealed partial class NativeRuleText
             return HumanizeLower(getter.Name[4..]);
         }
         var active = body.Returns.Where(r => r.Conditions.All(IsCurrentRun)).ToArray();
-        return active is [var ret] && ret.Conditions.All(IsDreadTest) ? ValueText(ret.Value) : null;
+        if (active is not [var ret] || !ret.Conditions.All(IsDreadTest))
+            return null;
+        if (_expandingGetters.Count >= MaxGetterDepth || !_expandingGetters.Add(getter))
+        {
+            _getterCycleDetected = true;
+            Gap($"recursive-getter:{getter.DeclaringType?.Name}.{getter.Name}");
+            return null;
+        }
+        try
+        {
+            return ValueText(ret.Value);
+        }
+        finally
+        {
+            _expandingGetters.Remove(getter);
+        }
     }
 
     private readonly HashSet<(string Name, FieldInfo Field)> _trackedMonsterInts = [];

@@ -167,12 +167,14 @@ internal static class EnemyMechanismReader
                 var terms = new List<string>();
                 var destinations = new List<string>();
                 var allRead = true;
+                var allDestinationsKnown = true;
                 foreach (var branch in branches)
                 {
                     if (branch is null || AccessTools.Field(branch.GetType(), "id")?.GetValue(branch) is not string destination
                         || !machine.States.TryGetValue(destination, out var next))
                     {
                         text.Gap(state.Id);
+                        allDestinationsKnown = false;
                         continue;
                     }
                     var known = TryReadCondition(branch, out var condition);
@@ -190,22 +192,27 @@ internal static class EnemyMechanismReader
                     if (known && condition is null)
                         break;
                 }
-                // Without every condition, state only the reachable moves.
-                lines.Add(allRead
-                    ? $"{state.Id} (first matching branch): {string.Join("; ", terms)}"
-                    : $"{state.Id}: one of {string.Join(", ", destinations.Distinct())}");
+                // Only enumerate branch destinations when every destination in the branch table was resolved.
+                if (allDestinationsKnown && destinations.Count > 0)
+                {
+                    lines.Add(allRead
+                        ? $"{state.Id} (first matching branch): {string.Join("; ", terms)}"
+                        : $"{state.Id}: one of {string.Join(", ", destinations.Distinct())}");
+                }
             }
             else if (state is RandomBranchState random)
             {
                 var terms = new List<string>();
                 var destinations = new List<string>();
                 var allWeightsRead = true;
+                var allDestinationsKnown = true;
                 foreach (var branch in random.States)
                 {
                     if (!machine.States.TryGetValue(branch.stateId, out var next))
                     {
                         text.Gap(state.Id);
                         allWeightsRead = false;
+                        allDestinationsKnown = false;
                         continue;
                     }
                     var weight = branch.weightLambda is { } lambda ? text.ReadWeight(lambda) : null;
@@ -228,9 +235,12 @@ internal static class EnemyMechanismReader
                     destinations.Add(StateLabel(next));
                     pending.Enqueue(next);
                 }
-                lines.Add(allWeightsRead
-                    ? $"{state.Id} (eligible moves chosen by relative weight): {string.Join("; ", terms)}"
-                    : $"{state.Id}: one of {string.Join(", ", destinations.Distinct())}");
+                if (allDestinationsKnown && destinations.Count > 0)
+                {
+                    lines.Add(allWeightsRead
+                        ? $"{state.Id} (eligible moves chosen by relative weight): {string.Join("; ", terms)}"
+                        : $"{state.Id}: one of {string.Join(", ", destinations.Distinct())}");
+                }
             }
             else
                 text.Gap(state.Id);

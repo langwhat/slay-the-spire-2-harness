@@ -106,44 +106,199 @@ internal sealed partial class NativeRuleText
         return new Effect($"summon 1 random enemy from [{labels}]{exclusion}{minionText}");
     }
 
-    private List<Effect>? TryReadSpecialMove(MethodInfo method)
+    private List<Effect>? TryReadSpecialMove(MethodInfo method, NativeRuleBody body)
     {
-        // TwoTailedRat.CallForBackup: synchronizes CallForBackupCount across all TwoTailedRat enemies and summons TwoTailedRat.
+        // TwoTailedRat.CallForBackup: if a slot is empty, summons TwoTailedRat; then unconditionally syncs CallForBackupCount across all TwoTailedRat enemies.
         if (method.Name == "CallForBackup" && method.DeclaringType is { } ratType && typeof(MonsterModel).IsAssignableFrom(ratType))
         {
-            var body = Body(method);
-            var addsSelfType = body.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd)
+            var addStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CreatureCmd)
                 && s.Call.Method.Name == nameof(CreatureCmd.Add) && s.Call.Method.IsGenericMethod
                 && s.Call.Method.GetGenericArguments()[0] == ratType);
-            if (addsSelfType)
+            var addGuardedByEmptySlot = addStep is not null && addStep.Conditions.Any(c =>
+                c is { Expected: false, Value: Call { Method.Name: nameof(string.IsNullOrEmpty) } });
+            var syncSteps = body.Calls.Where(s => s.Call.Method.Name == "ForEach"
+                && s.Call.Arguments.OfType<Call>().Any(arg =>
+                    arg.Method is ConstructorInfo
+                    && arg.Arguments.OfType<Constant>().Any(c => c.Data is MethodInfo m
+                        && Body(m) is { Incomplete: false } syncBody
+                        && syncBody.Calls.Any(sc => sc.Call.Method.Name == "set_CallForBackupCount"))))
+                .ToArray();
+            var syncRunsAfterAdd = addStep is not null && syncSteps.Any(s =>
+                (s.Epoch > addStep.Epoch || (s.Epoch == addStep.Epoch && s.Order > addStep.Order))
+                && (!s.Conditions.Any(c => c.Value is Call { Method.Name: nameof(string.IsNullOrEmpty) })
+                    || s.Conditions.Any(c => c is { Expected: false, Value: Call { Method.Name: nameof(string.IsNullOrEmpty) } })));
+            var syncRunsWithoutEmptySlot = syncSteps.Any(s =>
+                !s.Conditions.Any(c => c.Value is Call { Method.Name: nameof(string.IsNullOrEmpty) })
+                || s.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: nameof(string.IsNullOrEmpty) } }));
+            if (addGuardedByEmptySlot && syncRunsAfterAdd && syncRunsWithoutEmptySlot)
             {
                 _summons.Add(ratType);
-                return [new Effect($"if an encounter slot is empty: increment shared call for backup count across all {ModelLabel(ratType)} enemies and summon {ModelLabel(ratType)}")];
+                return
+                [
+                    new Effect($"if an encounter slot is empty: summon {ModelLabel(ratType)}", AddedSummon: ratType),
+                    new Effect($"set shared call for backup count on all {ModelLabel(ratType)} enemies to 1 + highest current count"),
+                ];
             }
         }
 
-        // ThievingHopper.ThieveryMove: steals 1 card from target's draw/discard/hand via SwipePower and deals TheftDamage.
+        // ThievingHopper.ThieveryMove: steals 1 card from target's draw/discard pile using _stealPriorities via SwipePower, then deals TheftDamage.
         if (method.Name == "ThieveryMove" && method.DeclaringType is { } hopperType && typeof(MonsterModel).IsAssignableFrom(hopperType))
         {
-            var body = Body(method);
-            var stealsSwipe = body.Calls.Any(s => s.Call.Method.DeclaringType == typeof(SwipePower) && s.Call.Method.Name == "Steal");
+            var getCardsStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CardPile) && s.Call.Method.Name == "GetCards");
+            var stealStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(SwipePower) && s.Call.Method.Name == "Steal");
+            var applySwipeStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Apply));
             var execStep = body.Calls.FirstOrDefault(s => s.Call.Method.Name == "Execute" && s.Call.Method.DeclaringType?.Name == "AttackCommand");
-            if (stealsSwipe && execStep?.Call.Receiver is Call attackCall && Attack(attackCall) is { } attackEffect)
+            var attackAfterSteal = stealStep is not null && execStep is not null
+                && (execStep.Epoch > stealStep.Epoch || (execStep.Epoch == stealStep.Epoch && execStep.Order > stealStep.Order));
+            if (getCardsStep is not null && stealStep is not null && applySwipeStep is not null && attackAfterSteal
+                && execStep?.Call.Receiver is Call attackCall && Attack(attackCall) is { } attackEffect
+                && DescribeStealPriorities(hopperType) is { } priorityClause)
             {
                 _powers.Add(typeof(SwipePower));
                 return
                 [
-                    new Effect($"steal 1 card from player target's draw or discard pile (preferring unupgraded non-basic cards) and store it in {PowerLabel(typeof(SwipePower))} on self", AddedPower: typeof(SwipePower)),
+                    new Effect($"steal 1 non-Quest deck-backed card from player target's draw or discard pile ({priorityClause}) and store it in {PowerLabel(typeof(SwipePower))} on self", AddedPower: typeof(SwipePower)),
                     attackEffect,
                 ];
             }
         }
 
-        // DecimillipedeSegment.AfterAddedToRoom only staggers segment visual/initial HP parity and has no post-spawn combat hook.
-        if (method.Name == "AfterAddedToRoom" && method.DeclaringType?.Name == "DecimillipedeSegment")
-            return [];
-
         return null;
+    }
+
+    private string? DescribeStealPriorities(Type hopperType)
+    {
+        var field = hopperType.GetField("_stealPriorities", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+        if (field?.GetValue(null) is not Func<CardModel, bool>[] predicates || predicates.Length == 0)
+            return null;
+
+        var tiers = new List<string>(predicates.Length);
+        foreach (var predicate in predicates)
+        {
+            var predBody = Body(predicate.Method);
+            if (predBody.Incomplete || predBody.Returns.Count == 0)
+                return null;
+            if (DescribeStealPriorityPredicate(predBody) is not { } tier)
+                return null;
+            tiers.Add(tier);
+        }
+        return $"priority order: {string.Join(", then ", tiers)}";
+    }
+
+    private static string? DescribeStealPriorityPredicate(NativeRuleBody predBody)
+    {
+        var rarities = new List<CardRarity>();
+        Type? enchantedType = null;
+        var excludesEnchanted = false;
+        var includesEnchanted = false;
+
+        foreach (var ret in predBody.Returns)
+        {
+            if (TryTruth(ret.Value, out var constantBool) && !constantBool)
+                continue;
+            // Skip paths like `if (flag) { ... } return flag;` where the path condition already fixes `ret.Value == false`.
+            if (!TryTruth(ret.Value, out _)
+                && ret.Conditions.Any(c => !c.Expected && Key(c.Value) == Key(ret.Value)))
+                continue;
+
+            var pathTests = new List<Test>(ret.Conditions);
+            if (!TryTruth(ret.Value, out _))
+                pathTests.Add(new Test(ret.Value, true));
+
+            foreach (var rawTest in pathTests)
+            {
+                var (expr, expected) = UnwrapBooleanTest(rawTest);
+                if (expr is Operation { Operator: "isinst", Left: Call { Method.Name: "get_Enchantment" }, Right: Constant { Data: Type ench } }
+                    && typeof(EnchantmentModel).IsAssignableFrom(ench))
+                {
+                    enchantedType = ench;
+                    if (expected)
+                        includesEnchanted = true;
+                    else
+                        excludesEnchanted = true;
+                }
+                else if (expected)
+                {
+                    foreach (var rarity in FindRarityChecks(expr))
+                    {
+                        if (!rarities.Contains(rarity))
+                            rarities.Add(rarity);
+                    }
+                }
+            }
+        }
+
+        if ((rarities.Count == 0 && enchantedType is null) || (excludesEnchanted && includesEnchanted))
+            return null;
+
+        var orderedRarities = rarities.OrderBy(r => (int)r).ToArray();
+        var rarityText = orderedRarities.Length > 0 ? string.Join("/", orderedRarities) : "";
+        var enchLabel = enchantedType is not null ? ModelLabel(enchantedType) : null;
+        if (excludesEnchanted && enchLabel is not null && rarityText.Length > 0)
+            return $"non-{enchLabel} {rarityText}";
+        if (includesEnchanted && enchLabel is not null && rarityText.Length > 0)
+            return $"{rarityText} or {enchLabel}";
+        if (includesEnchanted && enchLabel is not null)
+            return enchLabel;
+        if (rarityText.Length > 0)
+            return rarityText;
+        return null;
+    }
+
+    private static (Value Expr, bool Expected) UnwrapBooleanTest(Test test)
+    {
+        var expr = test.Value;
+        var expected = test.Expected;
+        while (true)
+        {
+            if (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            else if (expr is Operation { Operator: "cgt.un", Left: var innerPos, Right: Constant { Data: 0 or null } })
+            {
+                expr = innerPos;
+            }
+            else
+            {
+                break;
+            }
+        }
+        return (expr, expected);
+    }
+
+    private static IEnumerable<CardRarity> FindRarityChecks(Value? value)
+    {
+        if (value is Operation { Operator: "ceq" or "beq", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int raw } }
+            && Enum.IsDefined(typeof(CardRarity), raw))
+        {
+            yield return (CardRarity)raw;
+            yield break;
+        }
+        if (value is Operation { Operator: "ceq" or "beq", Right: Call { Method.Name: "get_Rarity" }, Left: Constant { Data: int raw2 } }
+            && Enum.IsDefined(typeof(CardRarity), raw2))
+        {
+            yield return (CardRarity)raw2;
+            yield break;
+        }
+        if (value is Operation op)
+        {
+            foreach (var r in FindRarityChecks(op.Left))
+                yield return r;
+            if (op.Right is not null)
+                foreach (var r in FindRarityChecks(op.Right))
+                    yield return r;
+        }
+        else if (value is Call call)
+        {
+            if (call.Receiver is not null)
+                foreach (var r in FindRarityChecks(call.Receiver))
+                    yield return r;
+            foreach (var arg in call.Arguments)
+                foreach (var r in FindRarityChecks(arg))
+                    yield return r;
+        }
     }
 
     private string? DescribeSpawnOverrides(Call addCall, MethodInfo caller)
@@ -197,11 +352,26 @@ internal sealed partial class NativeRuleText
         if (value is Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
             && getter.ReturnType == typeof(bool) && getter.Name.StartsWith("get_", StringComparison.Ordinal)
             && monster is not null && getter.DeclaringType?.IsInstanceOfType(monster) == true
-            && BackingField(getter.DeclaringType, getter) is null
-            && Body(getter) is { Incomplete: false, Returns: [{ Conditions.Length: 0, Value: var computed }] }
-            && Condition(new Test(computed, expected)) is { Length: > 0 } expanded && expanded != Never)
+            && BackingField(getter.DeclaringType, getter) is null)
         {
-            return expanded;
+            if (_expandingGetters.Count >= MaxGetterDepth || !_expandingGetters.Add(getter))
+            {
+                _getterCycleDetected = true;
+                Gap($"recursive-getter:{getter.DeclaringType?.Name}.{getter.Name}");
+                return null;
+            }
+            try
+            {
+                if (Body(getter) is { Incomplete: false, Returns: [{ Conditions.Length: 0, Value: var computed }] }
+                    && Condition(new Test(computed, expected)) is { Length: > 0 } expanded && expanded != Never)
+                {
+                    return expanded;
+                }
+            }
+            finally
+            {
+                _expandingGetters.Remove(getter);
+            }
         }
 
         if (value is Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_HittableEnemies" } })
@@ -430,10 +600,10 @@ internal sealed partial class NativeRuleText
 
         var followUpClause = "";
         var stunStep = brokenBody.Calls.First(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Stun));
-        if (stunStep.Call.Arguments.LastOrDefault() is Constant { Data: string nextMoveId })
+        if (stunStep.Call.Arguments.LastOrDefault() is Constant { Data: string nextMoveId }
+            && monster is not null && ShowableMove(nextMoveId))
         {
-            if (monster is not null && ShowableMove(nextMoveId))
-                _forcedMoves.Add(nextMoveId);
+            _forcedMoves.Add(nextMoveId);
             followUpClause = $", then → {nextMoveId}";
         }
 

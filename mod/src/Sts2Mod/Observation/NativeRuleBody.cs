@@ -22,6 +22,8 @@ internal sealed class NativeRuleBody
     internal sealed record Call(MethodBase Method, Value? Receiver, Value[] Arguments) : Value;
     internal sealed record Operation(string Operator, Value Left, Value? Right = null) : Value;
     internal sealed record Assignment(Field Target, Value Assigned) : Value;
+    internal sealed record ArrayInit(Type? ElementType, Value Length, int Id) : Value;
+    internal sealed record ArrayValue(Type? ElementType, Value Length, Value[] Elements) : Value;
     internal sealed record Test(Value Value, bool Expected, int Offset = -1);
     internal sealed record Step(int Index, Call Call, Test[] Conditions, int Epoch = 0, int Order = 0);
     internal sealed record FieldStep(int Index, Assignment Assignment, Test[] Conditions, int Epoch = 0, int Order = 0);
@@ -43,6 +45,8 @@ internal sealed class NativeRuleBody
         public Dictionary<int, int> Visits { get; } = [];
         public HashSet<(int Epoch, int Index)> CumulativeVisited { get; } = [];
         public Dictionary<(int Start, int End), int> ActiveUnrolledLoops { get; } = [];
+        public Dictionary<int, Dictionary<int, Value>> ArrayElements { get; } = [];
+        public int NextArrayId;
         public List<Test> Conditions { get; } = [];
 
         public int EpochAt(int instructionIndex)
@@ -56,7 +60,7 @@ internal sealed class NativeRuleBody
 
         public Path Fork(int index)
         {
-            var copy = new Path { Index = index, StepOrder = StepOrder };
+            var copy = new Path { Index = index, StepOrder = StepOrder, NextArrayId = NextArrayId };
             copy.Stack.AddRange(Stack);
             copy.Conditions.AddRange(Conditions);
             foreach (var (key, value) in Locals)
@@ -69,7 +73,30 @@ internal sealed class NativeRuleBody
                 copy.CumulativeVisited.Add(item);
             foreach (var (key, value) in ActiveUnrolledLoops)
                 copy.ActiveUnrolledLoops.Add(key, value);
+            foreach (var (arrayId, elems) in ArrayElements)
+                copy.ArrayElements.Add(arrayId, new Dictionary<int, Value>(elems));
             return copy;
+        }
+
+        public Value Materialize(Value value) => value switch
+        {
+            ArrayInit init => MaterializeArray(init),
+            LocalAddress addr => Materialize(Locals.GetValueOrDefault(addr.Slot, Missing)),
+            _ => value,
+        };
+
+        private Value MaterializeArray(ArrayInit init)
+        {
+            if (init.Length is not Constant { Data: int len } || len < 0 || len > 16
+                || !ArrayElements.TryGetValue(init.Id, out var elems)
+                || elems.Count == 0)
+            {
+                return new Operation("newarr", init.Length, new Constant(init.ElementType));
+            }
+            var values = new Value[len];
+            for (var i = 0; i < len; i++)
+                values[i] = elems.TryGetValue(i, out var item) ? Materialize(item) : Missing;
+            return new ArrayValue(init.ElementType, init.Length, values);
         }
 
         public Value Pop()
@@ -182,8 +209,8 @@ internal sealed class NativeRuleBody
                         continue;
                     }
                     for (var i = 0; i < args.Length; i++)
-                        args[i] = path.Deref(args[i]);
-                    var call = new Call(target, receiver, args);
+                        args[i] = path.Materialize(path.Deref(args[i]));
+                    var call = new Call(target, receiver is not null ? path.Materialize(receiver) : null, args);
                     Calls.Add(new Step(index, call, [.. path.Conditions], epoch, path.StepOrder++));
                     if (target is MethodInfo { ReturnType: var type } && type == typeof(void))
                         continue;
@@ -335,9 +362,21 @@ internal sealed class NativeRuleBody
                                     path.Index = destination;
                                 continue;
                             }
+                            if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
+                                && limit is Operation { Operator: "ldlen" })
+                            {
+                                // Array foreach loop (`for (int i = 0; i < arr.Length; i++)`): run one representative iteration.
+                                if (!alreadyIncremented)
+                                {
+                                    pending.Push(path.Fork(path.Index));
+                                    path.Index = destination;
+                                }
+                                continue;
+                            }
                         }
-                        if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
-                            && counter.Left is Operation { Operator: "add", Right: Constant { Data: 1 } })
+                        if (visits == 1 && counter.Left is Operation { Operator: "add", Right: Constant { Data: 1 } }
+                            && (Loops.Any(loop => loop.Start == destination && loop.End == index)
+                                || limit is Operation { Operator: "ldlen" }))
                             continue;
                     }
                     if (TryTruth(condition, out var truth, isMonsterMove))
@@ -364,7 +403,7 @@ internal sealed class NativeRuleBody
                 if (code == OpCodes.Ret)
                 {
                     if (stateMachine is null && original.ReturnType != typeof(void))
-                        Returns.Add(new Result(path.Pop(), [.. path.Conditions]));
+                        Returns.Add(new Result(path.Materialize(path.Pop()), [.. path.Conditions]));
                     Terminals.Add(new Terminal([.. path.Conditions], path.CumulativeVisited.ToHashSet(), true));
                     break;
                 }
@@ -440,24 +479,49 @@ internal sealed class NativeRuleBody
                 }
                 else if (code.Name?.StartsWith("conv.", StringComparison.Ordinal) == true)
                     path.Stack.Add(new Operation(code.Name, path.Pop()));
-                // Arrays only carry results between calls; their elements are not tracked.
                 else if (code == OpCodes.Newarr)
-                    path.Stack.Add(new Operation("newarr", path.Pop(), new Constant(operand)));
+                {
+                    var len = path.Pop();
+                    var arrId = ++path.NextArrayId;
+                    path.ArrayElements[arrId] = [];
+                    path.Stack.Add(new ArrayInit(operand as Type, len, arrId));
+                }
                 else if (code == OpCodes.Ldlen)
                 {
                     var arr = path.Pop();
-                    path.Stack.Add(arr is Operation { Operator: "newarr", Left: var len } ? len : new Operation("ldlen", arr));
+                    path.Stack.Add(arr switch
+                    {
+                        ArrayInit { Length: var initLen } => initLen,
+                        ArrayValue { Length: var valLen } => valLen,
+                        Operation { Operator: "newarr", Left: var len } => len,
+                        _ => new Operation("ldlen", arr),
+                    });
                 }
                 else if (code.Name?.StartsWith("stelem", StringComparison.Ordinal) == true)
                 {
-                    _ = path.Pop();
-                    _ = path.Pop();
-                    _ = path.Pop();
+                    var elemVal = path.Pop();
+                    var elemIdx = path.Pop();
+                    var arr = path.Pop();
+                    if (arr is ArrayInit init && elemIdx is Constant { Data: int idx } && idx >= 0
+                        && path.ArrayElements.TryGetValue(init.Id, out var slots))
+                    {
+                        slots[idx] = elemVal;
+                    }
                 }
                 else if (code.Name?.StartsWith("ldelem", StringComparison.Ordinal) == true)
                 {
                     var element = path.Pop();
-                    path.Stack.Add(new Operation(code.Name, path.Pop(), element));
+                    var arr = path.Pop();
+                    if (arr is ArrayInit init && element is Constant { Data: int idx }
+                        && path.ArrayElements.TryGetValue(init.Id, out var slots)
+                        && slots.TryGetValue(idx, out var stored))
+                    {
+                        path.Stack.Add(stored);
+                    }
+                    else
+                    {
+                        path.Stack.Add(new Operation(code.Name, arr, element));
+                    }
                 }
                 else if (code != OpCodes.Nop && code.OpCodeType != OpCodeType.Prefix)
                 {

@@ -404,7 +404,7 @@ internal static class ItemMechanismReader
             && dieBody.Returns.Any(r => TryTruth(r.Value, out var dies) && !dies))
         {
             var genClause = cannotGenerate ? "; cannot be randomly generated in combat" : "";
-            return $"Automatic death prevention: triggers before ShouldDieLate relics when owner would die (unless death prevention is bypassed), consuming this potion{genClause}.";
+            return $"Automatic death prevention: triggers before late-stage death-prevention relics when owner would die (unless death prevention is bypassed), consuming this potion{genClause}.";
         }
 
         if (type.GetMethod("OnUse", DeclaredInstance) is { } onUse)

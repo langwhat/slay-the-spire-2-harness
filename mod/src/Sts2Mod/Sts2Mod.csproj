@@ -30,6 +30,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Sts2Mod.Native.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="mod_manifest.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

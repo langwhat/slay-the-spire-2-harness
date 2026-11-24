@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Ascension;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
@@ -18,15 +19,42 @@ internal static class EventMechanismReader
 {
     private const BindingFlags DeclaredInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
 
-    private sealed record ActCacheKey(int AscensionLevel, GameMode Mode);
-    private sealed record EventCacheKey(string EventId, string Language, bool IsFakeMerchant, bool IsFinished, string OptionsSignature);
-
     private static readonly PropertyInfo? OptionChosen = typeof(EventOption).GetProperty(
         "OnChosen",
         BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-    private static readonly ConcurrentDictionary<ActCacheKey, string?> ActCache = new();
-    private static readonly ConcurrentDictionary<EventCacheKey, string?> EventCache = new();
+    private static readonly ConcurrentDictionary<bool, string?> ActCache = new();
+    private static readonly ConcurrentDictionary<MethodInfo, NativeRuleBody> BodyCache = new();
     private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
+
+    private static void PushWarning(string message)
+    {
+        if (MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)
+            Godot.GD.PushWarning(message);
+    }
+
+    private static NativeRuleBody ReadBody(MethodInfo method)
+        => BodyCache.GetOrAdd(method, static m => NativeRuleBody.Read(m));
+
+    internal static bool HasWearyTraveler(RunState run)
+    {
+        if (RunManager.Instance.IsInProgress)
+            return RunManager.Instance.HasAscension(AscensionLevel.WearyTraveler);
+        return HasWearyTraveler(run.AscensionLevel, run.GameMode);
+    }
+
+    internal static bool HasWearyTraveler(int ascensionLevel, GameMode gameMode)
+    {
+        if (gameMode == GameMode.Blitz)
+        {
+            for (var level = 1; level <= ascensionLevel; level++)
+            {
+                if (AscensionHelper.GetLevelForBlitz(level) == AscensionLevel.WearyTraveler)
+                    return true;
+            }
+            return false;
+        }
+        return ascensionLevel >= (int)AscensionLevel.WearyTraveler;
+    }
 
     public static string? ReadActTransition(RunState run)
     {
@@ -35,18 +63,18 @@ internal static class EventMechanismReader
             if (run.CurrentActIndex + 1 >= run.Acts.Count)
                 return null;
 
-            var key = new ActCacheKey(run.AscensionLevel, run.GameMode);
-            if (ActCache.TryGetValue(key, out var cached))
+            var hasWearyTraveler = HasWearyTraveler(run);
+            if (ActCache.TryGetValue(hasWearyTraveler, out var cached))
                 return cached;
 
-            var text = DescribeActTransition(run.AscensionLevel >= (int)AscensionLevel.WearyTraveler);
-            ActCache[key] = text;
+            var text = DescribeActTransition(hasWearyTraveler);
+            ActCache[hasWearyTraveler] = text;
             return text;
         }
         catch (Exception error)
         {
             if (LoggedGaps.TryAdd("AncientEventModel.BeforeEventStarted", 0))
-                Godot.GD.PushWarning($"[sts2agent] Act transition mechanism unavailable: {error.Message}");
+                PushWarning($"[sts2agent] Act transition mechanism unavailable: {error.Message}");
             return null;
         }
     }
@@ -114,16 +142,8 @@ internal static class EventMechanismReader
         var eventId = activeEvent.Id.ToString();
         try
         {
-            var language = LocManager.Instance?.Language ?? "eng";
-            var signature = string.Join("|", visibleOptions.Select(item =>
-            {
-                var del = OptionChosen?.GetValue(item.Option) as Delegate;
-                return $"{item.Title}:{item.Option.IsProceed}:{del?.Method.MetadataToken ?? 0}";
-            }));
-            var cacheKey = new EventCacheKey(eventId, language, isFakeMerchant, activeEvent.IsFinished, signature);
-            if (EventCache.TryGetValue(cacheKey, out var cached))
-                return cached;
-
+            // Method IL bodies are cached by MethodInfo; dynamic option values are always rendered
+            // against the live activeEvent instance so stateful events (e.g. AbyssalBaths) stay fresh.
             var lines = new List<string>();
             if (isFakeMerchant && DescribeFakeMerchant(activeEvent.GetType()) is { } merchantLine)
                 lines.Add(merchantLine);
@@ -142,7 +162,7 @@ internal static class EventMechanismReader
                     {
                         var gapKey = $"{eventId}:{onChosen.Method.Name}:{gap}";
                         if (LoggedGaps.TryAdd(gapKey, 0))
-                            Godot.GD.PushWarning($"[sts2agent] Unresolved native event option rule for {gapKey}");
+                            PushWarning($"[sts2agent] Unresolved native event option rule for {gapKey}");
                         continue;
                     }
 
@@ -151,14 +171,12 @@ internal static class EventMechanismReader
                 }
             }
 
-            var result = lines.Count > 0 ? string.Join("\n", lines) : null;
-            EventCache[cacheKey] = result;
-            return result;
+            return lines.Count > 0 ? string.Join("\n", lines) : null;
         }
         catch (Exception error)
         {
             if (LoggedGaps.TryAdd(eventId, 0))
-                Godot.GD.PushWarning($"[sts2agent] Event mechanism unavailable for {eventId}: {error.Message}");
+                PushWarning($"[sts2agent] Event mechanism unavailable for {eventId}: {error.Message}");
             return null;
         }
     }
@@ -266,50 +284,69 @@ internal static class EventMechanismReader
         return DescribeOptionMethod(activeEvent, option, method);
     }
 
-    private static (string? Summary, string? Gap) DescribeOptionMethod(
+    internal static (string? Summary, string? Gap) DescribeOptionMethod(
         EventModel activeEvent,
         EventOption? option,
         MethodInfo method,
         int depth = 0)
     {
-        var body = NativeRuleBody.Read(method);
+        var body = ReadBody(method);
         if (body.Incomplete)
             return (null, "incomplete");
 
         var steps = new List<string>();
         var hasSelection = false;
-        var hasUnresolvedOperand = false;
         var usesRandom = body.Calls.Any(s => s.Call.Method.DeclaringType?.Name == "Rng"
             && s.Call.Method.Name is "NextFloat" or "NextDouble" or "NextInt" or "NextBool" or "NextItem");
 
         foreach (var group in body.Calls.GroupBy(s => (s.Epoch, s.Index))
             .OrderBy(g => (g.Key.Epoch, g.Max(s => s.Order), g.Key.Index)))
         {
-            var call = group.First().Call;
+            var distinctCalls = group.Select(s => s.Call).DistinctBy(c => c.Method).ToArray();
+            if (distinctCalls.Length != 1)
+                return (null, "ambiguous-call-group");
+
+            var call = distinctCalls[0];
             var declaring = call.Method.DeclaringType;
             var name = call.Method.Name;
             var generic = call.Method.IsGenericMethod ? call.Method.GetGenericArguments()[0] : null;
 
-            if (NativeRuleText.IsPresentationCall(call.Method)
-                || declaring?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
-                || declaring == typeof(Enumerable)
-                || call.Method is ConstructorInfo
-                || name.StartsWith("get_", StringComparison.Ordinal)
-                || name is "L10NLookup" or "ToList" or "FirstOrDefault" or "MoveNext" or "GetEnumerator"
-                    or "ToMutable" or "CreateCard" or "PreviewCardPileAdd" or "WithFlags" or "ForNonCombatWithUniformOdds"
-                    or "ForNonCombatWithDefaultOdds" or "Enchantment" or "Card" or "Relic" or "Potion" or "ToStringAndClear"
-                    or "Preview" or "CustomScaledWait" or "CloneCard" or "CardPool" or "PotionPool" or "GetUnlockedPotions"
-                    or "GetUnlockedCards" or "CreateForReward")
+            if (IsBenignEventHelperCall(call, activeEvent.GetType()))
+                continue;
+
+            if (typeof(EventModel).IsAssignableFrom(declaring)
+                && name is "SetEventFinished" or "Done" or "SetEventState")
             {
                 continue;
             }
 
+            if (typeof(Delegate).IsAssignableFrom(declaring) || name == "Invoke")
+                return (null, $"unresolved-delegate:{declaring?.Name}.{name}");
+
+            if (declaring == activeEvent.GetType() && call.Method is MethodInfo pureHelper && pureHelper != method
+                && pureHelper.ReturnType != typeof(Task) && pureHelper.ReturnType != typeof(void)
+                && !pureHelper.ContainsGenericParameters && !pureHelper.IsGenericMethod)
+            {
+                var pureBody = ReadBody(pureHelper);
+                if (!pureBody.Incomplete && pureBody.Writes.Count == 0 && pureBody.FieldSteps.Count == 0
+                    && !pureBody.Calls.Any(s => IsGameplaySideEffectCall(s.Call)))
+                {
+                    continue;
+                }
+            }
+
             var conditionalOnSelection = hasSelection && group.All(s => s.Conditions.Any(t => MentionsCardSelection(t.Value)));
 
-            if (declaring == activeEvent.GetType() && call.Method is MethodInfo helper && helper != method
-                && !helper.ContainsGenericParameters && !helper.IsGenericMethod
-                && helper.ReturnType == typeof(Task) && depth < 1)
+            // Reject any gameplay call gated by a non-trivial condition (such as dish checks, RNG branches,
+            // or dynamic state checks) unless every terminal execution path reaches this call unconditionally.
+            var isUnconditional = body.Terminals.Count > 0 && body.Terminals.All(t => t.Visited.Contains(group.Key));
+            if (!isUnconditional && !AllConditionsAreBenignGuards(group))
+                return (null, $"conditional-effect:{declaring?.Name}.{name}");
+
+            if (declaring == activeEvent.GetType() && call.Method is MethodInfo helper && helper != method)
             {
+                if (helper.ContainsGenericParameters || helper.IsGenericMethod || helper.ReturnType != typeof(Task) || depth >= 1)
+                    return (null, $"unresolved-helper:{helper.Name}");
                 var (nested, nestedGap) = DescribeOptionMethod(activeEvent, option, helper, depth + 1);
                 if (nestedGap is not null)
                     return (null, nestedGap);
@@ -372,6 +409,7 @@ internal static class EventMechanismReader
                     steps.Add(maxHpText is not null ? $"lose {maxHpText} Max HP" : "lose Max HP");
                     continue;
                 }
+                return (null, $"unresolved-cmd:CreatureCmd.{name}");
             }
 
             if (declaring == typeof(PlayerCmd))
@@ -388,6 +426,7 @@ internal static class EventMechanismReader
                     steps.Add(goldText is not null ? $"lose {goldText} Gold" : "lose Gold");
                     continue;
                 }
+                return (null, $"unresolved-cmd:PlayerCmd.{name}");
             }
 
             if (declaring == typeof(PotionCmd))
@@ -402,6 +441,7 @@ internal static class EventMechanismReader
                     steps.Add("obtain a potion");
                     continue;
                 }
+                return (null, $"unresolved-cmd:PotionCmd.{name}");
             }
 
             if (declaring == typeof(CardSelectCmd))
@@ -462,6 +502,7 @@ internal static class EventMechanismReader
                     }
                     continue;
                 }
+                return (null, $"unresolved-cmd:CardPileCmd.{name}");
             }
 
             if (declaring == typeof(CardCmd))
@@ -483,11 +524,30 @@ internal static class EventMechanismReader
                         steps.Add("transform card(s) in deck into random card(s)");
                     continue;
                 }
-                if (name == "Enchant" && !hasSelection)
+                if (name == nameof(CardCmd.TransformTo))
                 {
-                    steps.Add("enchant card(s) in deck");
+                    var targetType = generic is not null && typeof(CardModel).IsAssignableFrom(generic)
+                        ? generic
+                        : ExtractSingleCardType(call.Arguments.ElementAtOrDefault(1));
+                    if (targetType is not null)
+                    {
+                        steps.Add($"transform {(hasSelection ? "chosen card" : "card(s)")} into {NativeRuleText.ModelLabel(targetType)}");
+                        continue;
+                    }
+                    return (null, "unresolved-transform-target");
+                }
+                if (name == "Enchant")
+                {
+                    if (!hasSelection)
+                    {
+                        var enchLabel = generic is not null && typeof(EnchantmentModel).IsAssignableFrom(generic)
+                            ? $" with {NativeRuleText.ModelLabel(generic)}"
+                            : "";
+                        steps.Add($"enchant card(s) in deck{enchLabel}");
+                    }
                     continue;
                 }
+                return (null, $"unresolved-cmd:CardCmd.{name}");
             }
 
             if (declaring == typeof(RelicCmd))
@@ -505,6 +565,7 @@ internal static class EventMechanismReader
                     steps.Add("lose/remove a relic");
                     continue;
                 }
+                return (null, $"unresolved-cmd:RelicCmd.{name}");
             }
 
             if (declaring == typeof(RewardsCmd) && name == nameof(RewardsCmd.OfferCustom))
@@ -531,17 +592,20 @@ internal static class EventMechanismReader
                         ? generic
                         : FindEncounterInCall(call);
                     steps.Add(encType is not null
-                        ? $"enter event combat ({encType.Name})"
+                        ? $"enter event combat ({NativeRuleText.ModelLabel(encType)})"
                         : "enter event combat");
                     continue;
                 }
+                return (null, $"unresolved-event-call:{name}");
             }
+
+            // Fail closed on any remaining gameplay command or mutating model call.
+            if (IsGameplaySideEffectCall(call))
+                return (null, $"unresolved-call:{declaring?.Name}.{name}");
         }
 
         if (steps.Count == 0)
             return (null, null);
-        if (hasUnresolvedOperand)
-            return (null, "unresolved-operand");
 
         var distinctSteps = new List<string>(steps.Count);
         foreach (var step in steps)
@@ -554,6 +618,94 @@ internal static class EventMechanismReader
             ? "random outcome: "
             : "";
         return (prefix + string.Join(", then ", distinctSteps), null);
+    }
+
+    private static bool IsBenignEventHelperCall(Call call, Type eventType)
+    {
+        var declaring = call.Method.DeclaringType;
+        var name = call.Method.Name;
+        if (NativeRuleText.IsPresentationCall(call.Method)
+            || declaring?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
+            || declaring == typeof(Enumerable)
+            || declaring == typeof(Array)
+            || call.Method is ConstructorInfo
+            || name.StartsWith("get_", StringComparison.Ordinal)
+            || name.StartsWith("op_", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (declaring == eventType && name.StartsWith("set_", StringComparison.Ordinal))
+            return true;
+
+        if (declaring?.Name is "DynamicVar" or "DamageVar" or "HealVar" or "MaxHpVar" or "GoldVar" or "StringVar" or "IntVar"
+            && name is "set_BaseValue" or "set_StringValue" or "set_IntValue")
+        {
+            return true;
+        }
+
+        if (declaring?.Namespace == "System.Collections.Generic" && name is "Add" or "Remove" or "Contains" or "GetEnumerator" or "Clear")
+            return true;
+
+        if (name is "L10NLookup" or "ToList" or "ToArray" or "FirstOrDefault" or "First" or "MoveNext" or "GetEnumerator" or "Dispose"
+            or "ToMutable" or "CreateCard" or "PreviewCardPileAdd" or "WithFlags" or "ForNonCombatWithUniformOdds"
+            or "ForNonCombatWithDefaultOdds" or "Enchantment" or "Card" or "Relic" or "Potion" or "Encounter" or "ToStringAndClear"
+            or "Preview" or "CustomScaledWait" or "CloneCard" or "CardPool" or "PotionPool" or "GetUnlockedPotions"
+            or "GetUnlockedCards" or "CreateForReward" or "GetPile" or "GetCards" or "GetFormattedText" or "NextFloat"
+            or "NextDouble" or "NextInt" or "NextBool" or "NextItem" or "ThatDoesDamage" or "AddChildSafely"
+            or "Create" or "FromCardWithCardHoverTips" or "FromEnchantment" or "FromRelic" or "Static")
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsGameplaySideEffectCall(Call call)
+    {
+        var declaring = call.Method.DeclaringType;
+        if (declaring is null)
+            return true;
+        if (declaring.Namespace == typeof(CreatureCmd).Namespace)
+            return declaring.Name is not ("SfxCmd" or "VfxCmd" or "TalkCmd" or "ThinkCmd" or "Cmd");
+        if (typeof(AbstractModel).IsAssignableFrom(declaring)
+            || declaring.Name is "Player" or "Creature" or "CardPile" or "RunState" or "IRunState")
+        {
+            return call.Method is MethodInfo mi && (mi.ReturnType == typeof(void) || mi.ReturnType == typeof(Task));
+        }
+        return false;
+    }
+
+    private static bool AllConditionsAreBenignGuards(IGrouping<(int Epoch, int Index), Step> group)
+    {
+        foreach (var step in group)
+        {
+            foreach (var cond in step.Conditions)
+            {
+                if (!IsBenignEventGuard(cond))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsBenignEventGuard(Test cond)
+    {
+        if (MentionsCardSelection(cond.Value))
+            return true;
+        // Null/non-empty checks on rolled/selected candidates (e.g. `if (cardModel != null)`, `if (list.Count != 0)`, `if (cards.Any())`).
+        return cond.Value switch
+        {
+            Call { Method.Name: nameof(Enumerable.Any) or nameof(Enumerable.Count) or "get_Count" } => true,
+            Operation { Operator: "ceq" or "cgt" or "cgt.un" or "clt" or "clt.un" or "beq" or "bne.un",
+                Left: Call { Method.Name: "get_Count" or nameof(Enumerable.Count) or nameof(Enumerable.Any) },
+                Right: Constant { Data: 0 } } => true,
+            Call { Method.Name: "NextItem" or "FirstOrDefault" or "CreateCard" or "ToMutable" } => true,
+            Operation { Operator: "ceq" or "beq" or "bne.un",
+                Left: Call { Method.Name: "NextItem" or "FirstOrDefault" or "CreateCard" or "ToMutable" },
+                Right: Constant { Data: null } } => true,
+            _ => false,
+        };
     }
 
     private static bool MentionsCloneCard(Value? value) => value switch

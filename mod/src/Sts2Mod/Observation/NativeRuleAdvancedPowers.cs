@@ -14,16 +14,19 @@ namespace Sts2Mod.Observation;
 internal sealed partial class NativeRuleText
 {
     private readonly HashSet<Type> _generatedCards = [];
-    private readonly Dictionary<Type, List<PropertyInfo>> _summonTrueFlags = [];
+    private readonly Dictionary<Type, List<FieldInfo>> _summonTrueFlags = [];
     private readonly Dictionary<Type, HashSet<string>> _mutableDynamicKeys = [];
     private readonly Dictionary<Type, HashSet<FieldInfo>> _gameplayFields = [];
+    private readonly HashSet<MethodInfo> _expandingGetters = [];
+    private bool _getterCycleDetected;
+    private const int MaxGetterDepth = 4;
 
     internal void ConfigureSummon(MonsterModel copy)
     {
-        if (!_summonTrueFlags.TryGetValue(copy.GetType(), out var properties))
+        if (!_summonTrueFlags.TryGetValue(copy.GetType(), out var fields))
             return;
-        foreach (var property in properties)
-            property.SetValue(copy, true);
+        foreach (var field in fields)
+            field.SetValue(copy, true);
     }
 
     private HashSet<string> MutableDynamicKeys(Type power)

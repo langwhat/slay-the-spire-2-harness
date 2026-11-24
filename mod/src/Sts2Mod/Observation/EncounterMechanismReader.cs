@@ -16,7 +16,7 @@ internal static class EncounterMechanismReader
 
     private sealed record CacheKey(string EncounterId, int AscensionLevel, GameMode Mode, string Language);
 
-    private sealed record IntSetter(PropertyInfo Property, int? ConstantValue, Call? RngSource, int RngOffset, int SampleCount);
+    private sealed record IntSetter(PropertyInfo Property, int? ConstantValue, Call? RngSource, int RngOffset, int[]? ExactDomain);
 
     private sealed record SpawnSpec(Type MonsterType, IReadOnlyList<IntSetter> Setters);
 
@@ -110,8 +110,16 @@ internal static class EncounterMechanismReader
 
             if (ruleText is not null && spawn.Setters.FirstOrDefault(setter => setter.ConstantValue is null) is { } rngSetter)
             {
-                var isSequential = rngSetter.RngSource is not null && sequentialRngGroups.Contains((rngSetter.RngSource, rngSetter.Property.Name));
-                ruleText = ReplaceFirstMoveWithRngVariants(spawn, rngSetter.Property, rngSetter.SampleCount, isSequential, ruleText, gaps);
+                if (rngSetter.ExactDomain is { Length: > 0 } exactDomain)
+                {
+                    var isSequential = rngSetter.RngSource is not null && sequentialRngGroups.Contains((rngSetter.RngSource, rngSetter.Property.Name));
+                    ruleText = ReplaceFirstMoveWithRngVariants(spawn, rngSetter.Property, exactDomain, isSequential, ruleText, gaps);
+                }
+                else
+                {
+                    gaps.Add($"GenerateMonsters/first-move-domain:{spawn.MonsterType.Name}.{rngSetter.Property.Name}");
+                    ruleText = StripFirstMoveLine(ruleText);
+                }
             }
 
             described.Add(new SpawnDescribe(
@@ -173,15 +181,15 @@ internal static class EncounterMechanismReader
 
                 if (assigned is Constant { Data: int constantInt })
                 {
-                    setters.Add(new IntSetter(property, constantInt, null, 0, 1));
+                    setters.Add(new IntSetter(property, constantInt, null, 0, null));
                 }
-                else if (TryReadRngOffset(assigned, out var rngSource, out var offset, out var sampleCount))
+                else if (TryReadExactRngDomain(assigned, out var rngSource, out var offset, out var exactDomain))
                 {
-                    setters.Add(new IntSetter(property, null, rngSource, offset, sampleCount));
+                    setters.Add(new IntSetter(property, null, rngSource, offset, exactDomain));
                 }
                 else if (DependsOnRng(assigned))
                 {
-                    setters.Add(new IntSetter(property, null, null, 0, ExtractRngUpperBound(assigned) ?? 6));
+                    setters.Add(new IntSetter(property, null, null, 0, null));
                 }
                 else
                 {
@@ -245,7 +253,7 @@ internal static class EncounterMechanismReader
     private static string ReplaceFirstMoveWithRngVariants(
         SpawnSpec spawn,
         PropertyInfo property,
-        int sampleCount,
+        int[] exactDomain,
         bool sequentialAcrossCopies,
         string baselineText,
         HashSet<string> gaps)
@@ -255,29 +263,41 @@ internal static class EncounterMechanismReader
             return baselineText;
 
         var firstMoves = new List<string>();
-        var upperBound = Math.Clamp(sampleCount, 1, 12);
-        for (var candidate = 0; candidate < upperBound; candidate++)
+        foreach (var candidate in exactDomain)
         {
             var sample = CreateConfiguredMonster(spawn.MonsterType, spawn.Setters, (property, candidate));
             var (sampleText, sampleGaps) = EnemyMechanismReader.Describe(sample);
             foreach (var gap in sampleGaps)
                 gaps.Add($"{spawn.MonsterType.Name}/{gap}");
             if (sampleText is null)
-                continue;
+                return StripFirstMoveLine(baselineText);
             var firstLine = sampleText.Split('\n')[0];
             if (!firstLine.StartsWith(FirstMovePrefix, StringComparison.Ordinal))
-                return baselineText;
+                return StripFirstMoveLine(baselineText);
             var moveId = firstLine[FirstMovePrefix.Length..];
             if (!firstMoves.Contains(moveId, StringComparer.Ordinal))
                 firstMoves.Add(moveId);
         }
 
-        if (firstMoves.Count <= 1)
-            return baselineText;
+        if (firstMoves.Count == 0)
+            return StripFirstMoveLine(baselineText);
+        if (firstMoves.Count == 1)
+        {
+            lines[0] = $"First move: {firstMoves[0]}";
+            return string.Join("\n", lines);
+        }
 
         var qualifier = sequentialAcrossCopies ? "distinct initial moves across copies from" : "one of";
         lines[0] = $"First move: {qualifier} {string.Join(", ", firstMoves)}";
         return string.Join("\n", lines);
+    }
+
+    private static string StripFirstMoveLine(string ruleText)
+    {
+        var lines = ruleText.Split('\n');
+        if (lines.Length == 0 || !lines[0].StartsWith(FirstMovePrefix, StringComparison.Ordinal))
+            return ruleText;
+        return string.Join("\n", lines.Skip(1));
     }
 
     private static string FormatLineup(IReadOnlyList<SpawnDescribe> described)
@@ -370,45 +390,52 @@ internal static class EncounterMechanismReader
         _ => value,
     };
 
-    private static bool TryReadRngOffset(Value value, out Call? rngSource, out int offset, out int sampleCount)
+    private const int MaxExactDomainSize = 32;
+
+    internal static bool TryReadExactRngDomain(Value value, out Call? rngSource, out int offset, out int[] exactDomain)
     {
         rngSource = null;
         offset = 0;
-        sampleCount = 6;
+        exactDomain = [];
         switch (value)
         {
             case Call { Method.Name: "NextInt", Receiver: Call { Method.Name: "get_Rng" } } rngCall:
                 rngSource = rngCall;
-                if (rngCall.Arguments is [Constant { Data: int maxExclusive }] && maxExclusive > 0)
-                    sampleCount = maxExclusive;
-                else if (rngCall.Arguments is [Constant { Data: int minInclusive }, Constant { Data: int upperExclusive }] && upperExclusive > minInclusive)
-                    sampleCount = upperExclusive;
+                if (rngCall.Arguments is [Constant { Data: int maxExclusive }] && maxExclusive > 0 && maxExclusive <= MaxExactDomainSize)
+                {
+                    exactDomain = Enumerable.Range(0, maxExclusive).ToArray();
+                    return true;
+                }
+                if (rngCall.Arguments is [Constant { Data: int minInclusive }, Constant { Data: int upperExclusive }]
+                    && upperExclusive > minInclusive && (upperExclusive - minInclusive) <= MaxExactDomainSize)
+                {
+                    exactDomain = Enumerable.Range(minInclusive, upperExclusive - minInclusive).ToArray();
+                    return true;
+                }
+                return false;
+            case Call { Method.Name: "NextBool", Receiver: Call { Method.Name: "get_Rng" } } boolCall:
+                rngSource = boolCall;
+                exactDomain = [0, 1];
                 return true;
             case Operation { Operator: "add", Left: var left, Right: Constant { Data: int delta } }
-                when TryReadRngOffset(left, out rngSource, out var innerOffset, out sampleCount):
+                when TryReadExactRngDomain(left, out rngSource, out var innerOffset, out var innerDomain):
                 offset = innerOffset + delta;
-                sampleCount = Math.Max(sampleCount, offset + 1);
+                exactDomain = innerDomain.Select(v => v + delta).Distinct().ToArray();
+                return true;
+            case Operation { Operator: "sub", Left: var left, Right: Constant { Data: int subDelta } }
+                when TryReadExactRngDomain(left, out rngSource, out var innerSubOffset, out var innerSubDomain):
+                offset = innerSubOffset - subDelta;
+                exactDomain = innerSubDomain.Select(v => v - subDelta).Distinct().ToArray();
                 return true;
             case Operation { Operator: "rem", Left: var left, Right: Constant { Data: int modulus } }
-                when modulus > 0 && TryReadRngOffset(left, out rngSource, out var innerOffset, out _):
-                offset = ((innerOffset % modulus) + modulus) % modulus;
-                sampleCount = modulus;
+                when modulus > 0 && TryReadExactRngDomain(left, out rngSource, out var innerModOffset, out var innerModDomain):
+                offset = ((innerModOffset % modulus) + modulus) % modulus;
+                exactDomain = innerModDomain.Select(v => v % modulus).Distinct().ToArray();
                 return true;
             default:
                 return false;
         }
     }
-
-    private static int? ExtractRngUpperBound(Value? value) => value switch
-    {
-        Operation { Operator: "rem", Right: Constant { Data: int modulus } } when modulus > 0 => modulus,
-        Call { Method.Name: "NextInt", Arguments: [Constant { Data: int maxExclusive }] } when maxExclusive > 0 => maxExclusive,
-        Call { Method.Name: "NextInt", Arguments: [Constant { Data: int minInc }, Constant { Data: int maxExc }] } when maxExc > minInc => maxExc,
-        Call { Method.Name: "NextBool" } => 2,
-        Operation op => ExtractRngUpperBound(op.Left) ?? ExtractRngUpperBound(op.Right),
-        Call call => call.Arguments.Select(ExtractRngUpperBound).FirstOrDefault(v => v is not null) ?? ExtractRngUpperBound(call.Receiver),
-        _ => null,
-    };
 
     private static bool DependsOnRng(Value? value) => value switch
     {

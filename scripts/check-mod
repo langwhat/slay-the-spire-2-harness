@@ -34,6 +34,7 @@ fi
 if [ -n "$GAME_DIR" ]; then
     "$DOTNET" build mod/src/Sts2Mod/Sts2Mod.csproj -c Release --nologo "-p:GameDir=$GAME_DIR"
     "$DOTNET" build mod/tools/NativeTemplate/Mod/NativeTemplate.csproj -c Release --nologo "-p:GameDir=$GAME_DIR"
+    "$DOTNET" test mod/tests/Sts2Mod.Native.Tests/Sts2Mod.Native.Tests.csproj -c Release --nologo "-p:GameDir=$GAME_DIR"
 else
     echo "Skipped game-assembly Mod builds (sts2.dll not found; set STS2_GAME_DIR to verify)."
 fi

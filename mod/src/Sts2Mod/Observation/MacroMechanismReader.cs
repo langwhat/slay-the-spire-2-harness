@@ -1,6 +1,9 @@
 using System.Globalization;
+using System.Reflection;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Hooks;
 using MegaCrit.Sts2.Core.Models;
 
 namespace Sts2Mod.Observation;
@@ -13,16 +16,48 @@ internal static class MacroMechanismReader
     public const string OstyRoutingId = "MACRO.OSTY_DAMAGE_ROUTING";
     public const string OrbQueueRuleId = "MACRO.ORB_QUEUE";
 
+    private static readonly FieldInfo? MerchantEntryRawCost = AccessTools.Field(typeof(MerchantEntry), "_cost");
+
     public static string ReadShopRemoval(Player player, MerchantCardRemovalEntry removalEntry)
     {
         var increase = MerchantCardRemovalEntry.PriceIncrease;
         var used = player.ExtraFields.CardShopRemovalsUsed;
         var current = removalEntry.Cost;
-        var baseCost = Math.Max(0, current - increase * used);
-        var next = current + increase;
+        var rawCurrent = MerchantEntryRawCost?.GetValue(removalEntry) is int raw ? raw : (int?)null;
+
+        if (rawCurrent is { } listCurrent)
+        {
+            var listBase = Math.Max(0, listCurrent - increase * used);
+            var listNext = listCurrent + increase;
+            if (listCurrent == current)
+            {
+                return string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"Shop card removal: once per shop; list price increases by +{increase} Gold after each successful shop removal (list base: {listBase}, prior removals: {used}, current: {current} Gold, next shop list price: {listNext} Gold). Canceling card selection does not spend Gold or consume the removal.");
+            }
+
+            int? discountedNext = null;
+            try
+            {
+                if (player.RunState is { } runState)
+                    discountedNext = (int)Hook.ModifyMerchantPrice(runState, player, removalEntry, listNext);
+            }
+            catch
+            {
+                discountedNext = null;
+            }
+
+            var nextClause = discountedNext is { } nextPayable
+                ? $", next shop at current price modifiers: {nextPayable} Gold (list price: {listNext} Gold)"
+                : $", next shop list price: {listNext} Gold";
+            return string.Create(
+                CultureInfo.InvariantCulture,
+                $"Shop card removal: once per shop; pre-discount list price increases by +{increase} Gold after each successful shop removal (list base: {listBase}, prior removals: {used}, current list price: {listCurrent} Gold; current payable after price modifiers: {current} Gold{nextClause}). Canceling card selection does not spend Gold or consume the removal.");
+        }
+
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"Shop card removal: once per shop; cost increases by +{increase} Gold after each successful shop removal (base: {baseCost}, prior removals: {used}, current: {current} Gold, next shop: {next} Gold). Canceling card selection does not spend Gold or consume the removal.");
+            $"Shop card removal: once per shop; pre-discount list price increases by +{increase} Gold after each successful shop removal (prior removals: {used}, current payable: {current} Gold). Canceling card selection does not spend Gold or consume the removal.");
     }
 
     public static string? ReadActBossContinuity(IReadOnlyList<EncounterModel> upcomingBosses)
@@ -33,7 +68,7 @@ internal static class MacroMechanismReader
     }
 
     public static string XCostRule()
-        => "X-cost cards spend all current Energy when played (X = Energy spent; playing at 0 Energy sets X = 0); replays and autoplays reuse the original X.";
+        => "X-cost cards spend all current Energy on manual play (base X = Energy spent, 0 at 0 Energy); replays reuse the original captured X; auto-plays spend 0 Energy and capture current Energy as base X unless the triggering effect preserves X; X-value modifiers still adjust the resolved X effect.";
 
     public static string OstyDamageRoutingRule()
         => $"Incoming attack damage targets {NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} before the player (excess damage overflows to the player); post-Osty HP-loss effects apply after redirection.";

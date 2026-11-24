@@ -37,15 +37,24 @@ internal static class RelicMechanismReader
             else
             {
                 var (described, gaps) = Describe(relic.GetType());
-                if (gaps.Count == 0 && !string.IsNullOrWhiteSpace(described))
+                if (gaps.Count > 0)
+                {
+                    var id = relic.Id.ToString();
+                    if (LoggedErrors.TryAdd($"gaps:{id}", 0) && MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)
+                        Godot.GD.PushWarning($"[sts2agent] Unresolved native relic rules for {id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
+                }
+                else if (!string.IsNullOrWhiteSpace(described))
+                {
                     text = described;
+                }
             }
         }
         catch (Exception error)
         {
             var id = relic.Id.ToString();
-            if (LoggedErrors.TryAdd(id, 0))
+            if (LoggedErrors.TryAdd($"err:{id}", 0) && MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)
                 Godot.GD.PushWarning($"[sts2agent] Relic mechanism unavailable for {id}: {error.Message}");
+            return null;
         }
 
         Cache[key] = text;

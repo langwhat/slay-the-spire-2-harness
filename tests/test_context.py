@@ -476,18 +476,6 @@ def test_compaction_baseline_definition_order_does_not_follow_set_iteration(
     assert [row["id"] for row in definitions] == ["CARD.ONE", "CARD.TWO", "ENEMY.ONE"]
 
 
-def test_combat_state_format_explains_unpowered_vs_unblockable_damage() -> None:
-    from sts2_harness.combat import _system  # pyright: ignore[reportPrivateUsage]
-    from sts2_harness.prompts import PackagedPrompts
-
-    text = _system(PackagedPrompts(), viewer_input=False, minimal=True).body
-    assert (
-        "Unpowered damage ignores attack modifiers such as POWER.STRENGTH_POWER, "
-        "POWER.WEAK_POWER, and POWER.VULNERABLE_POWER, "
-        "and is still blockable unless marked unblockable."
-    ) in text
-
-
 def test_precombat_boss_and_elite_mechanisms_route_by_role_and_remaining_bosses() -> None:
     from sts2_harness.client.models import NamedDefinition, PublicMap
     from sts2_harness.deck import card_rewards, deck_context, deck_observation
