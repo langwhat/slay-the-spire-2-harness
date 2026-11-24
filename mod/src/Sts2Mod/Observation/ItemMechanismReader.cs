@@ -433,17 +433,48 @@ internal static class ItemMechanismReader
             return null;
         }
         var predBody = NativeRuleBody.Read(predMethod);
-        if (predBody.Incomplete)
+        if (predBody.Incomplete || predBody.Returns.Count == 0)
         {
             valid = false;
             return null;
         }
-        var tags = predBody.Calls
-            .Where(s => s.Call.Method.Name == "Contains" && s.Call.Arguments.OfType<Constant>().Any(c => c.Data is int raw && Enum.IsDefined(typeof(CardTag), raw)))
-            .SelectMany(s => s.Call.Arguments.OfType<Constant>().Where(c => c.Data is int raw && Enum.IsDefined(typeof(CardTag), raw)).Select(c => ((CardTag)(int)c.Data!).ToString()))
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-        if (tags.Length > 0)
+        var positiveReturns = predBody.Returns.Where(r => r.Value is not Constant { Data: 0 or false }).ToArray();
+        if (positiveReturns.Length == 0)
+        {
+            valid = false;
+            return null;
+        }
+        var tags = new List<string>();
+        foreach (var ret in positiveReturns)
+        {
+            var pathTests = new List<Test>(ret.Conditions);
+            if (ret.Value is not Constant { Data: 1 or true })
+                pathTests.Add(new Test(ret.Value, true));
+            foreach (var rawTest in pathTests)
+            {
+                var expr = rawTest.Value;
+                var expected = rawTest.Expected;
+                while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                {
+                    expr = inner;
+                    expected = !expected;
+                }
+                if (expected && expr is Call { Method.Name: "Contains" } containsCall
+                    && (containsCall.Receiver is Call { Method.Name: "get_Tags" } || containsCall.Arguments.Any(a => a is Call { Method.Name: "get_Tags" }))
+                    && containsCall.Arguments.OfType<Constant>().FirstOrDefault(c => c.Data is int raw && Enum.IsDefined(typeof(CardTag), raw)) is { Data: int tagInt })
+                {
+                    var tagName = ((CardTag)tagInt).ToString();
+                    if (!tags.Contains(tagName, StringComparer.Ordinal))
+                        tags.Add(tagName);
+                }
+                else
+                {
+                    valid = false;
+                    return null;
+                }
+            }
+        }
+        if (tags.Count > 0)
             return string.Join("/", tags);
         valid = false;
         return null;

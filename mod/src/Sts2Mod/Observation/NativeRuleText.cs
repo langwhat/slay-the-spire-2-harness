@@ -980,7 +980,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     {
                         setFields.Add(backing);
                     }
-                    else if (BackingField(monsterType, setter) is not { } otherField || IsGameplayField(otherField))
+                    else if (BackingField(monsterType, setter) is { FieldType: var ft } bf
+                        && ft == typeof(bool) && IsGameplayField(bf))
                     {
                         Gap($"summon-config:{monsterType.Name}.{name}");
                     }
@@ -2671,6 +2672,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     }
 
     internal static string CallKey(Call call) => Key(call);
+    internal static string ValueKey(Value? value) => Key(value);
 
     private static string Key(Value? value) => value switch
     {

@@ -70,6 +70,8 @@ internal static class NativeTestBootstrap
                     ["PECK.title"] = "Peck",
                     ["TORIC_TOUGHNESS.title"] = "Toric Toughness",
                     ["DEBT.title"] = "Debt",
+                    ["ULTIMATE_STRIKE.title"] = "Ultimate Strike",
+                    ["ULTIMATE_DEFEND.title"] = "Ultimate Defend",
                 },
                 "enchantments" => new Dictionary<string, string>
                 {
@@ -207,7 +209,8 @@ public sealed class NativeExtractionTests
         Assert.Contains("transformable Basic", torusSummary!, StringComparison.Ordinal);
         Assert.Contains("CARD.TORIC_TOUGHNESS", torusSummary!, StringComparison.Ordinal);
 
-        // StoneOfAllTime discards Rng.NextInt(100); deterministic options must NOT be tagged as random outcome.
+        // StoneOfAllTime discards Rng.NextInt(100); deterministic options must NOT be tagged as random outcome,
+        // and Push must include the 8 Vigorous stacks.
         var stone = ModelDb.Event<StoneOfAllTime>();
         var liftMethod = typeof(StoneOfAllTime).GetMethod("Lift", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var pushMethod = typeof(StoneOfAllTime).GetMethod("Push", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -217,6 +220,34 @@ public sealed class NativeExtractionTests
         Assert.Null(pushGap);
         Assert.DoesNotContain("random outcome", liftSummary!, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("random outcome", pushSummary!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ENCHANTMENT.VIGOROUS (8)", pushSummary!, StringComparison.Ordinal);
+
+        // ColossalFlower.ReachDeeper unlocks higher future prizes via SetEventState and must fail closed instead of showing damage-only.
+        var flower = ModelDb.Event<ColossalFlower>();
+        var reachDeeper = typeof(ColossalFlower).GetMethod("ReachDeeper", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (reachSummary, reachGap) = EventMechanismReader.DescribeOptionMethod(flower, null, reachDeeper);
+        Assert.Null(reachSummary);
+        Assert.NotNull(reachGap);
+
+        // Amalgamator must distinguish Basic Strike -> UltimateStrike from Basic Defend -> UltimateDefend.
+        var amalgamator = ModelDb.Event<Amalgamator>();
+        var combineStrikes = typeof(Amalgamator).GetMethod("CombineStrikes", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var combineDefends = typeof(Amalgamator).GetMethod("CombineDefends", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (strikesSummary, strikesGap) = EventMechanismReader.DescribeOptionMethod(amalgamator, null, combineStrikes);
+        var (defendsSummary, defendsGap) = EventMechanismReader.DescribeOptionMethod(amalgamator, null, combineDefends);
+        Assert.Null(strikesGap);
+        Assert.Contains("Basic Strike", strikesSummary!, StringComparison.Ordinal);
+        Assert.Contains("CARD.ULTIMATE_STRIKE", strikesSummary!, StringComparison.Ordinal);
+        Assert.Null(defendsGap);
+        Assert.Contains("Basic Defend", defendsSummary!, StringComparison.Ordinal);
+        Assert.Contains("CARD.ULTIMATE_DEFEND", defendsSummary!, StringComparison.Ordinal);
+
+        // SunkenTreasury.SecondChest concatenates localized strings; String.Concat must not cause a spurious gap.
+        var treasury = ModelDb.Event<SunkenTreasury>();
+        var secondChest = typeof(SunkenTreasury).GetMethod("SecondChest", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (chestSummary, chestGap) = EventMechanismReader.DescribeOptionMethod(treasury, null, secondChest);
+        Assert.Null(chestGap);
+        Assert.Contains("CARD.GREED", chestSummary!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -270,9 +301,14 @@ public sealed class NativeExtractionTests
         Assert.Empty(slumberGaps);
         Assert.Contains("until played", slumberText!, StringComparison.Ordinal);
 
+        var (soulsText, soulsGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(SoulsPower));
+        Assert.Empty(soulsGaps);
+        Assert.Contains("Removes keyword(s): Exhaust", soulsText!, StringComparison.Ordinal);
+
         var (glassText, glassGaps) = ModifierMechanismReader.DescribeOrbWithGaps(typeof(GlassOrb));
         Assert.Empty(glassGaps);
         Assert.Contains("minimum base 0", glassText!, StringComparison.Ordinal);
+        Assert.Contains("effective Passive value is > 0", glassText!, StringComparison.Ordinal);
 
         // Hexed has an unhandled ClearAffliction/play hook that must surface a diagnostic gap instead of silent empty gaps.
         var (_, hexedGaps) = ModifierMechanismReader.DescribeAfflictionWithGaps(typeof(Hexed));
@@ -296,6 +332,21 @@ public sealed class NativeExtractionTests
         Assert.Empty(thieveryGaps);
         Assert.Contains("stores it on this power instance", thieveryText!, StringComparison.Ordinal);
         Assert.DoesNotContain("HEIST_POWER", thieveryText!, StringComparison.Ordinal);
+
+        var (heistText, heistGaps) = PowerMechanismReader.Describe(typeof(HeistPower), true);
+        Assert.Empty(heistGaps);
+        Assert.Contains("target player's combat rewards", heistText!, StringComparison.Ordinal);
+
+        var (stockText, stockGaps) = PowerMechanismReader.Describe(typeof(StockPower), true);
+        Assert.Empty(stockGaps);
+        Assert.Contains("MONSTER.AXEBOT", stockText!, StringComparison.Ordinal);
+        Assert.Contains("Prevents combat from ending: yes", stockText!, StringComparison.Ordinal);
+
+        var merc = ModelDb.Monster<GremlinMerc>().ToMutable();
+        merc.SetUpForCombat();
+        var (mercText, _) = EnemyMechanismReader.Describe(merc);
+        Assert.NotNull(mercText);
+        Assert.Contains("if not in Blitz mode: trigger each POWER.THIEVERY_POWER", mercText!, StringComparison.Ordinal);
 
         var bulletTimeRule = ItemMechanismReader.DescribeCard(ModelDb.Card<BulletTime>());
         Assert.NotNull(bulletTimeRule);

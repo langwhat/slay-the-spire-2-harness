@@ -525,6 +525,7 @@ internal sealed class NativeRuleBody
                     if (arr is ArrayInit init)
                     {
                         if (elemIdx is Constant { Data: int idx } && idx >= 0
+                            && init.Length is Constant { Data: int arrLen } && idx < arrLen
                             && !path.InvalidatedArrays.Contains(init.Id)
                             && path.ArrayElements.TryGetValue(init.Id, out var slots))
                         {
@@ -565,11 +566,17 @@ internal sealed class NativeRuleBody
 
     private static bool IsReadOnlyArrayScanLoop(List<CodeInstruction> instructions, int start, int end)
     {
+        var arithmeticCount = 0;
         for (var cursor = start; cursor < end; cursor++)
         {
             var code = instructions[cursor].opcode;
             if (code == OpCodes.Stfld || code == OpCodes.Stsfld || code.Name?.StartsWith("stelem", StringComparison.Ordinal) == true)
                 return false;
+            if (code == OpCodes.Add || code == OpCodes.Sub || code == OpCodes.Mul || code == OpCodes.Div)
+            {
+                if (++arithmeticCount > 1)
+                    return false;
+            }
             if ((code == OpCodes.Call || code == OpCodes.Callvirt) && instructions[cursor].operand is MethodBase called)
             {
                 var declaring = called.DeclaringType;

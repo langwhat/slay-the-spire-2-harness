@@ -258,27 +258,30 @@ internal static class ModifierMechanismReader
             gaps.Add("OnPlay");
         }
 
-        if (type.GetMethod("OnEnchant", DeclaredInstance) is { } onEnchant
-            && NativeRuleBody.Read(onEnchant) is { Incomplete: false } enchBody)
+        if (type.GetMethod("OnEnchant", DeclaredInstance) is { } onEnchant)
         {
-            if (enchBody.Calls.Any(s => s.Call.Method.Name == "AddKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw)))
+            var enchBody = NativeRuleBody.Read(onEnchant);
+            if (enchBody.Incomplete)
             {
-                var kws = enchBody.Calls
-                    .Where(s => s.Call.Method.Name == "AddKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw))
-                    .Select(s => ((CardKeyword)(int)((Constant)s.Call.Arguments[0]).Data!).ToString())
-                    .Distinct(StringComparer.Ordinal);
-                parts.Add($"Grants keyword(s): {string.Join(", ", kws)}.");
+                gaps.Add("OnEnchant");
             }
-            if (enchBody.Calls.Any(s => s.Call.Method.Name == "RemoveKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw)))
+            else
             {
-                var kws = enchBody.Calls
-                    .Where(s => s.Call.Method.Name == "RemoveKeyword" && s.Call.Arguments is [Constant { Data: int kw }] && Enum.IsDefined(typeof(CardKeyword), kw))
-                    .Select(s => ((CardKeyword)(int)((Constant)s.Call.Arguments[0]).Data!).ToString())
-                    .Distinct(StringComparer.Ordinal);
-                parts.Add($"Removes keyword(s): {string.Join(", ", kws)}.");
+                var beforeCount = parts.Count;
+                var addedKws = ExtractKeywordArguments(enchBody, "AddKeyword", "ApplyKeyword");
+                if (addedKws.Length > 0)
+                    parts.Add($"Grants keyword(s): {string.Join(", ", addedKws)}.");
+
+                var removedKws = ExtractKeywordArguments(enchBody, "RemoveKeyword");
+                if (removedKws.Length > 0)
+                    parts.Add($"Removes keyword(s): {string.Join(", ", removedKws)}.");
+
+                if (enchBody.Calls.Any(s => s.Call.Method.Name is "WithBaseCost" or "SetWithModifiers" or "AddModifier" or "ChangeBaseCost" or "UpgradeBy"))
+                    parts.Add("Permanently modifies the enchanted card's Energy cost.");
+
+                if (parts.Count == beforeCount)
+                    gaps.Add("OnEnchant");
             }
-            if (enchBody.Calls.Any(s => s.Call.Method.Name == "WithBaseCost" || s.Call.Method.Name == "SetWithModifiers" || s.Call.Method.Name == "AddModifier" || s.Call.Method.Name == "ChangeBaseCost" || s.Call.Method.Name == "UpgradeBy"))
-                parts.Add("Permanently modifies the enchanted card's Energy cost.");
         }
 
         if (type.GetMethod("AfterAutoPrePlayPhaseEntered", DeclaredInstance) is { } autoPre
@@ -512,8 +515,46 @@ internal static class ModifierMechanismReader
         {
             if (customBody.Calls.Any(s => s.Call.Method.Name == "get_GainsBlock"))
                 return "Eligible cards: cards that gain Block.";
+            if (customBody.Calls.Any(s => s.Call.Method.Name == "GetKeywordsWithSources")
+                && customBody.Calls.FirstOrDefault(s => s.Call.Method.Name == "Contains" && s.Call.Arguments.OfType<Constant>().Any(c => c.Data is int kw && Enum.IsDefined(typeof(CardKeyword), kw))) is { } kwStep)
+            {
+                var kw = (CardKeyword)(int)kwStep.Call.Arguments.OfType<Constant>().First(c => c.Data is int k && Enum.IsDefined(typeof(CardKeyword), k)).Data!;
+                return $"Eligible cards: cards with local {NativeRuleText.KeywordLabel(kw)} keyword.";
+            }
         }
         return null;
+    }
+
+    private static string[] ExtractKeywordArguments(NativeRuleBody body, params string[] methodNames)
+    {
+        var keywords = new List<string>();
+        foreach (var step in body.Calls)
+        {
+            if (!methodNames.Contains(step.Call.Method.Name, StringComparer.Ordinal))
+                continue;
+            foreach (var arg in step.Call.Arguments)
+            {
+                if (arg is Constant { Data: int rawKw } && Enum.IsDefined(typeof(CardKeyword), rawKw))
+                {
+                    var label = NativeRuleText.KeywordLabel((CardKeyword)rawKw);
+                    if (!keywords.Contains(label, StringComparer.Ordinal))
+                        keywords.Add(label);
+                }
+                else if (arg is ArrayValue array)
+                {
+                    foreach (var elem in array.Elements)
+                    {
+                        if (elem is Constant { Data: int arrKw } && Enum.IsDefined(typeof(CardKeyword), arrKw))
+                        {
+                            var label = NativeRuleText.KeywordLabel((CardKeyword)arrKw);
+                            if (!keywords.Contains(label, StringComparer.Ordinal))
+                                keywords.Add(label);
+                        }
+                    }
+                }
+            }
+        }
+        return keywords.ToArray();
     }
 
     internal static string? DescribeAffliction(Type type)
@@ -631,7 +672,7 @@ internal static class ModifierMechanismReader
                     && NativeRuleBody.Read(passiveMethod) is { Incomplete: false } passiveMethodBody
                     && passiveMethodBody.Calls.Any(s => s.Call.Method.Name == nameof(Math.Max));
                 effectClause = passiveFloorZero
-                    ? "Deals unpowered orb damage to all hittable enemies; passive base value decreases by 1 after each trigger (minimum base 0; Focus still modifies Passive and Evoke)."
+                    ? "Deals unpowered orb damage to all hittable enemies; when effective Passive value is > 0, triggers and decreases passive base value by 1 (minimum base 0; Focus still modifies Passive and Evoke; if effective Passive value is ≤ 0, neither damages nor decreases base value)."
                     : "Deals unpowered orb damage to all hittable enemies.";
             }
             else

@@ -314,8 +314,17 @@ internal static class EventMechanismReader
                 continue;
 
             if (typeof(EventModel).IsAssignableFrom(declaring)
-                && name is "SetEventFinished" or "Done" or "SetEventState")
+                && name is "SetEventFinished" or "Done")
             {
+                continue;
+            }
+            if (typeof(EventModel).IsAssignableFrom(declaring) && name == "SetEventState")
+            {
+                // Multi-stage state transitions that introduce new follow-up options (e.g. ColossalFlower.ReachDeeper)
+                // cannot be summarized accurately from the immediate step alone. Only allow SetEventState when it
+                // re-offers the current option and/or pure exit/proceed options.
+                if (!IsSelfLoopOrExitStateTransition(body, method, activeEvent.GetType()))
+                    return (null, "multi-stage-event-state");
                 continue;
             }
 
@@ -451,23 +460,50 @@ internal static class EventMechanismReader
                 hasSelection = true;
                 var countText = ExtractSelectorCount(activeEvent, body, group.First(), call) ?? "eligible";
                 var cardNoun = countText == "1" ? "card" : "card(s)";
+                var hasFilter = HasSelectionFilterPredicate(call);
+                var hasNonNullFilter = false;
+                var filterDesc = hasFilter ? DescribeGenericDeckFilter(call, out hasNonNullFilter) : null;
+                if (filterDesc is null && hasNonNullFilter)
+                    return (null, "unresolved-selection-filter");
+
                 if (name == nameof(CardSelectCmd.FromDeckGeneric))
                 {
-                    var filterDesc = DescribeGenericDeckFilter(call);
-                    if (filterDesc is null && HasSelectionFilterPredicate(call))
-                        return (null, "unresolved-selection-filter");
                     var qualifiedNoun = filterDesc is not null ? $"{filterDesc} {cardNoun}" : cardNoun;
                     steps.Add($"select {countText} {qualifiedNoun} from deck");
                     continue;
                 }
-                steps.Add(name switch
+                if (name == nameof(CardSelectCmd.FromDeckForRemoval))
                 {
-                    nameof(CardSelectCmd.FromDeckForRemoval) => $"select {countText} removable {cardNoun} from deck to remove",
-                    nameof(CardSelectCmd.FromDeckForUpgrade) => $"select {countText} upgradable {cardNoun} from deck to upgrade",
-                    nameof(CardSelectCmd.FromDeckForTransformation) => $"select {countText} removable {cardNoun} from deck to transform",
-                    nameof(CardSelectCmd.FromDeckForEnchantment) => DescribeEnchantSelection(call, countText),
-                    _ => $"select {countText} {cardNoun}",
-                });
+                    var qualifiedNoun = filterDesc is not null
+                        ? (filterDesc.Contains("removable", StringComparison.Ordinal) ? $"{filterDesc} {cardNoun}" : $"removable {filterDesc} {cardNoun}")
+                        : $"removable {cardNoun}";
+                    steps.Add($"select {countText} {qualifiedNoun} from deck to remove");
+                    continue;
+                }
+                if (name == nameof(CardSelectCmd.FromDeckForUpgrade))
+                {
+                    var qualifiedNoun = filterDesc is not null
+                        ? (filterDesc.Contains("upgradable", StringComparison.Ordinal) ? $"{filterDesc} {cardNoun}" : $"upgradable {filterDesc} {cardNoun}")
+                        : $"upgradable {cardNoun}";
+                    steps.Add($"select {countText} {qualifiedNoun} from deck to upgrade");
+                    continue;
+                }
+                if (name == nameof(CardSelectCmd.FromDeckForTransformation))
+                {
+                    var qualifiedNoun = filterDesc is not null
+                        ? (filterDesc.Contains("removable", StringComparison.Ordinal) || filterDesc.Contains("transformable", StringComparison.Ordinal)
+                            ? $"{filterDesc} {cardNoun}"
+                            : $"removable {filterDesc} {cardNoun}")
+                        : $"removable {cardNoun}";
+                    steps.Add($"select {countText} {qualifiedNoun} from deck to transform");
+                    continue;
+                }
+                if (name == nameof(CardSelectCmd.FromDeckForEnchantment))
+                {
+                    steps.Add(DescribeEnchantSelection(activeEvent, call, countText, filterDesc));
+                    continue;
+                }
+                steps.Add($"select {countText} {cardNoun}");
                 continue;
             }
 
@@ -639,6 +675,7 @@ internal static class EventMechanismReader
             || declaring == typeof(Enumerable)
             || declaring == typeof(Array)
             || declaring == typeof(LocString)
+            || (declaring == typeof(string) && name is "Concat" or "Format" or "Join")
             || call.Method is ConstructorInfo
             || name.StartsWith("get_", StringComparison.Ordinal)
             || name.StartsWith("op_", StringComparison.Ordinal))
@@ -775,7 +812,43 @@ internal static class EventMechanismReader
         return kinds.Count > 0 ? string.Join(", ", kinds) : null;
     }
 
-    private static string DescribeEnchantSelection(Call call, string countText)
+    private static bool IsSelfLoopOrExitStateTransition(NativeRuleBody body, MethodInfo currentMethod, Type eventType)
+    {
+        var optionCtors = body.Calls
+            .Where(s => s.Call.Method is ConstructorInfo { DeclaringType: var dt } && dt == typeof(EventOption))
+            .ToArray();
+        if (optionCtors.Length == 0)
+            return false;
+
+        foreach (var ctor in optionCtors)
+        {
+            var delegateArg = ctor.Call.Arguments.ElementAtOrDefault(1);
+            if (delegateArg is Constant { Data: null })
+                continue;
+            if (delegateArg is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo targetMethod }] })
+                return false;
+            if (targetMethod == currentMethod)
+                continue;
+            // Allow follow-up options that are pure exit/finish (e.g. ExitBaths) or whose handler is the current method.
+            if (targetMethod.DeclaringType == eventType && IsPureFinishEventMethod(targetMethod))
+                continue;
+            return false;
+        }
+        return true;
+    }
+
+    private static bool IsPureFinishEventMethod(MethodInfo method)
+    {
+        var b = ReadBody(method);
+        if (b.Incomplete)
+            return false;
+        return b.Calls.All(s =>
+            IsBenignEventHelperCall(s.Call, method.DeclaringType ?? typeof(EventModel))
+            || (typeof(EventModel).IsAssignableFrom(s.Call.Method.DeclaringType)
+                && s.Call.Method.Name is "SetEventFinished" or "Done"));
+    }
+
+    private static string DescribeEnchantSelection(EventModel activeEvent, Call call, string countText, string? filterDesc)
     {
         var enchantArg = call.Arguments.ElementAtOrDefault(1);
         var enchantType = enchantArg switch
@@ -784,8 +857,18 @@ internal static class EventMechanismReader
             _ => null,
         };
         var label = enchantType is not null ? NativeRuleText.ModelLabel(enchantType) : "the offered enchantment";
-        var prefix = countText == "eligible" ? "eligible deck card(s)" : $"{countText} eligible deck card(s)";
-        return $"select {prefix} to enchant with {label}";
+        var amountParam = call.Method.GetParameters().FirstOrDefault(p => p.Name == "amount");
+        var amountText = amountParam is not null && amountParam.Position < call.Arguments.Length
+            ? ResolveEventAmount(activeEvent, call.Arguments[amountParam.Position])
+            : null;
+        var showAmount = enchantType is not null
+            && ModelDb.GetByIdOrNull<EnchantmentModel>(ModelDb.GetId(enchantType)) is { ShowAmount: true };
+        var amountClause = amountText is not null && (showAmount || amountText != "1")
+            ? $" ({amountText})"
+            : "";
+        var qualifier = filterDesc is not null ? $"{filterDesc} " : "eligible ";
+        var prefix = countText == "eligible" ? $"{qualifier}deck card(s)" : $"{countText} {qualifier}deck card(s)";
+        return $"select {prefix} to enchant with {label}{amountClause}";
     }
 
     private static bool CallUsesRng(Call call)
@@ -813,10 +896,12 @@ internal static class EventMechanismReader
             {
                 return directCount;
             }
-            // In async state machines, struct CardSelectorPrefs may be initialized via `call .ctor` on a state field.
+            // In async state machines, struct CardSelectorPrefs may be initialized via `call .ctor` on the same receiver.
+            var prefsKey = NativeRuleText.ValueKey(prefsArg);
             var precedingCtor = body.Calls
                 .Where(s => s.Call.Method is ConstructorInfo { DeclaringType.Name: "CardSelectorPrefs" }
-                    && (s.Epoch < selectStep.Epoch || (s.Epoch == selectStep.Epoch && s.Order < selectStep.Order)))
+                    && (s.Epoch < selectStep.Epoch || (s.Epoch == selectStep.Epoch && s.Order < selectStep.Order))
+                    && (s.Call.Receiver is null || NativeRuleText.ValueKey(s.Call.Receiver) == prefsKey))
                 .OrderByDescending(s => (s.Epoch, s.Order))
                 .FirstOrDefault();
             if (precedingCtor is not null && ReadPrefsCount(activeEvent, precedingCtor.Call) is { } ctorCount)
@@ -859,45 +944,153 @@ internal static class EventMechanismReader
     private static bool HasSelectionFilterPredicate(Call call)
         => call.Method.GetParameters().Any(p => p.ParameterType == typeof(Func<CardModel, bool>));
 
-    private static string? DescribeGenericDeckFilter(Call call)
+    private static bool HasNonNullFilterArgument(Call call)
     {
         var filterParam = call.Method.GetParameters().FirstOrDefault(p => p.ParameterType == typeof(Func<CardModel, bool>));
         if (filterParam is null || filterParam.Position >= call.Arguments.Length)
+            return false;
+        return call.Arguments[filterParam.Position] is not Constant { Data: null };
+    }
+
+    private static string? DescribeGenericDeckFilter(Call call, out bool hasNonNullFilter)
+    {
+        hasNonNullFilter = false;
+        var filterParam = call.Method.GetParameters().FirstOrDefault(p => p.ParameterType == typeof(Func<CardModel, bool>));
+        if (filterParam is null || filterParam.Position >= call.Arguments.Length)
             return null;
+        if (call.Arguments[filterParam.Position] is Constant { Data: null })
+            return null;
+        hasNonNullFilter = true;
         if (call.Arguments[filterParam.Position] is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo predMethod }] })
             return null;
 
+        return DescribeCardFilterPredicate(predMethod, boundTag: null, depth: 0);
+    }
+
+    private static string? DescribeCardFilterPredicate(MethodInfo predMethod, CardTag? boundTag, int depth)
+    {
+        if (depth > 1)
+            return null;
         var body = ReadBody(predMethod);
-        if (body.Incomplete)
+        if (body.Incomplete || body.Returns.Count == 0)
+            return null;
+
+        // If the predicate simply delegates to a helper (e.g. `(c) => IsValid(CardTag.Strike, c)`), inline it once.
+        if (body.Returns is [{ Conditions.Length: 0, Value: Call { Method: MethodInfo helper } helperCall }]
+            && helper.ReturnType == typeof(bool) && helper != predMethod
+            && helper.DeclaringType is { } dt && typeof(EventModel).IsAssignableFrom(dt))
+        {
+            CardTag? passedTag = boundTag;
+            foreach (var arg in helperCall.Arguments)
+            {
+                if (arg is Constant { Data: int rawTag } && Enum.IsDefined(typeof(CardTag), rawTag))
+                    passedTag = (CardTag)rawTag;
+            }
+            return DescribeCardFilterPredicate(helper, passedTag, depth + 1);
+        }
+
+        var positiveReturns = body.Returns.Where(r => r.Value is not Constant { Data: 0 or false }).ToArray();
+        if (positiveReturns.Length == 0)
             return null;
 
         var qualifiers = new List<string>();
-        var checksTransformable = body.Calls.Any(s => s.Call.Method.Name == "get_IsTransformable");
-        var checksRemovable = body.Calls.Any(s => s.Call.Method.Name == "get_IsRemovable");
-        var checksUpgradable = body.Calls.Any(s => s.Call.Method.Name == "get_IsUpgradable");
-        if (checksTransformable)
-            qualifiers.Add("transformable");
-        else if (checksRemovable)
-            qualifiers.Add("removable");
-        if (checksUpgradable)
-            qualifiers.Add("upgradable");
-
         var rarities = new List<CardRarity>();
-        foreach (var ret in body.Returns)
+        var tags = new List<CardTag>();
+        var requiresTransformable = false;
+        var requiresRemovable = false;
+        var requiresUpgradable = false;
+
+        foreach (var ret in positiveReturns)
         {
-            if (ret.Value is Constant { Data: 0 or false })
-                continue;
-            foreach (var expr in ret.Conditions.Select(c => c.Value).Append(ret.Value))
+            var pathTests = new List<Test>(ret.Conditions);
+            if (ret.Value is not Constant { Data: 1 or true })
+                pathTests.Add(new Test(ret.Value, true));
+
+            foreach (var rawTest in pathTests)
             {
-                if (expr is Operation { Operator: "ceq" or "beq", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int raw } }
-                    && Enum.IsDefined(typeof(CardRarity), raw) && !rarities.Contains((CardRarity)raw))
+                var expr = rawTest.Value;
+                var expected = rawTest.Expected;
+                while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
                 {
-                    rarities.Add((CardRarity)raw);
+                    expr = inner;
+                    expected = !expected;
+                }
+
+                if (expr is Call { Method.Name: "get_IsTransformable" })
+                {
+                    if (!expected)
+                        return null;
+                    requiresTransformable = true;
+                }
+                else if (expr is Call { Method.Name: "get_IsRemovable" })
+                {
+                    if (!expected)
+                        return null;
+                    requiresRemovable = true;
+                }
+                else if (expr is Call { Method.Name: "get_IsUpgradable" })
+                {
+                    if (!expected)
+                        return null;
+                    requiresUpgradable = true;
+                }
+                else if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int rawRarity } } rarityOp
+                    && Enum.IsDefined(typeof(CardRarity), rawRarity))
+                {
+                    var isEquality = rarityOp.Operator == "bne.un" ? !expected : expected;
+                    if (!isEquality)
+                        return null;
+                    if (!rarities.Contains((CardRarity)rawRarity))
+                        rarities.Add((CardRarity)rawRarity);
+                }
+                else if (expr is Call { Method.Name: "Contains", Arguments: [var tagArg] } containsCall
+                    && (containsCall.Receiver is Call { Method.Name: "get_Tags" }
+                        || containsCall.Arguments.Any(a => a is Call { Method.Name: "get_Tags" })))
+                {
+                    if (!expected)
+                        return null;
+                    var tag = tagArg is Constant { Data: int rawTag } && Enum.IsDefined(typeof(CardTag), rawTag)
+                        ? (CardTag?)rawTag
+                        : boundTag;
+                    if (tag is null)
+                        return null;
+                    if (!tags.Contains(tag.Value))
+                        tags.Add(tag.Value);
+                }
+                else if (expr is Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags" }, var extTagArg] })
+                {
+                    if (!expected)
+                        return null;
+                    var tag = extTagArg is Constant { Data: int rawTag } && Enum.IsDefined(typeof(CardTag), rawTag)
+                        ? (CardTag?)rawTag
+                        : boundTag;
+                    if (tag is null)
+                        return null;
+                    if (!tags.Contains(tag.Value))
+                        tags.Add(tag.Value);
+                }
+                else if (expr is Input { Type: var inputType } && typeof(CardModel).IsAssignableFrom(inputType) && expected)
+                {
+                    // Null check `card != null`.
+                    continue;
+                }
+                else
+                {
+                    return null;
                 }
             }
         }
+
+        if (requiresTransformable)
+            qualifiers.Add("transformable");
+        else if (requiresRemovable)
+            qualifiers.Add("removable");
+        if (requiresUpgradable)
+            qualifiers.Add("upgradable");
         if (rarities.Count > 0)
             qualifiers.Add(string.Join("/", rarities));
+        if (tags.Count > 0)
+            qualifiers.Add(string.Join("/", tags));
 
         return qualifiers.Count > 0 ? string.Join(" ", qualifiers) : null;
     }
@@ -907,6 +1100,9 @@ internal static class EventMechanismReader
         Call { Method.Name: ".ctor", Arguments: [var single] } => ExtractSingleCardType(single),
         Call { Method: { Name: "Card", IsGenericMethod: true } lookup } when lookup.DeclaringType == typeof(ModelDb)
             => lookup.GetGenericArguments()[0],
+        Call { Method: { Name: "CreateCard", IsGenericMethod: true } create }
+            when typeof(CardModel).IsAssignableFrom(create.GetGenericArguments()[0])
+            => create.GetGenericArguments()[0],
         _ => null,
     };
 

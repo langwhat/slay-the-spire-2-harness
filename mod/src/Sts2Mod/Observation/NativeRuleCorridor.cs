@@ -68,7 +68,10 @@ internal sealed partial class NativeRuleText
         {
             recognized = true;
             _powers.Add(typeof(ThieveryPower));
-            return new Effect($"trigger each {PowerLabel(typeof(ThieveryPower))} on self to steal Gold from its target");
+            var checksBlitz = stealBody.Calls.Any(s => s.Call.Method.Name == "get_GameMode")
+                && stealBody.Calls.Any(s => s.Conditions.Any(c => c.Value is Operation { Left: Call { Method.Name: "get_GameMode" } }));
+            var blitzGuard = checksBlitz ? "if not in Blitz mode: " : "";
+            return new Effect($"{blitzGuard}trigger each {PowerLabel(typeof(ThieveryPower))} on self to steal Gold from its target");
         }
 
         return null;
@@ -766,7 +769,7 @@ internal sealed partial class NativeRuleText
         if (!addsGoldReward)
             return false;
 
-        line = $"{prefix}Before death: if event target=owner: add stacks Gold to combat rewards";
+        line = $"{prefix}Before death: if event target=owner: add stacks Gold to this power's target player's combat rewards";
         return true;
     }
 
