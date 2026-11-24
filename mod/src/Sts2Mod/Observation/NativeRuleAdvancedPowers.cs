@@ -352,6 +352,7 @@ internal sealed partial class NativeRuleText
             ("CreatureCmd", "TriggerAnim" or "ChangeCreatureAnim") => true,
             ("PowerModel", "Flash" or "InvokeDisplayAmountChanged" or "StartPulsing" or "StopPulsing") => true,
             ("RelicModel", "Flash" or "InvokeDisplayAmountChanged" or "set_Status") => true,
+            ("CardModel", "InvokeKeywordsChanged") => true,
             (_, "AssertMutable") => true,
             ("MonsterModel", "L10NMonsterLookup") => true,
             ("Creature", "GetCreatureNode" or "GetVfxContainer" or "GetBackVfxContainer" or "SetNodeVisible") => true,
@@ -429,7 +430,9 @@ internal sealed partial class NativeRuleText
             return true;
         if (call.Method is MethodInfo voidHelper && voidHelper.ReturnType == typeof(void)
             && !voidHelper.IsSpecialName && voidHelper.DeclaringType != typeof(MonsterModel) && voidHelper.DeclaringType != typeof(PowerModel)
-            && (call.Receiver == Self || IsSameMonsterTypeLookup(call.Receiver, voidHelper.DeclaringType))
+            && (call.Receiver == Self
+                || (voidHelper.IsStatic && voidHelper.DeclaringType == caller.DeclaringType)
+                || IsSameMonsterTypeLookup(call.Receiver, voidHelper.DeclaringType))
             && IsPresentationVoidHelper(voidHelper))
             return true;
         return false;
@@ -448,6 +451,8 @@ internal sealed partial class NativeRuleText
         {
             var m = step.Call.Method;
             if (IsBenignReadOrPlumbingCall(m))
+                continue;
+            if (m is ConstructorInfo { DeclaringType: var dt } && typeof(Delegate).IsAssignableFrom(dt))
                 continue;
             if (step.Call.Receiver == Self && m is MethodInfo setter && setter.Name.StartsWith("set_", StringComparison.Ordinal)
                 && setter.DeclaringType is { } owner && BackingField(owner, setter) is { } field && !IsGameplayField(field))
@@ -475,6 +480,8 @@ internal sealed partial class NativeRuleText
             var m = step.Call.Method;
             if (IsBenignReadOrPlumbingCall(m))
                 continue;
+            if (m is ConstructorInfo { DeclaringType: var dt } && typeof(Delegate).IsAssignableFrom(dt))
+                continue;
             if (step.Call.Receiver == Self && m is MethodInfo setter && setter.Name.StartsWith("set_", StringComparison.Ordinal)
                 && setter.DeclaringType is { } owner && BackingField(owner, setter) is { } field && !IsGameplayField(field))
                 continue;
@@ -494,18 +501,18 @@ internal sealed partial class NativeRuleText
             handled.Add("AfterSideTurnEnd");
             lines.Add(tempStatLine);
         }
-        if (ReadCardPlaySnapshotPowerHooks(type, powerPrefix, out var snapshotLine))
-        {
-            handled.Add("BeforeCardPlayed");
-            handled.Add("AfterCardPlayed");
-            lines.Add(snapshotLine);
-        }
         if (ReadRuptureHooks(type, powerPrefix, out var ruptureLine))
         {
             handled.Add("BeforeCardPlayed");
             handled.Add("AfterDamageReceived");
             handled.Add("AfterCardPlayed");
             lines.Add(ruptureLine);
+        }
+        if (!handled.Contains("BeforeCardPlayed") && ReadCardPlaySnapshotPowerHooks(type, powerPrefix, out var snapshotLine))
+        {
+            handled.Add("BeforeCardPlayed");
+            handled.Add("AfterCardPlayed");
+            lines.Add(snapshotLine);
         }
         if (ReadDarkEmbraceHooks(type, powerPrefix, out var darkEmbraceLine))
         {
@@ -576,6 +583,59 @@ internal sealed partial class NativeRuleText
             handled.Add("AfterCardPlayed");
             handled.Add("AfterSideTurnEnd");
             lines.Add(jugglingLine);
+        }
+        if (ReadFeralHooks(type, powerPrefix, out var feralLine))
+        {
+            handled.Add("AfterApplied");
+            handled.Add("ModifyCardPlayResultLocation");
+            handled.Add("AfterModifyingCardPlayResultLocation");
+            handled.Add("AfterSideTurnStart");
+            lines.Add(feralLine);
+        }
+        if (ReadImitationLearningHooks(type, powerPrefix, out var imitationLine))
+        {
+            handled.Add("BeforeCardPlayed");
+            handled.Add("AfterCardPlayed");
+            lines.Add(imitationLine);
+        }
+        if (ReadOrbitHooks(type, powerPrefix, out var orbitLine))
+        {
+            handled.Add("AfterEnergySpent");
+            lines.Add(orbitLine);
+        }
+        if (ReadVoidFormHooks(type, powerPrefix, out var voidFormLines))
+        {
+            handled.Add("AfterApplied");
+            handled.Add("AfterRemoved");
+            handled.Add("BeforeApplied");
+            handled.Add("BeforePowerAmountChanged");
+            handled.Add("TryModifyEnergyCostInCombatLate");
+            handled.Add("TryModifyStarCost");
+            handled.Add("AfterCardPlayed");
+            handled.Add("BeforeSideTurnStart");
+            lines.AddRange(voidFormLines);
+        }
+        if (ReadSwordSageHooks(type, powerPrefix, out var swordSageLine))
+        {
+            handled.Add("AfterPowerAmountChanged");
+            handled.Add("AfterCardEnteredCombat");
+            handled.Add("AfterRemoved");
+            lines.Add(swordSageLine);
+        }
+        if (ReadLethalityHook(type, powerPrefix, out var lethalityLine))
+        {
+            handled.Add("ModifyDamageMultiplicative");
+            lines.Add(lethalityLine);
+        }
+        if (ReadCallOfTheVoidHook(type, powerPrefix, out var callOfTheVoidLine))
+        {
+            handled.Add("BeforeHandDraw");
+            lines.Add(callOfTheVoidLine);
+        }
+        if (ReadAutomationHooks(type, powerPrefix, out var automationLine))
+        {
+            handled.Add("AfterCardDrawn");
+            lines.Add(automationLine);
         }
     }
 
@@ -835,17 +895,22 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        var snapshotsAmount = beforeBody.Calls.Any(s => s.Call.Method.Name is "Add" or "set_Item"
+        var snapshotStep = beforeBody.Calls.FirstOrDefault(s => s.Call.Method.Name is "Add" or "set_Item"
             && s.Call.Receiver is Field f && InternalDataField(f)?.FieldType == typeof(Dictionary<CardModel, int>));
-        if (!snapshotsAmount)
+        if (snapshotStep is null)
             return false;
 
         var checksApplier = beforeBody.Calls.Any(s => s.Call.Method.Name == "get_Applier");
+        var filteredCardType = snapshotStep.Conditions
+            .Select(c => IsEquality(c, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
+                && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct) ? (CardType?)(int)ct : null)
+            .FirstOrDefault(t => t is not null);
         var cardActor = checksApplier ? "applier's" : "owned";
+        var cardNoun = filteredCardType is { } kind ? $"{kind} card" : "card";
 
         if (afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.GainBlock)))
         {
-            line = $"{prefix}Card-play Block timing: snapshots stacks before each {cardActor} card play starts, then gains that much unpowered Block after that card play resolves (if owner is alive and combat continues)";
+            line = $"{prefix}Card-play Block timing: snapshots stacks before each {cardActor} {cardNoun} play starts, then gains that much unpowered Block after that card play resolves (if owner is alive and combat continues)";
             return true;
         }
         if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage)) is { } dmgStep)
@@ -857,7 +922,7 @@ internal sealed partial class NativeRuleText
             if (who is null)
                 return false;
             var props = ResolveDamageProps(Argument(dmgStep.Call, "props"), power);
-            line = $"{prefix}Card-play damage timing: snapshots stacks before each {cardActor} card play starts, then deals that much{DamageFlags(props)} damage to {who} after that card play resolves";
+            line = $"{prefix}Card-play damage timing: snapshots stacks before each {cardActor} {cardNoun} play starts, then deals that much{DamageFlags(props)} damage to {who} after that card play resolves";
             return true;
         }
         if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(PowerCmd)
@@ -869,7 +934,26 @@ internal sealed partial class NativeRuleText
             if (who is null)
                 return false;
             _powers.Add(appliedType);
-            line = $"{prefix}Card-play power timing: snapshots stacks before each {cardActor} card play starts, then attempts to apply that many {PowerLabel(appliedType)} to {who} after that card play resolves";
+            line = $"{prefix}Card-play power timing: snapshots stacks before each {cardActor} {cardNoun} play starts, then attempts to apply that many {PowerLabel(appliedType)} to {who} after that card play resolves";
+            return true;
+        }
+        if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(OrbCmd)
+                && s.Call.Method.Name == nameof(OrbCmd.Channel) && s.Call.Method.IsGenericMethod) is { } orbStep)
+        {
+            var orbType = orbStep.Call.Method.GetGenericArguments()[0];
+            line = $"{prefix}Card-play Orb timing: snapshots stacks before each {cardActor} {cardNoun} play starts, then channels that many {ModelLabel(orbType)} after that card play resolves";
+            return true;
+        }
+        if (afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy)))
+        {
+            line = $"{prefix}Card-play Energy timing: snapshots stacks before each {cardActor} {cardNoun} play starts, then gains that much Energy after that card play resolves";
+            return true;
+        }
+        if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CardPileCmd)
+                && s.Call.Method.Name == nameof(CardPileCmd.AddGeneratedCardToCombat)) is { } addGenStep
+            && ReadGeneratedCard(addGenStep.Call) is { } genEffect)
+        {
+            line = $"{prefix}Card-play generation timing: tracks each {cardActor} {cardNoun} play started while this power is active, then after that card play resolves: {genEffect.Text}";
             return true;
         }
 
@@ -1120,6 +1204,226 @@ internal sealed partial class NativeRuleText
         };
         var destLabel = PileLocationLabel((PileType)(int)destPileNum);
         line = $"{prefix}Card-count clone trigger: counts owner's {countedType.Value} plays this turn (retroactively including {countedType.Value} plays already started earlier this turn before this power was applied); after the {ordinal} {countedType.Value} play resolves, adds stacks clone(s) of that played card to owner's {destLabel}; counter resets after owner's turn ends";
+        return true;
+    }
+
+    private bool ReadFeralHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterApplied") is not { } applied
+            || FindOverride(power, "ModifyCardPlayResultLocation") is not { } modifyLoc
+            || FindOverride(power, "AfterModifyingCardPlayResultLocation") is not { } afterLoc
+            || FindOverride(power, "AfterSideTurnStart") is not { } turnStart
+            || Body(applied) is not { Incomplete: false } appliedBody
+            || Body(modifyLoc) is not { Incomplete: false } locBody
+            || Body(afterLoc) is not { Incomplete: false } afterBody
+            || Body(turnStart) is not { Incomplete: false } startBody)
+        {
+            return false;
+        }
+
+        var locStep = locBody.FieldSteps.FirstOrDefault(f =>
+            f.Assignment.Target.Receiver is Input { Name: "location" }
+            && f.Assignment.Assigned is Constant { Data: int fp } && Enum.IsDefined(typeof(PileType), fp));
+        if (locStep is null || locStep.Assignment.Assigned is not Constant { Data: int rawPile })
+            return false;
+
+        var checksZeroEnergy = locStep.Conditions.Any(c =>
+            c.Value is Operation { Left: Call { Method.Name: "get_EnergyValue" }, Right: Constant { Data: 0 } });
+        var checksCounterLimit = locStep.Conditions.Any(c =>
+            c.Value is Operation { Left: Field f } && InternalDataField(f)?.FieldType == typeof(int));
+        var cardType = locStep.Conditions
+            .Select(c => IsEquality(c, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
+                && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct) ? (CardType?)(int)ct : null)
+            .FirstOrDefault(t => t is not null);
+        var incrementsAfter = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == power)
+            || afterBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
+        var resetsOnStart = startBody.Calls.Any(s => s.Call.Method.DeclaringType == power)
+            || startBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
+        var initFromHistory = appliedBody.Calls.Any(s => s.Call.Method.Name == nameof(Enumerable.Count));
+        if (!checksZeroEnergy || !checksCounterLimit || cardType is null || !incrementsAfter || !resetsOnStart || !initFromHistory)
+            return false;
+
+        var destLabel = PileLocationLabel((PileType)rawPile);
+        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel} instead of discard pile; counter resets after owner's turn starts";
+        return true;
+    }
+
+    private bool ReadImitationLearningHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "BeforeCardPlayed") is not { } before
+            || FindOverride(power, "AfterCardPlayed") is not { } after
+            || Body(before) is not { Incomplete: false } beforeBody
+            || Body(after) is not { Incomplete: false } afterBody)
+        {
+            return false;
+        }
+
+        var clonesForPlayer = beforeBody.Calls.Any(s => s.Call.Method.Name == "CreateCloneForPlayer");
+        var autoPlaysClone = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name == nameof(CardCmd.AutoPlay));
+        var decrements = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Decrement));
+        if (!clonesForPlayer || !autoPlaysClone || !decrements)
+            return false;
+
+        var filteredType = beforeBody.Calls.Where(s => s.Call.Method.Name == "CreateCloneForPlayer")
+            .SelectMany(s => s.Conditions)
+            .Select(c => IsEquality(c, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
+                && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct) ? (CardType?)(int)ct : null)
+            .FirstOrDefault(t => t is not null);
+        var kindLabel = filteredType is { } k ? $"{k} card" : "card";
+        line = $"{prefix}Co-op copy trigger: after the targeted allied player plays a {kindLabel} (first play in series), auto-plays a clone of that card for owner and subtracts 1 {PowerLabel(power)} stack (if the clone is allowed to play)";
+        return true;
+    }
+
+    private bool ReadOrbitHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterEnergySpent") is not { } spent
+            || Body(spent) is not { Incomplete: false } spentBody
+            || TryGetCanonicalPower(power) is not { } canonical
+            || !canonical.DynamicVars.TryGetValue("Energy", out var energyVar))
+        {
+            return false;
+        }
+
+        var gainsEnergy = spentBody.Calls.Any(s =>
+            s.Call.Method.DeclaringType == typeof(PlayerCmd)
+            && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy));
+        var tracksEnergy = spentBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
+        if (!gainsEnergy || !tracksEnergy)
+            return false;
+
+        var threshold = Number(energyVar.BaseValue);
+        line = $"{prefix}Energy-spent trigger: tracks cumulative Energy spent by owner on cards across combat; every {threshold} Energy spent, owner gains stacks Energy";
+        return true;
+    }
+
+    private bool ReadVoidFormHooks(Type power, string prefix, out List<string> lines)
+    {
+        lines = [];
+        if (FindOverride(power, "TryModifyEnergyCostInCombatLate") is not { } energyHook
+            || FindOverride(power, "TryModifyStarCost") is not { } starHook
+            || FindOverride(power, "AfterCardPlayed") is not { } afterPlayed
+            || FindOverride(power, "BeforeSideTurnStart") is not { } turnStart
+            || Body(energyHook) is not { Incomplete: false } energyBody
+            || Body(starHook) is not { Incomplete: false } starBody
+            || Body(afterPlayed) is not { Incomplete: false } afterBody
+            || Body(turnStart) is not { Incomplete: false } startBody)
+        {
+            return false;
+        }
+
+        var energyZero = energyBody.OutStores.Where(s => s.Assigned is not Input).All(s => Numeric(s.Assigned) == 0m);
+        var starZero = starBody.OutStores.Where(s => s.Assigned is not Input).All(s => Numeric(s.Assigned) == 0m);
+        var incrementsPlayed = afterBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
+            && s.Assignment.Assigned is Operation { Operator: "add", Right: Constant { Data: 1 } });
+        var resetsOnStart = startBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
+            && Numeric(s.Assignment.Assigned) == 0m);
+        if (!energyZero || !starZero || !incrementsPlayed || !resetsOnStart)
+            return false;
+
+        lines.Add($"{prefix}In-combat Energy and Star cost (late): owner's first N non-autoplay card plays each turn (where N = stacks, for cards in Hand or Play) cost 0 Energy and 0 Stars; counter resets before owner's turn starts");
+        if (FindOverride(power, "BeforeApplied") is not null || FindOverride(power, "BeforePowerAmountChanged") is not null)
+            lines.Add($"{prefix}Application timing: applying or changing stacks of this power disables the free-cost effect for the remainder of the current turn until owner's next turn starts");
+        return true;
+    }
+
+    private bool ReadSwordSageHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterPowerAmountChanged") is not { } amtChanged
+            || FindOverride(power, "AfterCardEnteredCombat") is not { } cardEntered
+            || FindOverride(power, "AfterRemoved") is not { } removed
+            || Body(amtChanged) is not { Incomplete: false } amtBody
+            || Body(cardEntered) is not { Incomplete: false } enterBody
+            || Body(removed) is not { Incomplete: false } remBody)
+        {
+            return false;
+        }
+
+        var targetCardType = remBody.Calls
+            .Where(s => s.Call.Method.Name == "set_BaseReplayCount" && s.Call.Receiver is Operation { Operator: "isinst" or "castclass", Right: Constant { Data: Type ct } })
+            .Select(s => ((Constant)((Operation)s.Call.Receiver!).Right!).Data as Type)
+            .FirstOrDefault(t => t is not null && typeof(CardModel).IsAssignableFrom(t));
+        var callsHelper = amtBody.Calls.Any(s => s.Call.Method.DeclaringType == power)
+            && enterBody.Calls.Any(s => s.Call.Method.DeclaringType == power);
+        if (targetCardType is null || !callsHelper)
+            return false;
+
+        line = $"{prefix}Card replay bonus: increases BaseReplayCount of all owned {ModelLabel(targetCardType)} cards in combat (including non-clone cards entering combat) by stacks while this power is active; removes that bonus when this power is removed";
+        return true;
+    }
+
+    private bool ReadLethalityHook(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "ModifyDamageMultiplicative") is not { } mult
+            || Body(mult) is not { Incomplete: false } multBody)
+            return false;
+
+        var checksCurrentPlayIndex = multBody.Returns.SelectMany(r => r.Conditions)
+            .Any(c => c.Value is Operation { Left: Call { Method.Name: "get_CurrentPlayIndex" } });
+        var checksStartedAttacks = multBody.Returns.SelectMany(r => r.Conditions)
+            .Any(c => c.Value is Operation { Left: Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] } });
+        var activeReturns = multBody.Returns.Where(r => Numeric(r.Value) != 1m).ToArray();
+        if (!checksCurrentPlayIndex || !checksStartedAttacks || activeReturns.Length == 0)
+            return false;
+
+        var factorTexts = activeReturns.Select(r => ValueText(r.Value)).Distinct(StringComparer.Ordinal).ToArray();
+        if (factorTexts is not [{ } factorText])
+            return false;
+
+        line = $"{prefix}Damage multiplier per hit, after additions: if powered attack from owner's first Attack card play this turn (excluding replays of that card): ×{factorText}";
+        return true;
+    }
+
+    private bool ReadCallOfTheVoidHook(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "BeforeHandDraw") is not { } beforeDraw
+            || Body(beforeDraw) is not { Incomplete: false } body)
+            return false;
+
+        var keywordStep = body.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name == nameof(CardCmd.ApplyKeyword));
+        var addStep = body.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(CardPileCmd) && s.Call.Method.Name == nameof(CardPileCmd.AddGeneratedCardsToCombat));
+        var usesFactory = body.Calls.Any(s =>
+            s.Call.Method.DeclaringType?.Name == "CardFactory" && s.Call.Method.Name == "GetDistinctForCombat");
+        if (keywordStep is null || addStep is null || !usesFactory)
+            return false;
+
+        if (keywordStep.Call.Arguments.ElementAtOrDefault(1) is not ArrayValue { Elements: [Constant { Data: int rawKw }] }
+            || !Enum.IsDefined(typeof(CardKeyword), rawKw)
+            || Numeric(Argument(addStep.Call, "newPileType")) is not { } rawPile
+            || !Enum.IsDefined(typeof(PileType), (int)rawPile))
+            return false;
+
+        var kwLabel = KeywordLabel((CardKeyword)rawKw);
+        var pileLabel = PileLocationLabel((PileType)(int)rawPile);
+        line = $"{prefix}Before turn-start hand draw: if player=owner: generate stacks random non-Basic non-Ancient character card(s) with {kwLabel} into owner's {pileLabel}";
+        return true;
+    }
+
+    private bool ReadAutomationHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterCardDrawn") is not { } drawn
+            || Body(drawn) is not { Incomplete: false } drawnBody
+            || TryGetCanonicalPower(power) is not { } canonical
+            || !canonical.DynamicVars.TryGetValue("BaseCards", out var baseCardsVar))
+        {
+            return false;
+        }
+
+        var countsDown = drawnBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
+        var gainsEnergy = drawnBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy));
+        if (!countsDown || !gainsEnergy)
+            return false;
+
+        var threshold = Number(baseCardsVar.BaseValue);
+        line = $"{prefix}Card-draw trigger: every {threshold} cards drawn by owner across combat, owner gains stacks Energy and counter resets to {threshold}";
         return true;
     }
 }

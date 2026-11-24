@@ -41,6 +41,7 @@ internal sealed class NativeRuleBody
         public int StepOrder;
         public List<Value> Stack { get; } = [];
         public Dictionary<int, Value> Locals { get; } = [];
+        public Dictionary<string, Value> OutValues { get; } = new(StringComparer.Ordinal);
         public Dictionary<FieldInfo, Value> StateFields { get; } = [];
         public Dictionary<int, int> Visits { get; } = [];
         public HashSet<(int Epoch, int Index)> CumulativeVisited { get; } = [];
@@ -66,6 +67,8 @@ internal sealed class NativeRuleBody
             copy.Conditions.AddRange(Conditions);
             foreach (var (key, value) in Locals)
                 copy.Locals.Add(key, value);
+            foreach (var (key, value) in OutValues)
+                copy.OutValues.Add(key, value);
             foreach (var (key, value) in StateFields)
                 copy.StateFields.Add(key, value);
             foreach (var (key, value) in Visits)
@@ -218,7 +221,23 @@ internal sealed class NativeRuleBody
                     var args = new Value[target.GetParameters().Length];
                     for (var i = args.Length - 1; i >= 0; i--)
                         args[i] = path.Pop();
-                    var receiver = code != OpCodes.Newobj && !target.IsStatic ? path.Deref(path.Pop()) : null;
+                    var rawReceiver = code != OpCodes.Newobj && !target.IsStatic ? path.Pop() : null;
+                    var receiver = rawReceiver is not null ? path.Deref(rawReceiver) : null;
+                    if (code == OpCodes.Call && target is ConstructorInfo && rawReceiver is LocalAddress ctorSlot)
+                    {
+                        var constructed = new Call(target, null, args.Select(path.Materialize).ToArray());
+                        path.Locals[ctorSlot.Slot] = constructed;
+                        continue;
+                    }
+                    if (target.Name == "Remove" && target.DeclaringType is { IsGenericType: true } dictType
+                        && dictType.GetGenericTypeDefinition() == typeof(Dictionary<,>)
+                        && receiver is not null && args.Length == 2)
+                    {
+                        if (args[1] is LocalAddress removedValSlot)
+                            path.Locals[removedValSlot.Slot] = new Operation("dict_removed_value", receiver);
+                        else if (args[1] is Field { Receiver: var smRec, Member: var smField } && smRec == StateMachine)
+                            path.StateFields[smField] = new Operation("dict_removed_value", receiver);
+                    }
                     if (target.Name == "Deconstruct" && target.DeclaringType is { IsGenericType: true } pair
                         && pair.GetGenericTypeDefinition() == typeof(KeyValuePair<,>)
                         && receiver is not null && args is [LocalAddress keySlot, LocalAddress valueSlot])
@@ -310,7 +329,8 @@ internal sealed class NativeRuleBody
                     {
                         var isDecZero = decLeft is Call { Method.Name: "op_Implicit", Arguments: [Constant { Data: 0 }] }
                             || decLeft is Field { Member.Name: "Zero", Member.DeclaringType: var zt } && zt == typeof(decimal);
-                        var isDecIncremented = decLeft is Call { Method.Name: "op_Increment" or "op_Addition" };
+                        var isDecIncremented = decLeft is Call { Method.Name: "op_Increment" or "op_Addition" }
+                            || decLeft is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "add", Right: Constant { Data: 1 } }] };
                         if (visits == 0 && expected && isDecZero && IsCountedLoopBound(decRight))
                         {
                             Loops.Add(new Loop(destination, index, decRight));
@@ -441,9 +461,22 @@ internal sealed class NativeRuleBody
                     if (targetAddr is LocalAddress initSlot)
                         path.Locals[initSlot.Slot] = new Constant(0);
                     else if (targetAddr is Input initParam)
+                    {
+                        path.OutValues[initParam.Name] = new Constant(0m);
                         OutStores.Add(new OutStore(initParam, new Constant(0m), [.. path.Conditions]));
+                    }
                     else if (targetAddr is Field initField && initField.Receiver != StateMachine)
                         FieldSteps.Add(new FieldStep(index, new Assignment(initField, new Constant(0m)), [.. path.Conditions], epoch, path.StepOrder++));
+                }
+                else if (code == OpCodes.Ldobj || code.Name?.StartsWith("ldind", StringComparison.Ordinal) == true)
+                {
+                    var address = path.Pop();
+                    if (address is LocalAddress loadSlot)
+                        path.Stack.Add(path.Locals.GetValueOrDefault(loadSlot.Slot, Missing));
+                    else if (address is Input loadParam)
+                        path.Stack.Add(path.OutValues.GetValueOrDefault(loadParam.Name, loadParam));
+                    else
+                        path.Stack.Add(address);
                 }
                 else if (code == OpCodes.Stobj || code.Name?.StartsWith("stind", StringComparison.Ordinal) == true)
                 {
@@ -452,7 +485,10 @@ internal sealed class NativeRuleBody
                     if (address is LocalAddress storeSlot)
                         path.Locals[storeSlot.Slot] = storedValue;
                     else if (address is Input storeParam)
+                    {
+                        path.OutValues[storeParam.Name] = storedValue;
                         OutStores.Add(new OutStore(storeParam, storedValue, [.. path.Conditions]));
+                    }
                     else if (address is Field storeField && storeField.Receiver != StateMachine)
                         FieldSteps.Add(new FieldStep(index, new Assignment(storeField, storedValue), [.. path.Conditions], epoch, path.StepOrder++));
                 }
@@ -597,7 +633,7 @@ internal sealed class NativeRuleBody
         Call { Method.Name: "get_IntValue" or "get_BaseValue", Method.DeclaringType: var dvType }
             when typeof(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar).IsAssignableFrom(dvType) => true,
         Call { Method.Name: "get_Count" } => true,
-        Operation { Operator: "kvp_value" } => true,
+        Operation { Operator: "kvp_value" or "dict_removed_value" } => true,
         _ => false,
     };
 

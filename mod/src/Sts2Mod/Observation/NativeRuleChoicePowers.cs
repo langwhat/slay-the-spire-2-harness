@@ -49,6 +49,22 @@ internal sealed partial class NativeRuleText
             else
                 Gap($"{type.Name}.{energyHook.Name}");
         }
+        if (FindOverride(type, "ModifyOrbValue") is { } orbValueHook)
+        {
+            handled.Add(orbValueHook.Name);
+            if (ReadPlayerDeltaHook(type, orbValueHook, "value", "Orb passive and evoke values") is { } orbValueLine)
+                lines.Add($"{powerPrefix}{orbValueLine}");
+            else
+                Gap($"{type.Name}.{orbValueHook.Name}");
+        }
+        if (FindOverride(type, "ModifyOrbPassiveTriggerCounts") is { } orbTriggerHook)
+        {
+            handled.Add(orbTriggerHook.Name);
+            if (ReadOrbPassiveTriggerCountHook(type, orbTriggerHook, handled) is { } orbTriggerLine)
+                lines.Add($"{powerPrefix}{orbTriggerLine}");
+            else
+                Gap($"{type.Name}.{orbTriggerHook.Name}");
+        }
         if (HasCardPlayLimit(type))
         {
             handled.Add("BeforeCardPlayed");
@@ -58,7 +74,7 @@ internal sealed partial class NativeRuleText
         }
         foreach (var costHookName in new[] { "TryModifyEnergyCostInCombat", "TryModifyEnergyCostInCombatLate" })
         {
-            if (FindOverride(type, costHookName) is not { } costHook)
+            if (handled.Contains(costHookName) || FindOverride(type, costHookName) is not { } costHook)
                 continue;
             handled.Add(costHook.Name);
             if (ReadEnergyCostHook(costHook) is { } costLine)
@@ -66,7 +82,7 @@ internal sealed partial class NativeRuleText
             else
                 Gap($"{type.Name}.{costHook.Name}");
         }
-        if (FindOverride(type, "ModifyCardPlayCount") is { } playCountHook)
+        if (!handled.Contains("ModifyCardPlayCount") && FindOverride(type, "ModifyCardPlayCount") is { } playCountHook)
         {
             handled.Add(playCountHook.Name);
             if (ReadCardPlayCountHook(type, playCountHook, handled) is { } playCountLine)
@@ -74,13 +90,18 @@ internal sealed partial class NativeRuleText
             else
                 Gap($"{type.Name}.{playCountHook.Name}");
         }
-        if (FindOverride(type, "ModifyCardPlayResultLocation") is { } playLocHook)
+        if (!handled.Contains("ModifyCardPlayResultLocation") && FindOverride(type, "ModifyCardPlayResultLocation") is { } playLocHook)
         {
-            handled.Add(playLocHook.Name);
             if (ReadCardPlayResultLocationHook(type, playLocHook, handled) is { } playLocLine)
+            {
+                handled.Add(playLocHook.Name);
                 lines.Add($"{powerPrefix}{playLocLine}");
-            else
+            }
+            else if (FindOverride(type, "AfterModifyingCardPlayResultLocation") is null || !HasInternalDataFieldAccess(playLocHook))
+            {
+                handled.Add(playLocHook.Name);
                 Gap($"{type.Name}.{playLocHook.Name}");
+            }
         }
         if (FindOverride(type, "ModifyPreBlockDamageTarget") is { } preBlockTargetHook)
         {
@@ -374,6 +395,9 @@ internal sealed partial class NativeRuleText
         }
         if (rawPile is null || conditions is null)
             return null;
+        // Fail closed when the destination depends on internal turn counters or resource costs (handled by specialized power readers).
+        if (conditions.Any(c => ContainsInternalDataOrEnergyCheck(c.Value)))
+            return null;
 
         CardType? filteredType = null;
         foreach (var cond in conditions)
@@ -396,23 +420,132 @@ internal sealed partial class NativeRuleText
         => Body(method) is { Incomplete: false, Writes.Count: 0, FieldSteps.Count: 0 } body
             && body.Calls.All(step => IsBenignReadOrPlumbingCall(step.Call.Method));
 
+    private static bool HasInternalDataFieldAccess(MethodInfo hook)
+        => NativeRuleBody.Read(hook) is { Incomplete: false } body
+            && body.Returns.SelectMany(r => r.Conditions).Any(c => ContainsInternalDataOrEnergyCheck(c.Value));
+
+    private static bool ContainsInternalDataOrEnergyCheck(Value value) => value switch
+    {
+        Field f => InternalDataField(f) is not null,
+        Call { Method.Name: "get_EnergyValue" or "get_EnergySpent" } => true,
+        Call c => (c.Receiver is { } rec && ContainsInternalDataOrEnergyCheck(rec))
+            || c.Arguments.Any(ContainsInternalDataOrEnergyCheck),
+        Operation op => ContainsInternalDataOrEnergyCheck(op.Left)
+            || (op.Right is { } right && ContainsInternalDataOrEnergyCheck(right)),
+        _ => false,
+    };
+
+    private string? ReadOrbPassiveTriggerCountHook(Type type, MethodInfo hook, HashSet<string> handled)
+    {
+        var body = Body(hook);
+        if (body.Incomplete || body.Returns.Count == 0)
+            return null;
+        var outcomes = new List<(string Text, Test[] Conditions)>();
+        foreach (var result in body.Returns)
+        {
+            if (result.Value is Input { Name: "triggerCount" })
+            {
+                outcomes.Add(("", result.Conditions));
+                continue;
+            }
+            if (result.Value is Operation { Operator: "add", Left: Input { Name: "triggerCount" }, Right: var delta }
+                && ValueText(delta) is { } deltaText)
+            {
+                outcomes.Add(($"+{deltaText} additional passive trigger(s)", result.Conditions));
+                continue;
+            }
+            return null;
+        }
+        var rendered = RenderOutcomes(outcomes, body.Terminals.Where(t => !t.Returned).Select(t => t.Conditions));
+        if (rendered is not { Count: > 0 })
+            return null;
+        if (FindOverride(type, "AfterModifyingOrbPassiveTriggerCount") is { } afterHook && IsPurePresentationHook(afterHook))
+            handled.Add(afterHook.Name);
+        return $"Orb passive trigger count: {string.Join("; ", rendered)}";
+    }
+
     private void ReadPowerReceptionHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
     {
-        if (FindOverride(type, "TryModifyPowerAmountReceived") is not { } modify)
-            return;
-        handled.Add(modify.Name);
-        if (IsVisibleDebuffNegation(modify))
+        if (FindOverride(type, "TryModifyPowerAmountReceived") is { } modify)
         {
-            var decrement = FindOverride(type, "AfterModifyingPowerAmountReceived") is { } after && IsSelfDecrement(after);
-            if (decrement)
-                handled.Add("AfterModifyingPowerAmountReceived");
-            var outcome = decrement
-                ? $"(reduce applied stacks to 0; attempt to subtract 1 {PowerLabel(type)} stack)"
-                : "reduce applied stacks to 0";
-            lines.Add($"{powerPrefix}When a power would be applied to owner: if applied power is a visible Debuff: {outcome}");
+            handled.Add(modify.Name);
+            if (IsVisibleDebuffNegation(modify))
+            {
+                var decrement = FindOverride(type, "AfterModifyingPowerAmountReceived") is { } after && IsSelfDecrement(after);
+                if (decrement)
+                    handled.Add("AfterModifyingPowerAmountReceived");
+                var outcome = decrement
+                    ? $"(reduce applied stacks to 0; attempt to subtract 1 {PowerLabel(type)} stack)"
+                    : "reduce applied stacks to 0";
+                lines.Add($"{powerPrefix}When a power would be applied to owner: if applied power is a visible Debuff: {outcome}");
+            }
+            else if (ReadPowerAmountReceivedModifier(type, modify, handled) is { } receivedLine)
+            {
+                lines.Add($"{powerPrefix}{receivedLine}");
+            }
+            else
+            {
+                Gap($"{type.Name}.{modify.Name}");
+            }
         }
-        else
-            Gap($"{type.Name}.{modify.Name}");
+        if (FindOverride(type, "ModifyPowerAmountGivenAdditive") is { } givenAdd)
+        {
+            handled.Add(givenAdd.Name);
+            var rendered = ReadValueHook(givenAdd, 0m, "+{0}", out _);
+            if (rendered is { Count: > 0 })
+            {
+                if (FindOverride(type, "AfterModifyingPowerAmountGiven") is { } afterGiven && IsPurePresentationHook(afterGiven))
+                    handled.Add(afterGiven.Name);
+                lines.Add($"{powerPrefix}Power stacks given (additive): {string.Join("; ", rendered)}");
+            }
+            else
+            {
+                Gap($"{type.Name}.{givenAdd.Name}");
+            }
+        }
+    }
+
+    private string? ReadPowerAmountReceivedModifier(Type type, MethodInfo method, HashSet<string> handled)
+    {
+        var body = Body(method);
+        if (body.Incomplete)
+            return null;
+        var active = body.Returns.Where(r => TryTruth(r.Value, out var modified) && modified).ToArray();
+        var nonPassthroughStores = body.OutStores.Where(s => s.Parameter.Name == "modifiedAmount" && s.Assigned is not Input).ToArray();
+        if (active.Length != 1 || nonPassthroughStores is not [var store])
+            return null;
+
+        string? changeText = null;
+        if (store.Assigned is Call { Method.Name: "op_Multiply", Arguments: [var mulL, var mulR] }
+            && ((mulL is Input { Name: "amount" } && ValueText(mulR) is { } mulFactor)
+                || (mulR is Input { Name: "amount" } && ValueText(mulL) is { } mulFactor2 && (mulFactor = mulFactor2) is not null)))
+        {
+            changeText = $"multiply applied stacks by {mulFactor}";
+        }
+        else if (store.Assigned is Call { Method.Name: "op_Addition", Arguments: [Input { Name: "amount" }, var addR] }
+            && ValueText(addR) is { } addText)
+        {
+            changeText = $"increase applied stacks by {addText}";
+        }
+        if (changeText is null)
+            return null;
+
+        var guard = Guard(active[0].Conditions);
+        if (guard is null || guard == Never)
+            return null;
+
+        var afterSuffix = "";
+        if (FindOverride(type, "AfterModifyingPowerAmountReceived") is { } afterHook)
+        {
+            var (afterEffects, afterIncomplete) = ReadEffects(afterHook, typeof(PowerModel).IsAssignableFrom(type) ? type : null);
+            if (!afterIncomplete)
+            {
+                handled.Add(afterHook.Name);
+                if (afterEffects.Count > 0)
+                    afterSuffix = $"; then {string.Join("; ", afterEffects.Select(e => e.Text))}";
+            }
+        }
+        return $"When a power would be applied: {When(guard, changeText + afterSuffix)}";
     }
 
     private bool IsVisibleDebuffNegation(MethodInfo method)
@@ -575,11 +708,19 @@ internal sealed partial class NativeRuleText
                 continue;
             }
             var floored = false;
-            if (value is Call { Method.DeclaringType: var math, Method.Name: nameof(Math.Max), Arguments: [var minimum, var inner] }
-                && math == typeof(Math) && Numeric(minimum) == 0m)
+            if (value is Call { Method.DeclaringType: var math, Method.Name: nameof(Math.Max), Arguments: [var arg0, var arg1] }
+                && math == typeof(Math))
             {
-                floored = true;
-                value = inner;
+                if (Numeric(arg0) == 0m)
+                {
+                    floored = true;
+                    value = arg1;
+                }
+                else if (Numeric(arg1) == 0m)
+                {
+                    floored = true;
+                    value = arg0;
+                }
             }
             if (value is Call { Method.DeclaringType: var number, Method.Name: "op_Addition" or "op_Subtraction", Arguments: [Input source, var delta] }
                 && number == typeof(decimal) && source.Name == operand && ValueText(delta) is { } deltaText)

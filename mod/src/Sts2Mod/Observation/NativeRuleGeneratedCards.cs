@@ -69,7 +69,7 @@ internal sealed partial class NativeRuleText
                 continue;
             if (method.Name is "OnTurnEndInHand" or "OnPlay" or "OnUpgrade" or "FakeUpgrade"
                 or "SetupSkins" or "BeforeAnimPlayedInCompendium"
-                or "get_CanonicalKeywords" or "get_CanonicalVars" or "get_HasTurnEndInHandEffect"
+                or "get_CanonicalKeywords" or "get_CanonicalTags" or "get_CanonicalVars" or "get_HasTurnEndInHandEffect"
                 or "get_CanonicalEnergyCost" or "get_CanonicalStarCost" or "get_MaxUpgradeLevel"
                 or "get_MultiplayerConstraint" or "get_TargetType" or "get_Rarity" or "get_Type"
                 or "get_ExtraHoverTips" or "get_GainsBlock" or "get_Title"
@@ -106,8 +106,11 @@ internal sealed partial class NativeRuleText
             var name = call.Method.Name;
             if (IsPresentationCall(call.Method)
                 || declaring?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
-                || name is "get_Owner" or "get_Creature" or "get_DynamicVars" or "get_Damage"
-                    or "get_HpLoss" or "get_Cards" or "get_BaseValue" or "get_EnergyCost"
+                || (declaring == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty) && name == "CheckMissingWithAnim")
+                || declaring == typeof(DamageCmd)
+                || declaring?.Name == "AttackCommand" && name is not "Execute"
+                || name is "get_Owner" or "get_Creature" or "get_Osty" or "get_DynamicVars" or "get_Damage"
+                    or "get_OstyDamage" or "get_HpLoss" or "get_Cards" or "get_BaseValue" or "get_EnergyCost"
                     or "get_CombatState" or "get_Enemies" or "get_Powers" or "OfType" or "FirstOrDefault"
                 || call.Method is ConstructorInfo)
                 continue;
@@ -120,8 +123,21 @@ internal sealed partial class NativeRuleText
             var isTargetedEnemyPowerGuard = declaring == typeof(PowerCmd) && name == nameof(PowerCmd.ModifyAmount)
                 && call.Arguments.Length >= 2 && EnemyPowerTargetingCardOwner(card.GetType(), call.Arguments[1]) is not null
                 && minimized.All(path => path.All(c => IsDreadTest(c) || IsEnemyPowerPresenceCheck(card.GetType(), c)));
-            if (!isTargetedEnemyPowerGuard && minimized.Any(path => path.Any(c => !IsDreadTest(c) && Condition(c) is not "")))
+            var isOstyPresentGuard = declaring?.Name == "AttackCommand" && name == "Execute"
+                && minimized.All(path => path.All(c => IsDreadTest(c)
+                    || (c is { Expected: false, Value: Call { Method.DeclaringType: var ostyDecl, Method.Name: "CheckMissingWithAnim" } }
+                        && ostyDecl == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))));
+            if (!isTargetedEnemyPowerGuard && !isOstyPresentGuard
+                && minimized.Any(path => path.Any(c => !IsDreadTest(c) && Condition(c) is not "")))
                 return null;
+
+            if (declaring?.Name == "AttackCommand" && name == "Execute" && call.Receiver is Call attackBuilder)
+            {
+                if (DescribeCardAttackCommand(card, attackBuilder, isOstyPresentGuard) is not { } attackDesc)
+                    return null;
+                effects.Add(attackDesc);
+                continue;
+            }
 
             if (declaring == typeof(CreatureCmd) && name == nameof(CreatureCmd.Damage))
             {
@@ -194,10 +210,40 @@ internal sealed partial class NativeRuleText
         _ => false,
     };
 
+    private string? DescribeCardAttackCommand(CardModel card, Call receiver, bool requiresOsty)
+    {
+        Value? amount = null;
+        var fromOsty = false;
+        string? targetText = null;
+        for (var c = receiver; ; c = (Call)c.Receiver)
+        {
+            if (c.Method.DeclaringType == typeof(DamageCmd) && c.Method.Name == "Attack")
+                amount = c.Arguments.FirstOrDefault();
+            else if (c.Method.Name == "FromOsty")
+                fromOsty = true;
+            else if (c.Method.Name == "TargetingRandomOpponents")
+                targetText = "a random enemy";
+            else if (c.Method.Name == "TargetingAllOpponents")
+                targetText = "all enemies";
+            if (c.Receiver is not Call)
+                break;
+        }
+        if (amount is null || targetText is null || CardNumeric(card, amount) is not { } dmg)
+            return null;
+        var attackerPrefix = fromOsty
+            ? $"if {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive: {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} deals "
+            : requiresOsty
+                ? $"if {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive: deal "
+                : "deal ";
+        return $"{attackerPrefix}{Number(dmg)} damage to {targetText}";
+    }
+
     private decimal? CardNumeric(CardModel card, Value value) => value switch
     {
         Call { Method.Name: "get_BaseValue", Receiver: Call { Method.Name: "get_HpLoss" } }
             when card.DynamicVars.TryGetValue("HpLoss", out var hp) => hp.BaseValue,
+        Call { Method.Name: "get_BaseValue", Receiver: Call { Method.Name: "get_OstyDamage" } }
+            when card.DynamicVars.TryGetValue("OstyDamage", out var ostyDmg) => ostyDmg.BaseValue,
         Call { Method.Name: "get_BaseValue", Receiver: Call { Method.Name: "get_Cards" } }
             when card.DynamicVars.TryGetValue("Cards", out var cards) => cards.BaseValue,
         Call { Method.Name: "get_BaseValue", Receiver: var dyn }

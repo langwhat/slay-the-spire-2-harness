@@ -45,6 +45,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("AfterSideTurnStartLate", "At side turn start, late"),
         ("AfterBlockCleared", "After Block expires at turn start"),
         ("AfterEnergyReset", "After turn-start Energy reset"),
+        ("AfterEnergyResetLate", "After turn-start Energy reset (late)"),
         ("BeforeHandDraw", "Before turn-start hand draw"),
         ("AfterAutoPrePlayPhaseEntered", "At start of turn before card play"),
         ("AfterCardEnteredCombat", "After a card enters combat"),
@@ -52,7 +53,15 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("BeforeCardPlayed", "Before card play"),
         ("AfterCardPlayed", "After each card play resolves"),
         ("AfterCardExhausted", "After a card is exhausted"),
+        ("AfterCardDiscarded", "After a card is discarded"),
+        ("AfterShuffle", "After shuffling draw pile"),
         ("AfterCardChangedPilesLate", "After a card changes piles, late"),
+        ("AfterOrbChanneled", "After channeling an orb"),
+        ("AfterOrbEvoked", "After an orb is evoked"),
+        ("AfterStarsGained", "After gaining Stars"),
+        ("AfterStarsSpent", "After spending Stars"),
+        ("AfterForge", "After forging"),
+        ("AfterEnergySpent", "After spending Energy on a card"),
         ("AfterBlockGained", "After gaining block"),
         ("AfterPreventingBlockClear", "After preventing block clear"),
         ("AfterDamageReceived", "After damage resolves"),
@@ -62,6 +71,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("BeforeSideTurnEnd", "Before side turn ends"),
         ("AfterAutoPostPlayPhaseEntered", "At end of turn before hand discard"),
         ("BeforeFlush", "Before end-of-turn hand discard"),
+        ("AfterFlush", "After end-of-turn hand discard"),
         ("AfterSideTurnEnd", "After side turn ends"),
         ("AfterSideTurnEndLate", "At side turn end, late"),
         ("AfterPowerAmountChanged", "After a power changes stacks"),
@@ -80,6 +90,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("AfterOstyRevived", "After Osty revives"),
         ("AfterModifyingHandDraw", "After modifying hand draw"),
         ("AfterModifyingDamageAmount", "After modifying damage"),
+        ("AfterModifyingBlockAmount", "After modifying Block"),
+        ("AfterModifyingPowerAmountGiven", "After modifying power stacks given"),
         ("AfterModifyingHpLostBeforeOsty", "After modifying HP lost"),
         ("AfterModifyingHpLostAfterOsty", "After modifying HP lost"),
         ("AfterCombatVictory", "After combat victory"),
@@ -225,13 +237,13 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         var preHandled = new HashSet<string>(StringComparer.Ordinal);
         if (power || isRelic)
         {
-            ReadPlayerResourceHooks(type, powerPrefix, preHandled, targetLines);
             if (power)
             {
-                ReadPowerReceptionHooks(type, powerPrefix, preHandled, targetLines);
-                ReadDamageCapHooks(type, powerPrefix, preHandled, targetLines);
                 ReadSpecialPowerHooks(type, powerPrefix, preHandled, targetLines);
+                ReadDamageCapHooks(type, powerPrefix, preHandled, targetLines);
             }
+            ReadPlayerResourceHooks(type, powerPrefix, preHandled, targetLines);
+            ReadPowerReceptionHooks(type, powerPrefix, preHandled, targetLines);
             handled.UnionWith(preHandled);
         }
 
@@ -1230,7 +1242,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             || type == typeof(Creature)
             || type == typeof(MegaCrit.Sts2.Core.Entities.Players.Player)
             || typeof(ICombatState).IsAssignableFrom(type)
-            || type == typeof(MegaCrit.Sts2.Core.Rooms.CombatRoom);
+            || type == typeof(MegaCrit.Sts2.Core.Rooms.CombatRoom)
+            || type == typeof(CardEnergyCost);
     }
 
     private Effect? DescribeEffect(Call call, MethodInfo caller, Type? power, IReadOnlySet<string> flags,
@@ -1574,10 +1587,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
         if (type == typeof(CardPileCmd) && effect == "Draw")
         {
-            var drawCountArg = Argument(call, "count") ?? args.ElementAtOrDefault(1);
-            var drawPlayerArg = Argument(call, "player") ?? (args.Length >= 3 ? args[2] : null);
+            var drawCountArg = Argument(call, "count");
+            var drawPlayerArg = Argument(call, "player") ?? args.LastOrDefault();
+            var drawCount = drawCountArg is not null ? ValueText(drawCountArg) : "1";
             var drawWho = drawPlayerArg is not null ? ValueText(drawPlayerArg) : "owner";
-            if (drawCountArg is not null && ValueText(drawCountArg) is { } drawCount && drawWho is not null)
+            if (drawCount is not null && drawWho is not null)
                 return new Effect($"{drawWho} draws {drawCount} {(drawCount == "1" ? "card" : "cards")}");
         }
 
@@ -1591,6 +1605,24 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 var posLabel = Numeric(apPosArg) is { } rawPos ? ((CardPilePosition)(int)rawPos).ToString().ToLowerInvariant() + " " : "";
                 return new Effect($"auto-play the {posLabel}{apCnt} card(s) of {Possessive(apWho)} draw pile");
             }
+        }
+
+        if (type == typeof(CardPileCmd) && effect == "ShuffleIfNecessary")
+        {
+            var shufPlayer = Argument(call, "player") ?? args.ElementAtOrDefault(1);
+            var shufWho = shufPlayer is not null ? ValueText(shufPlayer) : "owner";
+            if (shufWho is not null)
+                return new Effect($"shuffle {Possessive(shufWho)} discard pile into draw pile if draw pile is empty");
+        }
+
+        if (type == typeof(CardSelectCmd) && effect is "FromHand" or "FromHandForDiscard" or "FromCombatPile")
+        {
+            if (IsConsumedCardSelection(call, caller))
+            {
+                recognized = false;
+                return null;
+            }
+            return null;
         }
 
         if (type == typeof(PlayerCmd))
@@ -1618,6 +1650,32 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 if (orbWho is not null)
                     return new Effect($"{orbWho} channels 1 {ModelLabel(generic)}");
             }
+            if (effect == "Channel" && generic is null)
+            {
+                var orbArg = Argument(call, "orb") ?? args.ElementAtOrDefault(1);
+                var orbPlayer = Argument(call, "player") ?? args.ElementAtOrDefault(2);
+                var orbWho = orbPlayer is not null ? ValueText(orbPlayer) : "owner";
+                if (orbWho is not null && DescribeOrbValue(orbArg) is { } orbLabel)
+                    return new Effect($"{orbWho} channels {orbLabel}");
+            }
+            if (effect == "Passive")
+            {
+                var orbArg = Argument(call, "orb") ?? args.ElementAtOrDefault(1);
+                var affectedByHooks = Argument(call, "countAffectedByHooks") is Constant { Data: 1 or true };
+                if (orbArg is not null && ValueText(orbArg) is { } orbTarget)
+                {
+                    var hookNote = affectedByHooks ? " (affected by passive trigger count modifiers)" : "";
+                    return new Effect($"trigger the passive effect of {orbTarget}{hookNote}");
+                }
+            }
+            if (effect == "AddSlots")
+            {
+                var slotPlayer = Argument(call, "player") ?? args.ElementAtOrDefault(0);
+                var slotAmt = Argument(call, "amount") ?? args.ElementAtOrDefault(1);
+                if (slotPlayer is not null && slotAmt is not null
+                    && ValueText(slotPlayer) is { } slotWho && ValueText(slotAmt) is { } slotCount)
+                    return new Effect($"{slotWho} gains {slotCount} orb {(slotCount == "1" ? "slot" : "slots")}");
+            }
             if (effect == "EvokeLast" || effect == "EvokeNext")
             {
                 var orbPlayer = Argument(call, "player") ?? args.ElementAtOrDefault(1);
@@ -1625,6 +1683,39 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 if (orbWho is not null)
                     return new Effect($"{orbWho} evokes their {(effect == "EvokeLast" ? "last" : "next")} orb");
             }
+        }
+
+        if (type == typeof(ForgeCmd) && effect == "Forge")
+        {
+            var forgeAmt = Argument(call, "amount") ?? args.ElementAtOrDefault(0);
+            var forgePlayer = Argument(call, "player") ?? args.ElementAtOrDefault(1);
+            if (forgeAmt is not null && forgePlayer is not null
+                && ValueText(forgeAmt) is { } forgeAmountText && ValueText(forgePlayer) is { } forgeWho)
+                return new Effect($"{forgeWho} forges {forgeAmountText}");
+        }
+
+        if (type == typeof(MegaCrit.Sts2.Core.Rooms.CombatRoom) && effect == "AddExtraReward" && args.Length >= 2)
+        {
+            if (ValueText(args[0]) is { } rewardWho && args[1] is Call { Method: ConstructorInfo { DeclaringType: var rewardType }, Arguments: var rArgs })
+            {
+                if (rewardType == typeof(MegaCrit.Sts2.Core.Rewards.GoldReward) && rArgs.Length >= 1 && ValueText(rArgs[0]) is { } goldAmt)
+                    return new Effect($"add an extra {goldAmt} Gold reward for {rewardWho}");
+                if (rewardType == typeof(MegaCrit.Sts2.Core.Rewards.CardRemovalReward))
+                    return new Effect($"add an extra card removal reward for {rewardWho}");
+            }
+        }
+
+        if (type == typeof(CardEnergyCost) && effect == "AddUntilPlayed" && args is [var costDeltaArg, ..]
+            && call.Receiver is Call { Method.Name: "get_EnergyCost", Receiver: var costTarget }
+            && ValueText(costTarget) is { } costTargetText)
+        {
+            if (Numeric(costDeltaArg) is { } costDeltaNum)
+            {
+                var verb = costDeltaNum < 0m ? $"reduce the Energy cost of {costTargetText} by {Number(-costDeltaNum)}" : $"increase the Energy cost of {costTargetText} by {Number(costDeltaNum)}";
+                return new Effect($"{verb} until played");
+            }
+            if (ValueText(costDeltaArg) is { } costDeltaText)
+                return new Effect($"change the Energy cost of {costTargetText} by {costDeltaText} until played");
         }
 
         if (type == typeof(OstyCmd) && effect == "Summon")
@@ -1656,6 +1747,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     : null;
             if (effect == "Upgrade" && args.Length >= 1 && ValueText(args[0]) is { } upgradedCards)
                 return new Effect($"upgrade {upgradedCards}");
+            if (effect == "Discard" && args.Length >= 2 && ValueText(args[1]) is { } discardedCards)
+                return new Effect($"discard {discardedCards}");
+            if (effect == "Exhaust" && args.Length >= 2 && ValueText(args[1]) is { } exhaustedCards)
+                return new Effect($"exhaust {exhaustedCards}");
+            if (effect == "TransformToRandom" && args.Length >= 1 && ValueText(args[0]) is { } transformedCards)
+                return new Effect($"transform {transformedCards} into a random card");
             if (effect == "AutoPlay" && args.Length >= 2 && ValueText(args[1]) is { } autoCard)
                 return new Effect($"auto-play {autoCard}");
             if (effect == "ApplyKeyword" && args.Length >= 2)
@@ -2324,6 +2421,27 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 if (call.Receiver is Call { Method: ConstructorInfo })
                     return expected ? "" : Never;
             }
+            if (name == "GetValueOrDefault" && call.Method.DeclaringType is { IsGenericType: true } nullableValDecl
+                && nullableValDecl.GetGenericTypeDefinition() == typeof(Nullable<>))
+            {
+                if (call.Receiver is Constant { Data: 0 })
+                    return expected ? Never : "";
+                if (call.Receiver is Call { Method: ConstructorInfo, Arguments: [var wrappedVal] })
+                    return Condition(test with { Value = wrappedVal });
+            }
+            if (name == "get_Count" && ValueText(call) is { } countCondText)
+                return expected ? $"{countCondText}>0" : $"{countCondText}=0";
+            if (name == "GetWithModifiers" && call.Receiver is Call { Method.Name: "get_EnergyCost" } && ValueText(call) is { } modEnergyText)
+                return expected ? $"{modEnergyText}≠0" : $"{modEnergyText}=0";
+            if (name is "get_EnergySpent" or "get_EnergyValue" && call.Receiver is Call { Method.Name: "get_Resources" } && ValueText(call) is { } resEnergyText)
+                return expected ? $"{resEnergyText}≠0" : $"{resEnergyText}=0";
+            if (name == "get_IsLastInSeries")
+                return expected ? "played card is the last play in its series" : "played card is not the last play in its series";
+            if (name == "get_IsAutoPlay")
+                return expected ? "played card is auto-played" : "played card is not auto-played";
+            if (name == "get_CostsX" && call.Receiver is Call { Method.Name: "get_EnergyCost", Receiver: var xCard }
+                && ValueText(xCard) is { } xCardLabel)
+                return expected ? $"{xCardLabel} has X Energy cost" : $"{xCardLabel} does not have X Energy cost";
             if (name == "get_Pile" && call.Method.DeclaringType == typeof(CardModel))
             {
                 var pileSubject = call.Receiver is Call { Method.Name: "get_Card" } ? "played card" : "that card";
@@ -2366,6 +2484,10 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         // AfterDeath sets this when death is prevented, regardless of whether a corpse stays in combat.
         if (value is Input { Name: "wasRemovalPrevented" })
             return expected ? "death was prevented" : "death was not prevented";
+
+        // CardFactory.GetDistinctForCombat(...).FirstOrDefault() != null
+        if (value is Call { Method.Name: "FirstOrDefault" } firstCall && UnwrapCardFactoryCall(firstCall) is not null)
+            return expected ? "a matching card exists in the pool" : "no matching card exists in the pool";
 
         // A truth test on an object reference checks that it exists.
         if ((value is Input { Type.IsValueType: false } || value is Call { Method: MethodInfo { ReturnType.IsValueType: false } })
@@ -2412,16 +2534,30 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             Input { Name: "target" } => "target",
             Input { Name: "dealer" } => "attacker",
             Input { Name: "cardSource" } => "source card",
+            Input { Name: "cardPlay" } => "card play",
             Input { Name: "amount" } => "amount",
             Input { Name: "power" } => "changed power",
+            Input { Name: "canonicalPower" } => "applied power",
             Input { Name: "card" } => "that card",
             Input { Name: "creature" } => "event target",
             Input { Name: "player" } => "player",
+            Input { Name: "shuffler" } => "shuffler",
             Input { Name: "creator" } => "card creator",
             Input { Name: "applier" } => "applier",
+            Input { Name: "giver" } => "power giver",
+            Input { Name: "orb" } => "that orb",
+            Input { Name: "gainer" } => "Star gainer",
+            Input { Name: "spender" } => "Star spender",
+            Input { Name: "forger" } => "forger",
+            Input { Name: "source" } => "source",
+            Input { Name: "retainedCards" } => "retained cards",
             Input { Name: "delta" } => "HP change",
             Constant { Data: null } => "none",
             Constant { Data: string text } => text,
+            Field { Member: { Name: var capName, FieldType: var capType, DeclaringType: { } capDecl } }
+                when capDecl.IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), inherit: false)
+                    && capName is "forger" or "player" or "card" or "target" or "amount" or "gainer" or "spender" or "shuffler"
+                => ValueText(new Input(capName, capType)),
             Operation { Operator: "neg", Left: var negInner } when ValueText(negInner) is { } negText => $"−{negText}",
             Operation { Operator: "conv.r8" or "conv.r4" or "conv.i4", Left: var convInner } => ValueText(convInner),
             Operation { Operator: "castclass" or "isinst", Left: Input { Name: "card" } } => "that card",
@@ -2442,6 +2578,31 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             Call { Method.Name: "get_Creature", Receiver: var playerRec } when ValueText(playerRec) is { } playerWho => playerWho,
             Call { Method.Name: "GetResolved", Receiver: Call { Method.Name: "get_EnergyCost", Receiver: var costCard } }
                 when ValueText(costCard) is { } costCardLabel => $"{Possessive(costCardLabel)} Energy cost",
+            Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost", Receiver: var modCostCard } }
+                when ValueText(modCostCard) is { } modCostCardLabel => $"{Possessive(modCostCardLabel)} modified Energy cost",
+            Call { Method.Name: "get_StarsSpent", Receiver: Call { Method.Name: "get_Resources" } } => "Stars spent on played card",
+            Call { Method.Name: "get_EnergyValue", Receiver: Call { Method.Name: "get_Resources" } } => "played card's Energy value",
+            Call { Method.Name: "get_EnergySpent", Receiver: Call { Method.Name: "get_Resources" } } => "Energy spent on played card",
+            Call { Method.Name: "get_Attacker", Method.DeclaringType: var atkCmdType } when atkCmdType == typeof(MegaCrit.Sts2.Core.Commands.Builders.AttackCommand) => "attacker",
+            Call { Method.Name: "get_Owner", Method.DeclaringType: var orbOwnerType, Receiver: Input { Name: "orb" } }
+                when orbOwnerType == typeof(OrbModel) => "that orb's owner",
+            Call { Method.Name: "get_Owner", Method.DeclaringType: var csOwnerType, Receiver: Input { Name: "cardSource" } }
+                when csOwnerType == typeof(CardModel) => "source card's owner",
+            Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Orbs" } } => "owner's orb count",
+            Call { Method.Name: "get_Item", Receiver: Call { Method.Name: "get_Orbs" }, Arguments: [Constant { Data: 0 }] } => "owner's first (next) orb",
+            Call { Method.Name: "get_Orbs" } => "each orb in owner's orb queue",
+            Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: nameof(Enumerable.GroupBy), Arguments: [Call { Method.Name: "get_Orbs" }, ..] }] }
+                => "number of unique orb types channeled by owner",
+            Call { Method.Name: "FloorToInt", Method.DeclaringType.Name: "Mathf", Arguments: [var floorInner] }
+                when ValueText(floorInner) is { } floorText => $"floor({floorText})",
+            Call { Method.Name: "get_Count", Receiver: var countedList } when DescribeCardSelectionValue(countedList) is not null
+                => "chosen card count",
+            Call { Method.Name: "get_Count", Receiver: var poolList } when IsFilteredUnlockedCardPool(poolList)
+                => "matching unlocked card pool size",
+            Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "ToList", Arguments: [Call { Method.Name: nameof(Enumerable.Where) } filteredList] } }
+                when FilteredSet(filteredList) is { } filteredLabel => $"count of {filteredLabel}",
+            Call { Method.Name: "GetResult", Receiver: Call { Method.Name: "GetAwaiter", Receiver: Call selectCall } }
+                when DescribeCardSelectionValue(selectCall) is { } selectedText => selectedText,
             Call { Method.Name: "Pow", Method.DeclaringType: var mathPow, Arguments: [var powBase, var powExp] }
                 when mathPow == typeof(Math) && ValueText(powBase) is { } baseText && ValueText(powExp) is { } expText
                 => $"{baseText}^{expText}",
@@ -2476,7 +2637,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator", Receiver: { } collection } } => ValueText(collection),
             Call { Method.Name: "Take" } takenCall when DescribedTakenCards(takenCall) is { } takenCards => takenCards,
             Call { Method.Name: "NextItem", Method.DeclaringType.Name: "Rng", Arguments: [var nextItems] }
-                when ValueText(nextItems) is { } itemsLabel => $"a random card from {itemsLabel}",
+                when ValueText(nextItems) is { } itemsLabel => itemsLabel == "all hittable enemies"
+                    ? "a random hittable enemy"
+                    : nextItems is Call { Method: MethodInfo { ReturnType: var retT } } && typeof(IEnumerable<Creature>).IsAssignableFrom(retT)
+                        ? $"a random target from {itemsLabel}"
+                        : $"a random card from {itemsLabel}",
             Call { Method.Name: "get_Cards", Receiver: Call { Method.Name: "GetPile", Arguments: [Constant { Data: int rawPile }, var pileOwner] } }
                 when Enum.IsDefined(typeof(PileType), rawPile) && ValueText(pileOwner) is { } pileWho
                 => $"{Possessive(pileWho)} {PileLocationLabel((PileType)rawPile)}",
@@ -2546,6 +2711,19 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             && Enum.IsDefined(typeof(PileType), rawPile) && ValueText(pileOwner) is { } pileWho
             && DescribePileCardFilter(selector) is { } pileFilter)
             return $"{pileFilter} in {Possessive(pileWho)} {PileLocationLabel((PileType)rawPile)}";
+        if (source is Input { Name: "retainedCards" } && DescribePileCardFilter(selector) is { } retainedFilter)
+            return $"{retainedFilter} among retained cards";
+        if (source is Input { Name: "targets" } && Body(selector) is { Incomplete: false, Returns: [{ Value: Call { Method.Name: "get_IsAlive" }, Conditions.Length: 0 }] })
+            return "living evoked targets";
+        if (source is Call { Method.Name: "GetOpponentsOf", Arguments: [var oppFocus] } && IsOwner(oppFocus)
+            && Body(selector) is { Incomplete: false, Returns: [{ Value: Call { Method.Name: "get_IsAlive" }, Conditions.Length: 0 }] })
+            return "all living opponents";
+        if (source is Call { Method.Name: "get_Players" }
+            && IsOtherLivingPlayerPredicate(selector))
+            return "each other living player";
+        if (source is Call { Method.Name: "GetTeammatesOf", Arguments: [var tmFocus] } && IsOwner(tmFocus)
+            && IsOtherLivingPlayerPredicate(selector))
+            return "each other living player";
         if (Body(selector).Returns is not [{ Value: var test, Conditions.Length: 0 }])
             return null;
         if (source is Call { Method.Name: "GetTeammatesOf", Arguments: [var focus] } && IsOwner(focus)
@@ -2585,13 +2763,96 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         _ => $"{pile.ToString().ToLowerInvariant()} pile",
     };
 
+    private string? DescribeOrbValue(Value? orbArg) => orbArg switch
+    {
+        Call { Method.Name: "ToMutable", Receiver: var inner } => DescribeOrbValue(inner),
+        Call { Method.Name: "GetRandomOrb", Method.DeclaringType: var t } when t == typeof(OrbModel) => "1 random orb",
+        _ => null,
+    };
+
+    private bool IsConsumedCardSelection(Call selectCall, MethodInfo caller)
+    {
+        var selectKey = Key(selectCall);
+        var body = Body(caller);
+        return body.Calls.Any(s =>
+            ((s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name is "Discard" or "Exhaust" or "TransformToRandom")
+                || (s.Call.Method.DeclaringType == typeof(CardPileCmd) && s.Call.Method.Name == "Add"))
+            && s.Call.Arguments.Any(a => ContainsCallKey(a, selectKey)));
+    }
+
+    private static bool ContainsCallKey(Value? value, string targetKey, int depth = 0)
+    {
+        if (value is null || depth > 8)
+            return false;
+        if (value is Call call)
+        {
+            if (Key(call) == targetKey)
+                return true;
+            return ContainsCallKey(call.Receiver, targetKey, depth + 1)
+                || call.Arguments.Any(a => ContainsCallKey(a, targetKey, depth + 1));
+        }
+        if (value is Operation op)
+            return ContainsCallKey(op.Left, targetKey, depth + 1) || ContainsCallKey(op.Right, targetKey, depth + 1);
+        return false;
+    }
+
+    private string? DescribeCardSelectionValue(Value? value)
+    {
+        while (value is Call { Method.Name: "ToList" or "ToArray", Arguments: [var listInner] })
+            value = listInner;
+        if (value is Call { Method.Name: "GetResult", Receiver: Call { Method.Name: "GetAwaiter", Receiver: Call innerSelect } })
+            value = innerSelect;
+        if (value is not Call { Method.DeclaringType: var decl, Method.Name: var name } selectCall || decl != typeof(CardSelectCmd))
+            return null;
+        var prefsArg = Argument(selectCall, "prefs");
+        var countText = prefsArg is Call { Method: ConstructorInfo { DeclaringType.Name: "CardSelectorPrefs" }, Arguments: [_, var minCount, ..] }
+            ? ValueText(minCount)
+            : null;
+        if (countText is null)
+            return null;
+        var noun = countText == "1" ? "card" : "card(s)";
+        if (name is "FromHand" or "FromHandForDiscard")
+            return $"{countText} chosen {noun} from hand";
+        if (name == "FromCombatPile" && Argument(selectCall, "pile") is Call { Method.Name: "GetPile", Arguments: [Constant { Data: int rawPile }, var pileOwner] }
+            && Enum.IsDefined(typeof(PileType), rawPile) && ValueText(pileOwner) is { } who)
+            return $"{countText} chosen {noun} from {Possessive(who)} {PileLocationLabel((PileType)rawPile)}";
+        return null;
+    }
+
+    private static bool IsFilteredUnlockedCardPool(Value? value)
+    {
+        while (value is Call { Method.Name: "ToList" or "ToArray" or "Where", Arguments: [var inner, ..] })
+            value = inner;
+        return value is Call { Method.Name: "GetUnlockedCards" };
+    }
+
+    private bool IsOtherLivingPlayerPredicate(MethodInfo selector)
+    {
+        var body = Body(selector);
+        if (body.Incomplete || body.Returns.Count == 0)
+            return false;
+        var checksAlive = body.Returns.Any(r => r.Value is Call { Method.Name: "get_IsAlive" }
+            || r.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: "get_IsAlive" } }));
+        var checksNotSelf = body.Returns.Any(r =>
+            r.Value is Operation { Operator: "ceq", Left: Operation { Operator: "ceq" }, Right: Constant { Data: 0 } }
+            || r.Conditions.Any(c => IsEquality(c, false, out _, out _)));
+        return checksAlive && checksNotSelf;
+    }
+
     private string? DescribedTakenCards(Call takeCall)
     {
         if (takeCall.Method.Name != nameof(Enumerable.Take) || takeCall.Arguments is not [var src, var countArg]
             || ValueText(countArg) is not { } countText)
             return null;
+        // Handle prioritized shuffle-concat pattern (e.g. PowerCell: non-Innate 0-cost cards before Innate 0-cost cards).
+        if (src is Call { Method.Name: nameof(Enumerable.Concat), Arguments: [var firstBranch, var secondBranch] }
+            && DescribeShuffledBranch(firstBranch) is { } firstDesc
+            && DescribeShuffledBranch(secondBranch) is { } secondDesc)
+        {
+            return $"up to {countText} random cards ({firstDesc}, then {secondDesc})";
+        }
         var shuffled = false;
-        if (src is Call { Method.Name: "UnstableShuffle", Arguments: [var shuffledSrc, ..] })
+        if (src is Call { Method.Name: "UnstableShuffle" or "StableShuffle", Arguments: [var shuffledSrc, ..] })
         {
             shuffled = true;
             src = shuffledSrc;
@@ -2601,6 +2862,21 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         if (ValueText(src) is not { } srcText)
             return null;
         return shuffled ? $"up to {countText} random {srcText}" : $"up to {countText} {srcText}";
+    }
+
+    private string? DescribeShuffledBranch(Value branch)
+    {
+        if (branch is Call { Method.Name: "StableShuffle" or "UnstableShuffle", Arguments: [var inner, ..] })
+            branch = inner;
+        if (branch is Call { Method.Name: "ToList", Arguments: [var listInner] })
+            branch = listInner;
+        if (branch is Call { Method.Name: nameof(Enumerable.Where), Arguments: [var source, Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] }
+            && ValueText(source) is { } sourceText
+            && DescribePileCardFilter(pred) is { } predText)
+        {
+            return $"{predText} from {sourceText}";
+        }
+        return ValueText(branch);
     }
 
     private string? DescribePileCardFilter(MethodInfo selector)
@@ -2618,7 +2894,10 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
         CardType? cardType = null;
         var requiresPlayable = false;
+        var excludesXCost = false;
+        string? costFilter = null;
         var requiredKeywords = new List<string>();
+        var excludedKeywords = new List<string>();
         var requiredTags = new List<string>();
 
         foreach (var raw in tests)
@@ -2639,6 +2918,30 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 cardType = (CardType)rawType;
                 continue;
             }
+            if (expr is Call { Method.Name: "get_CostsX" } && !expected)
+            {
+                excludesXCost = true;
+                continue;
+            }
+            if (expr is Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" } })
+            {
+                costFilter = expected ? "nonzero-Energy" : "0-Energy";
+                continue;
+            }
+            if (expr is Operation { Operator: "ceq" or "beq" or "cgt" or "bgt", Left: Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" } }, Right: Constant { Data: int costVal } } costOp)
+            {
+                if (costOp.Operator is "ceq" or "beq" && expected)
+                {
+                    costFilter = $"{costVal}-Energy";
+                    continue;
+                }
+                if (costOp.Operator is "cgt" or "bgt" && expected && costVal == 0)
+                {
+                    costFilter = "nonzero-Energy";
+                    continue;
+                }
+                return null;
+            }
             if (expr is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords" }, Arguments: [Constant { Data: int rawKw }] }
                 && Enum.IsDefined(typeof(CardKeyword), rawKw))
             {
@@ -2655,7 +2958,10 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                         requiredKeywords.Add(label);
                     continue;
                 }
-                return null;
+                var excludedLabel = $"non-{KeywordLabel(kw)}";
+                if (!excludedKeywords.Contains(excludedLabel, StringComparer.Ordinal))
+                    excludedKeywords.Add(excludedLabel);
+                continue;
             }
             if (expr is Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags" }, Constant { Data: int rawTag }] }
                 && Enum.IsDefined(typeof(CardTag), rawTag) && expected)
@@ -2671,7 +2977,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         var qualifiers = new List<string>();
         if (requiresPlayable)
             qualifiers.Add("playable");
+        if (excludesXCost)
+            qualifiers.Add("non-X-cost");
+        if (costFilter is not null)
+            qualifiers.Add(costFilter);
         qualifiers.AddRange(requiredKeywords);
+        qualifiers.AddRange(excludedKeywords);
         qualifiers.AddRange(requiredTags);
         if (cardType is { } kind)
             qualifiers.Add(kind.ToString());
@@ -2825,6 +3136,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             when type == typeof(PowerModel) => true,
         Call { Method.Name: "get_Side" or "get_Player", Method.DeclaringType: var type, Receiver: { } receiver }
             when type == typeof(Creature) => IsStable(receiver),
+        Call { Method.Name: "get_IsAutoPlay", Receiver: { } receiver } => IsStable(receiver),
         _ => false,
     };
 

@@ -467,13 +467,236 @@ public sealed class NativeExtractionTests
         Assert.Contains("after the 3rd Attack play resolves", jugglingText!, StringComparison.Ordinal);
         Assert.Contains("owner's hand", jugglingText!, StringComparison.Ordinal);
 
-        // TangledPower must remain intact and VoidFormPower/EnsemblePower must continue failing closed on unrecognized cost conditions.
+        // TangledPower must remain intact and EnsemblePower must continue failing closed on unrecognized cost conditions.
         var (tangledText, tangledGaps) = PowerMechanismReader.Describe(typeof(TangledPower), true);
         Assert.Empty(tangledGaps);
         Assert.Contains("cost +stacks Energy", tangledText!, StringComparison.Ordinal);
 
-        var (_, voidFormGaps) = PowerMechanismReader.Describe(typeof(VoidFormPower), true);
-        Assert.Contains("VoidFormPower.TryModifyEnergyCostInCombatLate", voidFormGaps);
+        var (_, ensembleGaps) = PowerMechanismReader.Describe(typeof(EnsemblePower), true);
+        Assert.Contains("EnsemblePower.TryModifyEnergyCostInCombatLate", ensembleGaps);
+    }
+
+    [Fact]
+    public void CrossCharacterPowers_ExtractCleanlyWithoutGaps()
+    {
+        // Defect powers (Orb hooks, Feral, Storm, Subroutine, OneForAll, Coolant, CreativeAi, Iteration, ConsumingShadow, Loop, Thunder, TrashToTreasure)
+        var (focusText, focusGaps) = PowerMechanismReader.Describe(typeof(FocusPower), true);
+        Assert.Empty(focusGaps);
+        Assert.Contains("Orb passive and evoke values", focusText!, StringComparison.Ordinal);
+        Assert.Contains("minimum 0", focusText!, StringComparison.Ordinal);
+
+        var (loopText, loopGaps) = PowerMechanismReader.Describe(typeof(LoopPower), true);
+        Assert.Empty(loopGaps);
+        Assert.Contains("owner's orb count>0", loopText!, StringComparison.Ordinal);
+        Assert.Contains("trigger the passive effect of owner's first (next) orb", loopText!, StringComparison.Ordinal);
+
+        var (thunderText, thunderGaps) = PowerMechanismReader.Describe(typeof(ThunderPower), true);
+        Assert.Empty(thunderGaps);
+        Assert.Contains("After an orb is evoked:", thunderText!, StringComparison.Ordinal);
+        Assert.Contains("ORB.LIGHTNING_ORB", thunderText!, StringComparison.Ordinal);
+        Assert.Contains("living evoked targets", thunderText!, StringComparison.Ordinal);
+
+        var (trashText, trashGaps) = PowerMechanismReader.Describe(typeof(TrashToTreasurePower), true);
+        Assert.Empty(trashGaps);
+        Assert.Contains("channels 1 random orb", trashText!, StringComparison.Ordinal);
+
+        var (shadowText, shadowGaps) = PowerMechanismReader.Describe(typeof(ConsumingShadowPower), true);
+        Assert.Empty(shadowGaps);
+        Assert.Contains("evokes their last orb", shadowText!, StringComparison.Ordinal);
+
+        var (coolantText, coolantGaps) = PowerMechanismReader.Describe(typeof(CoolantPower), true);
+        Assert.Empty(coolantGaps);
+        Assert.Contains("number of unique orb types channeled by owner", coolantText!, StringComparison.Ordinal);
+
+        var (creativeText, creativeGaps) = PowerMechanismReader.Describe(typeof(CreativeAiPower), true);
+        Assert.Empty(creativeGaps);
+        Assert.Contains("generate 1 random Power card(s)", creativeText!, StringComparison.Ordinal);
+
+        var (feralText, feralGaps) = PowerMechanismReader.Describe(typeof(FeralPower), true);
+        Assert.Empty(feralGaps);
+        Assert.Contains("0-Energy Attack plays", feralText!, StringComparison.Ordinal);
+        Assert.Contains("return to hand", feralText!, StringComparison.Ordinal);
+
+        var (iterText, iterGaps) = PowerMechanismReader.Describe(typeof(IterationPower), true);
+        Assert.Empty(iterGaps);
+        Assert.Contains("Status cards drawn by owner this turn≤1", iterText!, StringComparison.Ordinal);
+
+        var (oneForAllText, oneForAllGaps) = PowerMechanismReader.Describe(typeof(OneForAllPower), true);
+        Assert.Empty(oneForAllGaps);
+        Assert.Contains("Energy spent on played card=0", oneForAllText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("played card is auto-played and played card is not auto-played", oneForAllText!, StringComparison.Ordinal);
+
+        var (stormText, stormGaps) = PowerMechanismReader.Describe(typeof(StormPower), true);
+        Assert.Empty(stormGaps);
+        Assert.Contains("each owned Power card play", stormText!, StringComparison.Ordinal);
+        Assert.Contains("ORB.LIGHTNING_ORB", stormText!, StringComparison.Ordinal);
+
+        var (subroutineText, subroutineGaps) = PowerMechanismReader.Describe(typeof(SubroutinePower), true);
+        Assert.Empty(subroutineGaps);
+        Assert.Contains("each owned Power card play", subroutineText!, StringComparison.Ordinal);
+        Assert.Contains("gains that much Energy", subroutineText!, StringComparison.Ordinal);
+
+        // Regent powers (Star, Forge, EnergySpent, VoidForm, SwordSage, ForegoneConclusion, PaleBlueDot, Royalties, Tyranny)
+        var (blackHoleText, blackHoleGaps) = PowerMechanismReader.Describe(typeof(BlackHolePower), true);
+        Assert.Empty(blackHoleGaps);
+        Assert.Contains("Stars spent on played card>0", blackHoleText!, StringComparison.Ordinal);
+        Assert.Contains("After gaining Stars:", blackHoleText!, StringComparison.Ordinal);
+
+        var (childStarsText, childStarsGaps) = PowerMechanismReader.Describe(typeof(ChildOfTheStarsPower), true);
+        Assert.Empty(childStarsGaps);
+        Assert.Contains("After spending Stars:", childStarsText!, StringComparison.Ordinal);
+        Assert.Contains("(stacks × amount) Block", childStarsText!, StringComparison.Ordinal);
+
+        var (furnaceText, furnaceGaps) = PowerMechanismReader.Describe(typeof(FurnacePower), true);
+        Assert.Empty(furnaceGaps);
+        Assert.Contains("owner forges stacks", furnaceText!, StringComparison.Ordinal);
+
+        var (hammerText, hammerGaps) = PowerMechanismReader.Describe(typeof(HammerTimePower), true);
+        Assert.Empty(hammerGaps);
+        Assert.Contains("After forging:", hammerText!, StringComparison.Ordinal);
+        Assert.Contains("each other living player forges amount", hammerText!, StringComparison.Ordinal);
+
+        var (orbitText, orbitGaps) = PowerMechanismReader.Describe(typeof(OrbitPower), true);
+        Assert.Empty(orbitGaps);
+        Assert.Contains("every 4 Energy spent, owner gains stacks Energy", orbitText!, StringComparison.Ordinal);
+
+        var (voidFormText, voidFormGaps) = PowerMechanismReader.Describe(typeof(VoidFormPower), true);
+        Assert.Empty(voidFormGaps);
+        Assert.Contains("cost 0 Energy and 0 Stars", voidFormText!, StringComparison.Ordinal);
+        Assert.Contains("Application timing:", voidFormText!, StringComparison.Ordinal);
+
+        var (swordSageText, swordSageGaps) = PowerMechanismReader.Describe(typeof(SwordSagePower), true);
+        Assert.Empty(swordSageGaps);
+        Assert.Contains("CARD.SOVEREIGN_BLADE", swordSageText!, StringComparison.Ordinal);
+        Assert.Contains("BaseReplayCount", swordSageText!, StringComparison.Ordinal);
+
+        var (foregoneText, foregoneGaps) = PowerMechanismReader.Describe(typeof(ForegoneConclusionPower), true);
+        Assert.Empty(foregoneGaps);
+        Assert.Contains("shuffle owner's discard pile into draw pile if draw pile is empty", foregoneText!, StringComparison.Ordinal);
+        Assert.Contains("chosen card(s) from owner's draw pile into hand", foregoneText!, StringComparison.Ordinal);
+
+        var (paleDotText, paleDotGaps) = PowerMechanismReader.Describe(typeof(PaleBlueDotPower), true);
+        Assert.Empty(paleDotGaps);
+        Assert.Contains("card plays finished by owner this turn≥5", paleDotText!, StringComparison.Ordinal);
+
+        var (royaltiesText, royaltiesGaps) = PowerMechanismReader.Describe(typeof(RoyaltiesPower), true);
+        Assert.Empty(royaltiesGaps);
+        Assert.Contains("extra stacks Gold reward", royaltiesText!, StringComparison.Ordinal);
+
+        var (tyrannyText, tyrannyGaps) = PowerMechanismReader.Describe(typeof(TyrannyPower), true);
+        Assert.Empty(tyrannyGaps);
+        Assert.Contains("Turn-start card draw:", tyrannyText!, StringComparison.Ordinal);
+        Assert.Contains("exhaust stacks chosen card(s) from hand", tyrannyText!, StringComparison.Ordinal);
+
+        // Silent, Necrobinder, Ironclad, and Colorless powers
+        var (nightmareText, nightmareGaps) = PowerMechanismReader.Describe(typeof(NightmarePower), true);
+        Assert.Empty(nightmareGaps);
+        Assert.Contains("clone of recorded card instance", nightmareText!, StringComparison.Ordinal);
+
+        var (phantomText, phantomGaps) = PowerMechanismReader.Describe(typeof(PhantomBladesPower), true);
+        Assert.Empty(phantomGaps);
+        Assert.Contains("Shiv-tagged card plays finished by owner this turn≤0", phantomText!, StringComparison.Ordinal);
+        Assert.Contains("that card has Retain", phantomText!, StringComparison.Ordinal);
+
+        var (toolsText, toolsGaps) = PowerMechanismReader.Describe(typeof(ToolsOfTheTradePower), true);
+        Assert.Empty(toolsGaps);
+        Assert.Contains("discard stacks chosen card(s) from hand", toolsText!, StringComparison.Ordinal);
+
+        var (voidCallText, voidCallGaps) = PowerMechanismReader.Describe(typeof(CallOfTheVoidPower), true);
+        Assert.Empty(voidCallGaps);
+        Assert.Contains("non-Basic non-Ancient character card(s)", voidCallText!, StringComparison.Ordinal);
+
+        var (grimoireText, grimoireGaps) = PowerMechanismReader.Describe(typeof(ForbiddenGrimoirePower), true);
+        Assert.Empty(grimoireGaps);
+        Assert.Contains("extra card removal reward", grimoireText!, StringComparison.Ordinal);
+
+        var (lethalityText, lethalityGaps) = PowerMechanismReader.Describe(typeof(LethalityPower), true);
+        Assert.Empty(lethalityGaps);
+        Assert.Contains("first Attack card play this turn (excluding replays of that card)", lethalityText!, StringComparison.Ordinal);
+
+        var (sentryText, sentryGaps) = PowerMechanismReader.Describe(typeof(SentryModePower), true);
+        Assert.Empty(sentryGaps);
+        Assert.Contains("CARD.SWEEPING_GAZE", sentryText!, StringComparison.Ordinal);
+        Assert.Contains("deals 10 damage to a random enemy", sentryText!, StringComparison.Ordinal);
+
+        var (soulboundText, soulboundGaps) = PowerMechanismReader.Describe(typeof(SoulboundPower), true);
+        Assert.Empty(soulboundGaps);
+        Assert.Contains("CARD.SOUL", soulboundText!, StringComparison.Ordinal);
+        Assert.Contains("draw 2 cards", soulboundText!, StringComparison.Ordinal);
+
+        var (unmovableText, unmovableGaps) = PowerMechanismReader.Describe(typeof(UnmovablePower), true);
+        Assert.Empty(unmovableGaps);
+        Assert.Contains("earlier card/move Block gains by owner this turn<stacks: ×2", unmovableText!, StringComparison.Ordinal);
+
+        var (autoText, autoGaps) = PowerMechanismReader.Describe(typeof(AutomationPower), true);
+        Assert.Empty(autoGaps);
+        Assert.Contains("every 10 cards drawn by owner across combat", autoText!, StringComparison.Ordinal);
+
+        var (calamityText, calamityGaps) = PowerMechanismReader.Describe(typeof(CalamityPower), true);
+        Assert.Empty(calamityGaps);
+        Assert.Contains("each owned Attack card play", calamityText!, StringComparison.Ordinal);
+        Assert.Contains("generate stacks random Attack card(s)", calamityText!, StringComparison.Ordinal);
+
+        var (entropyText, entropyGaps) = PowerMechanismReader.Describe(typeof(EntropyPower), true);
+        Assert.Empty(entropyGaps);
+        Assert.Contains("transform stacks chosen card(s) from hand into a random card", entropyText!, StringComparison.Ordinal);
+
+        var (fastenText, fastenGaps) = PowerMechanismReader.Describe(typeof(FastenPower), true);
+        Assert.Empty(fastenGaps);
+        Assert.Contains("tag Defend: +stacks", fastenText!, StringComparison.Ordinal);
+
+        var (stratagemText, stratagemGaps) = PowerMechanismReader.Describe(typeof(StratagemPower), true);
+        Assert.Empty(stratagemGaps);
+        Assert.Contains("After shuffling draw pile:", stratagemText!, StringComparison.Ordinal);
+        Assert.Contains("move stacks chosen card(s) from owner's draw pile into hand", stratagemText!, StringComparison.Ordinal);
+
+        // RupturePower must not emit a duplicate generic card-play snapshot line.
+        var (ruptureText, ruptureGaps) = PowerMechanismReader.Describe(typeof(RupturePower), true);
+        Assert.Empty(ruptureGaps);
+        Assert.Contains("Self-damage timing:", ruptureText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Card-play power timing:", ruptureText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CrossCharacterRelics_ExtractCleanlyWithoutGaps()
+    {
+        var relicExpectations = new (Type RelicType, string ExpectedSubstring)[]
+        {
+            (typeof(Brimstone), "all living opponents"),
+            (typeof(RuinedHelmet), "multiply applied stacks by 2"),
+            (typeof(SneckoSkull), "POWER.POISON_POWER"),
+            (typeof(Tingsha), "deal 3 unpowered damage to a random hittable enemy"),
+            (typeof(ToughBandages), "owner gains unpowered 3 Block"),
+            (typeof(BigHat), "generate 2 random"),
+            (typeof(BoneFlute), "MONSTER.OSTY"),
+            (typeof(Bookmark), "reduce the Energy cost of a random card"),
+            (typeof(BoundPhylactery), "After turn-start Energy reset (late):"),
+            (typeof(FuneraryMask), "CARD.SOUL"),
+            (typeof(IvoryTile), "played card's Energy value≥3"),
+            (typeof(CrackedCore), "ORB.LIGHTNING_ORB"),
+            (typeof(EmotionChip), "owner lost unblocked HP last player turn"),
+            (typeof(GoldPlatedCables), "+1 additional passive trigger(s)"),
+            (typeof(InfusedCore), "Orb passive and evoke values:"),
+            (typeof(Metronome), "orbs channeled=7: deal 30 unpowered damage"),
+            (typeof(PowerCell), "non-X-cost 0-Energy card(s)"),
+            (typeof(RunicCapacitor), "owner gains 3 orb slots"),
+            (typeof(SymbioticVirus), "ORB.DARK_ORB"),
+            (typeof(FencingManual), "owner forges 10"),
+            (typeof(GalacticDust), "floor((stars spent ÷ 10)) × 10"),
+            (typeof(MiniRegent), "After spending Stars:"),
+            (typeof(VitruvianMinion), "tag Minion: ×2"),
+            (typeof(CentennialPuzzle), "owner draws 1 card"),
+            (typeof(PhilosophersStone), "Maximum Energy:"),
+            (typeof(TheAbacus), "After shuffling draw pile:"),
+        };
+
+        foreach (var (relicType, expected) in relicExpectations)
+        {
+            var (text, gaps) = RelicMechanismReader.Describe(relicType);
+            Assert.True(gaps.Count == 0, $"{relicType.Name} had unexpected gaps: {string.Join(", ", gaps)}");
+            Assert.NotNull(text);
+            Assert.Contains(expected, text!, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
