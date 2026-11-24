@@ -740,7 +740,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     }
 
     private sealed record EffectStep(int Index, Value Action, Test[] Conditions, int Epoch = 0, int Order = 0);
-    private sealed record MutablePowerTarget(string InstanceKey, int Epoch, int Order, Test[] Conditions, string TargetText);
+    private sealed record MutablePowerTarget(string InstanceKey, int Epoch, int Order, Test[] Conditions, string? TargetText);
 
     private (List<Effect> Effects, bool Incomplete) ReadEffects(MethodInfo method, Type? power = null,
         int depth = 0, bool onOwnedMonster = false, IReadOnlyDictionary<string, Value>? bindings = null)
@@ -946,15 +946,62 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
     private void RecordSummonPropertySetters(NativeRuleBody body)
     {
-        foreach (var step in body.Calls)
+        var addSteps = body.Calls
+            .Where(step => step.Call.Method.DeclaringType == typeof(CreatureCmd)
+                && step.Call.Method.Name == nameof(CreatureCmd.Add)
+                && !step.Call.Method.IsGenericMethod
+                && step.Call.Arguments.FirstOrDefault() is { } spawned
+                && SummonedMonsterType(spawned) is not null)
+            .ToArray();
+        if (addSteps.Length == 0)
+            return;
+
+        foreach (var monsterGroup in addSteps.GroupBy(step => SummonedMonsterType(step.Call.Arguments[0])!))
         {
-            if (step.Conditions.All(test => IsCurrentRun(test) && IsStaticRunCheck(test))
-                && step.Call.Method is MethodInfo { Name: var name } setter && name.StartsWith("set_", StringComparison.Ordinal)
-                && step.Call.Arguments is [Constant { Data: 1 or true }]
-                && SummonedMonsterType(step.Call.Receiver) is { } monsterType
-                && typeof(MonsterModel).IsAssignableFrom(monsterType)
-                && BackingField(monsterType, setter) is { } backing && backing.FieldType == typeof(bool)
-                && IsPlainBackingFieldSetter(setter, backing))
+            var monsterType = monsterGroup.Key;
+            var perAddFields = new List<HashSet<FieldInfo>>();
+            foreach (var addStep in monsterGroup)
+            {
+                var spawnedKey = Key(addStep.Call.Arguments[0]);
+                var setFields = new HashSet<FieldInfo>();
+                foreach (var step in body.Calls)
+                {
+                    if (step.Epoch > addStep.Epoch || (step.Epoch == addStep.Epoch && step.Order >= addStep.Order))
+                        continue;
+                    if (step.Call.Receiver is null || Key(step.Call.Receiver) != spawnedKey)
+                        continue;
+                    if (step.Call.Method is not MethodInfo { Name: var name } setter || !name.StartsWith("set_", StringComparison.Ordinal))
+                        continue;
+                    if (!ConditionsImply(addStep.Conditions, step.Conditions))
+                        continue;
+                    if (step.Call.Arguments is [Constant { Data: 1 or true }]
+                        && BackingField(monsterType, setter) is { } backing && backing.FieldType == typeof(bool)
+                        && IsPlainBackingFieldSetter(setter, backing))
+                    {
+                        setFields.Add(backing);
+                    }
+                    else if (BackingField(monsterType, setter) is not { } otherField || IsGameplayField(otherField))
+                    {
+                        Gap($"summon-config:{monsterType.Name}.{name}");
+                    }
+                }
+                perAddFields.Add(setFields);
+            }
+
+            if (perAddFields.Count == 0)
+                continue;
+
+            var commonFields = new HashSet<FieldInfo>(perAddFields[0]);
+            var allFields = new HashSet<FieldInfo>(perAddFields[0]);
+            foreach (var set in perAddFields.Skip(1))
+            {
+                commonFields.IntersectWith(set);
+                allFields.UnionWith(set);
+            }
+            if (commonFields.Count != allFields.Count)
+                Gap($"summon-config:{monsterType.Name}");
+
+            foreach (var backing in commonFields)
             {
                 if (!_summonTrueFlags.TryGetValue(monsterType, out var list))
                 {
@@ -977,9 +1024,6 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         return setterBody.Calls.All(c => c.Call.Method.Name is "AssertMutable" or "get_IsMutable");
     }
 
-    private static bool IsStaticRunCheck(Test test)
-        => test.Value is Call { Method.Name: "HasAscension" or "IsDread" };
-
     private Dictionary<string, string> CollectAppliedPowerHolders(NativeRuleBody body)
     {
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -1000,10 +1044,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         foreach (var step in body.Calls)
         {
             if (step.Call.Method.Name == "set_Target" && step.Call.Method.DeclaringType == typeof(PowerModel)
-                && step.Call.Receiver is { } instance && step.Call.Arguments is [var target]
-                && ValueText(target) is { } who)
+                && step.Call.Receiver is { } instance && step.Call.Arguments is [var target])
             {
-                list.Add(new MutablePowerTarget(Key(instance), step.Epoch, step.Order, step.Conditions, who));
+                // Preserve unresolved target assignments (TargetText = null) so Apply fails closed
+                // instead of silently treating an unreadable set_Target as absent.
+                list.Add(new MutablePowerTarget(Key(instance), step.Epoch, step.Order, step.Conditions, ValueText(target)));
             }
         }
         return list;
@@ -1033,8 +1078,10 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 perStepTargets.Add(null);
                 continue;
             }
-            // If multiple distinct target assignments can reach this same step along compatible paths, fail closed.
-            var distinctOnPath = compatible.Select(t => t.TargetText).Distinct(StringComparer.Ordinal).ToArray();
+            // If any reaching assignment had an unresolved target expression, fail closed.
+            if (compatible.Any(t => t.TargetText is null))
+                return false;
+            var distinctOnPath = compatible.Select(t => t.TargetText!).Distinct(StringComparer.Ordinal).ToArray();
             if (distinctOnPath.Length > 1 && compatible.Any(t => ConditionsImply(step.Conditions, t.Conditions) && t.TargetText != compatible[0].TargetText))
                 return false;
             var latestImplied = compatible.FirstOrDefault(t => ConditionsImply(step.Conditions, t.Conditions));
@@ -1599,7 +1646,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 foreach (var elem in keywordArray.Elements)
                 {
                     if (elem is Constant { Data: int rawKw } && Enum.IsDefined(typeof(CardKeyword), rawKw))
-                        keywords.Add(((CardKeyword)rawKw).ToString());
+                        keywords.Add(KeywordLabel((CardKeyword)rawKw));
                     else
                         return null;
                 }
@@ -2051,11 +2098,15 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             return IsCurrentRun(test) ? "" : "never";
         if (value is Call { Method.DeclaringType.Name: "LocalContext", Method.Name: "IsMe" })
             return expected ? "" : Never;
-        var hadCycleBefore = _getterCycleDetected;
-        if (CombatCondition(test) is { } combat)
-            return combat;
-        if (!hadCycleBefore && _getterCycleDetected)
+        var prevCycle = _getterCycleDetected;
+        _getterCycleDetected = false;
+        var combat = CombatCondition(test);
+        var hitCycle = _getterCycleDetected;
+        _getterCycleDetected = prevCycle || hitCycle;
+        if (hitCycle)
             return null;
+        if (combat is not null)
+            return combat;
         if (value is Operation { Operator: "ceq", Right: Constant { Data: 0 or null } } negation
             && (negation.Left is Call { Method: MethodInfo { ReturnType: var type } } && type == typeof(bool)
                 || negation.Left is Operation { Operator: "ceq" or "cgt" or "cgt.un" or "clt" or "clt.un" }
@@ -2596,6 +2647,30 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     };
 
     private static string TestKey(Test test) => IsStable(test.Value) ? Key(test.Value) : $"{test.Offset}:{Key(test.Value)}";
+
+    internal static string KeywordLabel(CardKeyword keyword)
+    {
+        var stableName = keyword.ToString();
+        try
+        {
+            var loc = new MegaCrit.Sts2.Core.Localization.LocString("card_keywords", MegaCrit.Sts2.Core.Helpers.StringHelper.Slugify(stableName) + ".title");
+            if (loc.Exists())
+            {
+                var localized = loc.GetFormattedText().Trim();
+                if (localized.Length > 0 && !string.Equals(localized, stableName, StringComparison.OrdinalIgnoreCase))
+                    return $"{localized} ({stableName})";
+                if (localized.Length > 0)
+                    return localized;
+            }
+        }
+        catch
+        {
+            // Fall back to stable enum identifier when card_keywords loc table is absent.
+        }
+        return stableName;
+    }
+
+    internal static string CallKey(Call call) => Key(call);
 
     private static string Key(Value? value) => value switch
     {

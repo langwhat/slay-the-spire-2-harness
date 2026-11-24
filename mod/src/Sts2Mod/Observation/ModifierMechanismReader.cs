@@ -230,7 +230,12 @@ internal static class ModifierMechanismReader
             if (onPlayBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy)))
                 parts.Add($"{oncePrefix}gains amount Energy.");
             if (onPlayBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.GainBlock)))
-                parts.Add($"{oncePrefix}gains amount unpowered Block.");
+            {
+                var isUnpoweredBlock = IsEnchantmentBlockUnpowered(type, onPlayBody);
+                parts.Add(isUnpoweredBlock
+                    ? $"{oncePrefix}gains amount unpowered Block."
+                    : $"{oncePrefix}gains amount Block (scales with Block modifiers such as Dexterity/Frail).");
+            }
             if (onPlayBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage)) is { } dmgCall)
             {
                 var amt = dmgCall.Call.Arguments.ElementAtOrDefault(2) is { } a ? ReadDecimalLiteral(a) : null;
@@ -283,18 +288,42 @@ internal static class ModifierMechanismReader
             parts.Add("Auto-plays this card automatically at the start of turn 1 before normal card play.");
         }
 
-        if (type.GetMethod("BeforeFlush", DeclaredInstance) is { } beforeFlush
-            && NativeRuleBody.Read(beforeFlush) is { Incomplete: false } flushBody
-            && flushBody.Calls.Any(s => s.Call.Method.Name == "AddThisCombat" || s.Call.Method.Name == "AddThisTurn"))
+        if (type.GetMethod("BeforeFlush", DeclaredInstance) is { } beforeFlush)
         {
-            parts.Add("If still in hand before end-of-turn discard, reduces this card's Energy cost for this combat.");
+            var flushBody = NativeRuleBody.Read(beforeFlush);
+            if (flushBody.Incomplete)
+            {
+                gaps.Add("BeforeFlush");
+            }
+            else if (flushBody.Calls.Any(s => s.Call.Method.Name == "AddUntilPlayed"))
+            {
+                parts.Add("If still in hand before end-of-turn discard, reduces this card's Energy cost until played.");
+            }
+            else if (flushBody.Calls.Any(s => s.Call.Method.Name == "AddThisCombat" || s.Call.Method.Name == "AddThisTurn"))
+            {
+                parts.Add("If still in hand before end-of-turn discard, reduces this card's Energy cost for this combat.");
+            }
+            else
+            {
+                gaps.Add("BeforeFlush");
+            }
         }
 
-        if (type.GetMethod("AfterCardDrawn", DeclaredInstance) is { } afterDraw
-            && NativeRuleBody.Read(afterDraw) is { Incomplete: false } drawBody
-            && drawBody.Calls.Any(s => s.Call.Method.Name == "SetThisTurn" || s.Call.Method.Name == "SetThisCombat"))
+        if (type.GetMethod("AfterCardDrawn", DeclaredInstance) is { } afterDraw)
         {
-            parts.Add("Randomizes this card's Energy cost when drawn.");
+            var drawBody = NativeRuleBody.Read(afterDraw);
+            if (drawBody.Incomplete)
+            {
+                gaps.Add("AfterCardDrawn");
+            }
+            else if (drawBody.Calls.Any(s => s.Call.Method.Name == "SetThisTurn" || s.Call.Method.Name == "SetThisCombat"))
+            {
+                parts.Add("Randomizes this card's Energy cost when drawn.");
+            }
+            else
+            {
+                gaps.Add("AfterCardDrawn");
+            }
         }
 
         if (type.GetMethod("ModifyShuffleOrder", DeclaredInstance) is { } shuffleOrder)
@@ -314,7 +343,57 @@ internal static class ModifierMechanismReader
             }
         }
 
+        RecordUnhandledModifierHooks(type, typeof(EnchantmentModel), HandledEnchantmentHooks, gaps);
+
         return (parts.Count > 0 ? string.Join(" ", parts) : null, gaps);
+    }
+
+    private static readonly HashSet<string> HandledEnchantmentHooks = new(StringComparer.Ordinal)
+    {
+        "CanEnchantCardType", "CanEnchant", "AfterCardPlayed", "EnchantDamageAdditive", "EnchantDamageMultiplicative",
+        "EnchantBlockAdditive", "EnchantPlayCount", "OnPlay", "OnEnchant", "AfterAutoPrePlayPhaseEntered",
+        "BeforeFlush", "AfterCardDrawn", "ModifyShuffleOrder", "RecalculateValues",
+    };
+
+    private static readonly HashSet<string> HandledAfflictionHooks = new(StringComparer.Ordinal)
+    {
+        "AfterCardEnteredCombat", "CanAfflictCardType",
+    };
+
+    private static void RecordUnhandledModifierHooks(Type type, Type baseModelType, HashSet<string> handledNames, HashSet<string> gaps)
+    {
+        foreach (var method in type.GetMethods(DeclaredInstance))
+        {
+            if (method.IsSpecialName || handledNames.Contains(method.Name))
+                continue;
+            var baseDef = method.GetBaseDefinition();
+            if (baseDef.DeclaringType == typeof(object) || baseDef.DeclaringType == type)
+                continue;
+            if (baseModelType.IsAssignableFrom(baseDef.DeclaringType) || baseDef.DeclaringType == typeof(AbstractModel))
+                gaps.Add(method.Name);
+        }
+    }
+
+    private static bool IsEnchantmentBlockUnpowered(Type type, NativeRuleBody onPlayBody)
+    {
+        if (ModelDb.GetByIdOrNull<EnchantmentModel>(ModelDb.GetId(type)) is { } canonical
+            && canonical.DynamicVars.TryGetValue("Block", out var dv)
+            && dv is MegaCrit.Sts2.Core.Localization.DynamicVars.BlockVar blockVar)
+        {
+            return blockVar.Props.HasFlag(ValueProp.Unpowered);
+        }
+
+        var gainCall = onPlayBody.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.GainBlock));
+        if (gainCall is not null)
+        {
+            foreach (var arg in gainCall.Call.Arguments)
+            {
+                if (arg is Constant { Data: int rawProp })
+                    return ((ValueProp)rawProp).HasFlag(ValueProp.Unpowered);
+            }
+        }
+        return false;
     }
 
     private static string? DescribeEnchantDamageAdditive(
@@ -462,6 +541,10 @@ internal static class ModifierMechanismReader
                     .Distinct(StringComparer.Ordinal);
                 parts.Add($"Grants {string.Join(", ", kws)} to the afflicted card in combat.");
             }
+            else
+            {
+                gaps.Add("AfterCardEnteredCombat");
+            }
         }
 
         if (type.GetMethod("CanAfflictCardType", DeclaredInstance) is { } canType)
@@ -484,6 +567,7 @@ internal static class ModifierMechanismReader
             }
         }
 
+        RecordUnhandledModifierHooks(type, typeof(AfflictionModel), HandledAfflictionHooks, gaps);
         return (parts.Count > 0 ? string.Join(" ", parts) : null, gaps);
     }
 
@@ -542,7 +626,14 @@ internal static class ModifierMechanismReader
             else if (evBody.Calls.Any(s => s.Call.Method.Name == "MinBy" || s.Call.Method.Name == "OrderBy"))
                 effectClause = "Passive increases this orb's stored Evoke damage; Evoke deals unpowered damage to the lowest-HP hittable enemy.";
             else if (evBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage)))
-                effectClause = "Deals unpowered orb damage to all hittable enemies; passive value decreases by 1 after each trigger.";
+            {
+                var passiveFloorZero = type.GetMethod("Passive", DeclaredInstance) is { } passiveMethod
+                    && NativeRuleBody.Read(passiveMethod) is { Incomplete: false } passiveMethodBody
+                    && passiveMethodBody.Calls.Any(s => s.Call.Method.Name == nameof(Math.Max));
+                effectClause = passiveFloorZero
+                    ? "Deals unpowered orb damage to all hittable enemies; passive base value decreases by 1 after each trigger (minimum base 0; Focus still modifies Passive and Evoke)."
+                    : "Deals unpowered orb damage to all hittable enemies.";
+            }
             else
                 gaps.Add("Evoke");
         }

@@ -1013,7 +1013,7 @@ internal sealed class GameObserver(
 
         _objects.Add(reference, new AllyEntry(name, id, hp, maxHp, creature.Block, display, powers, creature.IsAlive));
         _descriptions.Add(reference, null);
-        if (creature.Monster is MegaCrit.Sts2.Core.Models.Monsters.Osty)
+        if (creature.Monster is MegaCrit.Sts2.Core.Models.Monsters.Osty && creature.IsAlive)
         {
             _mechanisms.Add(new MechanismView(
                 MechanismKind.Other,

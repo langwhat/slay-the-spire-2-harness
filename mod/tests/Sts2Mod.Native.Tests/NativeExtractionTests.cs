@@ -10,11 +10,15 @@ using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Afflictions;
+using MegaCrit.Sts2.Core.Models.Cards;
 using MegaCrit.Sts2.Core.Models.Enchantments;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models.Monsters;
+using MegaCrit.Sts2.Core.Models.Orbs;
 using MegaCrit.Sts2.Core.Models.Potions;
 using MegaCrit.Sts2.Core.Models.Powers;
+using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.MonsterMoves;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
@@ -58,17 +62,22 @@ internal static class NativeTestBootstrap
             var tables = new[]
             {
                 "monsters", "powers", "afflictions", "cards", "relics", "potions",
-                "enchantments", "orbs", "events", "ancients", "encounters",
+                "enchantments", "orbs", "events", "ancients", "encounters", "card_keywords",
             }.ToDictionary(key => key, key => new LocTable(key, key switch
             {
                 "cards" => new Dictionary<string, string>
                 {
                     ["PECK.title"] = "Peck",
                     ["TORIC_TOUGHNESS.title"] = "Toric Toughness",
+                    ["DEBT.title"] = "Debt",
                 },
                 "enchantments" => new Dictionary<string, string>
                 {
                     ["SLITHER.title"] = "Slither",
+                },
+                "card_keywords" => new Dictionary<string, string>
+                {
+                    ["sly.title"] = "Sly",
                 },
                 "events" => new Dictionary<string, string>
                 {
@@ -129,34 +138,85 @@ public sealed class NativeExtractionTests
         Assert.NotNull(text);
 
         var layEggsLine = text!.Split('\n').Single(l => l.StartsWith("LAY_EGGS_MOVE:", StringComparison.Ordinal));
-        // Must wrap the full per-iteration body in a single `3 times:` block rather than repeating each step separately.
-        Assert.Contains("3 times: if an encounter slot is empty: (summon ", layEggsLine, StringComparison.Ordinal);
-        Assert.Contains("POWER.MINION_POWER", layEggsLine, StringComparison.Ordinal);
+        Assert.Contains(
+            "3 times: if an encounter slot is empty: (summon MONSTER.TOUGH_EGG; attempt to apply 1 POWER.MINION_POWER to the summoned MONSTER.TOUGH_EGG)",
+            layEggsLine,
+            StringComparison.Ordinal);
         Assert.Equal(1, layEggsLine.Split("3 times:", StringSplitOptions.None).Length - 1);
     }
 
     [Fact]
-    public void EventOptions_FailClosedOnUnresolvedDelegateAndPreserveTransformTargets()
+    public void InfestedPowerSummon_PreservesStartStunnedOnSummonedWriggler()
     {
-        var conveyor = (EndlessConveyor)ModelDb.Event<EndlessConveyor>().ToMutable();
+        var phrog = ModelDb.Monster<PhrogParasite>().ToMutable();
+        phrog.SetUpForCombat();
+        var (text, gaps) = EnemyMechanismReader.Describe(phrog);
+        Assert.Empty(gaps);
+        Assert.NotNull(text);
+        Assert.Contains("Summoned MONSTER.WRIGGLER:", text!, StringComparison.Ordinal);
+        Assert.Contains("  First move: SPAWNED_MOVE", text!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EventOptions_FailClosedOnUnresolvedCallsAndExtractCountsAndFiltersAccurately()
+    {
+        // Unconditional unknown call/delegate must fail closed with a gap and omit the option summary.
+        var synthetic = new SyntheticUnresolvedCallEvent();
+        var unknownCallMethod = typeof(SyntheticUnresolvedCallEvent).GetMethod(nameof(SyntheticUnresolvedCallEvent.PayThenUnknown), BindingFlags.Instance | BindingFlags.Public)!;
+        var (unknownSummary, unknownGap) = EventMechanismReader.DescribeOptionMethod(synthetic, null, unknownCallMethod);
+        Assert.Null(unknownSummary);
+        Assert.NotNull(unknownGap);
+
+        // CrystalSphere minigame options must fail closed rather than emitting cost-only half transactions.
+        var sphere = ModelDb.Event<CrystalSphere>();
+        var uncover = typeof(CrystalSphere).GetMethod("UncoverFuture", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var paymentPlan = typeof(CrystalSphere).GetMethod("PaymentPlan", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (uncoverSummary, uncoverGap) = EventMechanismReader.DescribeOptionMethod(sphere, null, uncover);
+        var (planSummary, planGap) = EventMechanismReader.DescribeOptionMethod(sphere, null, paymentPlan);
+        Assert.Null(uncoverSummary);
+        Assert.NotNull(uncoverGap);
+        Assert.Null(planSummary);
+        Assert.NotNull(planGap);
+
+        // EndlessConveyor conditional cost + delegate must fail closed.
+        var conveyor = ModelDb.Event<EndlessConveyor>();
         var grabMethod = typeof(EndlessConveyor).GetMethod("GrabSomethingOffTheBelt", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var (grabSummary, grabGap) = EventMechanismReader.DescribeOptionMethod(conveyor, null, grabMethod);
         Assert.Null(grabSummary);
         Assert.NotNull(grabGap);
 
-        var carvings = (WoodCarvings)ModelDb.Event<WoodCarvings>().ToMutable();
+        // WaterloggedScriptorium PricklySponge must report 2 cards from CardSelectorPrefs (not enchantment amount 1).
+        var scriptorium = ModelDb.Event<WaterloggedScriptorium>();
+        var spongeMethod = typeof(WaterloggedScriptorium).GetMethod("PricklySponge", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (spongeSummary, spongeGap) = EventMechanismReader.DescribeOptionMethod(scriptorium, null, spongeMethod);
+        Assert.Null(spongeGap);
+        Assert.NotNull(spongeSummary);
+        Assert.Contains("select 2 eligible deck card(s)", spongeSummary!, StringComparison.Ordinal);
+        Assert.DoesNotContain("select 1", spongeSummary!, StringComparison.Ordinal);
+
+        // WoodCarvings Bird and Torus must keep the Basic filter and transform target cards.
+        var carvings = ModelDb.Event<WoodCarvings>();
         var birdMethod = typeof(WoodCarvings).GetMethod("Bird", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var torusMethod = typeof(WoodCarvings).GetMethod("Torus", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var (birdSummary, birdGap) = EventMechanismReader.DescribeOptionMethod(carvings, null, birdMethod);
         var (torusSummary, torusGap) = EventMechanismReader.DescribeOptionMethod(carvings, null, torusMethod);
-
         Assert.Null(birdGap);
-        Assert.NotNull(birdSummary);
+        Assert.Contains("transformable Basic", birdSummary!, StringComparison.Ordinal);
         Assert.Contains("CARD.PECK", birdSummary!, StringComparison.Ordinal);
-
         Assert.Null(torusGap);
-        Assert.NotNull(torusSummary);
+        Assert.Contains("transformable Basic", torusSummary!, StringComparison.Ordinal);
         Assert.Contains("CARD.TORIC_TOUGHNESS", torusSummary!, StringComparison.Ordinal);
+
+        // StoneOfAllTime discards Rng.NextInt(100); deterministic options must NOT be tagged as random outcome.
+        var stone = ModelDb.Event<StoneOfAllTime>();
+        var liftMethod = typeof(StoneOfAllTime).GetMethod("Lift", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var pushMethod = typeof(StoneOfAllTime).GetMethod("Push", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (liftSummary, liftGap) = EventMechanismReader.DescribeOptionMethod(stone, null, liftMethod);
+        var (pushSummary, pushGap) = EventMechanismReader.DescribeOptionMethod(stone, null, pushMethod);
+        Assert.Null(liftGap);
+        Assert.Null(pushGap);
+        Assert.DoesNotContain("random outcome", liftSummary!, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("random outcome", pushSummary!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -181,47 +241,83 @@ public sealed class NativeExtractionTests
     }
 
     [Fact]
-    public void Enchantments_ReportExactNativeFormulaAndTiming()
+    public void Modifiers_ReportExactNativeFormulaTimingAndUnhandledHookGaps()
     {
         var (goopyText, goopyGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Goopy));
         Assert.Empty(goopyGaps);
-        Assert.NotNull(goopyText);
         Assert.Contains("+(amount - 1) Block", goopyText!, StringComparison.Ordinal);
         Assert.DoesNotContain("+amount Block", goopyText!, StringComparison.Ordinal);
 
         var (momentumText, momentumGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Momentum));
         Assert.Empty(momentumGaps);
-        Assert.NotNull(momentumText);
         Assert.Contains("accumulated bonus", momentumText!, StringComparison.Ordinal);
         Assert.DoesNotContain("Adds +amount", momentumText!, StringComparison.Ordinal);
 
         var (perfectFitText, perfectFitGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(PerfectFit));
         Assert.Empty(perfectFitGaps);
-        Assert.NotNull(perfectFitText);
         Assert.Contains("non-initial shuffles", perfectFitText!, StringComparison.Ordinal);
 
         var (emberText, emberGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(TezcatarasEmber));
         Assert.Empty(emberGaps);
-        Assert.NotNull(emberText);
         Assert.Contains("+3 powered attack damage", emberText!, StringComparison.Ordinal);
 
-        var (sharpText, sharpGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Sharp));
-        Assert.Empty(sharpGaps);
-        Assert.Contains("+amount powered attack damage", sharpText!, StringComparison.Ordinal);
+        var (adroitText, adroitGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Adroit));
+        Assert.Empty(adroitGaps);
+        Assert.DoesNotContain("unpowered Block", adroitText!, StringComparison.Ordinal);
+        Assert.Contains("scales with Block modifiers", adroitText!, StringComparison.Ordinal);
+
+        var (slumberText, slumberGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(SlumberingEssence));
+        Assert.Empty(slumberGaps);
+        Assert.Contains("until played", slumberText!, StringComparison.Ordinal);
+
+        var (glassText, glassGaps) = ModifierMechanismReader.DescribeOrbWithGaps(typeof(GlassOrb));
+        Assert.Empty(glassGaps);
+        Assert.Contains("minimum base 0", glassText!, StringComparison.Ordinal);
+
+        // Hexed has an unhandled ClearAffliction/play hook that must surface a diagnostic gap instead of silent empty gaps.
+        var (_, hexedGaps) = ModifierMechanismReader.DescribeAfflictionWithGaps(typeof(Hexed));
+        Assert.NotEmpty(hexedGaps);
     }
 
     [Fact]
-    public void MasterPlannerPower_ResolvesPlayedCardTargetAndSlyKeyword()
+    public void PowersAndItems_ReportAccurateTargetsGuardsAndLifetimes()
     {
-        var (text, gaps) = PowerMechanismReader.Describe(typeof(MasterPlannerPower), true);
-        Assert.Empty(gaps);
-        Assert.NotNull(text);
-        Assert.Contains("apply Sly to played card", text!, StringComparison.Ordinal);
-        Assert.DoesNotContain("generated card", text!, StringComparison.Ordinal);
+        var (plannerText, plannerGaps) = PowerMechanismReader.Describe(typeof(MasterPlannerPower), true);
+        Assert.Empty(plannerGaps);
+        Assert.Contains("apply Sly to played card", plannerText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("generated card", plannerText!, StringComparison.Ordinal);
+
+        var (burrowedText, burrowedGaps) = PowerMechanismReader.Describe(typeof(BurrowedPower), true);
+        Assert.Empty(burrowedGaps);
+        Assert.Contains("MONSTER.TUNNELER", burrowedText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("BITE_MOVE", burrowedText!, StringComparison.Ordinal);
+
+        var (thieveryText, thieveryGaps) = PowerMechanismReader.Describe(typeof(ThieveryPower), true);
+        Assert.Empty(thieveryGaps);
+        Assert.Contains("stores it on this power instance", thieveryText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("HEIST_POWER", thieveryText!, StringComparison.Ordinal);
+
+        var bulletTimeRule = ItemMechanismReader.DescribeCard(ModelDb.Card<BulletTime>());
+        Assert.NotNull(bulletTimeRule);
+        Assert.Contains("until played or until the turn ends", bulletTimeRule!, StringComparison.Ordinal);
+
+        var arrowStabRule = ItemMechanismReader.DescribeCard(ModelDb.Card<ArrowStab>());
+        Assert.NotNull(arrowStabRule);
+        Assert.Contains("owner has at least 1 arrow", arrowStabRule!, StringComparison.Ordinal);
+        Assert.Contains("hand is not full", arrowStabRule!, StringComparison.Ordinal);
+        Assert.Contains("Shoot card(s)", arrowStabRule!, StringComparison.Ordinal);
+
+        var liquidRule = ItemMechanismReader.DescribePotion(ModelDb.Potion<LiquidMemories>());
+        Assert.NotNull(liquidRule);
+        Assert.Contains("until played or until the turn ends", liquidRule!, StringComparison.Ordinal);
+
+        var lizardRule = ItemMechanismReader.DescribeRelic(ModelDb.Relic<LizardTail>());
+        Assert.NotNull(lizardRule);
+        Assert.DoesNotContain("ShouldDie", lizardRule!, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void SpecialMoves_MatchNativeOrderAndPriorityPredicates()
+    public void SpecialMoves_MatchNativeOrderGuardsAndPriorityPredicates()
     {
         var rat = ModelDb.Monster<TwoTailedRat>().ToMutable();
         rat.SetUpForCombat();
@@ -237,10 +333,12 @@ public sealed class NativeExtractionTests
         var (hopperText, hopperGaps) = EnemyMechanismReader.Describe(hopper);
         Assert.Empty(hopperGaps);
         var stealLine = hopperText!.Split('\n').Single(l => l.StartsWith("THIEVERY_MOVE:", StringComparison.Ordinal));
+        Assert.Contains("if player target has any non-Quest deck-backed card", stealLine, StringComparison.Ordinal);
         Assert.Contains("non-ENCHANTMENT.IMBUED Uncommon", stealLine, StringComparison.Ordinal);
         Assert.Contains("non-ENCHANTMENT.IMBUED Common/Rare/Event", stealLine, StringComparison.Ordinal);
         Assert.Contains("non-ENCHANTMENT.IMBUED Basic", stealLine, StringComparison.Ordinal);
         Assert.Contains("Ancient or ENCHANTMENT.IMBUED", stealLine, StringComparison.Ordinal);
+        Assert.Contains("falls back to any eligible card", stealLine, StringComparison.Ordinal);
         Assert.DoesNotContain("unupgraded non-basic", stealLine, StringComparison.Ordinal);
     }
 
@@ -275,17 +373,23 @@ public sealed class NativeExtractionTests
         Assert.NotNull(fairyRule);
         Assert.DoesNotContain("ShouldDieLate", fairyRule!, StringComparison.Ordinal);
 
-        var dummyEventType = typeof(EventModel).Assembly.GetTypes().FirstOrDefault(t => t.Name == "BattlewornDummy");
-        if (dummyEventType is not null)
-        {
-            var (dummyText, _) = EventMechanismReader.DescribeEventTypeForProbe(dummyEventType);
-            if (dummyText is not null)
-                Assert.DoesNotContain("BattlewornDummyEventV1Encounter", dummyText, StringComparison.Ordinal);
-        }
+        var dummyEventType = typeof(EventModel).Assembly.GetTypes().Single(t => t.Name == "BattlewornDummy");
+        var (dummyText, dummyGaps) = EventMechanismReader.DescribeEventTypeForProbe(dummyEventType);
+        Assert.Empty(dummyGaps);
+        Assert.NotNull(dummyText);
+        Assert.DoesNotContain("BattlewornDummyEventV1Encounter", dummyText!, StringComparison.Ordinal);
+        Assert.Contains("ENCOUNTER.BATTLEWORN_DUMMY_EVENT_V1_ENCOUNTER", dummyText!, StringComparison.Ordinal);
+        Assert.Contains("ENCOUNTER.BATTLEWORN_DUMMY_EVENT_V2_ENCOUNTER", dummyText!, StringComparison.Ordinal);
+        Assert.Contains("ENCOUNTER.BATTLEWORN_DUMMY_EVENT_V3_ENCOUNTER", dummyText!, StringComparison.Ordinal);
 
         var xRule = MacroMechanismReader.XCostRule();
         Assert.Contains("X-value modifiers", xRule, StringComparison.Ordinal);
         Assert.Contains("auto-plays spend 0 Energy", xRule, StringComparison.Ordinal);
+
+        var ostyRule = MacroMechanismReader.OstyDamageRoutingRule();
+        Assert.Contains("is alive", ostyRule, StringComparison.Ordinal);
+        Assert.Contains("after the player's Block is applied", ostyRule, StringComparison.Ordinal);
+        Assert.Contains("powered attack damage", ostyRule, StringComparison.Ordinal);
 
         var dummySynthetic = new SyntheticDamageEvent();
         var blockableMethod = typeof(SyntheticDamageEvent).GetMethod(nameof(SyntheticDamageEvent.BlockableHit), BindingFlags.Instance | BindingFlags.Public)!;
@@ -299,13 +403,13 @@ public sealed class NativeExtractionTests
     }
 
     [Fact]
-    public void RecursiveGetters_TerminateWithGapInsteadOfStackOverflow()
+    public void RecursiveGetters_TerminateWithGapRepeatedlyOnSameReader()
     {
         var monster = new SyntheticCyclicMonster();
         var reader = new NativeRuleText(monster);
         var condMethod = typeof(SyntheticCyclicMonster).GetMethod(nameof(SyntheticCyclicMonster.CheckCyclic), BindingFlags.Instance | BindingFlags.Public)!;
-        var result = reader.ReadCondition(condMethod);
-        Assert.Null(result);
+        Assert.Null(reader.ReadCondition(condMethod));
+        Assert.Null(reader.ReadCondition(condMethod));
         Assert.NotEmpty(reader.Gaps);
     }
 
@@ -329,6 +433,18 @@ public sealed class NativeExtractionTests
 
         public Task UnblockableHit()
             => CreatureCmd.Damage(new ThrowingPlayerChoiceContext(), Owner!.Creature, 7m, ValueProp.Unblockable | ValueProp.Unpowered, null, null);
+    }
+
+    private sealed class SyntheticUnresolvedCallEvent : EventModel
+    {
+        private readonly Func<Task> _unknownAction = () => Task.CompletedTask;
+        protected override IReadOnlyList<EventOption> GenerateInitialOptions() => [];
+
+        public async Task PayThenUnknown()
+        {
+            await PlayerCmd.LoseGold(40m, Owner!, MegaCrit.Sts2.Core.Entities.Gold.GoldLossType.Spent);
+            await _unknownAction();
+        }
     }
 
     private sealed class SyntheticCyclicMonster : MonsterModel

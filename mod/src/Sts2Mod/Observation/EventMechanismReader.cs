@@ -296,13 +296,12 @@ internal static class EventMechanismReader
 
         var steps = new List<string>();
         var hasSelection = false;
-        var usesRandom = body.Calls.Any(s => s.Call.Method.DeclaringType?.Name == "Rng"
-            && s.Call.Method.Name is "NextFloat" or "NextDouble" or "NextInt" or "NextBool" or "NextItem");
+        var usesRandom = false;
 
         foreach (var group in body.Calls.GroupBy(s => (s.Epoch, s.Index))
             .OrderBy(g => (g.Key.Epoch, g.Max(s => s.Order), g.Key.Index)))
         {
-            var distinctCalls = group.Select(s => s.Call).DistinctBy(c => c.Method).ToArray();
+            var distinctCalls = group.Select(s => s.Call).DistinctBy(NativeRuleText.CallKey).ToArray();
             if (distinctCalls.Length != 1)
                 return (null, "ambiguous-call-group");
 
@@ -334,6 +333,9 @@ internal static class EventMechanismReader
                     continue;
                 }
             }
+
+            if (CallUsesRng(call) || group.Any(s => s.Conditions.Any(c => ValueUsesRng(c.Value))))
+                usesRandom = true;
 
             var conditionalOnSelection = hasSelection && group.All(s => s.Conditions.Any(t => MentionsCardSelection(t.Value)));
 
@@ -447,8 +449,17 @@ internal static class EventMechanismReader
             if (declaring == typeof(CardSelectCmd))
             {
                 hasSelection = true;
-                var countText = ExtractSelectorCount(call) ?? "eligible";
+                var countText = ExtractSelectorCount(activeEvent, body, group.First(), call) ?? "eligible";
                 var cardNoun = countText == "1" ? "card" : "card(s)";
+                if (name == nameof(CardSelectCmd.FromDeckGeneric))
+                {
+                    var filterDesc = DescribeGenericDeckFilter(call);
+                    if (filterDesc is null && HasSelectionFilterPredicate(call))
+                        return (null, "unresolved-selection-filter");
+                    var qualifiedNoun = filterDesc is not null ? $"{filterDesc} {cardNoun}" : cardNoun;
+                    steps.Add($"select {countText} {qualifiedNoun} from deck");
+                    continue;
+                }
                 steps.Add(name switch
                 {
                     nameof(CardSelectCmd.FromDeckForRemoval) => $"select {countText} removable {cardNoun} from deck to remove",
@@ -599,9 +610,8 @@ internal static class EventMechanismReader
                 return (null, $"unresolved-event-call:{name}");
             }
 
-            // Fail closed on any remaining gameplay command or mutating model call.
-            if (IsGameplaySideEffectCall(call))
-                return (null, $"unresolved-call:{declaring?.Name}.{name}");
+            // Fail closed by default on any unrecognized non-benign call (including custom minigames or helpers).
+            return (null, $"unresolved-call:{declaring?.Name}.{name}");
         }
 
         if (steps.Count == 0)
@@ -628,6 +638,7 @@ internal static class EventMechanismReader
             || declaring?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
             || declaring == typeof(Enumerable)
             || declaring == typeof(Array)
+            || declaring == typeof(LocString)
             || call.Method is ConstructorInfo
             || name.StartsWith("get_", StringComparison.Ordinal)
             || name.StartsWith("op_", StringComparison.Ordinal))
@@ -773,25 +784,122 @@ internal static class EventMechanismReader
             _ => null,
         };
         var label = enchantType is not null ? NativeRuleText.ModelLabel(enchantType) : "the offered enchantment";
-        return $"select {countText} eligible deck card(s) to enchant with {label}";
+        var prefix = countText == "eligible" ? "eligible deck card(s)" : $"{countText} eligible deck card(s)";
+        return $"select {prefix} to enchant with {label}";
     }
 
-    private static string? ExtractSelectorCount(Call call)
+    private static bool CallUsesRng(Call call)
+        => ValueUsesRng(call.Receiver) || call.Arguments.Any(ValueUsesRng);
+
+    private static bool ValueUsesRng(Value? value) => value switch
     {
-        foreach (var arg in call.Arguments)
+        null => false,
+        Call { Method.DeclaringType.Name: "Rng", Method.Name: "NextFloat" or "NextDouble" or "NextInt" or "NextBool" or "NextItem" } => true,
+        Call call => ValueUsesRng(call.Receiver) || call.Arguments.Any(ValueUsesRng),
+        Operation op => ValueUsesRng(op.Left) || ValueUsesRng(op.Right),
+        Field field => ValueUsesRng(field.Receiver),
+        _ => false,
+    };
+
+    private static string? ExtractSelectorCount(EventModel activeEvent, NativeRuleBody body, Step selectStep, Call call)
+    {
+        var parameters = call.Method.GetParameters();
+        var prefsParam = parameters.FirstOrDefault(p => p.ParameterType.Name == "CardSelectorPrefs");
+        if (prefsParam is not null && prefsParam.Position < call.Arguments.Length)
         {
-            if (arg is Constant { Data: int n } && n is > 0 and < 99)
-                return n.ToString(CultureInfo.InvariantCulture);
-            if (arg is Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: int count }] } && count is > 0 and < 99)
-                return count.ToString(CultureInfo.InvariantCulture);
-            if (arg is Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: int min }, Constant { Data: int max }] })
+            var prefsArg = call.Arguments[prefsParam.Position];
+            if (prefsArg is Call { Method: ConstructorInfo } directCtor
+                && ReadPrefsCount(activeEvent, directCtor) is { } directCount)
             {
-                return min == max
-                    ? min.ToString(CultureInfo.InvariantCulture)
-                    : max > 99 ? $"{min}+" : $"{min}–{max}";
+                return directCount;
+            }
+            // In async state machines, struct CardSelectorPrefs may be initialized via `call .ctor` on a state field.
+            var precedingCtor = body.Calls
+                .Where(s => s.Call.Method is ConstructorInfo { DeclaringType.Name: "CardSelectorPrefs" }
+                    && (s.Epoch < selectStep.Epoch || (s.Epoch == selectStep.Epoch && s.Order < selectStep.Order)))
+                .OrderByDescending(s => (s.Epoch, s.Order))
+                .FirstOrDefault();
+            if (precedingCtor is not null && ReadPrefsCount(activeEvent, precedingCtor.Call) is { } ctorCount)
+                return ctorCount;
+
+            return null;
+        }
+
+        // Only inspect explicit count parameters when no CardSelectorPrefs is present (never enchantment `amount`).
+        var countParam = parameters.FirstOrDefault(p => p.ParameterType == typeof(int) && p.Name is "count" or "numCards");
+        if (countParam is not null && countParam.Position < call.Arguments.Length)
+            return ResolveEventAmount(activeEvent, call.Arguments[countParam.Position]);
+
+        return null;
+    }
+
+    private static string? ReadPrefsCount(EventModel activeEvent, Call prefsCtor)
+    {
+        if (prefsCtor.Arguments is [_, var singleCount]
+            && ResolveEventAmount(activeEvent, singleCount) is { } singleText)
+        {
+            return singleText;
+        }
+        if (prefsCtor.Arguments is [_, var minArg, var maxArg])
+        {
+            var minText = ResolveEventAmount(activeEvent, minArg);
+            var maxText = ResolveEventAmount(activeEvent, maxArg);
+            if (minText is not null && maxText is not null)
+            {
+                if (minText == maxText)
+                    return minText;
+                if (int.TryParse(maxText, CultureInfo.InvariantCulture, out var maxNum) && maxNum > 99)
+                    return $"{minText}+";
+                return $"{minText}–{maxText}";
             }
         }
         return null;
+    }
+
+    private static bool HasSelectionFilterPredicate(Call call)
+        => call.Method.GetParameters().Any(p => p.ParameterType == typeof(Func<CardModel, bool>));
+
+    private static string? DescribeGenericDeckFilter(Call call)
+    {
+        var filterParam = call.Method.GetParameters().FirstOrDefault(p => p.ParameterType == typeof(Func<CardModel, bool>));
+        if (filterParam is null || filterParam.Position >= call.Arguments.Length)
+            return null;
+        if (call.Arguments[filterParam.Position] is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo predMethod }] })
+            return null;
+
+        var body = ReadBody(predMethod);
+        if (body.Incomplete)
+            return null;
+
+        var qualifiers = new List<string>();
+        var checksTransformable = body.Calls.Any(s => s.Call.Method.Name == "get_IsTransformable");
+        var checksRemovable = body.Calls.Any(s => s.Call.Method.Name == "get_IsRemovable");
+        var checksUpgradable = body.Calls.Any(s => s.Call.Method.Name == "get_IsUpgradable");
+        if (checksTransformable)
+            qualifiers.Add("transformable");
+        else if (checksRemovable)
+            qualifiers.Add("removable");
+        if (checksUpgradable)
+            qualifiers.Add("upgradable");
+
+        var rarities = new List<CardRarity>();
+        foreach (var ret in body.Returns)
+        {
+            if (ret.Value is Constant { Data: 0 or false })
+                continue;
+            foreach (var expr in ret.Conditions.Select(c => c.Value).Append(ret.Value))
+            {
+                if (expr is Operation { Operator: "ceq" or "beq", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int raw } }
+                    && Enum.IsDefined(typeof(CardRarity), raw) && !rarities.Contains((CardRarity)raw))
+                {
+                    rarities.Add((CardRarity)raw);
+                }
+            }
+        }
+        if (rarities.Count > 0)
+            qualifiers.Add(string.Join("/", rarities));
+
+        return qualifiers.Count > 0 ? string.Join(" ", qualifiers) : null;
     }
 
     private static Type? ExtractSingleCardType(Value? value) => value switch
@@ -864,6 +972,7 @@ internal static class EventMechanismReader
         Call { Method.Name: "get_HpLoss" } => "HpLoss",
         Call { Method.Name: "get_MaxHp" } => "MaxHp",
         Call { Method.Name: "get_Gold" } => "Gold",
+        Call { Method.Name: "get_Cards" } => "Cards",
         _ => null,
     };
 

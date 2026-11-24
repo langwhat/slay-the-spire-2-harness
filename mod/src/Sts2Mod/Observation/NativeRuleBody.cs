@@ -46,6 +46,7 @@ internal sealed class NativeRuleBody
         public HashSet<(int Epoch, int Index)> CumulativeVisited { get; } = [];
         public Dictionary<(int Start, int End), int> ActiveUnrolledLoops { get; } = [];
         public Dictionary<int, Dictionary<int, Value>> ArrayElements { get; } = [];
+        public HashSet<int> InvalidatedArrays { get; } = [];
         public int NextArrayId;
         public List<Test> Conditions { get; } = [];
 
@@ -75,28 +76,46 @@ internal sealed class NativeRuleBody
                 copy.ActiveUnrolledLoops.Add(key, value);
             foreach (var (arrayId, elems) in ArrayElements)
                 copy.ArrayElements.Add(arrayId, new Dictionary<int, Value>(elems));
+            foreach (var invalidated in InvalidatedArrays)
+                copy.InvalidatedArrays.Add(invalidated);
             return copy;
         }
 
-        public Value Materialize(Value value) => value switch
+        public Value Materialize(Value value)
+            => Materialize(value, [], 0);
+
+        private Value Materialize(Value value, HashSet<int> visiting, int depth) => value switch
         {
-            ArrayInit init => MaterializeArray(init),
-            LocalAddress addr => Materialize(Locals.GetValueOrDefault(addr.Slot, Missing)),
+            ArrayInit init => MaterializeArray(init, visiting, depth),
+            LocalAddress addr => depth >= 4 ? Missing : Materialize(Locals.GetValueOrDefault(addr.Slot, Missing), visiting, depth + 1),
             _ => value,
         };
 
-        private Value MaterializeArray(ArrayInit init)
+        private Value MaterializeArray(ArrayInit init, HashSet<int> visiting, int depth)
         {
-            if (init.Length is not Constant { Data: int len } || len < 0 || len > 16
-                || !ArrayElements.TryGetValue(init.Id, out var elems)
-                || elems.Count == 0)
+            if (depth >= 4
+                || InvalidatedArrays.Contains(init.Id)
+                || !visiting.Add(init.Id))
             {
                 return new Operation("newarr", init.Length, new Constant(init.ElementType));
             }
-            var values = new Value[len];
-            for (var i = 0; i < len; i++)
-                values[i] = elems.TryGetValue(i, out var item) ? Materialize(item) : Missing;
-            return new ArrayValue(init.ElementType, init.Length, values);
+            try
+            {
+                if (init.Length is not Constant { Data: int len } || len < 0 || len > 16
+                    || !ArrayElements.TryGetValue(init.Id, out var elems)
+                    || elems.Count == 0)
+                {
+                    return new Operation("newarr", init.Length, new Constant(init.ElementType));
+                }
+                var values = new Value[len];
+                for (var i = 0; i < len; i++)
+                    values[i] = elems.TryGetValue(i, out var item) ? Materialize(item, visiting, depth + 1) : Missing;
+                return new ArrayValue(init.ElementType, init.Length, values);
+            }
+            finally
+            {
+                visiting.Remove(init.Id);
+            }
         }
 
         public Value Pop()
@@ -363,9 +382,10 @@ internal sealed class NativeRuleBody
                                 continue;
                             }
                             if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
-                                && limit is Operation { Operator: "ldlen" })
+                                && limit is Operation { Operator: "ldlen" }
+                                && IsReadOnlyArrayScanLoop(instructions, destination, index))
                             {
-                                // Array foreach loop (`for (int i = 0; i < arr.Length; i++)`): run one representative iteration.
+                                // Pure read-only array scan loop (e.g. searching static priority predicates): run one representative iteration.
                                 if (!alreadyIncremented)
                                 {
                                     pending.Push(path.Fork(path.Index));
@@ -376,7 +396,7 @@ internal sealed class NativeRuleBody
                         }
                         if (visits == 1 && counter.Left is Operation { Operator: "add", Right: Constant { Data: 1 } }
                             && (Loops.Any(loop => loop.Start == destination && loop.End == index)
-                                || limit is Operation { Operator: "ldlen" }))
+                                || (limit is Operation { Operator: "ldlen" } && IsReadOnlyArrayScanLoop(instructions, destination, index))))
                             continue;
                     }
                     if (TryTruth(condition, out var truth, isMonsterMove))
@@ -502,17 +522,28 @@ internal sealed class NativeRuleBody
                     var elemVal = path.Pop();
                     var elemIdx = path.Pop();
                     var arr = path.Pop();
-                    if (arr is ArrayInit init && elemIdx is Constant { Data: int idx } && idx >= 0
-                        && path.ArrayElements.TryGetValue(init.Id, out var slots))
+                    if (arr is ArrayInit init)
                     {
-                        slots[idx] = elemVal;
+                        if (elemIdx is Constant { Data: int idx } && idx >= 0
+                            && !path.InvalidatedArrays.Contains(init.Id)
+                            && path.ArrayElements.TryGetValue(init.Id, out var slots))
+                        {
+                            slots[idx] = elemVal;
+                        }
+                        else
+                        {
+                            // Dynamic or out-of-range index write invalidates constant element tracking for this array.
+                            path.InvalidatedArrays.Add(init.Id);
+                            path.ArrayElements.Remove(init.Id);
+                        }
                     }
                 }
                 else if (code.Name?.StartsWith("ldelem", StringComparison.Ordinal) == true)
                 {
                     var element = path.Pop();
                     var arr = path.Pop();
-                    if (arr is ArrayInit init && element is Constant { Data: int idx }
+                    if (arr is ArrayInit init && !path.InvalidatedArrays.Contains(init.Id)
+                        && element is Constant { Data: int idx }
                         && path.ArrayElements.TryGetValue(init.Id, out var slots)
                         && slots.TryGetValue(idx, out var stored))
                     {
@@ -530,6 +561,23 @@ internal sealed class NativeRuleBody
                 }
             }
         }
+    }
+
+    private static bool IsReadOnlyArrayScanLoop(List<CodeInstruction> instructions, int start, int end)
+    {
+        for (var cursor = start; cursor < end; cursor++)
+        {
+            var code = instructions[cursor].opcode;
+            if (code == OpCodes.Stfld || code == OpCodes.Stsfld || code.Name?.StartsWith("stelem", StringComparison.Ordinal) == true)
+                return false;
+            if ((code == OpCodes.Call || code == OpCodes.Callvirt) && instructions[cursor].operand is MethodBase called)
+            {
+                var declaring = called.DeclaringType;
+                if (declaring != typeof(Enumerable) && declaring?.Namespace != "System.Linq" && !called.Name.StartsWith("get_", StringComparison.Ordinal))
+                    return false;
+            }
+        }
+        return true;
     }
 
     private static bool IsCountedLoopBound(Value? limit) => limit switch

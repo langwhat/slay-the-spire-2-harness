@@ -212,7 +212,7 @@ internal static class ItemMechanismReader
     private static string? DescribeCardCostLifetime(NativeRuleBody body)
     {
         if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisTurn"))
-            return "Cost reduction sets target card(s) to 0 Energy for this turn only (reverts after turn ends).";
+            return "Cost reduction sets target card(s) Energy cost to 0 until played or until the turn ends (whichever comes first).";
         if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisCombat"))
             return "Cost reduction sets target card(s) to 0 Energy for the rest of combat.";
         return null;
@@ -308,23 +308,32 @@ internal static class ItemMechanismReader
             }
         }
 
-        // Attack or Block -> select from combat pile -> move to target pile (e.g., Headbutt, Hologram).
+        // Attack or Block -> select from combat pile -> move to target pile (e.g., Headbutt, Hologram, ArrowStab).
         if ((attackIdx >= 0 || blockIdx >= 0) && selectCombatPileIdx > Math.Max(attackIdx, blockIdx) && pileAddIdx > selectCombatPileIdx)
         {
             var firstAction = attackIdx >= 0 ? "Resolves attack damage first" : "Gains Block first";
-            var selCall = ordered[selectCombatPileIdx].First().Call;
+            var selGroup = ordered[selectCombatPileIdx];
+            var selCall = selGroup.First().Call;
             var addCall = ordered[pileAddIdx].First().Call;
             var srcPile = ExtractPileType(selCall.Arguments.ElementAtOrDefault(1));
             var dstPile = addCall.Arguments.ElementAtOrDefault(1) is Constant { Data: int rawDst } ? (PileType?)rawDst : null;
             var dstPos = addCall.Arguments.ElementAtOrDefault(2) is Constant { Data: int rawPos } ? (CardPilePosition)rawPos : CardPilePosition.Bottom;
             if (srcPile is not null && dstPile is not null)
             {
+                var conditionClause = DescribeCombatPileSelectionCondition(body, selGroup, out var condValid);
+                var filterClause = DescribeCombatPileSelectionFilter(selCall, out var filterValid);
+                if (!condValid || !filterValid)
+                    return null;
+
                 var dstWhere = dstPile == PileType.Draw && dstPos == CardPilePosition.Top
                     ? "on top of draw pile"
                     : dstPile == PileType.Hand
                         ? "into hand"
                         : $"into {dstPile.Value.ToString().ToLowerInvariant()} pile";
-                return $"{firstAction}, then selects from {srcPile.Value.ToString().ToLowerInvariant()} pile to move {dstWhere}.";
+                var cardDesc = filterClause is not null ? $"{filterClause} card(s)" : "card(s)";
+                return conditionClause is not null
+                    ? $"{firstAction}; {conditionClause}, selects {cardDesc} from {srcPile.Value.ToString().ToLowerInvariant()} pile to move {dstWhere}."
+                    : $"{firstAction}, then selects {cardDesc} from {srcPile.Value.ToString().ToLowerInvariant()} pile to move {dstWhere}.";
             }
         }
 
@@ -373,6 +382,71 @@ internal static class ItemMechanismReader
         var checksNotX = body.Returns.Any(r => r.Conditions.Any(c => c.Value is Operation { Left: Call { Method.Name: "get_CostsX" } })
             || r.Value is Operation { Left: Call { Method.Name: "get_CostsX" } });
         return checksZeroCost && checksNotX;
+    }
+
+    private static string? DescribeCombatPileSelectionCondition(
+        NativeRuleBody body,
+        IGrouping<(int Epoch, int Index), Step> selGroup,
+        out bool valid)
+    {
+        valid = true;
+        if (body.Terminals.Count > 0 && body.Terminals.All(t => t.Visited.Contains(selGroup.Key)))
+            return null;
+
+        var clauses = new List<string>();
+        foreach (var cond in selGroup.First().Conditions)
+        {
+            if (cond is { Expected: true, Value: Call { Method.Name: "PlayerHasAnyArrows" } })
+            {
+                if (!clauses.Contains("owner has at least 1 arrow", StringComparer.Ordinal))
+                    clauses.Add("owner has at least 1 arrow");
+            }
+            else if (cond.Value is Operation { Operator: "clt" or "blt" or "bge",
+                Left: Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Cards" } },
+                Right: Constant { Data: int } or Call { Method.Name: "get_MaxCardsInHand" } } handOp
+                && ((handOp.Operator == "bge" && !cond.Expected) || (handOp.Operator != "bge" && cond.Expected)))
+            {
+                if (!clauses.Contains("hand is not full", StringComparer.Ordinal))
+                    clauses.Add("hand is not full");
+            }
+            else
+            {
+                valid = false;
+                return null;
+            }
+        }
+        return clauses.Count > 0 ? $"if {string.Join(" and ", clauses)}" : null;
+    }
+
+    private static string? DescribeCombatPileSelectionFilter(Call selCall, out bool valid)
+    {
+        valid = true;
+        var filterParam = selCall.Method.GetParameters().FirstOrDefault(p => p.ParameterType == typeof(Func<CardModel, bool>));
+        if (filterParam is null || filterParam.Position >= selCall.Arguments.Length)
+            return null;
+        var arg = selCall.Arguments[filterParam.Position];
+        if (arg is Constant { Data: null })
+            return null;
+        if (arg is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo predMethod }] })
+        {
+            valid = false;
+            return null;
+        }
+        var predBody = NativeRuleBody.Read(predMethod);
+        if (predBody.Incomplete)
+        {
+            valid = false;
+            return null;
+        }
+        var tags = predBody.Calls
+            .Where(s => s.Call.Method.Name == "Contains" && s.Call.Arguments.OfType<Constant>().Any(c => c.Data is int raw && Enum.IsDefined(typeof(CardTag), raw)))
+            .SelectMany(s => s.Call.Arguments.OfType<Constant>().Where(c => c.Data is int raw && Enum.IsDefined(typeof(CardTag), raw)).Select(c => ((CardTag)(int)c.Data!).ToString()))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (tags.Length > 0)
+            return string.Join("/", tags);
+        valid = false;
+        return null;
     }
 
     private static PileType? ExtractPileType(Value? expr)
@@ -430,7 +504,7 @@ internal static class ItemMechanismReader
                     && s.Call.Method.Name == nameof(CardSelectCmd.FromCombatPile)
                     && ExtractPileType(s.Call.Arguments.ElementAtOrDefault(1)) == PileType.Discard));
                 if (selectsDiscard && setsFreeThisTurn)
-                    notes.Add("Selects from discard pile, sets Energy cost to 0 for this turn only (reverts after turn ends), and moves into hand.");
+                    notes.Add("Selects from discard pile, sets Energy cost to 0 until played or until the turn ends (whichever comes first), and moves into hand.");
             }
             else if (CallsOnlyRandomPotionFill(onUse))
             {
@@ -479,7 +553,7 @@ internal static class ItemMechanismReader
             && relic.DynamicVars.TryGetValue("Heal", out var hv))
         {
             var pct = hv.BaseValue.ToString("0.########", CultureInfo.InvariantCulture);
-            notes.Add($"Late death prevention: checked after ShouldDie effects (such as {NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Potions.FairyInABottle))}); once per run, prevents owner death and heals max(1, floor({pct}% of Max HP)).");
+            notes.Add($"Late death prevention: checked after earlier death-prevention effects (such as {NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Potions.FairyInABottle))}); once per run, prevents owner death and heals max(1, floor({pct}% of Max HP)).");
         }
 
         // Post-Osty flat HP loss reduction (e.g., TungstenRod).

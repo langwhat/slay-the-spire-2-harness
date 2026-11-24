@@ -13,6 +13,7 @@ internal static class EncounterMechanismReader
     private const BindingFlags DeclaredInstance = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
     private const BindingFlags AnyInstance = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
     private const string FirstMovePrefix = "First move: ";
+    private const string InitialSelectionPrefix = "Initial selection: ";
 
     private sealed record CacheKey(string EncounterId, int AscensionLevel, GameMode Mode, string Language);
 
@@ -108,17 +109,23 @@ internal static class EncounterMechanismReader
                 gaps.Add($"{spawn.MonsterType.Name}/{gap}");
             hoisted.UnionWith(monsterHoisted);
 
-            if (ruleText is not null && spawn.Setters.FirstOrDefault(setter => setter.ConstantValue is null) is { } rngSetter)
+            if (ruleText is not null)
             {
-                if (rngSetter.ExactDomain is { Length: > 0 } exactDomain)
+                var rngSetters = spawn.Setters.Where(setter => setter.ConstantValue is null).ToArray();
+                if (rngSetters.Length > 0)
                 {
-                    var isSequential = rngSetter.RngSource is not null && sequentialRngGroups.Contains((rngSetter.RngSource, rngSetter.Property.Name));
-                    ruleText = ReplaceFirstMoveWithRngVariants(spawn, rngSetter.Property, exactDomain, isSequential, ruleText, gaps);
-                }
-                else
-                {
-                    gaps.Add($"GenerateMonsters/first-move-domain:{spawn.MonsterType.Name}.{rngSetter.Property.Name}");
-                    ruleText = StripFirstMoveLine(ruleText);
+                    if (TryBuildRngCombinations(rngSetters, out var combinations))
+                    {
+                        var isSequential = rngSetters.Length == 1
+                            && rngSetters[0].RngSource is not null
+                            && sequentialRngGroups.Contains((rngSetters[0].RngSource!, rngSetters[0].Property.Name));
+                        ruleText = ReplaceFirstMoveWithRngVariants(spawn, combinations, isSequential, ruleText, gaps);
+                    }
+                    else
+                    {
+                        gaps.Add($"GenerateMonsters/first-move-domain:{spawn.MonsterType.Name}");
+                        ruleText = StripInitialMoveLine(ruleText);
+                    }
                 }
             }
 
@@ -234,7 +241,7 @@ internal static class EncounterMechanismReader
     private static MonsterModel CreateConfiguredMonster(
         Type monsterType,
         IReadOnlyList<IntSetter> setters,
-        (PropertyInfo Property, int Value)? overrideSetter = null)
+        IReadOnlyList<(PropertyInfo Property, int Value)>? overrides = null)
     {
         var monster = ModelDb.GetById<MonsterModel>(ModelDb.GetId(monsterType)).ToMutable();
         foreach (var setter in setters)
@@ -243,59 +250,108 @@ internal static class EncounterMechanismReader
                 setter.Property.SetValue(monster, value);
         }
 
-        if (overrideSetter is var (property, overrideValue))
-            property.SetValue(monster, overrideValue);
+        if (overrides is not null)
+        {
+            foreach (var (property, overrideValue) in overrides)
+                property.SetValue(monster, overrideValue);
+        }
 
         monster.SetUpForCombat();
         return monster;
     }
 
+    private static bool TryBuildRngCombinations(
+        IReadOnlyList<IntSetter> rngSetters,
+        out List<List<(PropertyInfo Property, int Value)>> combinations)
+    {
+        combinations = [[]];
+        foreach (var setter in rngSetters)
+        {
+            if (setter.ExactDomain is not { Length: > 0 } domain)
+                return false;
+            if ((long)combinations.Count * domain.Length > MaxExactDomainSize)
+                return false;
+            var next = new List<List<(PropertyInfo Property, int Value)>>(combinations.Count * domain.Length);
+            foreach (var prefix in combinations)
+            {
+                foreach (var val in domain)
+                {
+                    var copy = new List<(PropertyInfo Property, int Value)>(prefix.Count + 1);
+                    copy.AddRange(prefix);
+                    copy.Add((setter.Property, val));
+                    next.Add(copy);
+                }
+            }
+            combinations = next;
+        }
+        return combinations.Count > 0;
+    }
+
     private static string ReplaceFirstMoveWithRngVariants(
         SpawnSpec spawn,
-        PropertyInfo property,
-        int[] exactDomain,
+        IReadOnlyList<List<(PropertyInfo Property, int Value)>> combinations,
         bool sequentialAcrossCopies,
         string baselineText,
         HashSet<string> gaps)
     {
         var lines = baselineText.Split('\n');
-        if (lines.Length == 0 || !lines[0].StartsWith(FirstMovePrefix, StringComparison.Ordinal))
+        if (lines.Length == 0 || !IsInitialMoveLine(lines[0]))
             return baselineText;
 
-        var firstMoves = new List<string>();
-        foreach (var candidate in exactDomain)
+        var initialStates = new List<string>();
+        var allFirstMoves = true;
+        foreach (var combo in combinations)
         {
-            var sample = CreateConfiguredMonster(spawn.MonsterType, spawn.Setters, (property, candidate));
+            var sample = CreateConfiguredMonster(spawn.MonsterType, spawn.Setters, combo);
             var (sampleText, sampleGaps) = EnemyMechanismReader.Describe(sample);
             foreach (var gap in sampleGaps)
                 gaps.Add($"{spawn.MonsterType.Name}/{gap}");
             if (sampleText is null)
-                return StripFirstMoveLine(baselineText);
+                return StripInitialMoveLine(baselineText);
             var firstLine = sampleText.Split('\n')[0];
-            if (!firstLine.StartsWith(FirstMovePrefix, StringComparison.Ordinal))
-                return StripFirstMoveLine(baselineText);
-            var moveId = firstLine[FirstMovePrefix.Length..];
-            if (!firstMoves.Contains(moveId, StringComparer.Ordinal))
-                firstMoves.Add(moveId);
+            if (firstLine.StartsWith(FirstMovePrefix, StringComparison.Ordinal))
+            {
+                var moveId = firstLine[FirstMovePrefix.Length..];
+                if (!initialStates.Contains(moveId, StringComparer.Ordinal))
+                    initialStates.Add(moveId);
+            }
+            else if (firstLine.StartsWith(InitialSelectionPrefix, StringComparison.Ordinal))
+            {
+                allFirstMoves = false;
+                var stateId = firstLine[InitialSelectionPrefix.Length..];
+                if (!initialStates.Contains(stateId, StringComparer.Ordinal))
+                    initialStates.Add(stateId);
+            }
+            else
+            {
+                return StripInitialMoveLine(baselineText);
+            }
         }
 
-        if (firstMoves.Count == 0)
-            return StripFirstMoveLine(baselineText);
-        if (firstMoves.Count == 1)
+        if (initialStates.Count == 0)
+            return StripInitialMoveLine(baselineText);
+        if (initialStates.Count == 1)
         {
-            lines[0] = $"First move: {firstMoves[0]}";
+            lines[0] = allFirstMoves
+                ? $"{FirstMovePrefix}{initialStates[0]}"
+                : $"{InitialSelectionPrefix}{initialStates[0]}";
             return string.Join("\n", lines);
         }
 
+        var prefixLabel = allFirstMoves ? FirstMovePrefix : InitialSelectionPrefix;
         var qualifier = sequentialAcrossCopies ? "distinct initial moves across copies from" : "one of";
-        lines[0] = $"First move: {qualifier} {string.Join(", ", firstMoves)}";
+        lines[0] = $"{prefixLabel}{qualifier} {string.Join(", ", initialStates)}";
         return string.Join("\n", lines);
     }
 
-    private static string StripFirstMoveLine(string ruleText)
+    private static bool IsInitialMoveLine(string line)
+        => line.StartsWith(FirstMovePrefix, StringComparison.Ordinal)
+            || line.StartsWith(InitialSelectionPrefix, StringComparison.Ordinal);
+
+    private static string StripInitialMoveLine(string ruleText)
     {
         var lines = ruleText.Split('\n');
-        if (lines.Length == 0 || !lines[0].StartsWith(FirstMovePrefix, StringComparison.Ordinal))
+        if (lines.Length == 0 || !IsInitialMoveLine(lines[0]))
             return ruleText;
         return string.Join("\n", lines.Skip(1));
     }

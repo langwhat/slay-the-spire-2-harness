@@ -130,7 +130,14 @@ internal sealed partial class NativeRuleText
             var syncRunsWithoutEmptySlot = syncSteps.Any(s =>
                 !s.Conditions.Any(c => c.Value is Call { Method.Name: nameof(string.IsNullOrEmpty) })
                 || s.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: nameof(string.IsNullOrEmpty) } }));
-            if (addGuardedByEmptySlot && syncRunsAfterAdd && syncRunsWithoutEmptySlot)
+            var hasMaxPlusOne = body.Calls.Any(s => s.Call.Method.Name == nameof(Enumerable.Max)
+                && s.Call.Arguments.OfType<Call>().Any(arg =>
+                    arg.Method is ConstructorInfo
+                    && arg.Arguments.OfType<Constant>().Any(c => c.Data is MethodInfo m
+                        && Body(m) is { Incomplete: false } maxBody
+                        && maxBody.Returns.Any(r => r.Value is Operation { Operator: "add",
+                            Left: Call { Method.Name: "get_CallForBackupCount" }, Right: Constant { Data: 1 } }))));
+            if (addGuardedByEmptySlot && syncRunsAfterAdd && syncRunsWithoutEmptySlot && hasMaxPlusOne)
             {
                 _summons.Add(ratType);
                 return
@@ -145,19 +152,22 @@ internal sealed partial class NativeRuleText
         if (method.Name == "ThieveryMove" && method.DeclaringType is { } hopperType && typeof(MonsterModel).IsAssignableFrom(hopperType))
         {
             var getCardsStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CardPile) && s.Call.Method.Name == "GetCards");
+            var removeStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CardPileCmd) && s.Call.Method.Name == nameof(CardPileCmd.RemoveFromCombat));
+            var removeGuardedByAny = removeStep is not null && removeStep.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: nameof(Enumerable.Any) } });
+            var usesRandomChoice = body.Calls.Any(s => s.Call.Method.Name == "NextItem");
             var stealStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(SwipePower) && s.Call.Method.Name == "Steal");
             var applySwipeStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Apply));
             var execStep = body.Calls.FirstOrDefault(s => s.Call.Method.Name == "Execute" && s.Call.Method.DeclaringType?.Name == "AttackCommand");
             var attackAfterSteal = stealStep is not null && execStep is not null
                 && (execStep.Epoch > stealStep.Epoch || (execStep.Epoch == stealStep.Epoch && execStep.Order > stealStep.Order));
-            if (getCardsStep is not null && stealStep is not null && applySwipeStep is not null && attackAfterSteal
+            if (getCardsStep is not null && removeGuardedByAny && usesRandomChoice && stealStep is not null && applySwipeStep is not null && attackAfterSteal
                 && execStep?.Call.Receiver is Call attackCall && Attack(attackCall) is { } attackEffect
                 && DescribeStealPriorities(hopperType) is { } priorityClause)
             {
                 _powers.Add(typeof(SwipePower));
                 return
                 [
-                    new Effect($"steal 1 non-Quest deck-backed card from player target's draw or discard pile ({priorityClause}) and store it in {PowerLabel(typeof(SwipePower))} on self", AddedPower: typeof(SwipePower)),
+                    new Effect($"if player target has any non-Quest deck-backed card in draw or discard pile: steal 1 random eligible card ({priorityClause}; falls back to any eligible card if no tier matches) and store it in {PowerLabel(typeof(SwipePower))} on self", AddedPower: typeof(SwipePower)),
                     attackEffect,
                 ];
             }
@@ -607,8 +617,16 @@ internal sealed partial class NativeRuleText
             followUpClause = $", then → {nextMoveId}";
         }
 
+        var requiredMonsterType = stunStep.Conditions
+            .Select(c => c is { Expected: true, Value: Operation { Operator: "isinst", Right: Constant { Data: Type mt } } }
+                && typeof(MonsterModel).IsAssignableFrom(mt) ? mt : null)
+            .FirstOrDefault(t => t is not null);
+        var holderGuard = requiredMonsterType is not null
+            ? $" and owner is {ModelLabel(requiredMonsterType)}"
+            : "";
+
         lines.Add($"{prefix}Block expires at turn start: if owner=event target: no");
-        lines.Add($"{prefix}After block is broken: if event target=owner: stun owner for one action{followUpClause} and remove {PowerLabel(power)}");
+        lines.Add($"{prefix}After block is broken: if event target=owner{holderGuard}: stun owner for one action{followUpClause} and remove {PowerLabel(power)}");
         lines.Add($"{prefix}After this power is removed: remove all Block from former owner");
         return true;
     }
@@ -728,11 +746,12 @@ internal sealed partial class NativeRuleText
             return false;
 
         var losesGold = body.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.LoseGold));
-        if (!losesGold)
+        var tracksGoldOnSelf = body.Calls.Any(s => s.Call.Method.Name == "set_BaseValue"
+            && s.Call.Receiver is Call { Method.Name: "get_Gold" });
+        if (!losesGold || !tracksGoldOnSelf)
             return false;
 
-        _powers.Add(typeof(HeistPower));
-        line = $"{prefix}When triggered by owner's move: steals min(stacks, target player's Gold) Gold and stores it as {PowerLabel(typeof(HeistPower))} on owner";
+        line = $"{prefix}When triggered by owner's move: if target player is alive and has Gold: steals min(stacks, target player's Gold) Gold and stores it on this power instance";
         return true;
     }
 
