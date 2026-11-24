@@ -97,12 +97,20 @@ internal sealed partial class NativeRuleText
             || body.FieldSteps.Any(step => step.Assignment.Target.Member.DeclaringType?.IsDefined(typeof(CompilerGeneratedAttribute), false) != true))
             return null;
         var chainedAttackCalls = new HashSet<Call>(ReferenceEqualityComparer.Instance);
+        var seenAttackRoots = new HashSet<Call>(ReferenceEqualityComparer.Instance);
         foreach (var step in body.Calls)
         {
             if (step.Call.Method.DeclaringType?.Name == "AttackCommand" && step.Call.Method.Name == "Execute")
             {
+                Call? root = null;
                 for (var cur = step.Call.Receiver as Call; cur is not null; cur = cur.Receiver as Call)
+                {
                     chainedAttackCalls.Add(cur);
+                    root = cur;
+                }
+                // AttackCommand is mutable; fail closed if the same DamageCmd.Attack instance is executed more than once.
+                if (root is not null && !seenAttackRoots.Add(root))
+                    return null;
             }
         }
         var effects = new List<string>();

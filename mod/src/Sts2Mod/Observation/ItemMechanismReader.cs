@@ -215,21 +215,43 @@ internal static class ItemMechanismReader
         var hasCombat = body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisCombat");
         if (hasTurn == hasCombat)
             return null;
-        // Fail closed when the same card also applies another cost mutation (e.g. SetThisTurn / AddThisTurn / UpgradeBy).
-        var hasOtherCostMutation = body.Calls.Any(s =>
-            (s.Call.Method.DeclaringType == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardEnergyCost)
-                && !s.Call.Method.Name.StartsWith("get_", StringComparison.Ordinal)
-                && s.Call.Method.Name is not ("GetWithModifiers" or "GetAmountToSpend" or "GetResolved" or "SetToFreeThisTurn" or "SetToFreeThisCombat"))
-            || (s.Call.Method.DeclaringType == typeof(CardModel)
-                && s.Call.Method.Name is "SetToFreeThisTurn" or "SetToFreeThisCombat" ? false
-                : s.Call.Method.DeclaringType == typeof(CardModel)
-                    && (s.Call.Method.Name.Contains("StarCost", StringComparison.Ordinal) || s.Call.Method.Name.Contains("EnergyCost", StringComparison.Ordinal))
-                    && !s.Call.Method.Name.StartsWith("get_", StringComparison.Ordinal)));
-        if (hasOtherCostMutation)
+        // Fail closed when the same card (or a helper it calls) also applies another cost mutation.
+        if (HasOtherCostMutation(body))
             return null;
         if (hasTurn)
             return "Cost reduction sets target card(s)' local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).";
         return "Cost reduction sets target card(s)' local Energy and Star costs to 0 for the rest of combat (global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).";
+    }
+
+    private static bool HasOtherCostMutation(NativeRuleBody body, int depth = 0)
+    {
+        foreach (var s in body.Calls)
+        {
+            var m = s.Call.Method;
+            var dt = m.DeclaringType;
+            if (dt == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardEnergyCost)
+                && !m.Name.StartsWith("get_", StringComparison.Ordinal)
+                && m.Name is not ("GetWithModifiers" or "GetAmountToSpend" or "GetResolved" or "SetToFreeThisTurn" or "SetToFreeThisCombat"))
+                return true;
+            if (dt == typeof(CardModel)
+                && m.Name is not ("SetToFreeThisTurn" or "SetToFreeThisCombat")
+                && (m.Name.Contains("StarCost", StringComparison.Ordinal) || m.Name.Contains("EnergyCost", StringComparison.Ordinal))
+                && !m.Name.StartsWith("get_", StringComparison.Ordinal))
+                return true;
+            if (depth < 2 && m is MethodInfo mi && !mi.IsSpecialName && !mi.ContainsGenericParameters
+                && dt is not null && dt != typeof(CardModel)
+                && (typeof(CardModel).IsAssignableFrom(dt)
+                    || dt.Namespace?.StartsWith("Sts2Mod", StringComparison.Ordinal) == true
+                    || (dt.Namespace?.StartsWith("System", StringComparison.Ordinal) != true
+                        && dt.Namespace?.StartsWith("Godot", StringComparison.Ordinal) != true
+                        && dt.Assembly != typeof(CardModel).Assembly))
+                && NativeRuleBody.Read(mi) is var helperBody)
+            {
+                if (helperBody.Incomplete || HasOtherCostMutation(helperBody, depth + 1))
+                    return true;
+            }
+        }
+        return false;
     }
 
     private static string? DescribeCardHistoryPrecondition(Type cardType, NativeRuleBody body)
@@ -642,7 +664,7 @@ internal static class ItemMechanismReader
             && dmgRecBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Heal)
                 && s.Conditions.Any(c => c.Value is Operation { Left: Call { Method.Name: "get_CurrentSide" } })))
         {
-            notes.Add("Once during each of owner's turns, the first time owner loses unblocked HP on owner's turn, heals HP equal to that unblocked damage.");
+            notes.Add("Once during each of owner's turns, the first time owner loses unblocked HP on owner's turn (does not trigger on lethal damage), heals HP equal to that unblocked damage.");
         }
 
         // First exhausted Skill clone per combat (e.g., BurningSticks).

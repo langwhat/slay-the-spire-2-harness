@@ -74,7 +74,7 @@ Owned relics cover demands at zero draw and energy cost. Read Elite and Boss rul
 Default to **skipping** when no offered card clearly improves the deck over its draw/dilution cost.
 - **Act 1:** Early on, strong frontload, multi-enemy reach, and efficient block that clearly beat basic starters justify taking so Act 1 Elites pay out relics safely. Also take rare early growth engines, reliable energy, and net draw. Once 2–3 transition cards plus early growth cover Act 1 threats, lean toward skipping extra flat-number cards. Avoid stacking 2+ cost cards without energy or narrow payoffs with zero triggers before an imminent Elite.
 - **Middle acts:** Merely beating a basic starter is rarely enough. Lean toward skipping flat standalone cards weaker than your best owned option; prioritize completing links, multiplying an active core, adding net draw/energy, or covering multi-enemy waves and peak Boss hits.
-- **Final act:** Few fights remain, and the end may require back-to-back Bosses without healing. Strongly favor skipping; take only cards that directly change the final Boss fights (finishing growth multiplication, answering a Boss constraint/peak hit, or cheap draw/energy enabling setup + defense on the same turn).
+- **Final act:** Few fights remain, and the end may require back-to-back Bosses with no inter-act rest or full heal between (normal combat victory effects still trigger). Strongly favor skipping; take only cards that directly change the final Boss fights (finishing growth multiplication, answering a Boss constraint/peak hit, or cheap draw/energy enabling setup + defense on the same turn).
 
 ## Route, rest sites, shops, and events
 

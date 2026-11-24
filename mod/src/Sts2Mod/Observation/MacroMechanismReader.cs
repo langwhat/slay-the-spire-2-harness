@@ -95,7 +95,7 @@ internal static class MacroMechanismReader
     {
         if (upcomingBosses.Count < 2)
             return null;
-        return $"Act double-boss continuity: defeating the first Act boss ({upcomingBosses[0].Title.GetFormattedText()} / {upcomingBosses[0].Id}) immediately transitions into the second Act boss ({upcomingBosses[1].Title.GetFormattedText()} / {upcomingBosses[1].Id}) with no heal or rest between fights (HP, deck, relics, and potions carry over).";
+        return $"Act double-boss continuity: defeating the first Act boss ({upcomingBosses[0].Title.GetFormattedText()} / {upcomingBosses[0].Id}) immediately transitions into the second Act boss ({upcomingBosses[1].Title.GetFormattedText()} / {upcomingBosses[1].Id}) with no inter-act rest or full heal between fights (normal combat victory effects still trigger; HP, deck, relics, and potions carry over).";
     }
 
     public static string XCostRule()

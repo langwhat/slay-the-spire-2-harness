@@ -523,7 +523,8 @@ public sealed class NativeExtractionTests
 
         var (feralText, feralGaps) = PowerMechanismReader.Describe(typeof(FeralPower), true);
         Assert.Empty(feralGaps);
-        Assert.Contains("0-Energy Attack card plays returned by this power each turn", feralText!, StringComparison.Ordinal);
+        Assert.Contains("0-Energy Attack card plays whose destination is set to hand by this power each turn", feralText!, StringComparison.Ordinal);
+        Assert.Contains("overflows to discard pile", feralText!, StringComparison.Ordinal);
         Assert.Contains("overriding Exhaust as well", feralText!, StringComparison.Ordinal);
 
         var (iterText, iterGaps) = PowerMechanismReader.Describe(typeof(IterationPower), true);
@@ -1121,6 +1122,37 @@ public sealed class NativeExtractionTests
         Assert.Empty(mutPoisonGaps);
         Assert.Contains("1 times:", mutPoisonText!, StringComparison.Ordinal);
         Assert.DoesNotContain("ACCELERANT", mutPoisonText!, StringComparison.Ordinal);
+
+        // 33. R6 gameplay & reader soundness: DemonTongue lethal caveat, Slither in-hand check, EchoForm play-series,
+        // CardFactory FirstOrDefault with predicate/default, foreach calling helper ignoring item, helper cost mutation,
+        // shared mutable AttackCommand multi-execute, and multi-branch ModifyCardPlayCount.
+        var demonText = ItemMechanismReader.ReadRelic(ModelDb.Relic<DemonTongue>(), "eng");
+        Assert.NotNull(demonText);
+        Assert.Contains("does not trigger on lethal damage", demonText!, StringComparison.Ordinal);
+
+        var slitherText = ModifierMechanismReader.ReadEnchantment(ModelDb.Enchantment<Slither>(), "eng");
+        Assert.NotNull(slitherText);
+        Assert.Contains("If still in hand when drawn", slitherText!, StringComparison.Ordinal);
+
+        Assert.Contains("card play series each turn", echoText!, StringComparison.Ordinal);
+
+        var (predFirstText, predFirstGaps) = PowerMechanismReader.Describe(typeof(SyntheticFirstOrDefaultPredicatePower), true);
+        Assert.Null(predFirstText);
+        Assert.NotEmpty(predFirstGaps);
+
+        var (feHelperText, feHelperGaps) = PowerMechanismReader.Describe(typeof(SyntheticForeachUnusedHelperArgPower), true);
+        Assert.Empty(feHelperGaps);
+        Assert.Contains("for each item in owner's hand: owner gains 1 Energy", feHelperText!, StringComparison.Ordinal);
+
+        var helperCostMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.SetFreeThenHelperSetNine), BindingFlags.Static | BindingFlags.Public)!;
+        Assert.Null(describeCardCost.Invoke(null, [NativeRuleBody.Read(helperCostMethod)]));
+
+        var (sharedAttackText, _) = PowerMechanismReader.Describe(typeof(SyntheticSharedAttackCommandPower), true);
+        Assert.DoesNotContain("deal 25 damage to all enemies", sharedAttackText ?? "", StringComparison.Ordinal);
+
+        var (multiBranchReplayText, multiBranchReplayGaps) = PowerMechanismReader.Describe(typeof(SyntheticMultiBranchReplayPower), true);
+        Assert.Null(multiBranchReplayText);
+        Assert.NotEmpty(multiBranchReplayGaps);
     }
 
     [Fact]
@@ -1335,6 +1367,14 @@ public sealed class NativeExtractionTests
         {
             card.SetToFreeThisTurn();
             card.EnergyCost.SetThisTurn(9);
+        }
+
+        private static void HelperSetNine(CardModel card) => card.EnergyCost.SetThisTurn(9);
+
+        public static void SetFreeThenHelperSetNine(CardModel card)
+        {
+            card.SetToFreeThisTurn();
+            HelperSetNine(card);
         }
     }
 
@@ -1849,6 +1889,76 @@ public sealed class NativeExtractionTests
                 if (Owner.IsAlive)
                     await PowerCmd.Decrement(this);
             }
+        }
+    }
+
+    private sealed class SyntheticFirstOrDefaultPredicatePower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            var pool = Owner.Player!.Character.CardPool.GetUnlockedCards(Owner.Player.UnlockState, Owner.Player.RunState.CardMultiplayerConstraint)
+                .Where(c => c.Type == CardType.Attack);
+            var fallback = combatState.CreateCard<DefendIronclad>(Owner.Player);
+            var picked = CardFactory.GetDistinctForCombat(Owner.Player, pool, 3, Owner.Player.RunState.Rng.CombatCardGeneration)
+                .FirstOrDefault(c => c.Type == CardType.Skill, fallback);
+            await CardPileCmd.AddGeneratedCardToCombat(picked, PileType.Hand, Owner.Player);
+        }
+    }
+
+    private sealed class SyntheticForeachUnusedHelperArgPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        private Task PerCard(CardModel ignored) => PlayerCmd.GainEnergy(1m, Owner.Player!);
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            foreach (var c in PileType.Hand.GetPile(Owner.Player!).Cards)
+                await PerCard(c);
+        }
+    }
+
+    private sealed class SyntheticSharedAttackCard : CardModel
+    {
+        public SyntheticSharedAttackCard() : base(1, CardType.Attack, CardRarity.Token, TargetType.AllEnemies) { }
+        protected override async Task OnPlay(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            var cmd = DamageCmd.Attack(25m).TargetingAllOpponents(CombatState!);
+            var triple = cmd.WithHitCount(3);
+            await cmd.Execute(choiceContext);
+            await triple.Execute(choiceContext);
+        }
+    }
+
+    private sealed class SyntheticSharedAttackCommandPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            var card = combatState.CreateCard<SyntheticSharedAttackCard>(Owner.Player!);
+            await CardPileCmd.AddGeneratedCardToCombat(card, PileType.Hand, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticMultiBranchReplayPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override int ModifyCardPlayCount(CardModel card, Creature? target, int playCount)
+        {
+            if (card.Owner.Creature != Owner)
+                return playCount;
+            if (card.Type == CardType.Attack)
+                return playCount + 1;
+            return playCount + 2;
         }
     }
 }

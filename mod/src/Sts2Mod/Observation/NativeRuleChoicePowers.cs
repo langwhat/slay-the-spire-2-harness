@@ -377,6 +377,10 @@ internal sealed partial class NativeRuleText
         var body = Body(hook);
         if (body.Incomplete)
             return null;
+        if (body.Returns.Any(r =>
+            r.Value is not Input { Name: "playCount" }
+            && r.Value is not Operation { Operator: "add", Left: Input { Name: "playCount" }, Right: Constant { Data: 1 } }))
+            return null;
         var boosted = body.Returns.Where(r => r.Value is Operation { Operator: "add", Left: Input { Name: "playCount" }, Right: Constant { Data: 1 } }).ToArray();
         if (boosted is not [var active])
             return null;
@@ -385,6 +389,7 @@ internal sealed partial class NativeRuleText
         var excludesDupe = false;
         CardType? filteredType = null;
         var firstPlaysPerTurn = false;
+        var countsPlaySeries = false;
         foreach (var rawCond in active.Conditions)
         {
             var condExpr = rawCond.Value;
@@ -414,9 +419,10 @@ internal sealed partial class NativeRuleText
                 filteredType = nextType;
                 continue;
             }
-            if (IsCountLessThanStacksCheck(cond, out var countPred) && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes) && countedTypes.Count == 0)
+            if (IsCountLessThanStacksCheck(cond, out var countPred) && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes, out var predCountsSeries) && countedTypes.Count == 0)
             {
                 firstPlaysPerTurn = true;
+                countsPlaySeries = predCountsSeries;
                 continue;
             }
             // Fail closed on any unrecognized condition (e.g., Relic.UsedThisCombat on ThrowingAxe).
@@ -444,10 +450,12 @@ internal sealed partial class NativeRuleText
         }
 
         var dupeQualifier = excludesDupe ? "non-dupe " : "";
+        var playUnit = countsPlaySeries ? "card play series" : "card plays";
+        var seriesNote = countsPlaySeries ? "; replays do not consume additional charges" : "";
         var subject = firstPlaysPerTurn
             ? filteredType is { } firstKind
-                ? $"owned {dupeQualifier}{firstKind} cards played among owner's first N card plays each turn (where N = stacks)"
-                : $"each of owner's first N {dupeQualifier}card plays each turn (where N = stacks)"
+                ? $"owned {dupeQualifier}{firstKind} cards played among owner's first N {playUnit} each turn (where N = stacks{seriesNote})"
+                : $"each of owner's first N {dupeQualifier}{playUnit} each turn (where N = stacks{seriesNote})"
             : filteredType is { } kind
                 ? $"owned {dupeQualifier}{kind} cards"
                 : $"owned {dupeQualifier}cards";
@@ -623,8 +631,12 @@ internal sealed partial class NativeRuleText
     }
 
     private bool IsOwnerCardPlaysStartedPredicate(MethodInfo? pred, out List<CardType> filteredTypes)
+        => IsOwnerCardPlaysStartedPredicate(pred, out filteredTypes, out _);
+
+    private bool IsOwnerCardPlaysStartedPredicate(MethodInfo? pred, out List<CardType> filteredTypes, out bool countsPlaySeries)
     {
         filteredTypes = [];
+        countsPlaySeries = false;
         if (pred is null || pred.ContainsGenericParameters)
             return false;
         var body = Body(pred);
@@ -654,7 +666,10 @@ internal sealed partial class NativeRuleText
                 continue;
             }
             if (expected && expr is Call { Method.Name: "get_IsFirstInSeries" })
+            {
+                countsPlaySeries = true;
                 continue;
+            }
             if (IsEquality(new Test(expr, expected), true, out var eqL, out var eqR)
                 && ((IsEntryOwnerExpr(eqL) && IsOwnerPlayerOrCreature(eqR))
                     || (IsEntryOwnerExpr(eqR) && IsOwnerPlayerOrCreature(eqL))))

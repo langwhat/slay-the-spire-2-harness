@@ -932,10 +932,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     : action is Assignment assignment ? DescribeSlotAssignment(assignment, method) : null;
 
                 List<Effect> extracted;
+                MethodInfo? inlinedHelper = null;
                 if (effect is not null)
                     extracted = [effect];
                 else if (call is not null && !recognized && depth < 2 && ReadableHelper(call, method, power, matching.Select(step => step.Conditions)) is { } helper)
                 {
+                    inlinedHelper = helper.Method;
                     var nested = ReadEffects(helper.Method, helper.HelperPower,
                         depth + 1, onOwnedMonster || helper.OwnedMonster, helper.Bindings);
                     extracted = nested.Effects;
@@ -969,9 +971,13 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                             : sampleFe.Collection;
                         var boundColKey = boundCollection is not null ? Key(boundCollection) : null;
                         var referencesThis = bindings is null
-                            ? feGroup.Any(fe => ReferencesEnumerator(action, fe.Enumerator)
+                            ? feGroup.Any(fe => (inlinedHelper is null
+                                    ? ReferencesEnumerator(action, fe.Enumerator)
+                                    : HelperUsesEnumerator(inlinedHelper, call!, fe.Enumerator))
                                 || matching.Any(s => s.Conditions.Any(c => ReferencesEnumerator(c.Value, fe.Enumerator))))
-                            : boundColKey is not null && (ReferencesCollectionEnumerator(action, boundColKey)
+                            : boundColKey is not null && ((inlinedHelper is null
+                                    ? ReferencesCollectionEnumerator(action, boundColKey)
+                                    : HelperUsesCollectionEnumerator(inlinedHelper, call!, boundColKey))
                                 || matching.Any(s => s.Conditions.Any(c => ReferencesCollectionEnumerator(c.Value, boundColKey))));
                         if (referencesThis)
                             continue;
@@ -1063,6 +1069,55 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             incomplete = true;
             Gap(location);
         }
+    }
+
+    private bool HelperUsesEnumerator(MethodInfo helper, Call call, Call enumerator)
+    {
+        var helperBody = Body(helper);
+        if (!helperBody.ReadsParameters)
+            return false;
+        var parameters = helper.GetParameters();
+        var enumParamNames = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < parameters.Length && i < call.Arguments.Length; i++)
+        {
+            if (parameters[i].Name is { } pName && ReferencesEnumerator(call.Arguments[i], enumerator))
+                enumParamNames.Add(pName);
+        }
+        return enumParamNames.Count > 0 && BodyReferencesAnyInput(helperBody, enumParamNames);
+    }
+
+    private bool HelperUsesCollectionEnumerator(MethodInfo helper, Call call, string collectionKey)
+    {
+        var helperBody = Body(helper);
+        if (!helperBody.ReadsParameters)
+            return false;
+        var parameters = helper.GetParameters();
+        var enumParamNames = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < parameters.Length && i < call.Arguments.Length; i++)
+        {
+            if (parameters[i].Name is { } pName && ReferencesCollectionEnumerator(call.Arguments[i], collectionKey))
+                enumParamNames.Add(pName);
+        }
+        return enumParamNames.Count > 0 && BodyReferencesAnyInput(helperBody, enumParamNames);
+    }
+
+    private static bool BodyReferencesAnyInput(NativeRuleBody body, HashSet<string> paramNames)
+        => body.Calls.Any(s => ValueReferencesAnyInput(s.Call, paramNames) || s.Conditions.Any(c => ValueReferencesAnyInput(c.Value, paramNames)))
+            || body.FieldSteps.Any(f => ValueReferencesAnyInput(f.Assignment, paramNames) || f.Conditions.Any(c => ValueReferencesAnyInput(c.Value, paramNames)));
+
+    private static bool ValueReferencesAnyInput(Value? value, HashSet<string> paramNames, int depth = 0)
+    {
+        if (value is null || depth > 8)
+            return false;
+        return value switch
+        {
+            Input { Name: var name } => paramNames.Contains(name),
+            Call c => ValueReferencesAnyInput(c.Receiver, paramNames, depth + 1) || c.Arguments.Any(a => ValueReferencesAnyInput(a, paramNames, depth + 1)),
+            Operation op => ValueReferencesAnyInput(op.Left, paramNames, depth + 1) || ValueReferencesAnyInput(op.Right, paramNames, depth + 1),
+            Field f => ValueReferencesAnyInput(f.Receiver, paramNames, depth + 1),
+            Assignment a => ValueReferencesAnyInput(a.Target, paramNames, depth + 1) || ValueReferencesAnyInput(a.Assigned, paramNames, depth + 1),
+            _ => false,
+        };
     }
 
     private static bool ReferencesEnumerator(Value? value, Call enumerator, int depth = 0)

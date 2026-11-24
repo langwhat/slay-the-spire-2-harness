@@ -667,7 +667,7 @@ internal sealed partial class NativeRuleText
             && s.Call.Method.GetGenericArguments()[0] == typeof(StrengthPower));
         var multipliesByHits = applyStep is not null
             && Argument(applyStep.Call, "amount") is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "mul", Left: var ml, Right: var mr }] }
-            && (IsStackAmount(ml) || IsStackAmount(mr));
+            && ((IsStackAmount(ml) && mr is not Constant) || (IsStackAmount(mr) && ml is not Constant));
         var checksPetDedup = body.FieldSteps.Any(f => f.Assignment.Target.Member.Name == "petHit");
         if (applyStep is null || !multipliesByHits || !checksPetDedup)
             return false;

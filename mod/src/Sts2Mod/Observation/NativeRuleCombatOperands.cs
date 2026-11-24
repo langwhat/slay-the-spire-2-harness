@@ -90,7 +90,7 @@ internal sealed partial class NativeRuleText
         {
             case Call { Method.DeclaringType.Name: "CardFactory" } cf:
                 return cf;
-            case Call { Method.Name: "First" or "FirstOrDefault", Arguments: [var inner, ..] }:
+            case Call { Method.Name: "First" or "FirstOrDefault", Arguments: [var inner] }:
                 var foundSingle = UnwrapCardFactoryCall(inner, out _);
                 takesSingle = foundSingle is not null;
                 return foundSingle;

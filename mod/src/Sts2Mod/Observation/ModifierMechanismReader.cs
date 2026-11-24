@@ -320,9 +320,25 @@ internal static class ModifierMechanismReader
             {
                 gaps.Add("AfterCardDrawn");
             }
-            else if (drawBody.Calls.Any(s => s.Call.Method.Name == "SetThisTurn" || s.Call.Method.Name == "SetThisCombat"))
+            else if (drawBody.Calls.FirstOrDefault(s => s.Call.Method.Name is "SetThisTurn" or "SetThisCombat") is { } setCostStep)
             {
-                parts.Add("Randomizes this card's Energy cost when drawn.");
+                var checksHand = setCostStep.Conditions.Any(c =>
+                {
+                    var expr = c.Value;
+                    var expected = c.Expected;
+                    while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                    {
+                        expr = inner;
+                        expected = !expected;
+                    }
+                    return expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Type" }, Right: Constant { Data: int rawPile } } op
+                        && (op.Operator == "bne.un" ? !expected : expected)
+                        && (PileType)rawPile == PileType.Hand;
+                });
+                var duration = setCostStep.Call.Method.Name == "SetThisCombat" ? " for this combat" : " this turn";
+                parts.Add(checksHand
+                    ? $"If still in hand when drawn, randomizes this card's Energy cost{duration}."
+                    : $"Randomizes this card's Energy cost{duration} when drawn.");
             }
             else
             {

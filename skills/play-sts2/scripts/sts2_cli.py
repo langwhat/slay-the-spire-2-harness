@@ -74,6 +74,9 @@ def _one_line(text: object) -> str:
 
 def _cache_path(session: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)[:80]
+    if safe != session:
+        digest = hashlib.sha256(session.encode("utf-8")).hexdigest()[:8]
+        safe = f"{safe}_{digest}"
     return Path(tempfile.gettempdir()) / f"sts2_cli_session_{safe}.json"
 
 
@@ -1561,15 +1564,18 @@ def cmd_tools(url: str) -> int:
 
 
 def _parsed_arg_flags(tool_name: str, arg_text: str) -> tuple[bool, bool]:
-    """Return (is_state_inspect, contains_select_step)."""
+    """Return (is_state_inspect, contains_empty_select_step)."""
     try:
         parsed = _as_dict(json.loads(arg_text))
     except json.JSONDecodeError:
         return False, False
     is_state = tool_name == "run_inspect" and parsed.get("area") == "state"
     steps = _as_list(parsed.get("steps"))
-    has_select = any(_as_dict(s).get("kind") == "select" for s in steps)
-    return is_state, has_select
+    has_empty_select = any(
+        _as_dict(s).get("kind") == "select" and not _as_list(_as_dict(s).get("refs"))
+        for s in steps
+    )
+    return is_state, has_empty_select
 
 
 def cmd_call(
