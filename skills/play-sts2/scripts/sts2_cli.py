@@ -1609,7 +1609,12 @@ def cmd_tools(url: str) -> int:
     return 0
 
 
-def _parsed_arg_flags(tool_name: str, arg_text: str) -> tuple[bool, bool, set[str]]:
+def _parsed_arg_flags(
+    tool_name: str,
+    arg_text: str,
+    *,
+    confirmed_steps: int | None = None,
+) -> tuple[bool, bool, set[str]]:
     """Return (is_state_inspect, contains_empty_select_step, skipped_interact_actions)."""
     try:
         parsed = _as_dict(json.loads(arg_text))
@@ -1617,12 +1622,18 @@ def _parsed_arg_flags(tool_name: str, arg_text: str) -> tuple[bool, bool, set[st
         return False, False, set()
     is_state = tool_name == "run_inspect" and parsed.get("area") == "state"
     steps = [_as_dict(s) for s in _as_list(parsed.get("steps"))]
+    if confirmed_steps is not None:
+        steps = steps[: max(0, confirmed_steps)]
     has_empty_select = any(s.get("kind") == "select" and not _as_list(s.get("refs")) for s in steps)
     skipped_interacts: set[str] = set()
-    if tool_name == "run_act" and has_empty_select:
-        for s in steps:
-            if s.get("kind") == "interact" and s.get("action") is not None:
-                skipped_interacts.add(_str(s.get("action")))
+    if tool_name == "run_act":
+        # Record interact actions preceding an empty select in the confirmed prefix so
+        # skipped Prayer Wheel rewards stay guarded even if a later step stops.
+        for idx, step in enumerate(steps):
+            if step.get("kind") == "select" and not _as_list(step.get("refs")):
+                for prev in steps[:idx]:
+                    if prev.get("kind") == "interact" and prev.get("action") is not None:
+                        skipped_interacts.add(_str(prev.get("action")))
     return is_state, has_empty_select, skipped_interacts
 
 
@@ -1654,8 +1665,16 @@ def cmd_call(
         return 1
     cache = _load_cache(session)
     caller_outcome = _as_dict(payload.get("outcome"))
-    is_state_inspect, has_select, skipped_interacts = _parsed_arg_flags(tool_name, arg_text)
-    if caller_outcome.get("status") == "completed":
+    caller_status = _str(caller_outcome.get("status"))
+    confirmed_prefix: int | None = None
+    if caller_status == "stopped":
+        confirmed_prefix = _int(caller_outcome.get("completed_steps"))
+    elif caller_status != "completed":
+        confirmed_prefix = 0
+    is_state_inspect, has_select, skipped_interacts = _parsed_arg_flags(
+        tool_name, arg_text, confirmed_steps=confirmed_prefix
+    )
+    if caller_status in ("completed", "stopped"):
         _record_observed_auto_guards(payload, cache, skipped_card_actions=skipped_interacts)
     auto_log: list[str] = []
     can_auto = (

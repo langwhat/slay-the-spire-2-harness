@@ -1840,7 +1840,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             var pile = (int)pileNum;
             var position = Numeric(Argument(call, "position")) is { } place ? (CardPilePosition)(int)place : CardPilePosition.Bottom;
             var where = (PileType)pile == PileType.Draw && position != CardPilePosition.Bottom ? $" ({position.ToString().ToLowerInvariant()})" : "";
-            return new Effect($"add {count} {ModelLabel(generic)} to {Possessive(who)} {((PileType)pile).ToString().ToLowerInvariant()} pile{where}", AddedCard: generic);
+            var handOverflow = (PileType)pile == PileType.Hand ? " (overflows to discard pile if hand is full)" : "";
+            return new Effect($"add {count} {ModelLabel(generic)} to {Possessive(who)} {((PileType)pile).ToString().ToLowerInvariant()} pile{where}{handOverflow}", AddedCard: generic);
         }
 
         if (type == typeof(CardPileCmd) && effect is "AddGeneratedCardToCombat" or "AddGeneratedCardsToCombat")
@@ -1854,7 +1855,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             var destPile = (PileType)(int)destPileNum;
             var destPos = Numeric(Argument(call, "position")) is { } rawDestPos ? (CardPilePosition)(int)rawDestPos : CardPilePosition.Bottom;
             var destWhere = destPile == PileType.Hand
-                ? "into hand"
+                ? "into hand (overflows to discard pile if hand is full)"
                 : destPile == PileType.Draw && destPos != CardPilePosition.Bottom
                     ? $"to {PileLocationLabel(destPile)} ({destPos.ToString().ToLowerInvariant()})"
                     : $"to {PileLocationLabel(destPile)}";
@@ -3147,11 +3148,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         if (countText is null)
             return null;
         var noun = countText == "1" ? "card" : "card(s)";
+        var fewerSuffix = countText.StartsWith("up to ", StringComparison.Ordinal) ? "" : " (or all available if fewer)";
         if (name is "FromHand" or "FromHandForDiscard")
-            return $"{countText} chosen {noun} from hand";
+            return $"{countText} chosen {noun} from hand{fewerSuffix}";
         if (name == "FromCombatPile" && Argument(selectCall, "pile") is Call { Method.Name: "GetPile", Arguments: [Constant { Data: int rawPile }, var pileOwner] }
             && Enum.IsDefined(typeof(PileType), rawPile) && ValueText(pileOwner) is { } who)
-            return $"{countText} chosen {noun} from {Possessive(who)} {PileLocationLabel((PileType)rawPile)}";
+            return $"{countText} chosen {noun} from {Possessive(who)} {PileLocationLabel((PileType)rawPile)}{fewerSuffix}";
         return null;
     }
 

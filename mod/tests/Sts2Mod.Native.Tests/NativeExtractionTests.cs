@@ -282,10 +282,10 @@ public sealed class NativeExtractionTests
         var (emotionalSummary, emotionalGap) = EventMechanismReader.DescribeOptionMethod(weaver, null, emotional);
         var (acupunctureSummary, acupunctureGap) = EventMechanismReader.DescribeOptionMethod(weaver, null, acupuncture);
         Assert.Null(emotionalGap);
-        Assert.Contains("select up to 1 removable card", emotionalSummary!, StringComparison.Ordinal);
+        Assert.Contains("select 1 (or all remaining if fewer exist) removable card", emotionalSummary!, StringComparison.Ordinal);
         Assert.Contains("lose 125 Gold", emotionalSummary!, StringComparison.Ordinal);
         Assert.Null(acupunctureGap);
-        Assert.Contains("select up to 2 removable card(s)", acupunctureSummary!, StringComparison.Ordinal);
+        Assert.Contains("select 2 (or all remaining if fewer exist) removable card(s)", acupunctureSummary!, StringComparison.Ordinal);
         Assert.Contains("lose 250 Gold", acupunctureSummary!, StringComparison.Ordinal);
     }
 
@@ -456,7 +456,7 @@ public sealed class NativeExtractionTests
         var (aggressionText, aggressionGaps) = PowerMechanismReader.Describe(typeof(AggressionPower), true);
         Assert.Empty(aggressionGaps);
         Assert.Contains("Before side turn starts:", aggressionText!, StringComparison.Ordinal);
-        Assert.Contains("for each of up to stacks random Attack card(s) in owner's discard pile: (move it into hand; if it is upgradable: upgrade it)", aggressionText!, StringComparison.Ordinal);
+        Assert.Contains("for each of up to stacks random Attack card(s) in owner's discard pile: (move it into hand (overflows to discard pile if hand is full); if it is upgradable: upgrade it)", aggressionText!, StringComparison.Ordinal);
 
         var (wuppyText, wuppyGaps) = PowerMechanismReader.Describe(typeof(WuppysLoyaltyPower), true);
         Assert.Empty(wuppyGaps);
@@ -585,7 +585,7 @@ public sealed class NativeExtractionTests
         var (foregoneText, foregoneGaps) = PowerMechanismReader.Describe(typeof(ForegoneConclusionPower), true);
         Assert.Empty(foregoneGaps);
         Assert.Contains("shuffle owner's discard pile into draw pile if draw pile is empty", foregoneText!, StringComparison.Ordinal);
-        Assert.Contains("chosen card(s) from owner's draw pile into hand", foregoneText!, StringComparison.Ordinal);
+        Assert.Contains("chosen card(s) from owner's draw pile (or all available if fewer) into hand (overflows to discard pile if hand is full)", foregoneText!, StringComparison.Ordinal);
 
         var (paleDotText, paleDotGaps) = PowerMechanismReader.Describe(typeof(PaleBlueDotPower), true);
         Assert.Empty(paleDotGaps);
@@ -656,7 +656,7 @@ public sealed class NativeExtractionTests
 
         var (entropyText, entropyGaps) = PowerMechanismReader.Describe(typeof(EntropyPower), true);
         Assert.Empty(entropyGaps);
-        Assert.Contains("transform stacks chosen card(s) from hand into a random card", entropyText!, StringComparison.Ordinal);
+        Assert.Contains("transform stacks chosen card(s) from hand (or all available if fewer) into a random card", entropyText!, StringComparison.Ordinal);
 
         var (fastenText, fastenGaps) = PowerMechanismReader.Describe(typeof(FastenPower), true);
         Assert.Empty(fastenGaps);
@@ -665,7 +665,7 @@ public sealed class NativeExtractionTests
         var (stratagemText, stratagemGaps) = PowerMechanismReader.Describe(typeof(StratagemPower), true);
         Assert.Empty(stratagemGaps);
         Assert.Contains("After shuffling draw pile:", stratagemText!, StringComparison.Ordinal);
-        Assert.Contains("move stacks chosen card(s) from owner's draw pile into hand", stratagemText!, StringComparison.Ordinal);
+        Assert.Contains("move stacks chosen card(s) from owner's draw pile (or all available if fewer) into hand (overflows to discard pile if hand is full)", stratagemText!, StringComparison.Ordinal);
 
         // RupturePower must not emit a duplicate generic card-play snapshot line and must distinguish resolving card plays from Burn.
         var (ruptureText, ruptureGaps) = PowerMechanismReader.Describe(typeof(RupturePower), true);
@@ -1171,7 +1171,12 @@ public sealed class NativeExtractionTests
 
         var imbuedText = ModifierMechanismReader.ReadEnchantment(ModelDb.Enchantment<Imbued>(), "eng");
         Assert.NotNull(imbuedText);
-        Assert.Contains("bottom of the initial draw pile (taking precedence over Innate; only drawn in the opening hand if the opening draw reaches the bottom of the draw pile)", imbuedText!, StringComparison.Ordinal);
+        Assert.Contains("bottom of the initial draw pile (taking precedence over Innate; only drawn in the opening hand if the opening draw reaches this card's position)", imbuedText!, StringComparison.Ordinal);
+
+        var (stratagemText, stratagemGaps) = PowerMechanismReader.Describe(typeof(StratagemPower), true);
+        Assert.Empty(stratagemGaps);
+        Assert.Contains("into hand (overflows to discard pile if hand is full)", stratagemText!, StringComparison.Ordinal);
+        Assert.Contains("(or all available if fewer)", stratagemText!, StringComparison.Ordinal);
 
         var (feBenignReadText, feBenignReadGaps) = PowerMechanismReader.Describe(typeof(SyntheticForeachBenignReadHelperPower), true);
         Assert.Empty(feBenignReadGaps);
