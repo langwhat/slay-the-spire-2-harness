@@ -341,7 +341,7 @@ internal static class ModifierMechanismReader
             && NativeRuleBody.Read(startBottom) is { Incomplete: false, Returns: [{ Conditions.Length: 0, Value: var sbVal }] }
             && TryTruth(sbVal, out var startsAtBottom) && startsAtBottom)
         {
-            parts.Add("Starts at the bottom of the initial draw pile (taking precedence over Innate, so it does not consume an opening-hand draw).");
+            parts.Add("Starts at the bottom of the initial draw pile (taking precedence over Innate; only drawn in the opening hand if the opening draw reaches the bottom of the draw pile).");
         }
 
         if (type.GetMethod("ModifyShuffleOrder", DeclaredInstance) is { } shuffleOrder)

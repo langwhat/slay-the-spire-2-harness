@@ -1325,8 +1325,10 @@ internal sealed partial class NativeRuleText
             3 => "3rd",
             var n => $"{n}th",
         };
-        var destLabel = PileLocationLabel((PileType)(int)destPileNum);
-        line = $"{prefix}Card-count clone trigger: counts owner's {countedType.Value} plays this turn (retroactively including {countedType.Value} plays already started earlier this turn before this power was applied); after the {ordinal} {countedType.Value} play resolves, adds stacks clone(s) of that played card to owner's {destLabel}; counter resets after owner's turn ends";
+        var destPile = (PileType)(int)destPileNum;
+        var destLabel = PileLocationLabel(destPile);
+        var overflowNote = destPile == PileType.Hand ? " (overflows to discard pile if hand is full)" : "";
+        line = $"{prefix}Card-count clone trigger: counts owner's {countedType.Value} plays this turn (retroactively including {countedType.Value} plays already started earlier this turn before this power was applied); after the {ordinal} {countedType.Value} play resolves, adds stacks clone(s) of that played card to owner's {destLabel}{overflowNote}; counter resets after owner's turn ends";
         return true;
     }
 
@@ -1815,8 +1817,10 @@ internal sealed partial class NativeRuleText
             return false;
 
         var kwLabel = KeywordLabel((CardKeyword)rawKw);
-        var pileLabel = PileLocationLabel((PileType)(int)rawPile);
-        line = $"{prefix}Before turn-start hand draw: if player=owner: generate stacks random combat-generatable non-Basic non-Ancient unlocked character card(s) with {kwLabel} into owner's {pileLabel}";
+        var targetPile = (PileType)(int)rawPile;
+        var pileLabel = PileLocationLabel(targetPile);
+        var overflowNote = targetPile == PileType.Hand ? " (overflows to discard pile if hand is full)" : "";
+        line = $"{prefix}Before turn-start hand draw: if player=owner: generate stacks random combat-generatable non-Basic non-Ancient unlocked character card(s) with {kwLabel} into owner's {pileLabel}{overflowNote}";
         return true;
     }
 

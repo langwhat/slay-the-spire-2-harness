@@ -494,7 +494,7 @@ internal static class EventMechanismReader
                     var qualifiedNoun = filterDesc is not null
                         ? (filterDesc.Contains("removable", StringComparison.Ordinal) ? $"{filterDesc} {cardNoun}" : $"removable {filterDesc} {cardNoun}")
                         : $"removable {cardNoun}";
-                    steps.Add($"select {countText} {qualifiedNoun} from deck to remove");
+                    steps.Add($"select up to {countText} {qualifiedNoun} from deck to remove");
                     continue;
                 }
                 if (name == nameof(CardSelectCmd.FromDeckForUpgrade))

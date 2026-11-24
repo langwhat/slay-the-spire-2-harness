@@ -73,9 +73,11 @@ def _one_line(text: object) -> str:
 
 
 def _cache_path(session: str) -> Path:
-    if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", session):
+    # Use raw_ only for lowercase ASCII so case-insensitive filesystems (macOS APFS)
+    # cannot alias distinct names like "Game" and "game".
+    if re.fullmatch(r"[a-z0-9._-]{1,64}", session):
         return Path(tempfile.gettempdir()) / f"sts2_cli_session_raw_{session}.json"
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)[:48]
+    safe = re.sub(r"[^a-z0-9._-]", "_", session.lower())[:48]
     digest = hashlib.sha256(session.encode("utf-8")).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / f"sts2_cli_session_enc_{safe}_{digest}.json"
 
@@ -536,8 +538,12 @@ def _reset_session_if_new_run(payload: JsonObj, cache: JsonObj) -> bool:
     return is_new_run
 
 
-def _record_observed_auto_guards(payload: JsonObj, cache: JsonObj) -> None:
-    """Track visited shop entrances and opened card reward offers across calls."""
+def _record_observed_auto_guards(
+    payload: JsonObj,
+    cache: JsonObj,
+    skipped_card_actions: set[str] | None = None,
+) -> None:
+    """Track visited shop entrances and opened/skipped card reward offers across calls."""
     state = _as_dict(payload.get("state"))
     if state.get("phase") != "run":
         return
@@ -552,6 +558,18 @@ def _record_observed_auto_guards(payload: JsonObj, cache: JsonObj) -> None:
     if "close_shop" in enabled_ops or (state.get("screen") == "shop" and offers):
         opened_shops = [_str(x) for x in _as_list(cache.get("opened_shops"))]
         cache["opened_shops"] = _append_guard(opened_shops, nkey)
+
+    # If a batched [interact(openA), select([])] skipped card offer A without ever showing the
+    # intermediate selection screen to CLI, mark any card offer owning those interact action refs.
+    if state.get("screen") == "rewards" and skipped_card_actions:
+        opened_cards = [_str(x) for x in _as_list(cache.get("opened_card_offers"))]
+        for of in offers:
+            if of.get("kind") != "card":
+                continue
+            of_acts = {_str(a) for a in _as_list(of.get("actions")) if a is not None}
+            if of_acts & skipped_card_actions:
+                opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
+        cache["opened_card_offers"] = opened_cards
 
     # If a rewards selection is currently open, mark only card offers matching the active
     # selection's candidate refs so unopened Prayer Wheel card offers (whose contents are
@@ -838,18 +856,17 @@ def _run_auto_advance(
         next_outcome = _as_dict(next_payload.get("outcome"))
         out_status = _str(next_outcome.get("status"))
         if out_status != "completed":
-            # On rejected auto-steps nothing executed: preserve the last completed payload
-            # (including caller_completed_steps) instead of masking it with an auto rejection.
-            if out_status == "rejected":
-                reason_code = _str(_as_dict(next_outcome.get("reason")).get("code"))
-                suffix = f" ({reason_code})" if reason_code else ""
-                log.append(f"auto paused on {desc}: rejected{suffix}")
-                break
-            _record_guard(guard)
+            # Only burn a one-shot guard if execution may have occurred; never on rejected.
+            if out_status != "rejected":
+                _record_guard(guard)
             if caller_outcome.get("status") == "completed" and caller_completed_steps is not None:
                 log.insert(0, f"caller_completed_steps={caller_completed_steps}")
+            reason_code = _str(_as_dict(next_outcome.get("reason")).get("code"))
+            suffix = f" ({reason_code})" if reason_code else ""
+            # Propagate the latest payload (including state: null on busy/paused);
+            # render_reply reports CALLER_OUTCOME separately so caller receipts stay intact.
             current = next_payload
-            log.append(f"stopped on {desc} ({out_status})")
+            log.append(f"auto stopped on {desc}: {out_status}{suffix}")
             break
         _record_guard(guard)
         if next_payload.get("state") == current.get("state"):
@@ -884,6 +901,7 @@ def render_reply(
     force_map_topology: bool = False,
     handoff_trim: bool = False,
     auto_log: list[str] | None = None,
+    caller_outcome: JsonObj | None = None,
 ) -> str:
     if _reset_session_if_new_run(payload, cache):
         full = True
@@ -891,10 +909,16 @@ def render_reply(
     calls = _int(cache.get("calls")) + 1
     cache["calls"] = calls
 
+    outcome = _as_dict(payload.get("outcome"))
+    if auto_log and caller_outcome and caller_outcome != outcome:
+        caller_bits = [f"status={_str(caller_outcome.get('status'))}"]
+        for k in ("completed_steps", "next_step", "confirmed_steps", "uncertain_step"):
+            if k in caller_outcome and caller_outcome[k] is not None:
+                caller_bits.append(f"{k}={caller_outcome[k]}")
+        lines.append("CALLER_OUTCOME: " + " ".join(caller_bits))
     if auto_log:
         lines.append("AUTO_ADVANCED: " + " -> ".join(auto_log))
 
-    outcome = _as_dict(payload.get("outcome"))
     out_status = _str(outcome.get("status"))
     out_bits = [f"status={out_status}"]
     for k in ("completed_steps", "next_step", "confirmed_steps", "uncertain_step"):
@@ -1585,18 +1609,21 @@ def cmd_tools(url: str) -> int:
     return 0
 
 
-def _parsed_arg_flags(tool_name: str, arg_text: str) -> tuple[bool, bool]:
-    """Return (is_state_inspect, contains_empty_select_step)."""
+def _parsed_arg_flags(tool_name: str, arg_text: str) -> tuple[bool, bool, set[str]]:
+    """Return (is_state_inspect, contains_empty_select_step, skipped_interact_actions)."""
     try:
         parsed = _as_dict(json.loads(arg_text))
     except json.JSONDecodeError:
-        return False, False
+        return False, False, set()
     is_state = tool_name == "run_inspect" and parsed.get("area") == "state"
-    steps = _as_list(parsed.get("steps"))
-    has_empty_select = any(
-        _as_dict(s).get("kind") == "select" and not _as_list(_as_dict(s).get("refs")) for s in steps
-    )
-    return is_state, has_empty_select
+    steps = [_as_dict(s) for s in _as_list(parsed.get("steps"))]
+    has_empty_select = any(s.get("kind") == "select" and not _as_list(s.get("refs")) for s in steps)
+    skipped_interacts: set[str] = set()
+    if tool_name == "run_act" and has_empty_select:
+        for s in steps:
+            if s.get("kind") == "interact" and s.get("action") is not None:
+                skipped_interacts.add(_str(s.get("action")))
+    return is_state, has_empty_select, skipped_interacts
 
 
 def cmd_call(
@@ -1626,7 +1653,10 @@ def cmd_call(
         print(text)
         return 1
     cache = _load_cache(session)
-    is_state_inspect, has_select = _parsed_arg_flags(tool_name, arg_text)
+    caller_outcome = _as_dict(payload.get("outcome"))
+    is_state_inspect, has_select, skipped_interacts = _parsed_arg_flags(tool_name, arg_text)
+    if caller_outcome.get("status") == "completed":
+        _record_observed_auto_guards(payload, cache, skipped_card_actions=skipped_interacts)
     auto_log: list[str] = []
     can_auto = (
         auto
@@ -1650,6 +1680,7 @@ def cmd_call(
             force_map_topology=force_map_topology,
             handoff_trim=handoff_trim,
             auto_log=auto_log,
+            caller_outcome=caller_outcome,
         )
     )
     _save_cache(session, cache)

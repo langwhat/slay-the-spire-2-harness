@@ -26,6 +26,7 @@ internal sealed partial class NativeRuleText
             ? $" ({position.ToString().ToLowerInvariant()} position)"
             : "";
         var pileLabel = $"{pile.ToString().ToLowerInvariant()} pile{where}";
+        var overflowNote = pile == PileType.Hand ? " (overflows to discard pile if hand is full)" : "";
 
         var cardArg = Argument(call, "card", "cards");
         if (cardArg is Call { Method: { Name: "CreateCard", IsGenericMethod: true } create, Arguments: [var player] }
@@ -33,7 +34,7 @@ internal sealed partial class NativeRuleText
             && ValueText(player) is { } recipient)
         {
             var cardType = create.GetGenericArguments()[0];
-            return new Effect($"add 1 {ModelLabel(cardType)} to {Possessive(recipient)} {pileLabel}", AddedCard: cardType);
+            return new Effect($"add 1 {ModelLabel(cardType)} to {Possessive(recipient)} {pileLabel}{overflowNote}", AddedCard: cardType);
         }
 
         // Non-generic combatState.CreateCard(ModelDb.Card<T>(), player)
@@ -45,7 +46,7 @@ internal sealed partial class NativeRuleText
             && ValueText(ngPlayer) is { } ngRecipient)
         {
             var cardType = dbCard.GetGenericArguments()[0];
-            return new Effect($"add 1 {ModelLabel(cardType)} to {Possessive(ngRecipient)} {pileLabel}", AddedCard: cardType);
+            return new Effect($"add 1 {ModelLabel(cardType)} to {Possessive(ngRecipient)} {pileLabel}{overflowNote}", AddedCard: cardType);
         }
 
         // card.CreateClone() on recorded card instance (e.g. NightmarePower)
@@ -54,7 +55,7 @@ internal sealed partial class NativeRuleText
             && Argument(call, "creator", "player") is { } clonePlayer
             && ValueText(clonePlayer) is { } cloneRecipient)
         {
-            return new Effect($"add 1 clone of {cloneSlot} to {Possessive(cloneRecipient)} {pileLabel}");
+            return new Effect($"add 1 clone of {cloneSlot} to {Possessive(cloneRecipient)} {pileLabel}{overflowNote}");
         }
 
         // Static CardType.Create(player, count, combatState) (e.g. Soul.Create)
@@ -64,7 +65,7 @@ internal sealed partial class NativeRuleText
             && ValueText(staticCreate.Arguments[0]) is { } createdRecipient
             && ValueText(staticCreate.Arguments[1]) is { } createdCount)
         {
-            return new Effect($"add {createdCount} {ModelLabel(createdCardType)} to {Possessive(createdRecipient)} {pileLabel}", AddedCard: createdCardType);
+            return new Effect($"add {createdCount} {ModelLabel(createdCardType)} to {Possessive(createdRecipient)} {pileLabel}{overflowNote}", AddedCard: createdCardType);
         }
 
         // CardFactory.GetDistinctForCombat / GetForCombat(player, pool, count, rng)
@@ -75,7 +76,6 @@ internal sealed partial class NativeRuleText
             && (takesSingle ? "1" : ValueText(factoryCall.Arguments[2])) is { } factoryCount
             && DescribeCardFactoryPool(factoryCall.Arguments[1]) is { } poolDesc)
         {
-            var overflowNote = pile == PileType.Hand ? " (overflows to discard pile if hand is full)" : "";
             if (factoryCall.Method.Name == "GetDistinctForCombat")
                 return new Effect($"generate up to {factoryCount} distinct {poolDesc} card(s) into {Possessive(factoryRecipient)} {pileLabel}{overflowNote}");
             return new Effect($"generate {factoryCount} {poolDesc} card(s) (duplicates allowed) into {Possessive(factoryRecipient)} {pileLabel}{overflowNote}");

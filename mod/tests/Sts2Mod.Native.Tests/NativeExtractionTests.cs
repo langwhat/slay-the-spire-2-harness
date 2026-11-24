@@ -282,10 +282,10 @@ public sealed class NativeExtractionTests
         var (emotionalSummary, emotionalGap) = EventMechanismReader.DescribeOptionMethod(weaver, null, emotional);
         var (acupunctureSummary, acupunctureGap) = EventMechanismReader.DescribeOptionMethod(weaver, null, acupuncture);
         Assert.Null(emotionalGap);
-        Assert.Contains("select 1 removable card", emotionalSummary!, StringComparison.Ordinal);
+        Assert.Contains("select up to 1 removable card", emotionalSummary!, StringComparison.Ordinal);
         Assert.Contains("lose 125 Gold", emotionalSummary!, StringComparison.Ordinal);
         Assert.Null(acupunctureGap);
-        Assert.Contains("select 2 removable card(s)", acupunctureSummary!, StringComparison.Ordinal);
+        Assert.Contains("select up to 2 removable card(s)", acupunctureSummary!, StringComparison.Ordinal);
         Assert.Contains("lose 250 Gold", acupunctureSummary!, StringComparison.Ordinal);
     }
 
@@ -1162,9 +1162,16 @@ public sealed class NativeExtractionTests
         Assert.Empty(calamityGaps);
         Assert.Contains("overflows to discard pile if hand is full", calamityText!, StringComparison.Ordinal);
 
+        foreach (var handGenPower in new[] { typeof(JugglingPower), typeof(CallOfTheVoidPower), typeof(NightmarePower), typeof(SentryModePower) })
+        {
+            var (hgText, hgGaps) = PowerMechanismReader.Describe(handGenPower, true);
+            Assert.Empty(hgGaps);
+            Assert.Contains("overflows to discard pile if hand is full", hgText!, StringComparison.Ordinal);
+        }
+
         var imbuedText = ModifierMechanismReader.ReadEnchantment(ModelDb.Enchantment<Imbued>(), "eng");
         Assert.NotNull(imbuedText);
-        Assert.Contains("bottom of the initial draw pile (taking precedence over Innate", imbuedText!, StringComparison.Ordinal);
+        Assert.Contains("bottom of the initial draw pile (taking precedence over Innate; only drawn in the opening hand if the opening draw reaches the bottom of the draw pile)", imbuedText!, StringComparison.Ordinal);
 
         var (feBenignReadText, feBenignReadGaps) = PowerMechanismReader.Describe(typeof(SyntheticForeachBenignReadHelperPower), true);
         Assert.Empty(feBenignReadGaps);
