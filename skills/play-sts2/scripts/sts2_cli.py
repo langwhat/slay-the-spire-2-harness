@@ -544,8 +544,17 @@ def _record_observed_auto_guards(
     skipped_card_actions: set[str] | None = None,
 ) -> None:
     """Track visited shop entrances and opened/skipped card reward offers across calls."""
+    pending_skipped = {_str(x) for x in _as_list(cache.get("pending_skipped_card_actions")) if x}
+    if skipped_card_actions:
+        pending_skipped.update(skipped_card_actions)
+
     state = _as_dict(payload.get("state"))
+    if not state:
+        if pending_skipped:
+            cache["pending_skipped_card_actions"] = sorted(pending_skipped)[-32:]
+        return
     if state.get("phase") != "run":
+        cache.pop("pending_skipped_card_actions", None)
         return
 
     nkey = _node_key(state)
@@ -559,17 +568,20 @@ def _record_observed_auto_guards(
         opened_shops = [_str(x) for x in _as_list(cache.get("opened_shops"))]
         cache["opened_shops"] = _append_guard(opened_shops, nkey)
 
-    # If a batched [interact(openA), select([])] skipped card offer A without ever showing the
-    # intermediate selection screen to CLI, mark any card offer owning those interact action refs.
-    if state.get("screen") == "rewards" and skipped_card_actions:
+    # Resolve any batched [interact(openA), select([])] skips (including deferred ones whose
+    # original response returned state: null) once the rewards screen is observed.
+    if state.get("screen") == "rewards" and pending_skipped:
         opened_cards = [_str(x) for x in _as_list(cache.get("opened_card_offers"))]
         for of in offers:
             if of.get("kind") != "card":
                 continue
             of_acts = {_str(a) for a in _as_list(of.get("actions")) if a is not None}
-            if of_acts & skipped_card_actions:
+            if of_acts & pending_skipped:
                 opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
         cache["opened_card_offers"] = opened_cards
+        cache.pop("pending_skipped_card_actions", None)
+    elif state.get("screen") != "rewards":
+        cache.pop("pending_skipped_card_actions", None)
 
     # If a rewards selection is currently open, mark only card offers matching the active
     # selection's candidate refs so unopened Prayer Wheel card offers (whose contents are
@@ -831,7 +843,7 @@ def _run_auto_advance(
         if nxt is None:
             break
         step, desc, guard = nxt
-        body = json.dumps({"steps": [step], "reason": desc}, ensure_ascii=False)
+        body = json.dumps({"steps": [step]}, ensure_ascii=False)
         code, text = _http_post(endpoint, body)
         if code != 200:
             _record_guard(guard)
@@ -856,8 +868,12 @@ def _run_auto_advance(
         next_outcome = _as_dict(next_payload.get("outcome"))
         out_status = _str(next_outcome.get("status"))
         if out_status != "completed":
-            # Only burn a one-shot guard if execution may have occurred; never on rejected.
-            if out_status != "rejected":
+            # Only burn a one-shot guard if execution may have occurred; never on rejected
+            # or on stopped with 0 completed steps.
+            no_exec = out_status == "rejected" or (
+                out_status == "stopped" and _int(next_outcome.get("completed_steps")) == 0
+            )
+            if not no_exec:
                 _record_guard(guard)
             if caller_outcome.get("status") == "completed" and caller_completed_steps is not None:
                 log.insert(0, f"caller_completed_steps={caller_completed_steps}")
@@ -1669,12 +1685,14 @@ def cmd_call(
     confirmed_prefix: int | None = None
     if caller_status == "stopped":
         confirmed_prefix = _int(caller_outcome.get("completed_steps"))
+    elif caller_status == "unknown":
+        confirmed_prefix = _int(caller_outcome.get("confirmed_steps"))
     elif caller_status != "completed":
         confirmed_prefix = 0
     is_state_inspect, has_select, skipped_interacts = _parsed_arg_flags(
         tool_name, arg_text, confirmed_steps=confirmed_prefix
     )
-    if caller_status in ("completed", "stopped"):
+    if caller_status in ("completed", "stopped", "unknown"):
         _record_observed_auto_guards(payload, cache, skipped_card_actions=skipped_interacts)
     auto_log: list[str] = []
     can_auto = (

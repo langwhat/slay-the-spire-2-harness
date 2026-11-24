@@ -342,7 +342,7 @@ internal static class ItemMechanismReader
                 && cardType.GetMethod("Filter", DeclaredInstance) is { } filterMethod
                 && IsZeroCostPlayableFilter(filterMethod))
             {
-                return "Resolves attack damage first, then moves all 0-cost non-X Attack, Skill, and Power cards from discard pile into hand.";
+                return "Resolves attack damage first, then moves all 0-cost non-X Attack, Skill, and Power cards from discard pile into hand (overflows to discard pile if hand is full).";
             }
         }
 
@@ -373,7 +373,7 @@ internal static class ItemMechanismReader
                 var dstWhere = dstPile == PileType.Draw && dstPos == CardPilePosition.Top
                     ? "on top of draw pile"
                     : dstPile == PileType.Hand
-                        ? "into hand"
+                        ? "into hand (overflows to discard pile if hand is full)"
                         : $"into {dstPile.Value.ToString().ToLowerInvariant()} pile";
                 var cardDesc = filterClause is not null ? $"{filterClause} card(s)" : "card(s)";
                 return conditionClause is not null
@@ -580,7 +580,7 @@ internal static class ItemMechanismReader
                     && s.Call.Method.Name == nameof(CardSelectCmd.FromCombatPile)
                     && ExtractPileType(s.Call.Arguments.ElementAtOrDefault(1)) == PileType.Discard));
                 if (selectsDiscard && setsFreeThisTurn)
-                    notes.Add("Selects from discard pile, sets local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources), and moves into hand.");
+                    notes.Add("Selects from discard pile, sets local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources), and moves into hand (overflows to discard pile if hand is full).");
             }
             else if (CallsOnlyRandomPotionFill(onUse))
             {
@@ -676,7 +676,7 @@ internal static class ItemMechanismReader
                 && s.Call.Method.Name == nameof(CardPileCmd.AddGeneratedCardToCombat)
                 && ContainsMethodName(s.Call.Arguments.FirstOrDefault(), "CreateClone")))
         {
-            notes.Add("Once per combat, when an owned Skill card is exhausted (including Ethereal), adds a clone of that card into hand.");
+            notes.Add("Once per combat, when an owned Skill card is exhausted (including Ethereal), adds a clone of that card into hand (overflows to discard pile if hand is full).");
         }
 
         // Energy + Star cost zeroing on Nth non-autoplay card each turn (e.g., BrilliantScarf).
