@@ -19,7 +19,50 @@ internal static class ItemMechanismReader
     private static readonly ConcurrentDictionary<CardCacheKey, string?> CardCache = new();
     private static readonly ConcurrentDictionary<SimpleCacheKey, string?> PotionCache = new();
     private static readonly ConcurrentDictionary<SimpleCacheKey, string?> RelicCache = new();
+    private static readonly ConcurrentDictionary<Type, Type[]> CardPowerCache = new();
+    private static readonly ConcurrentDictionary<Type, Type[]> PotionPowerCache = new();
     private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
+
+    public static Type[] ReferencedPowers(CardModel card)
+        => ReferencedPowersFromMethod(card.GetType(), "OnPlay", CardPowerCache);
+
+    public static Type[] ReferencedPowers(PotionModel potion)
+        => ReferencedPowersFromMethod(potion.GetType(), "OnUse", PotionPowerCache);
+
+    private static Type[] ReferencedPowersFromMethod(Type modelType, string methodName, ConcurrentDictionary<Type, Type[]> cache)
+    {
+        if (cache.TryGetValue(modelType, out var cached))
+            return cached;
+
+        var powers = new HashSet<Type>();
+        try
+        {
+            if (modelType.GetMethod(methodName, DeclaredInstance) is { } method)
+            {
+                var body = NativeRuleBody.Read(method);
+                foreach (var step in body.Calls)
+                {
+                    if (step.Call.Method.DeclaringType == typeof(PowerCmd)
+                        && step.Call.Method.Name == nameof(PowerCmd.Apply)
+                        && step.Call.Method.IsGenericMethod
+                        && step.Call.Method.GetGenericArguments()[0] is { } pt
+                        && typeof(PowerModel).IsAssignableFrom(pt)
+                        && PowerMechanismReader.IsStandaloneReadable(pt))
+                    {
+                        powers.Add(pt);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Keep model observation resilient if a model method cannot be inspected.
+        }
+
+        var result = powers.OrderBy(t => t.FullName, StringComparer.Ordinal).ToArray();
+        cache[modelType] = result;
+        return result;
+    }
 
     public static string? ReadCard(CardModel card, string language)
     {
@@ -91,7 +134,7 @@ internal static class ItemMechanismReader
     {
         var cardType = card.GetType();
         if (card.Type is CardType.Status or CardType.Curse)
-            return null;
+            return DescribeStatusOrCurseCard(card, cardType);
 
         var notes = new List<string>();
 
@@ -108,10 +151,71 @@ internal static class ItemMechanismReader
 
                 if (DescribeCardPlaySequence(cardType, body) is { } sequenceRule)
                     notes.Add(sequenceRule);
+
+                if (DescribeCardCostLifetime(body) is { } costLifetime)
+                    notes.Add(costLifetime);
             }
         }
 
         return notes.Count > 0 ? string.Join(" ", notes) : null;
+    }
+
+    private static string? DescribeStatusOrCurseCard(CardModel card, Type cardType)
+    {
+        var notes = new List<string>();
+
+        if (cardType.GetMethod("get_ShouldPreventCardPlay", DeclaredInstance) is { } preventPlay
+            && NativeRuleBody.Read(preventPlay) is { Incomplete: false } preventBody)
+        {
+            var limit = preventBody.Returns
+                .SelectMany(r => r.Value is Operation { Left: Operation { Operator: "clt", Right: Constant { Data: int n } } } ? [n] : Array.Empty<int>())
+                .FirstOrDefault();
+            if (limit > 0)
+                notes.Add($"While in hand, prevents owner from playing cards once {limit} card plays have started this turn (counting replays and autoplays).");
+        }
+
+        if (cardType.GetMethod("OnDrawn", DeclaredInstance) is { } onDrawn
+            && NativeRuleBody.Read(onDrawn) is { Incomplete: false } drawnBody)
+        {
+            if (drawnBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.LoseEnergy)))
+                notes.Add("When drawn into hand, immediately loses Energy (even if drawn mid-turn).");
+        }
+
+        if (cardType.GetMethod("OnTurnEndInHand", DeclaredInstance) is { } turnEnd
+            && NativeRuleBody.Read(turnEnd) is { Incomplete: false } endBody)
+        {
+            if (endBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(PowerCmd)
+                && s.Call.Method.Name == nameof(PowerCmd.Apply) && s.Call.Method.IsGenericMethod) is { } applyStep)
+            {
+                var pt = applyStep.Call.Method.GetGenericArguments()[0];
+                var checksExisting = endBody.Calls.Any(s => s.Call.Method.Name == "HasPower" && s.Call.Method.IsGenericMethod
+                    && s.Call.Method.GetGenericArguments()[0] == pt);
+                var tickNote = checksExisting
+                    ? " (if owner did not already have it, sets skip-next-tick so it persists through the next turn)"
+                    : "";
+                notes.Add($"If still in hand at end of turn, applies {NativeRuleText.ModelLabel(pt)} to owner{tickNote}.");
+            }
+            else if (endBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage)))
+            {
+                var unblockable = endBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd)
+                    && s.Call.Method.Name == nameof(CreatureCmd.Damage)
+                    && s.Call.Arguments.Any(a => a is Constant { Data: int p } && ((MegaCrit.Sts2.Core.ValueProps.ValueProp)p).HasFlag(MegaCrit.Sts2.Core.ValueProps.ValueProp.Unblockable)));
+                notes.Add(unblockable
+                    ? "If still in hand at end of turn, deals unblockable unpowered damage to owner."
+                    : "If still in hand at end of turn, deals unpowered damage (blockable by Block) to owner.");
+            }
+        }
+
+        return notes.Count > 0 ? string.Join(" ", notes) : null;
+    }
+
+    private static string? DescribeCardCostLifetime(NativeRuleBody body)
+    {
+        if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisTurn"))
+            return "Cost reduction sets target card(s) to 0 Energy for this turn only (reverts after turn ends).";
+        if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisCombat"))
+            return "Cost reduction sets target card(s) to 0 Energy for the rest of combat.";
+        return null;
     }
 
     private static string? DescribeCardHistoryPrecondition(Type cardType, NativeRuleBody body)

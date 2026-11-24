@@ -108,6 +108,11 @@ internal sealed class NativeRuleBody
 
     private void ReadMethod(MethodInfo original)
     {
+        if (original.ContainsGenericParameters || original.IsGenericMethodDefinition)
+        {
+            Incomplete = true;
+            return;
+        }
         var stateMachine = original.GetCustomAttribute<AsyncStateMachineAttribute>()?.StateMachineType;
         var method = stateMachine is null ? original : AccessTools.Method(stateMachine, "MoveNext");
         if (method?.GetMethodBody() is null)
@@ -253,8 +258,34 @@ internal sealed class NativeRuleBody
                         path.Index = visits == 0 ? bodyStart : afterLoop;
                         continue;
                     }
-                    if (destination < index && condition is Operation { Right: var limit } counter)
+                    if (destination < index
+                        && condition is Call { Method.DeclaringType: var decType, Method.Name: "op_LessThan", Arguments: [var decLeft, var decRight] }
+                        && decType == typeof(decimal))
                     {
+                        var isDecZero = decLeft is Call { Method.Name: "op_Implicit", Arguments: [Constant { Data: 0 }] }
+                            || decLeft is Field { Member.Name: "Zero", Member.DeclaringType: var zt } && zt == typeof(decimal);
+                        var isDecIncremented = decLeft is Call { Method.Name: "op_Increment" or "op_Addition" };
+                        if (visits == 0 && expected && isDecZero && IsCountedLoopBound(decRight))
+                        {
+                            Loops.Add(new Loop(destination, index, decRight));
+                            path.Index = destination;
+                            continue;
+                        }
+                        if (visits == 0 && expected && isDecIncremented && IsCountedLoopBound(decRight))
+                        {
+                            // Bottom-tested decimal loop already ran its representative iteration.
+                            Loops.Add(new Loop(destination, index, decRight));
+                            continue;
+                        }
+                        if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
+                            && isDecIncremented)
+                            continue;
+                    }
+                    if (destination < index && condition is Operation { Right: var rawLimit } counter)
+                    {
+                        var limit = rawLimit is Operation { Operator: "conv.i4" or "conv.i8", Left: var unwrappedLimit }
+                            ? unwrappedLimit
+                            : rawLimit;
                         if (expected && counter.Operator is "blt" or "ble"
                             && (counter.Left as Constant ?? Fold(counter.Left)) is { Data: int current }
                             && limit is Constant { Data: int bound }
@@ -281,27 +312,32 @@ internal sealed class NativeRuleBody
                             }
                         }
                         // A counter loop also runs one representative iteration and records its count.
-                        if (visits == 0 && expected && counter is { Operator: "blt" or "ble", Left: Constant { Data: int start } })
+                        if (visits == 0 && expected && counter is { Operator: "blt" or "ble" }
+                            && (counter.Left as Constant ?? Fold(counter.Left)) is { Data: int start })
                         {
+                            var alreadyIncremented = counter.Left is Operation { Operator: "add", Right: Constant { Data: 1 } };
                             if (limit is Constant { Data: int fixedBound })
                             {
-                                var count = fixedBound - start + (counter.Operator == "ble" ? 1 : 0);
+                                var count = fixedBound - (alreadyIncremented ? start - 1 : start) + (counter.Operator == "ble" ? 1 : 0);
                                 if (count > 0)
                                 {
                                     Loops.Add(new Loop(destination, index, new Constant(count)));
-                                    path.Index = destination;
+                                    if (!alreadyIncremented)
+                                        path.Index = destination;
                                 }
                                 continue;
                             }
-                            if (start == 0 && counter.Operator == "blt" && limit is not null && IsCountedLoopBound(limit))
+                            if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
+                                && limit is not null && IsCountedLoopBound(limit))
                             {
                                 Loops.Add(new Loop(destination, index, limit));
-                                path.Index = destination;
+                                if (!alreadyIncremented)
+                                    path.Index = destination;
                                 continue;
                             }
                         }
                         if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
-                            && counter.Left is Operation { Operator: "add", Left: Constant { Data: int }, Right: Constant { Data: 1 } })
+                            && counter.Left is Operation { Operator: "add", Right: Constant { Data: 1 } })
                             continue;
                     }
                     if (TryTruth(condition, out var truth, isMonsterMove))
@@ -407,6 +443,11 @@ internal sealed class NativeRuleBody
                 // Arrays only carry results between calls; their elements are not tracked.
                 else if (code == OpCodes.Newarr)
                     path.Stack.Add(new Operation("newarr", path.Pop(), new Constant(operand)));
+                else if (code == OpCodes.Ldlen)
+                {
+                    var arr = path.Pop();
+                    path.Stack.Add(arr is Operation { Operator: "newarr", Left: var len } ? len : new Operation("ldlen", arr));
+                }
                 else if (code.Name?.StartsWith("stelem", StringComparison.Ordinal) == true)
                 {
                     _ = path.Pop();
@@ -429,10 +470,14 @@ internal sealed class NativeRuleBody
 
     private static bool IsCountedLoopBound(Value? limit) => limit switch
     {
+        Call { Method.Name: "op_Implicit", Arguments: [var inner] } => IsCountedLoopBound(inner),
         Call { Method.DeclaringType: var owner, Method.Name: "get_Amount", Receiver: Input { Name: "this" } }
             when owner == typeof(PowerModel) => true,
         Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
-            when getter.ReturnType == typeof(int) && typeof(MonsterModel).IsAssignableFrom(getter.DeclaringType) => true,
+            when getter.ReturnType == typeof(int) && typeof(AbstractModel).IsAssignableFrom(getter.DeclaringType) => true,
+        Call { Method.Name: "get_IntValue" or "get_BaseValue", Method.DeclaringType: var dvType }
+            when typeof(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar).IsAssignableFrom(dvType) => true,
+        Call { Method.Name: "get_Count" } => true,
         Operation { Operator: "kvp_value" } => true,
         _ => false,
     };

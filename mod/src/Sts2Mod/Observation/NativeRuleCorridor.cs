@@ -269,9 +269,6 @@ internal sealed partial class NativeRuleText
             return $"{mathCall.Method.Name.ToLowerInvariant()}({leftText}, {rightText})";
         }
 
-        if (value is Input { Name: "player" })
-            return "drawing player";
-
         return null;
     }
 
@@ -355,6 +352,39 @@ internal sealed partial class NativeRuleText
             handled.Add("AfterDeath");
             lines.Add(surpriseLine);
         }
+        if (ReadReattachPowerHooks(type, prefix, out var reattachLines))
+        {
+            handled.Add("AfterDeath");
+            handled.Add("ShouldAllowHitting");
+            handled.Add("ShouldCreatureBeRemovedFromCombatAfterDeath");
+            handled.Add("ShouldPowerBeRemovedAfterOwnerDeath");
+            handled.Add("ShouldOwnerDeathTriggerFatal");
+            lines.AddRange(reattachLines);
+        }
+    }
+
+    private bool ReadReattachPowerHooks(Type power, string prefix, out List<string> lines)
+    {
+        lines = [];
+        if (FindOverride(power, "AfterDeath") is not { } death
+            || FindOverride(power, "ShouldAllowHitting") is not { } allowHit
+            || FindOverride(power, "ShouldCreatureBeRemovedFromCombatAfterDeath") is not { } keepBody
+            || FindOverride(power, "ShouldOwnerDeathTriggerFatal") is not { } fatal
+            || power.GetMethod("DoReattach", Declared) is not { } reattach
+            || Body(death) is not { Incomplete: false } deathBody
+            || Body(allowHit) is not { Incomplete: false }
+            || Body(keepBody) is not { Incomplete: false }
+            || Body(fatal) is not { Incomplete: false }
+            || Body(reattach) is not { Incomplete: false } reattachBody)
+            return false;
+
+        var setsMove = deathBody.Calls.Any(s => s.Call.Method.Name == "SetMoveImmediate");
+        var healsStacks = reattachBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Heal));
+        if (!setsMove || !healsStacks)
+            return false;
+
+        lines.Add($"{prefix}On owner death: if death was not prevented: owner remains in combat and becomes untargetable while reviving; if another teammate with {PowerLabel(power)} is still alive, immediately forces next move to reattach and heal stacks HP (combat ends and Fatal triggers only when all segments with {PowerLabel(power)} are dead simultaneously)");
+        return true;
     }
 
     private bool ReadIllusionPowerHooks(Type power, string prefix, out List<string> lines)

@@ -316,6 +316,7 @@ internal sealed partial class NativeRuleText
             or "get_ShouldFadeAfterDeath" or "get_DeathSfx" or "get_HurtSfx" or "get_CastSfx"
             or "get_TakeDamageSfxType" or "get_HasDeathSfx" or "get_AttackSfx"
             or "get_Title" or "get_AssetPaths" or "get_Background"
+            or "get_ShowCounter" or "get_DisplayAmount" or "UpdateDisplay" or "DoActivateVisuals"
             || method.Name.StartsWith("<GenerateAnimator>", StringComparison.Ordinal)
             || method.Name.StartsWith("<SetupSkins>", StringComparison.Ordinal)
             || method.Name.StartsWith("<BeforeAnimPlayedInCompendium>", StringComparison.Ordinal)
@@ -347,6 +348,7 @@ internal sealed partial class NativeRuleText
             ("SfxCmd" or "VfxCmd" or "TalkCmd" or "ThinkCmd" or "Cmd" or "LocalContext" or "NodeHelper" or "GodotTreeExtensions", _) => true,
             ("CreatureCmd", "TriggerAnim" or "ChangeCreatureAnim") => true,
             ("PowerModel", "Flash" or "InvokeDisplayAmountChanged" or "StartPulsing" or "StopPulsing") => true,
+            ("RelicModel", "Flash" or "InvokeDisplayAmountChanged" or "set_Status") => true,
             (_, "AssertMutable") => true,
             ("MonsterModel", "L10NMonsterLookup") => true,
             ("Creature", "GetCreatureNode" or "GetVfxContainer" or "GetBackVfxContainer" or "SetNodeVisible") => true,
@@ -489,11 +491,11 @@ internal sealed partial class NativeRuleText
             handled.Add("AfterSideTurnEnd");
             lines.Add(tempStatLine);
         }
-        if (ReadAfterimageHooks(type, powerPrefix, out var afterimageLine))
+        if (ReadCardPlaySnapshotPowerHooks(type, powerPrefix, out var snapshotLine))
         {
             handled.Add("BeforeCardPlayed");
             handled.Add("AfterCardPlayed");
-            lines.Add(afterimageLine);
+            lines.Add(snapshotLine);
         }
         if (ReadRuptureHooks(type, powerPrefix, out var ruptureLine))
         {
@@ -799,7 +801,7 @@ internal sealed partial class NativeRuleText
         return true;
     }
 
-    private bool ReadAfterimageHooks(Type power, string prefix, out string line)
+    private bool ReadCardPlaySnapshotPowerHooks(Type power, string prefix, out string line)
     {
         line = "";
         if (FindOverride(power, "BeforeCardPlayed") is not { } before
@@ -812,12 +814,43 @@ internal sealed partial class NativeRuleText
 
         var snapshotsAmount = beforeBody.Calls.Any(s => s.Call.Method.Name is "Add" or "set_Item"
             && s.Call.Receiver is Field f && InternalDataField(f)?.FieldType == typeof(Dictionary<CardModel, int>));
-        var gainsBlock = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.GainBlock));
-        if (!snapshotsAmount || !gainsBlock)
+        if (!snapshotsAmount)
             return false;
 
-        line = $"{prefix}Card-play Block timing: snapshots stacks before each owned card play starts, then gains that much unpowered Block after that card play resolves (if owner is alive and combat continues)";
-        return true;
+        var checksApplier = beforeBody.Calls.Any(s => s.Call.Method.Name == "get_Applier");
+        var cardActor = checksApplier ? "applier's" : "owned";
+
+        if (afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.GainBlock)))
+        {
+            line = $"{prefix}Card-play Block timing: snapshots stacks before each {cardActor} card play starts, then gains that much unpowered Block after that card play resolves (if owner is alive and combat continues)";
+            return true;
+        }
+        if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage)) is { } dmgStep)
+        {
+            var targetArg = Argument(dmgStep.Call, "target", "targets");
+            var who = targetArg is not null ? ValueText(targetArg) : null;
+            if (who is null && targetArg is Call { Method.Name: "NextItem" })
+                who = "a random hittable enemy";
+            if (who is null)
+                return false;
+            var props = ResolveDamageProps(Argument(dmgStep.Call, "props"), power);
+            line = $"{prefix}Card-play damage timing: snapshots stacks before each {cardActor} card play starts, then deals that much{DamageFlags(props)} damage to {who} after that card play resolves";
+            return true;
+        }
+        if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(PowerCmd)
+                && s.Call.Method.Name == nameof(PowerCmd.Apply) && s.Call.Method.IsGenericMethod) is { } applyStep)
+        {
+            var appliedType = applyStep.Call.Method.GetGenericArguments()[0];
+            var targetArg = Argument(applyStep.Call, "target") ?? applyStep.Call.Arguments.ElementAtOrDefault(1);
+            var who = targetArg is not null ? ValueText(targetArg) : "owner";
+            if (who is null)
+                return false;
+            _powers.Add(appliedType);
+            line = $"{prefix}Card-play power timing: snapshots stacks before each {cardActor} card play starts, then attempts to apply that many {PowerLabel(appliedType)} to {who} after that card play resolves";
+            return true;
+        }
+
+        return false;
     }
 
     private bool ReadRuptureHooks(Type power, string prefix, out string line)

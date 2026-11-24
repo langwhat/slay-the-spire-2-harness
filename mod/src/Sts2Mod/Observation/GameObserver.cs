@@ -602,6 +602,15 @@ internal sealed class GameObserver(
             var upcomingBosses = RemainingBossEncounters(includeCurrentCombatBoss: false).ToArray();
             if (upcomingBosses.Length > 0)
             {
+                if (MacroMechanismReader.ReadActBossContinuity(upcomingBosses) is { } doubleBossRule)
+                {
+                    _mechanisms.Add(new MechanismView(
+                        MechanismKind.Other,
+                        MacroMechanismReader.ActDoubleBossId,
+                        run.Act.Title.GetFormattedText(),
+                        doubleBossRule,
+                        $"{ActMechanismOwner}:{upcomingBosses[0].Id}"));
+                }
                 if (EventMechanismReader.ReadActTransition(run) is { } actRule)
                 {
                     _mechanisms.Add(new MechanismView(
@@ -778,6 +787,35 @@ internal sealed class GameObserver(
                 cardRule,
                 reference));
         }
+        foreach (var powerType in ItemMechanismReader.ReferencedPowers(card))
+            _pendingPowerRules.Add((reference, powerType, powerType.Name));
+        if (card.Enchantment is { } enchantment && ModifierMechanismReader.ReadEnchantment(enchantment, gameLanguage) is { } enchRule)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                enchantment.Id.ToString(),
+                enchantment.Title.GetFormattedText(),
+                enchRule,
+                reference));
+        }
+        if (card.Affliction is { } affliction && ModifierMechanismReader.ReadAffliction(affliction, gameLanguage) is { } affRule)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                affliction.Id.ToString(),
+                affliction.Title.GetFormattedText(),
+                affRule,
+                reference));
+        }
+        if (card.EnergyCost.CostsX)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                MacroMechanismReader.XCostRuleId,
+                "X-Cost",
+                MacroMechanismReader.XCostRule(),
+                reference));
+        }
 
         var upgradeReader = UpgradeReaders.GetValue(
             card,
@@ -820,6 +858,8 @@ internal sealed class GameObserver(
                 potionRule,
                 reference));
         }
+        foreach (var powerType in ItemMechanismReader.ReferencedPowers(potion))
+            _pendingPowerRules.Add((reference, powerType, powerType.Name));
     }
 
     private void AddRelic(RelicModel relic)
@@ -842,7 +882,7 @@ internal sealed class GameObserver(
         };
         _descriptions[reference] = relic.DynamicDescription.GetFormattedText();
         AddHoverTipMaterial(reference, title, relic.Id.ToString(), relic.HoverTips);
-        if (ItemMechanismReader.ReadRelic(relic, gameLanguage) is { } relicRule)
+        if (RelicMechanismReader.Read(relic, gameLanguage) is { } relicRule)
         {
             _mechanisms.Add(new MechanismView(
                 MechanismKind.Other,
@@ -851,6 +891,8 @@ internal sealed class GameObserver(
                 relicRule,
                 reference));
         }
+        foreach (var powerType in RelicMechanismReader.ReferencedPowers(relic))
+            _pendingPowerRules.Add((reference, powerType, powerType.Name));
     }
 
     private ImmutableArray<ArrowSlotView>? ObserveArrowSlots(
@@ -883,11 +925,32 @@ internal sealed class GameObserver(
 
     private OrbQueueView ObserveOrbs(int capacity, IReadOnlyList<OrbModel> nativeOrbs, Creature holder)
     {
+        var holderKey = CreatureHolderKey(holder);
         var orbs = ImmutableArray.CreateBuilder<OrbView>();
         foreach (var orb in nativeOrbs)
         {
-            orbs.Add(new OrbView(orb.Title.GetFormattedText(), orb.Id.ToString(), orb.PassiveVal, orb.EvokeVal));
-            AddHoverTipMaterial(CreatureHolderKey(holder), orb.Title.GetFormattedText(), orb.Id.ToString(), orb.HoverTips);
+            var orbTitle = orb.Title.GetFormattedText();
+            var orbId = orb.Id.ToString();
+            orbs.Add(new OrbView(orbTitle, orbId, orb.PassiveVal, orb.EvokeVal));
+            AddHoverTipMaterial(holderKey, orbTitle, orbId, orb.HoverTips);
+            if (ModifierMechanismReader.ReadOrb(orb, gameLanguage) is { } orbRule)
+            {
+                _mechanisms.Add(new MechanismView(
+                    MechanismKind.Other,
+                    orbId,
+                    orbTitle,
+                    orbRule,
+                    holderKey));
+            }
+        }
+        if (capacity > 0 || nativeOrbs.Count > 0)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                MacroMechanismReader.OrbQueueRuleId,
+                "Orb Queue",
+                MacroMechanismReader.OrbQueueRule(),
+                holderKey));
         }
         return new OrbQueueView(capacity, orbs.ToImmutable());
     }
@@ -950,6 +1013,15 @@ internal sealed class GameObserver(
 
         _objects.Add(reference, new AllyEntry(name, id, hp, maxHp, creature.Block, display, powers, creature.IsAlive));
         _descriptions.Add(reference, null);
+        if (creature.Monster is MegaCrit.Sts2.Core.Models.Monsters.Osty)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                MacroMechanismReader.OstyRoutingId,
+                name,
+                MacroMechanismReader.OstyDamageRoutingRule(),
+                reference));
+        }
         return new AllyView(reference, name, id, hp, maxHp, creature.Block, display, powers, creature.IsAlive);
     }
 
@@ -1045,6 +1117,36 @@ internal sealed class GameObserver(
 
             if (text.CanonicalModel is PowerModel canonicalPower)
                 _pendingPowerRules.Add((owner, canonicalPower.GetType(), text.Title));
+            else if (text.CanonicalModel is EnchantmentModel canonicalEnchantment
+                && ModifierMechanismReader.ReadEnchantment(canonicalEnchantment, gameLanguage) is { } tipEnchRule)
+            {
+                _mechanisms.Add(new MechanismView(
+                    MechanismKind.Other,
+                    canonicalEnchantment.Id.ToString(),
+                    text.Title,
+                    tipEnchRule,
+                    owner));
+            }
+            else if (text.CanonicalModel is AfflictionModel canonicalAffliction
+                && ModifierMechanismReader.ReadAffliction(canonicalAffliction, gameLanguage) is { } tipAffRule)
+            {
+                _mechanisms.Add(new MechanismView(
+                    MechanismKind.Other,
+                    canonicalAffliction.Id.ToString(),
+                    text.Title,
+                    tipAffRule,
+                    owner));
+            }
+            else if (text.CanonicalModel is OrbModel canonicalOrb
+                && ModifierMechanismReader.ReadOrb(canonicalOrb, gameLanguage) is { } tipOrbRule)
+            {
+                _mechanisms.Add(new MechanismView(
+                    MechanismKind.Other,
+                    canonicalOrb.Id.ToString(),
+                    text.Title,
+                    tipOrbRule,
+                    owner));
+            }
 
             var mechanismKind = text.CanonicalModel switch
             {
@@ -1407,7 +1509,7 @@ internal sealed class GameObserver(
                         name = model.Title.GetFormattedText();
                         kind = OfferKind.Relic;
                         break;
-                    case MerchantCardRemovalEntry:
+                    case MerchantCardRemovalEntry removalEntry:
                         var removalTitle = new LocString("merchant_room", "MERCHANT.cardRemovalService.title").GetFormattedText();
                         name = string.IsNullOrWhiteSpace(removalTitle)
                             ? NativeInteractionLabels.CardRemovalService(gameLanguage)
@@ -1415,6 +1517,12 @@ internal sealed class GameObserver(
                         var removalDesc = new LocString("merchant_room", "MERCHANT.cardRemovalService.description");
                         removalDesc.Add("Amount", MerchantCardRemovalEntry.PriceIncrease);
                         description = removalDesc.GetFormattedText();
+                        _mechanisms.Add(new MechanismView(
+                            MechanismKind.Other,
+                            MacroMechanismReader.ShopRemovalId,
+                            name,
+                            MacroMechanismReader.ReadShopRemoval(run.Players.Single(), removalEntry),
+                            reference));
                         break;
                     default:
                         throw new InvalidOperationException("The native merchant entry has no supported public content.");

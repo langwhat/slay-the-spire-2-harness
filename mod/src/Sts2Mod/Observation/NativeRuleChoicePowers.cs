@@ -36,16 +36,16 @@ internal sealed partial class NativeRuleText
         if (FindOverride(type, "ModifyHandDraw") is { } drawHook)
         {
             handled.Add(drawHook.Name);
-            if (PlayerSubtraction(type, drawHook.Name, "count", floorAtZero: true))
-                lines.Add($"{powerPrefix}Turn-start card draw: if player=owner: reduce by stacks (minimum 0)");
+            if (ReadPlayerDeltaHook(type, drawHook, "count", "Turn-start card draw") is { } drawLine)
+                lines.Add($"{powerPrefix}{drawLine}");
             else
                 Gap($"{type.Name}.{drawHook.Name}");
         }
         if (FindOverride(type, "ModifyMaxEnergy") is { } energyHook)
         {
             handled.Add(energyHook.Name);
-            if (PlayerSubtraction(type, energyHook.Name, "amount", floorAtZero: false))
-                lines.Add($"{powerPrefix}Maximum Energy: if player=owner: reduce by stacks");
+            if (ReadPlayerDeltaHook(type, energyHook, "amount", "Maximum Energy") is { } energyLine)
+                lines.Add($"{powerPrefix}{energyLine}");
             else
                 Gap($"{type.Name}.{energyHook.Name}");
         }
@@ -377,24 +377,40 @@ internal sealed partial class NativeRuleText
                 ? field.Member
                 : null;
 
-    private bool PlayerSubtraction(Type power, string hook, string operand, bool floorAtZero)
+    private string? ReadPlayerDeltaHook(Type power, MethodInfo hook, string operand, string label)
     {
-        if (FindOverride(power, hook) is not { } method || Body(method) is not { Incomplete: false, Returns.Count: 2 } body)
-            return false;
-        var affected = body.Returns.SingleOrDefault(result => result.Conditions is [var test] && IsHolderPlayer(test, "player", true));
-        var unchanged = body.Returns.SingleOrDefault(result => result.Conditions is [var test] && IsHolderPlayer(test, "player", false));
-        if (affected is null || unchanged?.Value is not Input passThrough || passThrough.Name != operand)
-            return false;
-        var value = affected.Value;
-        if (floorAtZero)
+        var body = Body(hook);
+        if (body.Incomplete || body.Returns.Count == 0)
+            return null;
+
+        var outcomes = new List<(string Text, Test[] Conditions)>();
+        foreach (var result in body.Returns)
         {
-            if (value is not Call { Method.DeclaringType: var math, Method.Name: nameof(Math.Max), Arguments: [var minimum, var inner] }
-                || math != typeof(Math) || Numeric(minimum) != 0m)
-                return false;
-            value = inner;
+            var value = result.Value;
+            if (value is Input pass && pass.Name == operand)
+            {
+                outcomes.Add(("", result.Conditions));
+                continue;
+            }
+            var floored = false;
+            if (value is Call { Method.DeclaringType: var math, Method.Name: nameof(Math.Max), Arguments: [var minimum, var inner] }
+                && math == typeof(Math) && Numeric(minimum) == 0m)
+            {
+                floored = true;
+                value = inner;
+            }
+            if (value is Call { Method.DeclaringType: var number, Method.Name: "op_Addition" or "op_Subtraction", Arguments: [Input source, var delta] }
+                && number == typeof(decimal) && source.Name == operand && ValueText(delta) is { } deltaText)
+            {
+                var verb = value is Call { Method.Name: "op_Addition" } ? "increase by" : "reduce by";
+                var suffix = floored ? " (minimum 0)" : "";
+                outcomes.Add(($"{verb} {deltaText}{suffix}", result.Conditions));
+                continue;
+            }
+            return null;
         }
-        return value is Call { Method.DeclaringType: var number, Method.Name: "op_Subtraction",
-            Arguments: [Input source, var amount] } && number == typeof(decimal) && source.Name == operand && IsStackAmount(amount);
+        var rendered = RenderOutcomes(outcomes, body.Terminals.Where(t => !t.Returned).Select(t => t.Conditions));
+        return rendered is { Count: > 0 } ? $"{label}: {string.Join("; ", rendered)}" : null;
     }
 
     private bool HasCardPlayLimit(Type power)

@@ -17,17 +17,71 @@ internal sealed partial class NativeRuleText
 
     private Effect? ReadGeneratedCard(Call call)
     {
-        if (Argument(call, "card") is not Call { Method: { Name: "CreateCard", IsGenericMethod: true } create, Arguments: [var player] }
-            || create.DeclaringType != typeof(ICombatState) || !typeof(CardModel).IsAssignableFrom(create.GetGenericArguments()[0])
-            || ValueText(player) is not { } recipient || Numeric(Argument(call, "newPileType")) is not { } pileNum)
+        var pileNum = Numeric(Argument(call, "newPileType"));
+        if (pileNum is null)
             return null;
-        var pile = (int)pileNum;
-        var cardType = create.GetGenericArguments()[0];
+        var pile = (PileType)(int)pileNum;
         var position = Numeric(Argument(call, "position")) is { } rawPos ? (CardPilePosition)(int)rawPos : CardPilePosition.Bottom;
-        var where = (PileType)pile == PileType.Draw && position != CardPilePosition.Bottom
+        var where = pile == PileType.Draw && position != CardPilePosition.Bottom
             ? $" ({position.ToString().ToLowerInvariant()} position)"
             : "";
-        return new Effect($"add 1 {ModelLabel(cardType)} to {Possessive(recipient)} {((PileType)pile).ToString().ToLowerInvariant()} pile{where}", AddedCard: cardType);
+        var pileLabel = $"{pile.ToString().ToLowerInvariant()} pile{where}";
+
+        var cardArg = Argument(call, "card", "cards");
+        if (cardArg is Call { Method: { Name: "CreateCard", IsGenericMethod: true } create, Arguments: [var player] }
+            && create.DeclaringType == typeof(ICombatState) && typeof(CardModel).IsAssignableFrom(create.GetGenericArguments()[0])
+            && ValueText(player) is { } recipient)
+        {
+            var cardType = create.GetGenericArguments()[0];
+            return new Effect($"add 1 {ModelLabel(cardType)} to {Possessive(recipient)} {pileLabel}", AddedCard: cardType);
+        }
+
+        // CardFactory.GetDistinctForCombat(player, pool, count, rng) or First(GetDistinctForCombat(...))
+        var factoryCall = UnwrapCardFactoryCall(cardArg);
+        if (factoryCall is { Method.DeclaringType.Name: "CardFactory", Method.Name: "GetDistinctForCombat" }
+            && factoryCall.Arguments.Length >= 3
+            && ValueText(factoryCall.Arguments[0]) is { } factoryRecipient
+            && ValueText(factoryCall.Arguments[2]) is { } factoryCount)
+        {
+            var poolDesc = DescribeCardFactoryPool(factoryCall.Arguments[1]);
+            return new Effect($"generate {factoryCount} {poolDesc} card(s) into {Possessive(factoryRecipient)} {pileLabel}");
+        }
+
+        return null;
+    }
+
+    private static Call? UnwrapCardFactoryCall(Value? value) => value switch
+    {
+        Call { Method.DeclaringType.Name: "CardFactory" } cf => cf,
+        Call { Method.Name: "First" or "FirstOrDefault" or "ToList" or "ToArray" or "Select", Arguments: [var inner, ..] } => UnwrapCardFactoryCall(inner),
+        Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator", Receiver: var col } } => UnwrapCardFactoryCall(col),
+        _ => null,
+    };
+
+    private string DescribeCardFactoryPool(Value poolExpr)
+    {
+        var filters = new List<string>();
+        var current = poolExpr;
+        while (current is Call { Method.Name: "ToList" or "ToArray", Arguments: [var inner] })
+            current = inner;
+        if (current is Call { Method.Name: "Where", Arguments: [var source, Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] })
+        {
+            var predBody = Body(pred);
+            foreach (var ret in predBody.Returns)
+            {
+                if (ret.Value is Operation { Operator: "ceq", Left: Call { Method.Name: "get_Type" }, Right: Constant { Data: int rawType } }
+                    && Enum.IsDefined(typeof(CardType), rawType))
+                    filters.Add(((CardType)rawType).ToString());
+                if (ret.Value is Operation { Operator: "ceq", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int rawRarity } }
+                    && Enum.IsDefined(typeof(CardRarity), rawRarity))
+                    filters.Add(((CardRarity)rawRarity).ToString());
+            }
+            current = source;
+        }
+        var poolName = current is Call { Method.Name: "GetUnlockedCards", Receiver: Call { Method: { Name: "CardPool", IsGenericMethod: true } cp } }
+            ? HumanizeLower(cp.GetGenericArguments()[0].Name.Replace("CardPool", "", StringComparison.Ordinal))
+            : "random";
+        return filters.Count > 0 ? $"random {string.Join(" ", filters)}" : poolName == "random" ? "random" : $"random {poolName}";
     }
 
     private static string? CardSlot(Field field)
@@ -164,16 +218,43 @@ internal sealed partial class NativeRuleText
             && PowerBoolSlot(innerField) is { } getterFlag)
             return $"{getterFlag}={expected.ToString().ToLowerInvariant()}";
 
-        if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un", Left: Input { Name: "side" },
-            Right: Call { Method.DeclaringType: var creature, Method.Name: "get_Side", Receiver: var holder } } comparison
-            && creature == typeof(Creature) && IsOwner(holder))
-            return expected == (comparison.Operator != "bne.un") ? "turn side is owner's side" : "turn side is opposing side";
+        if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un" } sideComparison
+            && ((sideComparison.Left is Input { Name: "side" }
+                    && sideComparison.Right is Call { Method.DeclaringType: var c1, Method.Name: "get_Side", Receiver: var h1 }
+                    && c1 == typeof(Creature) && IsOwner(h1))
+                || (sideComparison.Right is Input { Name: "side" }
+                    && sideComparison.Left is Call { Method.DeclaringType: var c2, Method.Name: "get_Side", Receiver: var h2 }
+                    && c2 == typeof(Creature) && IsOwner(h2))))
+            return expected == (sideComparison.Operator != "bne.un") ? "turn side is owner's side" : "turn side is opposing side";
+
+        if (test.Value is Operation { Operator: "isinst", Left: Input { Name: "power" }, Right: Constant { Data: Type iface } }
+            && iface.Name == "ITemporaryPower")
+            return expected ? "changed power is temporary" : "changed power is not temporary";
+
+        if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un",
+            Left: Call { Method.Name: "GetTypeForAmount", Receiver: Input { Name: "power" } },
+            Right: Constant { Data: int rawPType } } ptOp && Enum.IsDefined(typeof(MegaCrit.Sts2.Core.Entities.Powers.PowerType), rawPType))
+        {
+            var ptName = ((MegaCrit.Sts2.Core.Entities.Powers.PowerType)rawPType).ToString();
+            return expected == (ptOp.Operator != "bne.un") ? $"changed power is a {ptName}" : $"changed power is not a {ptName}";
+        }
 
         if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un",
             Left: Call { Method.Name: "get_CurrentSide" },
             Right: Call { Method.DeclaringType: var sideOwner, Method.Name: "get_Side", Receiver: var sideReceiver } } sideCheck
-            && sideOwner == typeof(Creature) && IsOwner(sideReceiver))
-            return expected == (sideCheck.Operator != "bne.un") ? "acting side=owner's side" : "acting side≠owner's side";
+            && sideOwner == typeof(Creature) && ValueText(sideReceiver) is { } sideOwnerWho)
+            return expected == (sideCheck.Operator != "bne.un")
+                ? $"acting side={Possessive(sideOwnerWho)} side"
+                : $"acting side≠{Possessive(sideOwnerWho)} side";
+
+        if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un",
+            Left: Call { Method.DeclaringType: var sideLType, Method.Name: "get_Side", Receiver: var sideLRec },
+            Right: Call { Method.DeclaringType: var sideRType, Method.Name: "get_Side", Receiver: var sideRRec } } sameSideCheck
+            && sideLType == typeof(Creature) && sideRType == typeof(Creature)
+            && ValueText(sideLRec) is { } slWho && ValueText(sideRRec) is { } srWho)
+            return expected == (sameSideCheck.Operator != "bne.un")
+                ? $"{Possessive(slWho)} side={Possessive(srWho)} side"
+                : $"{Possessive(slWho)} side≠{Possessive(srWho)} side";
 
         if (test.Value is Call { Method.Name: "CanAfflict", Receiver: Call { Method: { Name: "Affliction", IsGenericMethod: true } aff },
             Arguments: [var targetCard] } && ValueText(targetCard) is { } cardLabel)
@@ -276,11 +357,18 @@ internal sealed partial class NativeRuleText
         Call { Method.Name: "get_PetOwner", Method.DeclaringType: var type, Receiver: { } targetPet }
             when type == typeof(Creature) && ValueText(targetPet) == PlayerTargetsLabel()
             => PlayerTargetsLabel(),
+        Call { Method.Name: "get_PetOwner", Method.DeclaringType: var petOwnerType, Receiver: { } anyPet }
+            when petOwnerType == typeof(Creature) && ValueText(anyPet) is { } petLabel
+            => $"{Possessive(petLabel)} owner",
         Call { Method.Name: "get_Player", Method.DeclaringType: var type, Receiver: Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_PetOwner" } pet } }
             when type == typeof(Creature) => ValueText(pet),
-        Call { Method.Name: "get_UnblockedDamage" or "get_TotalDamage", Method.DeclaringType: var type, Receiver: { } hit } damage
+        Call { Method.Name: "get_UnblockedDamage" or "get_TotalDamage" or "get_BlockedDamage", Method.DeclaringType: var type, Receiver: { } hit } damage
             when type == typeof(DamageResult) && (AttackHit(hit) ?? ValueText(hit)) is { } label
-            => $"{label} {(damage.Method.Name == "get_UnblockedDamage" ? "unblocked" : "total")} damage",
+            => $"{label} {(damage.Method.Name switch { "get_UnblockedDamage" => "unblocked", "get_BlockedDamage" => "blocked", _ => "total" })} damage",
+        Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_Orbs" },
+            Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo orbPred }] }] }
+            when OrbTypeFromPredicate(orbPred) is { } orbType
+            => $"owner's channeled {ModelLabel(orbType)} count",
         Input { Type: var type } when type == typeof(DamageResult) => "this hit's",
         Call { Method: { Name: "GetPowerAmount", IsGenericMethod: true } getAmt, Method.DeclaringType: var cType, Receiver: { } holder }
             when cType == typeof(Creature) && ValueText(holder) is { } who
@@ -295,6 +383,17 @@ internal sealed partial class NativeRuleText
             _ => AttackHit(value),
         };
     }
+
+    private Type? OrbTypeFromPredicate(MethodInfo predicate)
+        => Body(predicate).Returns.SelectMany(r => FindOrbTypes(r.Value)).FirstOrDefault();
+
+    private static IEnumerable<Type> FindOrbTypes(Value value) => value switch
+    {
+        Operation { Operator: "isinst", Right: Constant { Data: Type t } } when typeof(OrbModel).IsAssignableFrom(t) => [t],
+        Operation op => FindOrbTypes(op.Left).Concat(op.Right is { } r ? FindOrbTypes(r) : []),
+        Call call => (call.Receiver is { } rec ? FindOrbTypes(rec) : []).Concat(call.Arguments.SelectMany(FindOrbTypes)),
+        _ => [],
+    };
 
     private Type? AfflictionFromPredicate(MethodInfo predicate)
         => Body(predicate).Returns.SelectMany(r => FindAfflictionTypes(r.Value)).FirstOrDefault();

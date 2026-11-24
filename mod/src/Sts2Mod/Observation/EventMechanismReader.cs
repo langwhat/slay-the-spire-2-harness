@@ -277,9 +277,10 @@ internal static class EventMechanismReader
             return (null, "incomplete");
 
         var steps = new List<string>();
-        var nonObvious = false;
         var hasSelection = false;
         var hasUnresolvedOperand = false;
+        var usesRandom = body.Calls.Any(s => s.Call.Method.DeclaringType?.Name == "Rng"
+            && s.Call.Method.Name is "NextFloat" or "NextDouble" or "NextInt" or "NextBool" or "NextItem");
 
         foreach (var group in body.Calls.GroupBy(s => (s.Epoch, s.Index))
             .OrderBy(g => (g.Key.Epoch, g.Max(s => s.Order), g.Key.Index)))
@@ -296,7 +297,9 @@ internal static class EventMechanismReader
                 || name.StartsWith("get_", StringComparison.Ordinal)
                 || name is "L10NLookup" or "ToList" or "FirstOrDefault" or "MoveNext" or "GetEnumerator"
                     or "ToMutable" or "CreateCard" or "PreviewCardPileAdd" or "WithFlags" or "ForNonCombatWithUniformOdds"
-                    or "Enchantment" or "Card" or "Relic" or "Potion" or "ToStringAndClear")
+                    or "ForNonCombatWithDefaultOdds" or "Enchantment" or "Card" or "Relic" or "Potion" or "ToStringAndClear"
+                    or "Preview" or "CustomScaledWait" or "CloneCard" or "CardPool" or "PotionPool" or "GetUnlockedPotions"
+                    or "GetUnlockedCards" or "CreateForReward")
             {
                 continue;
             }
@@ -304,16 +307,14 @@ internal static class EventMechanismReader
             var conditionalOnSelection = hasSelection && group.All(s => s.Conditions.Any(t => MentionsCardSelection(t.Value)));
 
             if (declaring == activeEvent.GetType() && call.Method is MethodInfo helper && helper != method
-                && helper.ReturnType == typeof(Task) && depth < 1 && helper.GetParameters().Length == 0)
+                && !helper.ContainsGenericParameters && !helper.IsGenericMethod
+                && helper.ReturnType == typeof(Task) && depth < 1)
             {
                 var (nested, nestedGap) = DescribeOptionMethod(activeEvent, option, helper, depth + 1);
                 if (nestedGap is not null)
                     return (null, nestedGap);
                 if (nested is not null)
-                {
                     steps.Add(nested);
-                    nonObvious = true;
-                }
                 continue;
             }
 
@@ -323,49 +324,52 @@ internal static class EventMechanismReader
                 {
                     var amountParam = call.Method.GetParameters().FirstOrDefault(p => p.Name == "amount");
                     var propsParam = call.Method.GetParameters().FirstOrDefault(p => p.Name == "props");
-                    var dmgText = amountParam is not null && amountParam.Position < call.Arguments.Length
-                        ? ResolveEventAmount(activeEvent, call.Arguments[amountParam.Position])
-                        : null;
-                    if (propsParam is null || propsParam.Position >= call.Arguments.Length
-                        || call.Arguments[propsParam.Position] is not Constant { Data: int rawProps })
+                    var dmgVarParam = call.Method.GetParameters().FirstOrDefault(p => p.Name == "damageVar");
+                    string? dmgText = null;
+                    bool isUnblockable = true;
+                    if (dmgVarParam is not null && dmgVarParam.Position < call.Arguments.Length)
                     {
-                        hasUnresolvedOperand = true;
-                        continue;
+                        var arg = call.Arguments[dmgVarParam.Position];
+                        dmgText = ResolveEventAmount(activeEvent, arg);
+                        if (ExtractEventDynamicKey(arg) is { } key
+                            && activeEvent.DynamicVars.TryGetValue(key, out var dv)
+                            && dv is MegaCrit.Sts2.Core.Localization.DynamicVars.DamageVar dmgVar)
+                        {
+                            isUnblockable = dmgVar.Props.HasFlag(ValueProp.Unblockable);
+                        }
                     }
-                    var props = (ValueProp)rawProps;
-                    var isUnblockable = props.HasFlag(ValueProp.Unblockable);
-                    if (!isUnblockable)
-                        nonObvious = true;
-                    if (dmgText is null)
+                    else
                     {
-                        hasUnresolvedOperand = true;
-                        continue;
+                        dmgText = amountParam is not null && amountParam.Position < call.Arguments.Length
+                            ? ResolveEventAmount(activeEvent, call.Arguments[amountParam.Position])
+                            : null;
+                        if (propsParam is not null && propsParam.Position < call.Arguments.Length
+                            && call.Arguments[propsParam.Position] is Constant { Data: int rawProps })
+                        {
+                            isUnblockable = ((ValueProp)rawProps).HasFlag(ValueProp.Unblockable);
+                        }
                     }
-                    steps.Add($"deal {dmgText} {(isUnblockable ? "unblockable" : "blockable")} damage to owner");
+                    steps.Add(dmgText is not null
+                        ? $"deal {dmgText} {(isUnblockable ? "unblockable" : "blockable")} damage to owner"
+                        : $"deal {(isUnblockable ? "unblockable" : "blockable")} damage to owner");
                     continue;
                 }
                 if (name == nameof(CreatureCmd.Heal))
                 {
-                    if (ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1)) is { } healText)
-                        steps.Add($"heal {healText} HP");
-                    else
-                        hasUnresolvedOperand = true;
+                    var healText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1));
+                    steps.Add(healText is not null ? $"heal {healText} HP" : "heal HP");
                     continue;
                 }
                 if (name == nameof(CreatureCmd.GainMaxHp))
                 {
-                    if (ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1)) is { } maxHpText)
-                        steps.Add($"gain {maxHpText} Max HP");
-                    else
-                        hasUnresolvedOperand = true;
+                    var maxHpText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1));
+                    steps.Add(maxHpText is not null ? $"gain {maxHpText} Max HP" : "gain Max HP");
                     continue;
                 }
                 if (name == nameof(CreatureCmd.LoseMaxHp))
                 {
-                    if (ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(2)) is { } maxHpText)
-                        steps.Add($"lose {maxHpText} Max HP");
-                    else
-                        hasUnresolvedOperand = true;
+                    var maxHpText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(2));
+                    steps.Add(maxHpText is not null ? $"lose {maxHpText} Max HP" : "lose Max HP");
                     continue;
                 }
             }
@@ -374,40 +378,44 @@ internal static class EventMechanismReader
             {
                 if (name == nameof(PlayerCmd.GainGold))
                 {
-                    if (ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0)) is { } goldText)
-                        steps.Add($"gain {goldText} Gold");
-                    else
-                        hasUnresolvedOperand = true;
+                    var goldText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0));
+                    steps.Add(goldText is not null ? $"gain {goldText} Gold" : "gain Gold");
                     continue;
                 }
                 if (name == nameof(PlayerCmd.LoseGold))
                 {
-                    if (ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0)) is { } goldText)
-                        steps.Add($"lose {goldText} Gold");
-                    else
-                        hasUnresolvedOperand = true;
+                    var goldText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0));
+                    steps.Add(goldText is not null ? $"lose {goldText} Gold" : "lose Gold");
                     continue;
                 }
             }
 
-            if (declaring == typeof(PotionCmd) && name == nameof(PotionCmd.Discard))
+            if (declaring == typeof(PotionCmd))
             {
-                steps.Add("discard the chosen potion without triggering its on-use effect");
-                nonObvious = true;
-                continue;
+                if (name == nameof(PotionCmd.Discard))
+                {
+                    steps.Add("discard the chosen potion without triggering its on-use effect");
+                    continue;
+                }
+                if (name == nameof(PotionCmd.TryToProcure))
+                {
+                    steps.Add("obtain a potion");
+                    continue;
+                }
             }
 
             if (declaring == typeof(CardSelectCmd))
             {
                 hasSelection = true;
                 var countText = ExtractSelectorCount(call) ?? "eligible";
+                var cardNoun = countText == "1" ? "card" : "card(s)";
                 steps.Add(name switch
                 {
-                    nameof(CardSelectCmd.FromDeckForRemoval) => $"select {countText} removable card(s) from deck to remove",
-                    nameof(CardSelectCmd.FromDeckForUpgrade) => $"select {countText} upgradable card(s) from deck to upgrade",
-                    nameof(CardSelectCmd.FromDeckForTransformation) => $"select {countText} removable card(s) from deck to transform",
+                    nameof(CardSelectCmd.FromDeckForRemoval) => $"select {countText} removable {cardNoun} from deck to remove",
+                    nameof(CardSelectCmd.FromDeckForUpgrade) => $"select {countText} upgradable {cardNoun} from deck to upgrade",
+                    nameof(CardSelectCmd.FromDeckForTransformation) => $"select {countText} removable {cardNoun} from deck to transform",
                     nameof(CardSelectCmd.FromDeckForEnchantment) => DescribeEnchantSelection(call, countText),
-                    _ => $"select {countText} card(s)",
+                    _ => $"select {countText} {cardNoun}",
                 });
                 continue;
             }
@@ -423,25 +431,17 @@ internal static class EventMechanismReader
                 if (name == nameof(CardPileCmd.AddCurseToDeck) && generic is not null)
                 {
                     var unconditional = hasSelection && !conditionalOnSelection;
-                    if (unconditional)
-                        nonObvious = true;
                     var suffix = unconditional ? " unconditionally (even if 0 cards were eligible for selection)" : "";
                     steps.Add($"add 1 {NativeRuleText.ModelLabel(generic)} to deck{suffix}");
                     continue;
                 }
                 if (name == nameof(CardPileCmd.AddCursesToDeck))
                 {
-                    var curseType = ExtractSingleCardType(call.Arguments.FirstOrDefault());
-                    if (curseType is null)
-                    {
-                        hasUnresolvedOperand = true;
-                        continue;
-                    }
+                    var curseType = ExtractSingleCardType(call.Arguments.FirstOrDefault()) ?? FindCardModelInBody(body);
+                    var curseLabel = curseType is not null ? NativeRuleText.ModelLabel(curseType) : "curse card(s)";
                     var unconditional = hasSelection && !conditionalOnSelection;
-                    if (unconditional)
-                        nonObvious = true;
                     var suffix = unconditional ? " unconditionally (even if 0 cards were eligible for selection)" : "";
-                    steps.Add($"add {NativeRuleText.ModelLabel(curseType)} to deck{suffix}");
+                    steps.Add($"add {curseLabel} to deck{suffix}");
                     continue;
                 }
                 if (name == nameof(CardPileCmd.Add))
@@ -451,29 +451,68 @@ internal static class EventMechanismReader
                         || (pileParam.Position < call.Arguments.Length
                             && call.Arguments[pileParam.Position] is Constant { Data: (int)PileType.Deck });
                     if (isDeck)
-                        steps.Add("add card directly to deck");
+                    {
+                        var addedArg = call.Arguments.FirstOrDefault();
+                        if (MentionsCloneCard(addedArg))
+                            steps.Add("duplicate deck card(s) directly into deck");
+                        else if (ExtractSingleCardType(addedArg) is { } cardType)
+                            steps.Add($"add {NativeRuleText.ModelLabel(cardType)} directly to deck");
+                        else
+                            steps.Add("add card(s) directly to deck");
+                    }
                     continue;
                 }
             }
 
             if (declaring == typeof(CardCmd))
             {
-                if (name is nameof(CardCmd.Upgrade) or nameof(CardCmd.TransformToRandom) or "Enchant")
+                if (name == nameof(CardCmd.Upgrade))
+                {
+                    if (!hasSelection)
+                        steps.Add(usesRandom ? "upgrade random upgradable card(s) in deck" : "upgrade card(s) in deck");
                     continue;
+                }
+                if (name == nameof(CardCmd.Downgrade))
+                {
+                    steps.Add(usesRandom ? "downgrade random upgraded card(s) in deck" : "downgrade card(s) in deck");
+                    continue;
+                }
+                if (name == nameof(CardCmd.TransformToRandom))
+                {
+                    if (!hasSelection)
+                        steps.Add("transform card(s) in deck into random card(s)");
+                    continue;
+                }
+                if (name == "Enchant" && !hasSelection)
+                {
+                    steps.Add("enchant card(s) in deck");
+                    continue;
+                }
             }
 
-            if (declaring == typeof(RelicCmd) && name == nameof(RelicCmd.Obtain))
+            if (declaring == typeof(RelicCmd))
             {
-                if (generic is not null && typeof(RelicModel).IsAssignableFrom(generic))
-                    steps.Add($"obtain {NativeRuleText.ModelLabel(generic)} directly");
-                else
-                    steps.Add("obtain the offered relic directly");
-                continue;
+                if (name == nameof(RelicCmd.Obtain))
+                {
+                    if (generic is not null && typeof(RelicModel).IsAssignableFrom(generic))
+                        steps.Add($"obtain {NativeRuleText.ModelLabel(generic)} directly");
+                    else
+                        steps.Add("obtain a relic directly");
+                    continue;
+                }
+                if (name == nameof(RelicCmd.Remove) || name == nameof(RelicCmd.Melt))
+                {
+                    steps.Add("lose/remove a relic");
+                    continue;
+                }
             }
 
             if (declaring == typeof(RewardsCmd) && name == nameof(RewardsCmd.OfferCustom))
             {
-                steps.Add("open an optional reward screen");
+                var rewardDesc = DescribeCustomRewards(body);
+                steps.Add(rewardDesc is not null
+                    ? $"open an optional reward screen ({rewardDesc})"
+                    : "open an optional reward screen");
                 continue;
             }
 
@@ -488,15 +527,18 @@ internal static class EventMechanismReader
                 }
                 if (name == "EnterCombatWithoutExitingEvent")
                 {
-                    steps.Add("enter event combat");
+                    var encType = generic is not null && typeof(EncounterModel).IsAssignableFrom(generic)
+                        ? generic
+                        : FindEncounterInCall(call);
+                    steps.Add(encType is not null
+                        ? $"enter event combat ({encType.Name})"
+                        : "enter event combat");
                     continue;
                 }
             }
         }
 
-        // Strict non-redundancy: only emit when the option has a genuinely non-obvious native mechanic,
-        // and fail closed as a diagnostic gap if any operand on that non-obvious path could not be resolved.
-        if (!nonObvious || steps.Count == 0)
+        if (steps.Count == 0)
             return (null, null);
         if (hasUnresolvedOperand)
             return (null, "unresolved-operand");
@@ -508,7 +550,66 @@ internal static class EventMechanismReader
                 distinctSteps.Add(step);
         }
 
-        return (string.Join(", then ", distinctSteps), null);
+        var prefix = usesRandom && !distinctSteps.Any(s => s.Contains("random", StringComparison.OrdinalIgnoreCase))
+            ? "random outcome: "
+            : "";
+        return (prefix + string.Join(", then ", distinctSteps), null);
+    }
+
+    private static bool MentionsCloneCard(Value? value) => value switch
+    {
+        null => false,
+        Call call => call.Method.Name == "CloneCard"
+            || MentionsCloneCard(call.Receiver)
+            || call.Arguments.Any(MentionsCloneCard),
+        Operation op => MentionsCloneCard(op.Left) || MentionsCloneCard(op.Right),
+        _ => false,
+    };
+
+    private static Type? FindCardModelInBody(NativeRuleBody body)
+    {
+        foreach (var step in body.Calls)
+        {
+            if (step.Call.Method is { Name: "Card", IsGenericMethod: true } m && m.DeclaringType == typeof(ModelDb))
+                return m.GetGenericArguments()[0];
+        }
+        return null;
+    }
+
+    private static Type? FindEncounterInCall(Call call)
+    {
+        foreach (var arg in call.Arguments)
+        {
+            if (arg is Call { Method: { Name: "Encounter", IsGenericMethod: true } m } && m.DeclaringType == typeof(ModelDb))
+                return m.GetGenericArguments()[0];
+        }
+        return null;
+    }
+
+    private static string? DescribeCustomRewards(NativeRuleBody body)
+    {
+        var kinds = new List<string>();
+        foreach (var step in body.Calls)
+        {
+            var dt = step.Call.Method.DeclaringType?.Name;
+            if (dt == "CardReward" && !kinds.Contains("card reward"))
+                kinds.Add("card reward");
+            else if (dt == "RelicReward" && !kinds.Contains("relic reward"))
+                kinds.Add("relic reward");
+            else if (dt == "GoldReward" && !kinds.Contains("Gold reward"))
+                kinds.Add("Gold reward");
+            else if (dt == "PotionReward")
+            {
+                var potionType = body.Calls
+                    .Where(s => s.Call.Method is { Name: "Potion", IsGenericMethod: true } pm && pm.DeclaringType == typeof(ModelDb))
+                    .Select(s => s.Call.Method.GetGenericArguments()[0])
+                    .FirstOrDefault();
+                var label = potionType is not null ? $"{NativeRuleText.ModelLabel(potionType)} reward" : "potion reward";
+                if (!kinds.Contains(label))
+                    kinds.Add(label);
+            }
+        }
+        return kinds.Count > 0 ? string.Join(", ", kinds) : null;
     }
 
     private static string DescribeEnchantSelection(Call call, string countText)
