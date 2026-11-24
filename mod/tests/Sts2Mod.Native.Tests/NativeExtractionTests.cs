@@ -400,7 +400,7 @@ public sealed class NativeExtractionTests
         Assert.NotNull(bulletTimeRule);
         Assert.Contains("local Energy and Star costs to 0 until played or until the turn ends", bulletTimeRule!, StringComparison.Ordinal);
         Assert.Contains("global cost modifiers still apply", bulletTimeRule!, StringComparison.Ordinal);
-        Assert.Contains("manual plays of X-cost cards still spend all Energy/Stars while auto-plays spend 0", bulletTimeRule!, StringComparison.Ordinal);
+        Assert.Contains("Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources", bulletTimeRule!, StringComparison.Ordinal);
 
         var arrowStabRule = ItemMechanismReader.DescribeCard(ModelDb.Card<ArrowStab>());
         Assert.NotNull(arrowStabRule);
@@ -412,7 +412,7 @@ public sealed class NativeExtractionTests
         Assert.NotNull(liquidRule);
         Assert.Contains("local Energy and Star costs to 0 until played or until the turn ends", liquidRule!, StringComparison.Ordinal);
         Assert.Contains("global cost modifiers still apply", liquidRule!, StringComparison.Ordinal);
-        Assert.Contains("manual plays of X-cost cards still spend all Energy/Stars while auto-plays spend 0", liquidRule!, StringComparison.Ordinal);
+        Assert.Contains("Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources", liquidRule!, StringComparison.Ordinal);
 
         var lizardRule = ItemMechanismReader.DescribeRelic(ModelDb.Relic<LizardTail>());
         Assert.NotNull(lizardRule);
@@ -425,12 +425,13 @@ public sealed class NativeExtractionTests
         var (stampedeText, stampedeGaps) = PowerMechanismReader.Describe(typeof(StampedePower), true);
         Assert.Empty(stampedeGaps);
         Assert.Contains("At end of turn before hand discard", stampedeText!, StringComparison.Ordinal);
-        Assert.Contains("non-Unplayable Attack card(s) in owner's hand", stampedeText!, StringComparison.Ordinal);
+        Assert.Contains("Unplayable", stampedeText!, StringComparison.Ordinal);
+        Assert.Contains("Attack card(s) in owner's hand", stampedeText!, StringComparison.Ordinal);
         Assert.Contains("auto-play", stampedeText!, StringComparison.Ordinal);
 
         var (hellraiserText, hellraiserGaps) = PowerMechanismReader.Describe(typeof(HellraiserPower), true);
         Assert.Empty(hellraiserGaps);
-        Assert.Contains("early, before affliction hooks such as Bound", hellraiserText!, StringComparison.Ordinal);
+        Assert.Contains("AFFLICTION.BOUND", hellraiserText!, StringComparison.Ordinal);
         Assert.Contains("tag Strike", hellraiserText!, StringComparison.Ordinal);
         Assert.Contains("capped at 9", hellraiserText!, StringComparison.Ordinal);
 
@@ -441,14 +442,14 @@ public sealed class NativeExtractionTests
 
         var (freeAtkText, freeAtkGaps) = PowerMechanismReader.Describe(typeof(FreeAttackPower), true);
         Assert.Empty(freeAtkGaps);
-        Assert.Contains("In-combat Energy cost (late): owned Attack cards in Hand or Play cost 0 Energy (manual plays of Energy X-cost cards still spend all Energy; auto-plays spend 0)", freeAtkText!, StringComparison.Ordinal);
+        Assert.Contains("In-combat Energy cost (late): owned Attack cards in Hand or Play cost 0 Energy (Energy X-cost cards ignore cost modifiers and still spend all remaining Energy when paying resources)", freeAtkText!, StringComparison.Ordinal);
         Assert.Contains("Before card play:", freeAtkText!, StringComparison.Ordinal);
         Assert.Contains("subtract 1", freeAtkText!, StringComparison.Ordinal);
 
         var (veilText, veilGaps) = PowerMechanismReader.Describe(typeof(VeilpiercerPower), true);
         Assert.Empty(veilGaps);
         Assert.Contains("Ethereal", veilText!, StringComparison.Ordinal);
-        Assert.Contains("in Hand or Play cost 0 Energy (manual plays of Energy X-cost cards still spend all Energy; auto-plays spend 0)", veilText!, StringComparison.Ordinal);
+        Assert.Contains("in Hand or Play cost 0 Energy (Energy X-cost cards ignore cost modifiers and still spend all remaining Energy when paying resources)", veilText!, StringComparison.Ordinal);
 
         var (aggressionText, aggressionGaps) = PowerMechanismReader.Describe(typeof(AggressionPower), true);
         Assert.Empty(aggressionGaps);
@@ -458,7 +459,7 @@ public sealed class NativeExtractionTests
         var (wuppyText, wuppyGaps) = PowerMechanismReader.Describe(typeof(WuppysLoyaltyPower), true);
         Assert.Empty(wuppyGaps);
         Assert.Contains("Damage target redirection (before Block):", wuppyText!, StringComparison.Ordinal);
-        Assert.Contains("redirect damage to owner first; any overkill continues to original target's Block and HP", wuppyText!, StringComparison.Ordinal);
+        Assert.Contains("redirect damage to owner first; any overkill continues to original target (through Block and any remaining damage redirection)", wuppyText!, StringComparison.Ordinal);
         Assert.Contains("Targetable by hits: if event target is dead: no", wuppyText!, StringComparison.Ordinal);
 
         var (dieForYouText, dieForYouGaps) = PowerMechanismReader.Describe(typeof(DieForYouPower), true);
@@ -475,7 +476,7 @@ public sealed class NativeExtractionTests
         // TangledPower must remain intact and EnsemblePower must continue failing closed on unrecognized cost conditions.
         var (tangledText, tangledGaps) = PowerMechanismReader.Describe(typeof(TangledPower), true);
         Assert.Empty(tangledGaps);
-        Assert.Contains("cost +stacks Energy", tangledText!, StringComparison.Ordinal);
+        Assert.Contains("cost +stacks Energy (Energy X-cost cards ignore cost modifiers and spend all remaining Energy when played)", tangledText!, StringComparison.Ordinal);
 
         var (_, ensembleGaps) = PowerMechanismReader.Describe(typeof(EnsemblePower), true);
         Assert.Contains("EnsemblePower.TryModifyEnergyCostInCombatLate", ensembleGaps);
@@ -487,8 +488,8 @@ public sealed class NativeExtractionTests
         // Defect powers (Orb hooks, Feral, Storm, Subroutine, OneForAll, Coolant, CreativeAi, Iteration, ConsumingShadow, Loop, Thunder, TrashToTreasure)
         var (focusText, focusGaps) = PowerMechanismReader.Describe(typeof(FocusPower), true);
         Assert.Empty(focusGaps);
-        Assert.Contains("Focus-affected orb values", focusText!, StringComparison.Ordinal);
-        Assert.Contains("Plasma is unaffected", focusText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.FOCUS_POWER-affected orb values", focusText!, StringComparison.Ordinal);
+        Assert.Contains("ORB.PLASMA_ORB is unaffected", focusText!, StringComparison.Ordinal);
         Assert.Contains("minimum 0", focusText!, StringComparison.Ordinal);
 
         var (loopText, loopGaps) = PowerMechanismReader.Describe(typeof(LoopPower), true);
@@ -568,7 +569,8 @@ public sealed class NativeExtractionTests
 
         var (voidFormText, voidFormGaps) = PowerMechanismReader.Describe(typeof(VoidFormPower), true);
         Assert.Empty(voidFormGaps);
-        Assert.Contains("cost 0 Energy and 0 Stars (manual plays of Energy X-cost and Star X-cost cards still spend all Energy/Stars; auto-plays spend 0)", voidFormText!, StringComparison.Ordinal);
+        Assert.Contains("including auto-played cards", voidFormText!, StringComparison.Ordinal);
+        Assert.Contains("cost 0 Energy and 0 Stars (Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources)", voidFormText!, StringComparison.Ordinal);
         Assert.Contains("Application timing:", voidFormText!, StringComparison.Ordinal);
 
         var (swordSageText, swordSageGaps) = PowerMechanismReader.Describe(typeof(SwordSagePower), true);
@@ -619,7 +621,7 @@ public sealed class NativeExtractionTests
 
         var (lethalityText, lethalityGaps) = PowerMechanismReader.Describe(typeof(LethalityPower), true);
         Assert.Empty(lethalityGaps);
-        Assert.Contains("first Attack card play this turn (excluding replays of that card)", lethalityText!, StringComparison.Ordinal);
+        Assert.Contains("at most 1 owned Attack play has started this turn", lethalityText!, StringComparison.Ordinal);
 
         var (sentryText, sentryGaps) = PowerMechanismReader.Describe(typeof(SentryModePower), true);
         Assert.Empty(sentryGaps);
@@ -690,7 +692,7 @@ public sealed class NativeExtractionTests
             (typeof(CrackedCore), "ORB.LIGHTNING_ORB"),
             (typeof(EmotionChip), "owner received a hit that was not fully blocked last player turn"),
             (typeof(GoldPlatedCables), "+1 additional passive trigger(s)"),
-            (typeof(InfusedCore), "Focus-affected orb values"),
+            (typeof(InfusedCore), "POWER.FOCUS_POWER-affected orb values"),
             (typeof(Metronome), "orbs channeled=7: deal 30 unpowered damage"),
             (typeof(PowerCell), "local Energy cost = 0"),
             (typeof(RunicCapacitor), "owner gains 3 orb slots"),
@@ -862,6 +864,113 @@ public sealed class NativeExtractionTests
         Assert.Empty(hiveGaps);
         Assert.Contains("stacks times:", hiveText!, StringComparison.Ordinal);
         Assert.DoesNotContain("stacks × stacks", hiveText!, StringComparison.Ordinal);
+
+        // 11. ReboundPower, NostalgiaPower, VelvetChoker, ShrinkPower, CharonsAshes, LostWisp, BufferPower, JossPaper, CacophonyPower, ThrowingAxe.
+        var (reboundText, reboundGaps) = PowerMechanismReader.Describe(typeof(ReboundPower), true);
+        Assert.Empty(reboundGaps);
+        Assert.Contains("move to draw pile (top) instead of discard pile, then subtract 1", reboundText!, StringComparison.Ordinal);
+
+        var (nostalgiaText, nostalgiaGaps) = PowerMechanismReader.Describe(typeof(NostalgiaPower), true);
+        Assert.Empty(nostalgiaGaps);
+        Assert.Contains("owner's first N Attack or Skill plays each turn (where N = stacks) move to draw pile (top) instead of discard pile", nostalgiaText!, StringComparison.Ordinal);
+
+        var (chokerText, chokerGaps) = RelicMechanismReader.Describe(typeof(VelvetChoker));
+        Assert.Empty(chokerGaps);
+        Assert.Contains("card plays started by owner this turn≥6: no", chokerText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("ShouldPreventCardPlay", chokerText!, StringComparison.Ordinal);
+
+        var (shrinkText, shrinkGaps) = PowerMechanismReader.Describe(typeof(ShrinkPower), true);
+        Assert.Empty(shrinkGaps);
+        Assert.Contains("stacks≥0", shrinkText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsInfinite", shrinkText!, StringComparison.Ordinal);
+
+        var (ashesText, ashesGaps) = RelicMechanismReader.Describe(typeof(CharonsAshes));
+        Assert.Empty(ashesGaps);
+        Assert.Contains("deal 3 unpowered damage", ashesText!, StringComparison.Ordinal);
+
+        var (wispText, wispGaps) = RelicMechanismReader.Describe(typeof(MegaCrit.Sts2.Core.Models.Relics.LostWisp));
+        Assert.Empty(wispGaps);
+        Assert.Contains("deal 8 unpowered damage", wispText!, StringComparison.Ordinal);
+
+        var (bufferText, bufferGaps) = PowerMechanismReader.Describe(typeof(BufferPower), true);
+        Assert.Empty(bufferGaps);
+        Assert.Contains("CARD.BRIGHTEST_FLAME", bufferText!, StringComparison.Ordinal);
+
+        var (jossText, jossGaps) = RelicMechanismReader.Describe(typeof(JossPaper));
+        Assert.Empty(jossGaps);
+        Assert.Contains("owner draws (previous cards exhausted ÷ 5) cards", jossText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("previous previous", jossText!, StringComparison.Ordinal);
+
+        var (cacophonyText, cacophonyGaps) = PowerMechanismReader.Describe(typeof(CacophonyPower), true);
+        Assert.Empty(cacophonyGaps);
+        Assert.Contains("if counter cards≤0: (set counter cards to 33; if a random hittable enemy≠none: deal stacks unpowered damage", cacophonyText!, StringComparison.Ordinal);
+
+        var (_, throwingAxeGaps) = RelicMechanismReader.Describe(typeof(ThrowingAxe));
+        Assert.Contains("ThrowingAxe.ModifyCardPlayCount", throwingAxeGaps);
+
+        var spiralText = ModifierMechanismReader.DescribeEnchantment(typeof(Spiral));
+        Assert.NotNull(spiralText);
+        Assert.Contains("Basic cards tagged Defend or Strike", spiralText!, StringComparison.Ordinal);
+
+        // 12. Array element by-ref clear (ldelema) & async lifted parameter by-ref clear must invalidate stale values.
+        var arrClearMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.ArrayElementByRefClear), BindingFlags.Static | BindingFlags.Public)!;
+        var arrClearBody = NativeRuleBody.Read(arrClearMethod);
+        Assert.DoesNotContain(arrClearBody.Returns, r => r.Value is NativeRuleBody.Constant { Data: 7 });
+
+        var (asyncParamText, asyncParamGaps) = PowerMechanismReader.Describe(typeof(SyntheticAsyncParamClearPower), true);
+        Assert.Null(asyncParamText);
+        Assert.NotEmpty(asyncParamGaps);
+
+        // 13. Decimal loop mutating another local (`reward++`) must not collapse into fixed-count repetition.
+        var mutatingLoopMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.DecimalLoopMutatingOtherLocal), BindingFlags.Static | BindingFlags.Public)!;
+        Assert.Empty(NativeRuleBody.Read(mutatingLoopMethod).Loops);
+
+        // 14. Constructor-set guard flag must not fold into `does not re-trigger itself`.
+        var ctorGuardReader = new NativeRuleText();
+        var ctorGuardLines = new List<string>();
+        ctorGuardReader.ReadHooks(typeof(SyntheticCtorGuardPower), ctorGuardLines);
+        Assert.DoesNotContain(ctorGuardLines, l => l.Contains("does not re-trigger itself", StringComparison.Ordinal));
+
+        // 15. Cost hook restoring originalCost on active path or using standalone `Pile != X` must fail closed.
+        var (restoredCostText, restoredCostGaps) = PowerMechanismReader.Describe(typeof(SyntheticRestoredCostPower), true);
+        Assert.Null(restoredCostText);
+        Assert.NotEmpty(restoredCostGaps);
+
+        var (negPileText, negPileGaps) = PowerMechanismReader.Describe(typeof(SyntheticStandaloneNegatedPileCostPower), true);
+        Assert.Null(negPileText);
+        Assert.NotEmpty(negPileGaps);
+
+        // 16. Mixed OR enchantment eligibility (`Basic || Strike`) must render disjunction, never `Basic Strike-tagged`.
+        var mixedOrMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.MixedOrCanEnchant), BindingFlags.Static | BindingFlags.Public)!;
+        var describeCustom = typeof(ModifierMechanismReader).GetMethod("DescribeCustomCanEnchant", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var mixedOrDesc = (string?)describeCustom.Invoke(null, [NativeRuleBody.Read(mixedOrMethod)]);
+        Assert.NotNull(mixedOrDesc);
+        Assert.Contains("Basic cards", mixedOrDesc!, StringComparison.Ordinal);
+        Assert.Contains("Strike-tagged cards", mixedOrDesc!, StringComparison.Ordinal);
+        Assert.Contains(" or ", mixedOrDesc!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Basic Strike-tagged", mixedOrDesc!, StringComparison.Ordinal);
+
+        // 17. Separate foreach loops over independent Take(Amount) samples must not be merged into one loop.
+        var (sepLoopsText, _) = PowerMechanismReader.Describe(typeof(SyntheticSeparateForeachPower), true);
+        Assert.NotNull(sepLoopsText);
+        Assert.DoesNotContain("for each of ", sepLoopsText!, StringComparison.Ordinal);
+
+        // 18. AutoPlayFromDrawPile with forceExhaust: true (Havoc) must mention Exhaust; JackOfAllTrades filter must fail closed.
+        var readEffects = typeof(NativeRuleText).GetMethod("ReadEffects", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var havocMethod = typeof(Havoc).GetMethod("OnPlay", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var havocReader = new NativeRuleText();
+        var havocRes = readEffects.Invoke(havocReader, [havocMethod, null, 0, false, null])!;
+        var havocEffectsObj = (System.Collections.IEnumerable)havocRes.GetType().GetField("Item1")!.GetValue(havocRes)!;
+        var havocIncomplete = (bool)havocRes.GetType().GetField("Item2")!.GetValue(havocRes)!;
+        Assert.False(havocIncomplete);
+        var havocTexts = havocEffectsObj.Cast<object>().Select(e => (string)e.GetType().GetProperty("Text")!.GetValue(e)!).ToArray();
+        Assert.Contains(havocTexts, t => t.Contains("Exhaust", StringComparison.OrdinalIgnoreCase));
+
+        var joatMethod = typeof(JackOfAllTrades).GetMethod("OnPlay", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var joatReader = new NativeRuleText();
+        var joatRes = readEffects.Invoke(joatReader, [joatMethod, null, 0, false, null])!;
+        var joatIncomplete = (bool)joatRes.GetType().GetField("Item2")!.GetValue(joatRes)!;
+        Assert.True(joatIncomplete);
     }
 
     [Fact]
@@ -1027,6 +1136,104 @@ public sealed class NativeExtractionTests
             for (int i = 0; (decimal)i < dv.BaseValue; i++)
                 sum += i + 1;
             return sum;
+        }
+
+        public static int ArrayElementByRefClear()
+        {
+            var a = new int[1];
+            a[0] = 7;
+            ClearRef(ref a[0]);
+            return a[0];
+        }
+
+        public static int DecimalLoopMutatingOtherLocal(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar dv)
+        {
+            int reward = 0;
+            int total = 0;
+            for (int i = 0; (decimal)i < dv.BaseValue; i++)
+            {
+                reward++;
+                total += reward;
+            }
+            return total;
+        }
+
+        public static bool MixedOrCanEnchant(CardModel card)
+            => card.Rarity == CardRarity.Basic || card.Tags.Contains(CardTag.Strike);
+    }
+
+    private sealed class SyntheticAsyncParamClearPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        private static void ZeroInt(ref int x) => x = 0;
+        public override async Task AfterEnergySpent(CardModel card, int amount)
+        {
+            await Task.Yield();
+            ZeroInt(ref amount);
+            await PlayerCmd.GainEnergy(amount, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticCtorGuardPower : PowerModel
+    {
+        private bool _guard;
+        public SyntheticCtorGuardPower() { _guard = true; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        private bool GuardFlag { get => _guard; set => _guard = value; }
+        public override async Task AfterDamageReceived(PlayerChoiceContext choiceContext, Creature target, DamageResult result, ValueProp props, Creature? dealer, CardModel? cardSource)
+        {
+            if (target == Owner && !GuardFlag)
+            {
+                GuardFlag = true;
+                await PlayerCmd.GainEnergy(1m, Owner.Player!);
+                GuardFlag = false;
+            }
+        }
+    }
+
+    private sealed class SyntheticRestoredCostPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override bool TryModifyEnergyCostInCombatLate(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            modifiedCost = 0m;
+            if (card.Owner.Creature != Owner)
+                return false;
+            modifiedCost = originalCost;
+            return true;
+        }
+    }
+
+    private sealed class SyntheticStandaloneNegatedPileCostPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override bool TryModifyEnergyCostInCombatLate(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            modifiedCost = originalCost;
+            if (card.Owner.Creature != Owner || card.Pile?.Type == PileType.Exhaust)
+                return false;
+            modifiedCost = 0m;
+            return true;
+        }
+    }
+
+    private sealed class SyntheticSeparateForeachPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override async Task BeforeSideTurnStart(PlayerChoiceContext choiceContext, CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            var pile = PileType.Discard.GetPile(Owner.Player!);
+            foreach (var c in pile.Cards.Where(c => c.Type == CardType.Attack).ToList().Take(Amount))
+                await CardPileCmd.Add(c, PileType.Hand);
+            foreach (var c in pile.Cards.Where(c => c.Type == CardType.Attack).ToList().Take(Amount))
+                if (c.IsUpgradable) CardCmd.Upgrade(c);
         }
     }
 

@@ -72,9 +72,9 @@ internal sealed partial class NativeRuleText
         if (factoryCall is { Method.DeclaringType.Name: "CardFactory", Method.Name: "GetDistinctForCombat" or "GetForCombat" }
             && factoryCall.Arguments.Length >= 3
             && ValueText(factoryCall.Arguments[0]) is { } factoryRecipient
-            && ValueText(factoryCall.Arguments[2]) is { } factoryCount)
+            && ValueText(factoryCall.Arguments[2]) is { } factoryCount
+            && DescribeCardFactoryPool(factoryCall.Arguments[1]) is { } poolDesc)
         {
-            var poolDesc = DescribeCardFactoryPool(factoryCall.Arguments[1]);
             if (factoryCall.Method.Name == "GetDistinctForCombat")
                 return new Effect($"generate up to {factoryCount} distinct {poolDesc} card(s) into {Possessive(factoryRecipient)} {pileLabel}");
             return new Effect($"generate {factoryCount} {poolDesc} card(s) (duplicates allowed) into {Possessive(factoryRecipient)} {pileLabel}");
@@ -91,7 +91,7 @@ internal sealed partial class NativeRuleText
         _ => null,
     };
 
-    private string DescribeCardFactoryPool(Value poolExpr)
+    private string? DescribeCardFactoryPool(Value poolExpr)
     {
         var filters = new List<string>();
         var current = poolExpr;
@@ -100,17 +100,49 @@ internal sealed partial class NativeRuleText
         if (current is Call { Method.Name: "Where", Arguments: [var source, Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] })
         {
             var predBody = Body(pred);
-            foreach (var ret in predBody.Returns)
+            if (predBody.Incomplete || predBody.Returns.Count == 0)
+                return null;
+            var positive = predBody.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+            if (positive.Length != 1)
+                return null;
+            var tests = new List<Test>(positive[0].Conditions);
+            if (!(TryTruth(positive[0].Value, out var rb) && rb))
+                tests.Add(new Test(positive[0].Value, true));
+            foreach (var raw in tests)
             {
-                if (ret.Value is Operation { Operator: "ceq", Left: Call { Method.Name: "get_Type" }, Right: Constant { Data: int rawType } }
+                var expr = raw.Value;
+                var expected = raw.Expected;
+                while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                {
+                    expr = inner;
+                    expected = !expected;
+                }
+                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Type" }, Right: Constant { Data: int rawType } } typeOp
                     && Enum.IsDefined(typeof(CardType), rawType))
+                {
+                    var isEq = typeOp.Operator == "bne.un" ? !expected : expected;
+                    if (!isEq)
+                        return null;
                     filters.Add(((CardType)rawType).ToString());
-                if (ret.Value is Operation { Operator: "ceq", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int rawRarity } }
+                    continue;
+                }
+                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int rawRarity } } rarOp
                     && Enum.IsDefined(typeof(CardRarity), rawRarity))
+                {
+                    var isEq = rarOp.Operator == "bne.un" ? !expected : expected;
+                    if (!isEq)
+                        return null;
                     filters.Add(((CardRarity)rawRarity).ToString());
-                if (ret.Value is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords" }, Arguments: [Constant { Data: int rawKw }] }
+                    continue;
+                }
+                if (expected && expr is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords" }, Arguments: [Constant { Data: int rawKw }] }
                     && Enum.IsDefined(typeof(CardKeyword), rawKw))
+                {
                     filters.Add(KeywordLabel((CardKeyword)rawKw));
+                    continue;
+                }
+                // Fail closed on any unrecognized pool filter (e.g., `!(c is JackOfAllTrades)`).
+                return null;
             }
             current = source;
         }
@@ -119,9 +151,9 @@ internal sealed partial class NativeRuleText
             : current is Call { Method.Name: "GetUnlockedCards", Receiver: Call { Method.Name: "get_CardPool" } }
                 ? "unlocked character"
                 : null;
-        var parts = new List<string> { "combat-generatable" };
-        if (poolName is not null)
-            parts.Add(poolName);
+        if (poolName is null)
+            return null;
+        var parts = new List<string> { "combat-generatable", poolName };
         parts.AddRange(filters);
         return $"random {string.Join(" ", parts)}";
     }
@@ -252,9 +284,45 @@ internal sealed partial class NativeRuleText
                     }
                 }
             }
+            // When an assignment mutates a property (`cards exhausted = ...`) and a later step in the same
+            // guarded group reads the pre-mutation snapshot (no getter or helper called after the setter), qualify it.
+            if (currentMethod is not null && steps.Count >= 2 && steps[0].Text.Contains(" = ", StringComparison.Ordinal)
+                && !steps[0].Text.EndsWith(" = true", StringComparison.Ordinal)
+                && !steps[0].Text.EndsWith(" = false", StringComparison.Ordinal))
+            {
+                var eqIdx = steps[0].Text.IndexOf(" = ", StringComparison.Ordinal);
+                var propHuman = steps[0].Text[..eqIdx];
+                if (propHuman.Length > 0 && IsPreMutationSnapshotRead(currentMethod, propHuman))
+                {
+                    for (var si = 1; si < steps.Count; si++)
+                    {
+                        if (steps[si].Text.Contains(propHuman, StringComparison.Ordinal)
+                            && !steps[si].Text.Contains($"previous {propHuman}", StringComparison.Ordinal))
+                            steps[si] = steps[si] with { Text = steps[si].Text.Replace(propHuman, $"previous {propHuman}", StringComparison.Ordinal) };
+                    }
+                }
+            }
             groups.Add(first with { Effects = [Combine(steps, $"({string.Join("; ", steps.Select(step => step.Text))})")] });
         }
         return groups;
+    }
+
+    private bool IsPreMutationSnapshotRead(MethodInfo currentMethod, string propHuman)
+    {
+        var methodBody = Body(currentMethod);
+        var propPascal = propHuman.Replace(" ", "", StringComparison.Ordinal);
+        var setterStep = methodBody.Calls.FirstOrDefault(s =>
+            s.Call.Method.Name.StartsWith("set_", StringComparison.Ordinal)
+            && s.Call.Method.Name[4..].Equals(propPascal, StringComparison.OrdinalIgnoreCase));
+        if (setterStep is null)
+            return false;
+        var getterName = "get_" + setterStep.Call.Method.Name[4..];
+        var hasLaterSameTypeHelperOrGetter = methodBody.Calls.Any(s =>
+            (s.Epoch > setterStep.Epoch || (s.Epoch == setterStep.Epoch && s.Order > setterStep.Order))
+            && (s.Call.Method.Name.Equals(getterName, StringComparison.Ordinal)
+                || (s.Call.Method.DeclaringType == currentMethod.DeclaringType
+                    && !IsBenignReadOrPlumbingCall(s.Call.Method))));
+        return !hasLaterSameTypeHelperOrGetter;
     }
 
     private bool IsSingleMethodReentrancyFlag(MethodInfo currentMethod, string flagHuman)
@@ -270,6 +338,19 @@ internal sealed partial class NativeRuleText
             .FirstOrDefault(f => f.FieldType == typeof(bool) && f.Name.TrimStart('_').Equals(expectedName, StringComparison.OrdinalIgnoreCase));
         if (directField is null && prop?.SetMethod is null)
             return false;
+
+        foreach (var ctor in ownerType.GetConstructors(flags))
+        {
+            var ctorBody = NativeRuleBody.Read(ctor);
+            if (ctorBody.Incomplete)
+                return false;
+            if (directField is not null && (ctorBody.Writes.Contains(directField)
+                || ctorBody.FieldSteps.Any(fs => fs.Assignment.Target.Member == directField && Numeric(fs.Assignment.Assigned) != 0m)))
+                return false;
+            if (prop?.SetMethod is { } ctorSetter
+                && ctorBody.Calls.Any(s => s.Call.Method == ctorSetter && Numeric(s.Call.Arguments.FirstOrDefault()) != 0m))
+                return false;
+        }
 
         foreach (var other in ownerType.GetMethods(flags))
         {
@@ -519,7 +600,8 @@ internal sealed partial class NativeRuleText
     private bool IsLostHpInPreviousTurnGetter(MethodInfo getter)
     {
         if (Body(getter) is not { Incomplete: false, Returns: [{ Value: Call { Method.Name: nameof(Enumerable.Any),
-                Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
+                Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType,
+                        Arguments: [Call { Method.Name: "get_Entries", Receiver: Call { Method.Name: "get_History" } }] },
                     Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] }, Conditions.Length: 0 }] }
             || ofType.GetGenericArguments()[0].Name != "DamageReceivedEntry")
             return false;
@@ -569,11 +651,29 @@ internal sealed partial class NativeRuleText
 
     private string? DescribePowerHistoryCountGetter(MethodInfo getter)
     {
-        if (Body(getter) is not { Incomplete: false, Returns: [{ Value: Call { Method.Name: nameof(Enumerable.Count),
-                Arguments: [Call { Method.Name: "get_CardPlaysFinished" },
-                    Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] }, Conditions.Length: 0 }] })
+        var body = Body(getter);
+        if (body.Incomplete || body.Returns.Count == 0)
             return null;
-        return DescribeHistoryEntryCount("finished", pred);
+        Result? countRet = null;
+        if (body.Returns is [{ Conditions.Length: 0 } singleRet])
+        {
+            countRet = singleRet;
+        }
+        else if (body.Returns.Count == 2)
+        {
+            var zeroRet = body.Returns.FirstOrDefault(r => Numeric(r.Value) == 0m
+                && r.Conditions is [{ Expected: false, Value: Call { Method.Name: "get_IsInProgress" } }]);
+            var activeRet = body.Returns.FirstOrDefault(r => r != zeroRet
+                && r.Conditions is [{ Expected: true, Value: Call { Method.Name: "get_IsInProgress" } }]);
+            if (zeroRet is not null && activeRet is not null)
+                countRet = activeRet;
+        }
+        if (countRet?.Value is not Call { Method.Name: nameof(Enumerable.Count),
+                Arguments: [Call { Method.Name: "get_CardPlaysFinished" or "get_CardPlaysStarted" } srcCall,
+                    Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] })
+            return null;
+        var kind = srcCall.Method.Name == "get_CardPlaysStarted" ? "started" : "finished";
+        return DescribeHistoryEntryCount(kind, pred);
     }
 
     private string? DescribeHistoryEntryCount(string kind, MethodInfo pred)
@@ -581,25 +681,67 @@ internal sealed partial class NativeRuleText
         var body = Body(pred);
         if (body.Incomplete || body.Returns.Count == 0)
             return null;
-        if (!body.Calls.Any(s => s.Call.Method.Name == "HappenedThisTurn"))
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
             return null;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var retBool) && retBool))
+            tests.Add(new Test(positive[0].Value, true));
+
+        var hasTurnCheck = false;
+        var hasOwnerCheck = false;
         CardType? filteredType = null;
         CardTag? filteredTag = null;
-        foreach (var cond in body.Returns.SelectMany(r => r.Conditions).Concat(body.Returns.Select(r => new Test(r.Value, true))))
+        foreach (var raw in tests)
         {
-            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expected && expr is Call { Method.Name: "HappenedThisTurn" })
+            {
+                hasTurnCheck = true;
+                continue;
+            }
+            if (IsEquality(new Test(expr, expected), true, out var eqL, out var eqR)
+                && ((IsEntryOwnerExpr(eqL) && IsOwnerPlayerOrCreature(eqR))
+                    || (IsEntryOwnerExpr(eqR) && IsOwnerPlayerOrCreature(eqL))))
+            {
+                hasOwnerCheck = true;
+                continue;
+            }
+            if (IsEquality(new Test(expr, expected), true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
                 && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
+            {
                 filteredType = (CardType)(int)ct;
-            if (cond is { Expected: true, Value: Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags" }, Constant { Data: int rawTag }] } }
+                continue;
+            }
+            if (expected && expr is Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags" }, Constant { Data: int rawTag }] }
                 && Enum.IsDefined(typeof(CardTag), rawTag))
+            {
                 filteredTag = (CardTag)rawTag;
+                continue;
+            }
+            return null;
         }
-        var qualifier = filteredTag is { } tag ? $"{tag}-tagged "
-            : filteredType is { } ctVal ? $"{ctVal} "
-            : "";
-        return kind == "drawn"
-            ? $"{qualifier}cards drawn by owner this turn"
-            : $"{qualifier}card plays finished by owner this turn";
+        if (!hasTurnCheck || !hasOwnerCheck)
+            return null;
+
+        var qualifiers = new List<string>();
+        if (filteredTag is { } tag)
+            qualifiers.Add($"{tag}-tagged");
+        if (filteredType is { } ctVal)
+            qualifiers.Add(ctVal.ToString());
+        var qualifier = qualifiers.Count > 0 ? $"{string.Join(" ", qualifiers)} " : "";
+        return kind switch
+        {
+            "drawn" => $"{qualifier}cards drawn by owner this turn",
+            "started" => $"{qualifier}card plays started by owner this turn",
+            _ => $"{qualifier}card plays finished by owner this turn",
+        };
     }
 
     private bool IsBlockGainedThisTurnPredicate(MethodInfo pred)

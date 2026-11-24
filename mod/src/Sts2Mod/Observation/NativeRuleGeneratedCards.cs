@@ -224,19 +224,35 @@ internal sealed partial class NativeRuleText
         Value? amount = null;
         Value? hitCountArg = null;
         var fromOsty = false;
+        var unpowered = false;
+        var unblockable = false;
         string? targetText = null;
         for (var c = receiver; ; c = (Call)c.Receiver)
         {
-            if (c.Method.DeclaringType == typeof(DamageCmd) && c.Method.Name == "Attack")
+            var name = c.Method.Name;
+            if (c.Method.DeclaringType == typeof(DamageCmd) && name == "Attack")
                 amount = c.Arguments.FirstOrDefault();
-            else if (c.Method.Name == "WithHitCount" && c.Arguments.Length != 0)
-                hitCountArg = c.Arguments[0];
-            else if (c.Method.Name == "FromOsty")
+            else if (name == "WithHitCount" && c.Arguments.Length != 0)
+                hitCountArg ??= c.Arguments[0];
+            else if (name == "FromOsty")
                 fromOsty = true;
-            else if (c.Method.Name == "TargetingRandomOpponents")
-                targetText = "a random enemy";
-            else if (c.Method.Name == "TargetingAllOpponents")
-                targetText = "all enemies";
+            else if (name is "UnpoweredAttack" or "Unpowered")
+                unpowered = true;
+            else if (name == "Unblockable")
+                unblockable = true;
+            else if (name == "TargetingRandomOpponents")
+                targetText ??= "a random enemy";
+            else if (name == "TargetingAllOpponents")
+                targetText ??= "all enemies";
+            else if (name is not ("FromCard" or "FromCardUnpowered" or "FromPlayer" or "FromMonster"
+                or "WithHitFx" or "WithAttackerFx" or "WithAttackerAnim" or "WithNoAttackerAnim"
+                or "WithWaitBeforeHit" or "WithHitVfxNode" or "WithHitVfxSpawnedAtBase"
+                or "SpawningHitVfxOnEachCreature" or "OnlyPlayAnimOnce" or "BeforeDamage" or "AfterDamage"))
+                return null;
+            else if (name is "BeforeDamage" or "AfterDamage")
+                return null;
+            else if (name == "FromCardUnpowered")
+                unpowered = true;
             if (c.Receiver is not Call)
                 break;
         }
@@ -250,12 +266,13 @@ internal sealed partial class NativeRuleText
             hits = parsedHits;
         }
         var dmgText = hits == 1m ? Number(dmg) : $"{Number(dmg)}×{Number(hits)}";
+        var props = (unpowered ? ValueProp.Unpowered : (ValueProp)0) | (unblockable ? ValueProp.Unblockable : (ValueProp)0);
         var attackerPrefix = fromOsty
             ? $"if {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive: {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} deals "
             : requiresOsty
                 ? $"if {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive: deal "
                 : "deal ";
-        return $"{attackerPrefix}{dmgText} damage to {targetText}";
+        return $"{attackerPrefix}{dmgText}{DamageFlags(props)} damage to {targetText}";
     }
 
     private decimal? CardNumeric(CardModel card, Value value) => value switch

@@ -212,9 +212,9 @@ internal static class ItemMechanismReader
     private static string? DescribeCardCostLifetime(NativeRuleBody body)
     {
         if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisTurn"))
-            return "Cost reduction sets target card(s)' local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and manual plays of X-cost cards still spend all Energy/Stars while auto-plays spend 0).";
+            return "Cost reduction sets target card(s)' local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).";
         if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisCombat"))
-            return "Cost reduction sets target card(s)' local Energy and Star costs to 0 for the rest of combat (global cost modifiers still apply, and manual plays of X-cost cards still spend all Energy/Stars while auto-plays spend 0).";
+            return "Cost reduction sets target card(s)' local Energy and Star costs to 0 for the rest of combat (global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).";
         return null;
     }
 
@@ -542,7 +542,7 @@ internal static class ItemMechanismReader
                     && s.Call.Method.Name == nameof(CardSelectCmd.FromCombatPile)
                     && ExtractPileType(s.Call.Arguments.ElementAtOrDefault(1)) == PileType.Discard));
                 if (selectsDiscard && setsFreeThisTurn)
-                    notes.Add("Selects from discard pile, sets local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and manual plays of X-cost cards still spend all Energy/Stars while auto-plays spend 0), and moves into hand.");
+                    notes.Add("Selects from discard pile, sets local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources), and moves into hand.");
             }
             else if (CallsOnlyRandomPotionFill(onUse))
             {

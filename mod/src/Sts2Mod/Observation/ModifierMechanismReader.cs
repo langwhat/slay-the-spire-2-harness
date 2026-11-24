@@ -560,20 +560,29 @@ internal static class ModifierMechanismReader
         return clauses.Count > 0 ? string.Join(" ", clauses) : null;
     }
 
+    private sealed record CanEnchantBranch(
+        bool ExcludesUnplayable,
+        bool ExcludesXCost,
+        CardRarity? Rarity,
+        List<CardRarity> NegativeRarities,
+        List<CardTag> PositiveTags,
+        List<CardTag> NegativeTags);
+
     private static string? DescribeCustomCanEnchant(NativeRuleBody body)
     {
         var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
         if (positive.Length == 0)
             return null;
 
-        var rarities = new List<CardRarity>();
-        var pathTagGroups = new List<List<CardTag>>();
-        var excludesUnplayable = false;
-        var excludesXCost = false;
-
+        var branches = new List<CanEnchantBranch>(positive.Length);
         foreach (var ret in positive)
         {
-            var pathTags = new List<CardTag>();
+            CardRarity? branchRarity = null;
+            var negRarities = new List<CardRarity>();
+            var posTags = new List<CardTag>();
+            var negTags = new List<CardTag>();
+            var excludesUnplayable = false;
+            var excludesXCost = false;
             var tests = new List<Test>(ret.Conditions);
             if (!(TryTruth(ret.Value, out var rb) && rb))
                 tests.Add(new Test(ret.Value, true));
@@ -593,25 +602,31 @@ internal static class ModifierMechanismReader
                     && Enum.IsDefined(typeof(CardRarity), rawRar))
                 {
                     var isEq = rarOp.Operator == "bne.un" ? !expected : expected;
-                    if (!isEq)
-                        return null;
-                    if (!rarities.Contains((CardRarity)rawRar))
-                        rarities.Add((CardRarity)rawRar);
+                    var rar = (CardRarity)rawRar;
+                    if (isEq)
+                    {
+                        if (branchRarity is not null && branchRarity != rar)
+                            return null;
+                        branchRarity = rar;
+                    }
+                    else if (!negRarities.Contains(rar))
+                    {
+                        negRarities.Add(rar);
+                    }
                     continue;
                 }
                 if (expr is Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags" }, Constant { Data: int rawTag }] }
                     && Enum.IsDefined(typeof(CardTag), rawTag))
                 {
+                    var tag = (CardTag)rawTag;
                     if (expected)
                     {
-                        if (!pathTags.Contains((CardTag)rawTag))
-                            pathTags.Add((CardTag)rawTag);
+                        if (!posTags.Contains(tag))
+                            posTags.Add(tag);
                     }
-                    // Allow short-circuit `!Contains(TagA)` on the second branch of `Contains(TagA) || Contains(TagB)`
-                    // only when there are multiple positive returns covering the OR branches.
-                    else if (positive.Length <= 1)
+                    else if (!negTags.Contains(tag))
                     {
-                        return null;
+                        negTags.Add(tag);
                     }
                     continue;
                 }
@@ -627,26 +642,92 @@ internal static class ModifierMechanismReader
                 }
                 return null;
             }
-            if (pathTags.Count > 0)
-                pathTagGroups.Add(pathTags);
+            branches.Add(new CanEnchantBranch(excludesUnplayable, excludesXCost, branchRarity, negRarities, posTags, negTags));
         }
 
-        var parts = new List<string>();
-        if (excludesUnplayable)
-            parts.Add("playable");
-        if (excludesXCost)
-            parts.Add("non-Energy-X-cost");
-        if (rarities.Count > 0)
-            parts.Add(string.Join("/", rarities));
-        if (pathTagGroups.Count > 0)
+        // Only allow a negated tag or rarity on a branch when another branch with compatible qualifiers
+        // positively covers it (short-circuit `A || B`).
+        foreach (var branch in branches)
         {
-            var groupLabels = pathTagGroups
-                .Select(g => string.Join(" and ", g))
+            foreach (var negTag in branch.NegativeTags)
+            {
+                var covered = branches.Any(other =>
+                    other != branch
+                    && other.ExcludesUnplayable == branch.ExcludesUnplayable
+                    && other.ExcludesXCost == branch.ExcludesXCost
+                    && other.Rarity == branch.Rarity
+                    && other.PositiveTags.Contains(negTag)
+                    && other.PositiveTags.Count == 1);
+                if (!covered)
+                    return null;
+            }
+            foreach (var negRar in branch.NegativeRarities)
+            {
+                var covered = branches.Any(other =>
+                    other != branch
+                    && other.ExcludesUnplayable == branch.ExcludesUnplayable
+                    && other.ExcludesXCost == branch.ExcludesXCost
+                    && other.Rarity == negRar
+                    && other.PositiveTags.Count == 0);
+                if (!covered)
+                    return null;
+            }
+        }
+
+        // Merge branches that share identical non-tag qualifiers (e.g., Basic && (Defend || Strike)).
+        var sameNonTag = branches.All(b =>
+            b.ExcludesUnplayable == branches[0].ExcludesUnplayable
+            && b.ExcludesXCost == branches[0].ExcludesXCost
+            && b.Rarity == branches[0].Rarity);
+        if (sameNonTag)
+        {
+            var nonTagPrefix = FormatNonTagPrefix(branches[0]);
+            var hasTaglessBranch = branches.Any(b => b.PositiveTags.Count == 0);
+            if (hasTaglessBranch)
+                return nonTagPrefix.Length > 0 ? $"{nonTagPrefix} cards" : null;
+            var tagGroups = branches
+                .Select(b => string.Join(" and ", b.PositiveTags))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
-            parts.Add($"{string.Join(" or ", groupLabels)}-tagged");
+            var tagText = string.Join(" or ", tagGroups);
+            return nonTagPrefix.Length > 0
+                ? $"{nonTagPrefix} cards tagged {tagText}"
+                : $"{tagText}-tagged cards";
         }
-        return parts.Count > 0 ? $"{string.Join(" ", parts)} cards" : null;
+
+        // Otherwise render each branch explicitly as a disjunction.
+        var renderedBranches = new List<string>(branches.Count);
+        foreach (var branch in branches)
+        {
+            var nonTag = FormatNonTagPrefix(branch);
+            string desc;
+            if (branch.PositiveTags.Count == 0)
+            {
+                if (nonTag.Length == 0)
+                    return null;
+                desc = $"{nonTag} cards";
+            }
+            else
+            {
+                var tagText = string.Join(" and ", branch.PositiveTags);
+                desc = nonTag.Length > 0 ? $"{nonTag} cards tagged {tagText}" : $"{tagText}-tagged cards";
+            }
+            if (!renderedBranches.Contains(desc, StringComparer.Ordinal))
+                renderedBranches.Add(desc);
+        }
+        return renderedBranches.Count > 0 ? string.Join(" or ", renderedBranches) : null;
+
+        static string FormatNonTagPrefix(CanEnchantBranch b)
+        {
+            var p = new List<string>();
+            if (b.ExcludesUnplayable)
+                p.Add("playable");
+            if (b.ExcludesXCost)
+                p.Add("non-Energy-X-cost");
+            if (b.Rarity is { } r)
+                p.Add(r.ToString());
+            return string.Join(" ", p);
+        }
     }
 
     private static string[] ExtractKeywordArguments(NativeRuleBody body, params string[] methodNames)

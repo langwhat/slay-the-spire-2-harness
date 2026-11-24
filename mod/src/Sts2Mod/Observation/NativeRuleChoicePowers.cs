@@ -52,7 +52,14 @@ internal sealed partial class NativeRuleText
         if (FindOverride(type, "ModifyOrbValue") is { } orbValueHook)
         {
             handled.Add(orbValueHook.Name);
-            if (ReadPlayerDeltaHook(type, orbValueHook, "value", "Focus-affected orb values (applies to orb stats scaled by Focus: Lightning/Frost passive and evoke, Glass passive and 2× evoke, Dark per-turn growth only; Plasma is unaffected)") is { } orbValueLine)
+            var focusLabel = ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.FocusPower));
+            var lightningLabel = ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Orbs.LightningOrb));
+            var frostLabel = ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Orbs.FrostOrb));
+            var glassLabel = ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Orbs.GlassOrb));
+            var darkLabel = ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Orbs.DarkOrb));
+            var plasmaLabel = ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Orbs.PlasmaOrb));
+            var orbValueSubject = $"{focusLabel}-affected orb values (applies to orb stats scaled by {focusLabel}: {lightningLabel}/{frostLabel} passive and evoke, {glassLabel} passive and 2× evoke, {darkLabel} per-turn growth only; {plasmaLabel} is unaffected)";
+            if (ReadPlayerDeltaHook(type, orbValueHook, "value", orbValueSubject) is { } orbValueLine)
                 lines.Add($"{powerPrefix}{orbValueLine}");
             else
                 Gap($"{type.Name}.{orbValueHook.Name}");
@@ -106,7 +113,7 @@ internal sealed partial class NativeRuleText
         if (FindOverride(type, "ModifyPreBlockDamageTarget") is { } preBlockTargetHook)
         {
             handled.Add(preBlockTargetHook.Name);
-            if (ReadDamageTargetRedirectHook(preBlockTargetHook, "Damage target redirection (before Block)", "redirect damage to owner first; any overkill continues to original target's Block and HP") is { } redirectLine)
+            if (ReadDamageTargetRedirectHook(preBlockTargetHook, "Damage target redirection (before Block)", "redirect damage to owner first; any overkill continues to original target (through Block and any remaining damage redirection)") is { } redirectLine)
                 lines.Add($"{powerPrefix}{redirectLine}");
             else
                 Gap($"{type.Name}.{preBlockTargetHook.Name}");
@@ -153,14 +160,15 @@ internal sealed partial class NativeRuleText
         if (body.Incomplete)
             return null;
         var active = body.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
-        var nonPassthroughStores = body.OutStores.Where(s => s.Assigned is not Input).ToArray();
-        if (active.Length == 0 || nonPassthroughStores.Length == 0)
+        var allModifiedCostStores = body.OutStores.Where(s => s.Parameter.Name == "modifiedCost").ToArray();
+        if (active.Length == 0 || allModifiedCostStores.Length == 0)
             return null;
 
-        // Every reachable active return path must have an implied non-passthrough OutStore agreeing on the same cost rewrite.
+        // Every reachable active return path must have its final implied OutStore agree on the same cost rewrite
+        // (including passthrough restores such as `modifiedCost = originalCost`, which must NOT be skipped).
         var activeStores = active
             .Where(r => !IsUnreachableNullablePath(r.Conditions))
-            .Select(r => nonPassthroughStores.LastOrDefault(s => s.Parameter.Name == "modifiedCost" && ConditionsImply(r.Conditions, s.Conditions)))
+            .Select(r => allModifiedCostStores.LastOrDefault(s => ConditionsImply(r.Conditions, s.Conditions)))
             .ToArray();
         if (activeStores.Length == 0 || activeStores.Any(s => s is null))
             return null;
@@ -176,6 +184,7 @@ internal sealed partial class NativeRuleText
         CardKeyword? requiredKeyword = null;
         Type? requiredAffliction = null;
         var allowedPiles = new List<PileType>();
+        var excludedPilesPerPath = new List<(PileType? PositivePile, List<PileType> ExcludedPiles)>();
         var firstPath = true;
 
         var reachablePaths = 0;
@@ -185,10 +194,12 @@ internal sealed partial class NativeRuleText
             if (IsUnreachableNullablePath(ret.Conditions))
                 continue;
 
+            var hasOwnerCheck = false;
             CardType? pathType = null;
             CardKeyword? pathKeyword = null;
             Type? pathAffliction = null;
             PileType? pathPile = null;
+            var pathExcludedPiles = new List<PileType>();
 
             foreach (var rawCond in ret.Conditions)
             {
@@ -210,15 +221,16 @@ internal sealed partial class NativeRuleText
                     return null;
                 }
 
-                // Owner check: card.Owner.Creature == base.Owner or card.Owner == base.Owner.Player
+                // Owner check: card.Owner.Creature == base.Owner or card.Owner == base.Owner.Player or card.Owner == base.Owner
                 if (IsEquality(new Test(condExpr, condExpected), true, out var eqL, out var eqR)
                     && ((eqL is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } } } && IsOwner(eqR))
                         || (eqR is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } } } && IsOwner(eqL))
                         || (eqL is Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } }
-                            && eqR is Call { Method.Name: "get_Player", Receiver: var pRecL } && IsOwner(pRecL))
+                            && (IsOwner(eqR) || eqR is Call { Method.Name: "get_Player", Receiver: var pRecL } && IsOwner(pRecL)))
                         || (eqR is Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } }
-                            && eqL is Call { Method.Name: "get_Player", Receiver: var pRecR } && IsOwner(pRecR))))
+                            && (IsOwner(eqL) || eqL is Call { Method.Name: "get_Player", Receiver: var pRecR } && IsOwner(pRecR)))))
                 {
+                    hasOwnerCheck = true;
                     continue;
                 }
                 // CardType check: card.Type == X
@@ -259,18 +271,25 @@ internal sealed partial class NativeRuleText
                     && UnwrapPileTypeExpr(pileOp.Left) is Input { Name: "card" }
                     && Numeric(pileOp.Right) is { } rawPt && Enum.IsDefined(typeof(PileType), (int)rawPt))
                 {
+                    var pileVal = (PileType)(int)rawPt;
                     var isPileEq = condExpected == (pileOp.Operator != "bne.un");
                     if (isPileEq)
                     {
-                        pathPile = (PileType)(int)rawPt;
+                        if (pathPile is not null && pathPile != pileVal)
+                            return null;
+                        pathPile = pileVal;
                         continue;
                     }
-                    // Inequality against an earlier switch case on a multi-case path (e.g., != Hand before == Play).
+                    // Record inequality so we can verify it is only a switch fallthrough over another allowed pile.
+                    pathExcludedPiles.Add(pileVal);
                     continue;
                 }
                 // Fail closed on any unrecognized condition (e.g., turn counters on VoidFormPower or EnsemblePower).
                 return null;
             }
+
+            if (!hasOwnerCheck)
+                return null;
 
             reachablePaths++;
             if (firstPath)
@@ -285,12 +304,24 @@ internal sealed partial class NativeRuleText
                 return null;
             }
 
+            excludedPilesPerPath.Add((pathPile, pathExcludedPiles));
             if (pathPile is { } ptVal && !allowedPiles.Contains(ptVal))
                 allowedPiles.Add(ptVal);
         }
 
         if (reachablePaths == 0 || (reachablePaths > 1 && allowedPiles.Count == 0))
             return null;
+        if (allowedPiles.Count > 0 && excludedPilesPerPath.Any(p => p.PositivePile is null))
+            return null;
+        // Fail closed on standalone `card.Pile?.Type != X` exclusions not covered by a positive pile case.
+        foreach (var (posPile, exclPiles) in excludedPilesPerPath)
+        {
+            foreach (var excl in exclPiles)
+            {
+                if (posPile is null || !allowedPiles.Contains(excl))
+                    return null;
+            }
+        }
 
         allowedPiles.Sort();
 
@@ -307,8 +338,8 @@ internal sealed partial class NativeRuleText
         var subject = string.Join(" ", subjectParts);
         var timingTag = hook.Name == "TryModifyEnergyCostInCombatLate" ? "In-combat Energy cost (late)" : "In-combat Energy cost";
         return setsZero
-            ? $"{timingTag}: {subject} cost 0 Energy (manual plays of Energy X-cost cards still spend all Energy; auto-plays spend 0)"
-            : $"{timingTag}: {subject} cost +stacks Energy";
+            ? $"{timingTag}: {subject} cost 0 Energy (Energy X-cost cards ignore cost modifiers and still spend all remaining Energy when paying resources)"
+            : $"{timingTag}: {subject} cost +stacks Energy (Energy X-cost cards ignore cost modifiers and spend all remaining Energy when played)";
     }
 
     private static bool IsUnreachableNullablePath(Test[] conditions)
@@ -344,18 +375,42 @@ internal sealed partial class NativeRuleText
         if (boosted is not [var active])
             return null;
 
+        var hasOwnerCheck = false;
         CardType? filteredType = null;
         var firstPlaysPerTurn = false;
-        foreach (var cond in active.Conditions)
+        foreach (var rawCond in active.Conditions)
         {
-            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type" } && Numeric(r) is { } ct
-                && Enum.IsDefined(typeof(CardType), (int)ct))
+            var condExpr = rawCond.Value;
+            var condExpected = rawCond.Expected;
+            while (condExpr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                condExpr = inner;
+                condExpected = !condExpected;
+            }
+            var cond = new Test(condExpr, condExpected);
+            if (IsCardOwnerCheck(cond, "card"))
+            {
+                hasOwnerCheck = true;
+                continue;
+            }
+            if (!condExpected && condExpr is Call { Method.Name: "get_IsDupe", Receiver: Input { Name: "card" } })
+                continue;
+            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type", Receiver: Input { Name: "card" } }
+                && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
             {
                 filteredType = (CardType)(int)ct;
+                continue;
             }
-            if (cond.Value is Operation { Left: Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] } })
+            if (IsCountLessThanStacksCheck(cond, out var countPred) && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes) && countedTypes.Count == 0)
+            {
                 firstPlaysPerTurn = true;
+                continue;
+            }
+            // Fail closed on any unrecognized condition (e.g., Relic.UsedThisCombat on ThrowingAxe).
+            return null;
         }
+        if (!hasOwnerCheck)
+            return null;
 
         var consumeSuffix = "";
         if (FindOverride(power, "AfterModifyingCardPlayCount") is { } afterHook)
@@ -368,6 +423,10 @@ internal sealed partial class NativeRuleText
             else if (IsPurePresentationHook(afterHook))
             {
                 handled.Add(afterHook.Name);
+            }
+            else
+            {
+                return null;
             }
         }
 
@@ -393,12 +452,16 @@ internal sealed partial class NativeRuleText
             rawPile = retPile;
             conditions = activeRet.Conditions;
         }
-        else if (body.FieldSteps.FirstOrDefault(f => f.Assignment.Target.Receiver is Input { Name: "location" }
-                && f.Assignment.Assigned is Constant { Data: int fp } && Enum.IsDefined(typeof(PileType), fp)) is { } locStep
-            && locStep.Assignment.Assigned is Constant { Data: int fieldPile })
+        else
         {
-            rawPile = fieldPile;
-            conditions = locStep.Conditions;
+            var locSteps = body.FieldSteps.Where(f => f.Assignment.Target.Receiver is Input { Name: "location" }
+                && f.Assignment.Target.Member.Name == "pileType"
+                && f.Assignment.Assigned is Constant { Data: int fp } && Enum.IsDefined(typeof(PileType), fp)).ToArray();
+            if (locSteps is [var locStep] && locStep.Assignment.Assigned is Constant { Data: int fieldPile })
+            {
+                rawPile = fieldPile;
+                conditions = locStep.Conditions;
+            }
         }
         if (rawPile is null || conditions is null)
             return null;
@@ -406,22 +469,210 @@ internal sealed partial class NativeRuleText
         if (conditions.Any(c => ContainsInternalDataOrEnergyCheck(c.Value)))
             return null;
 
-        CardType? filteredType = null;
-        foreach (var cond in conditions)
+        var hasOwnerCheck = false;
+        var onlyFromDiscard = false;
+        var filteredTypes = new List<CardType>();
+        var firstPlaysPerTurn = false;
+        foreach (var rawCond in conditions)
         {
-            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type" } && Numeric(r) is { } ct
-                && Enum.IsDefined(typeof(CardType), (int)ct))
+            var condExpr = rawCond.Value;
+            var condExpected = rawCond.Expected;
+            while (condExpr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
             {
-                filteredType = (CardType)(int)ct;
+                condExpr = inner;
+                condExpected = !condExpected;
+            }
+            var cond = new Test(condExpr, condExpected);
+            if (IsCardOwnerCheck(cond, "card"))
+            {
+                hasOwnerCheck = true;
+                continue;
+            }
+            if (IsEquality(cond, true, out var pileL, out var pileR)
+                && pileL is Field { Member.Name: "pileType", Receiver: Input { Name: "location" } }
+                && Numeric(pileR) is { } reqPile && reqPile == (int)PileType.Discard)
+            {
+                onlyFromDiscard = true;
+                continue;
+            }
+            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type", Receiver: Input { Name: "card" } }
+                && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
+            {
+                var cardType = (CardType)(int)ct;
+                if (!filteredTypes.Contains(cardType))
+                    filteredTypes.Add(cardType);
+                continue;
+            }
+            if (TryMatchCardTypeRange(cond, out var rangeTypes))
+            {
+                foreach (var rt in rangeTypes)
+                    if (!filteredTypes.Contains(rt))
+                        filteredTypes.Add(rt);
+                continue;
+            }
+            if (IsCountLessThanStacksCheck(cond, out var countPred)
+                && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes)
+                && (countedTypes.Count == 0 || countedTypes.Order().SequenceEqual(filteredTypes.Order())))
+            {
+                firstPlaysPerTurn = true;
+                continue;
+            }
+            return null;
+        }
+        if (!hasOwnerCheck)
+            return null;
+
+        var posStep = body.FieldSteps.LastOrDefault(f =>
+            f.Assignment.Target.Receiver is Input { Name: "location" }
+            && f.Assignment.Target.Member.Name == "position"
+            && ConditionsImply(conditions, f.Conditions));
+        var posSuffix = "";
+        if (posStep is not null)
+        {
+            if (posStep.Assignment.Assigned is not Constant { Data: int rawPos } || !Enum.IsDefined(typeof(CardPilePosition), rawPos))
+                return null;
+            posSuffix = $" ({((CardPilePosition)rawPos).ToString().ToLowerInvariant()})";
+        }
+
+        var consumeSuffix = "";
+        if (FindOverride(power, "AfterModifyingCardPlayResultLocation") is { } afterLoc)
+        {
+            if (IsPurePresentationHook(afterLoc))
+            {
+                handled.Add(afterLoc.Name);
+            }
+            else if (IsSelfDecrement(afterLoc))
+            {
+                handled.Add(afterLoc.Name);
+                consumeSuffix = $", then subtract 1 {PowerLabel(power)} stack";
+            }
+            else
+            {
+                return null;
             }
         }
-        if (FindOverride(power, "AfterModifyingCardPlayResultLocation") is { } afterLoc && IsPurePresentationHook(afterLoc))
-            handled.Add(afterLoc.Name);
 
-        var subject = filteredType is { } kind ? $"owned {kind} cards" : "owned cards";
-        var destPile = ((PileType)rawPile.Value).ToString().ToLowerInvariant();
-        return $"Card destination after play: {subject} move to {destPile} pile instead of discard pile";
+        var typeLabel = filteredTypes.Count > 0 ? $"{string.Join(" or ", filteredTypes)} " : "";
+        var subject = firstPlaysPerTurn
+            ? $"owner's first N {typeLabel}plays each turn (where N = stacks)"
+            : $"owned {typeLabel}cards";
+        var destLabel = PileLocationLabel((PileType)rawPile.Value);
+        var insteadSuffix = onlyFromDiscard ? " instead of discard pile" : "";
+        return $"Card destination after play: {subject} move to {destLabel}{posSuffix}{insteadSuffix}{consumeSuffix}";
     }
+
+    private static bool IsCardOwnerCheck(Test cond, string cardParamName)
+        => IsEquality(cond, true, out var eqL, out var eqR)
+            && ((eqL is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: var n1 } } } && n1 == cardParamName && IsOwner(eqR))
+                || (eqR is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: var n2 } } } && n2 == cardParamName && IsOwner(eqL))
+                || (eqL is Call { Method.Name: "get_Owner", Receiver: Input { Name: var n3 } } && n3 == cardParamName
+                    && (IsOwner(eqR) || eqR is Call { Method.Name: "get_Player", Receiver: var pRecL } && IsOwner(pRecL)))
+                || (eqR is Call { Method.Name: "get_Owner", Receiver: Input { Name: var n4 } } && n4 == cardParamName
+                    && (IsOwner(eqL) || eqL is Call { Method.Name: "get_Player", Receiver: var pRecR } && IsOwner(pRecR))));
+
+    private static bool TryMatchCardTypeRange(Test cond, out List<CardType> matchedTypes)
+    {
+        matchedTypes = [];
+        if (cond.Value is not Operation { Operator: "bgt.un" or "cgt.un" or "ble.un" or "cle.un",
+                Left: Operation { Operator: "sub", Left: Call { Method.Name: "get_Type" }, Right: Constant { Data: int offset } },
+                Right: Constant { Data: int span } } op)
+            return false;
+        var inRange = op.Operator is "ble.un" or "cle.un" ? cond.Expected : !cond.Expected;
+        if (!inRange || span < 0 || span > 4)
+            return false;
+        for (var v = offset; v <= offset + span; v++)
+        {
+            if (!Enum.IsDefined(typeof(CardType), v))
+                return false;
+            matchedTypes.Add((CardType)v);
+        }
+        return matchedTypes.Count > 0;
+    }
+
+    private static bool IsCountLessThanStacksCheck(Test cond, out MethodInfo? predicate)
+    {
+        predicate = null;
+        if (cond.Value is not Operation { Operator: "bge" or "blt" or "clt",
+                Left: Call { Method.Name: nameof(Enumerable.Count),
+                    Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] },
+                Right: var rhs } op)
+            return false;
+        if (!IsStackAmount(rhs))
+            return false;
+        var isLess = op.Operator is "blt" or "clt" ? cond.Expected : !cond.Expected;
+        if (!isLess)
+            return false;
+        predicate = pred;
+        return true;
+    }
+
+    private bool IsOwnerCardPlaysStartedPredicate(MethodInfo? pred, out List<CardType> filteredTypes)
+    {
+        filteredTypes = [];
+        if (pred is null || pred.ContainsGenericParameters)
+            return false;
+        var body = Body(pred);
+        if (body.Incomplete || body.Returns.Count == 0)
+            return false;
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
+            return false;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var retBool) && retBool))
+            tests.Add(new Test(positive[0].Value, true));
+
+        var hasTurnCheck = false;
+        var hasOwnerCheck = false;
+        foreach (var raw in tests)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expected && expr is Call { Method.Name: "HappenedThisTurn" })
+            {
+                hasTurnCheck = true;
+                continue;
+            }
+            if (expected && expr is Call { Method.Name: "get_IsFirstInSeries" })
+                continue;
+            if (IsEquality(new Test(expr, expected), true, out var eqL, out var eqR)
+                && ((IsEntryOwnerExpr(eqL) && IsOwnerPlayerOrCreature(eqR))
+                    || (IsEntryOwnerExpr(eqR) && IsOwnerPlayerOrCreature(eqL))))
+            {
+                hasOwnerCheck = true;
+                continue;
+            }
+            if (IsEquality(new Test(expr, expected), true, out var tl, out var tr)
+                && tl is Call { Method.Name: "get_Type" } && Numeric(tr) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
+            {
+                var cardType = (CardType)(int)ct;
+                if (!filteredTypes.Contains(cardType))
+                    filteredTypes.Add(cardType);
+                continue;
+            }
+            if (TryMatchCardTypeRange(new Test(expr, expected), out var rangeTypes))
+            {
+                foreach (var rt in rangeTypes)
+                    if (!filteredTypes.Contains(rt))
+                        filteredTypes.Add(rt);
+                continue;
+            }
+            return false;
+        }
+        return hasTurnCheck && hasOwnerCheck;
+    }
+
+    private static bool IsEntryOwnerExpr(Value? value)
+        => value is Call { Method.Name: "get_Actor" }
+            || value is Call { Method.Name: "get_Player", Receiver: Call { Method.Name: "get_CardPlay" } };
+
+    private static bool IsOwnerPlayerOrCreature(Value? value)
+        => IsOwnerOrClosureOwner(value)
+            || value is Call { Method.Name: "get_Player", Receiver: var rec } && IsOwnerOrClosureOwner(rec);
 
     private bool IsPurePresentationHook(MethodInfo method)
         => Body(method) is { Incomplete: false, Writes.Count: 0, FieldSteps.Count: 0 } body
@@ -579,8 +830,11 @@ internal sealed partial class NativeRuleText
 
     private bool IsSelfDecrement(MethodInfo method)
         => Body(method) is { Incomplete: false, Writes.Count: 0, FieldSteps.Count: 0 } body
+            && body.Calls.All(step => IsBenignReadOrPlumbingCall(step.Call.Method)
+                || (step.Call.Method.DeclaringType == typeof(PowerCmd) && step.Call.Method.Name == nameof(PowerCmd.Decrement)))
             && body.Calls.Where(step => step.Call.Method.DeclaringType == typeof(PowerCmd)).DistinctBy(step => step.Index).ToArray()
-                is [{ Conditions.Length: 0, Call: { Method.Name: nameof(PowerCmd.Decrement), Arguments: [Input { Name: "this" }] } }];
+                is [{ Conditions: var decConds, Call: { Method.Name: nameof(PowerCmd.Decrement), Arguments: [Input { Name: "this" }] } }]
+            && decConds.All(c => IsCardOwnerCheck(c, "card"));
 
     private void ReadDamageCapHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
     {
@@ -625,15 +879,69 @@ internal sealed partial class NativeRuleText
         if (body.Incomplete)
             return null;
         var zeroed = body.Returns.Where(r => Numeric(r.Value) == 0m).ToArray();
-        if (zeroed.Length == 0)
+        if (zeroed is not [var active])
             return null;
-        var consumeSuffix = "";
-        if (FindOverride(power, "AfterModifyingHpLostAfterOsty") is { } afterHook && IsSelfDecrement(afterHook))
+
+        var hasOwnerCheck = false;
+        var excludedCards = new List<Type>();
+        foreach (var rawCond in active.Conditions)
         {
-            handled.Add(afterHook.Name);
-            consumeSuffix = $" and subtract 1 {PowerLabel(power)} stack";
+            var expr = rawCond.Value;
+            var expected = rawCond.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (IsEquality(new Test(expr, expected), true, out var eqL, out var eqR)
+                && ((eqL is Input { Name: "target" } && IsOwner(eqR))
+                    || (eqR is Input { Name: "target" } && IsOwner(eqL))))
+            {
+                hasOwnerCheck = true;
+                continue;
+            }
+            if (!expected && expr is Operation { Operator: "isinst", Left: Input { Name: "cardSource" }, Right: Constant { Data: Type cardType } }
+                && typeof(CardModel).IsAssignableFrom(cardType))
+            {
+                if (!excludedCards.Contains(cardType))
+                    excludedCards.Add(cardType);
+                continue;
+            }
+            if (!expected && expr is Operation { Operator: "cgt.un",
+                    Left: Operation { Operator: "isinst", Left: Input { Name: "cardSource" }, Right: Constant { Data: Type cardTypePos } },
+                    Right: Constant { Data: 0 or null } }
+                && typeof(CardModel).IsAssignableFrom(cardTypePos))
+            {
+                if (!excludedCards.Contains(cardTypePos))
+                    excludedCards.Add(cardTypePos);
+                continue;
+            }
+            return null;
         }
-        return $"Prevent next HP loss: when owner would lose nonzero HP (checked after Block and {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} redirection), reduce HP loss to 0{consumeSuffix}";
+        if (!hasOwnerCheck)
+            return null;
+
+        var consumeSuffix = "";
+        if (FindOverride(power, "AfterModifyingHpLostAfterOsty") is { } afterHook)
+        {
+            if (IsSelfDecrement(afterHook))
+            {
+                handled.Add(afterHook.Name);
+                consumeSuffix = $" and subtract 1 {PowerLabel(power)} stack";
+            }
+            else if (IsPurePresentationHook(afterHook))
+            {
+                handled.Add(afterHook.Name);
+            }
+            else
+            {
+                return null;
+            }
+        }
+        var exceptSuffix = excludedCards.Count > 0
+            ? $" (except from {string.Join(" or ", excludedCards.Select(ModelLabel))})"
+            : "";
+        return $"Prevent next HP loss: when owner would lose nonzero HP{exceptSuffix} (checked after Block and {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} redirection), reduce HP loss to 0{consumeSuffix}";
     }
 
     private List<string>? ReadDamageCap(MethodInfo hook)

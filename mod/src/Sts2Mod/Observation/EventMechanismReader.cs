@@ -1006,8 +1006,13 @@ internal static class EventMechanismReader
         if (targetEnchantment is null)
             return false;
 
+        var candidateParam = predMethod.GetParameters().FirstOrDefault(p => typeof(CardModel).IsAssignableFrom(p.ParameterType));
+        if (candidateParam?.Name is not { } candidateName)
+            return false;
+
         var body = ReadBody(predMethod);
-        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: Call { Method.Name: "CanEnchant", Receiver: var rec, Arguments: [Input] } }])
+        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: Call { Method.Name: "CanEnchant", Receiver: var rec, Arguments: [Input { Name: var argName }] } }]
+            || argName != candidateName)
             return false;
         return ExtractEnchantmentType(rec) == targetEnchantment;
     }

@@ -19,6 +19,7 @@ internal sealed class NativeRuleBody
     internal sealed record Input(string Name, Type? Type = null) : Value;
     internal sealed record LocalAddress(int Slot) : Value;
     internal sealed record StateFieldAddress(FieldInfo Member) : Value;
+    internal sealed record ArrayElementAddress(Value Array, Value Index) : Value;
     internal sealed record Field(FieldInfo Member, Value? Receiver) : Value;
     internal sealed record Call(MethodBase Method, Value? Receiver, Value[] Arguments) : Value;
     internal sealed record Operation(string Operator, Value Left, Value? Right = null) : Value;
@@ -151,17 +152,18 @@ internal sealed class NativeRuleBody
     public List<Terminal> Terminals { get; } = [];
     public HashSet<FieldInfo> Writes { get; } = [];
     public HashSet<Loop> Loops { get; } = [];
+    public HashSet<(int Start, int End)> ForeachRanges { get; } = [];
     public bool Incomplete { get; private set; }
     public bool ReadsParameters { get; private set; }
 
-    public static NativeRuleBody Read(MethodInfo method)
+    public static NativeRuleBody Read(MethodBase method)
     {
         var body = new NativeRuleBody();
         body.ReadMethod(method);
         return body;
     }
 
-    private void ReadMethod(MethodInfo original)
+    private void ReadMethod(MethodBase original)
     {
         if (original.ContainsGenericParameters || original.IsGenericMethodDefinition)
         {
@@ -169,7 +171,7 @@ internal sealed class NativeRuleBody
             return;
         }
         var stateMachine = original.GetCustomAttribute<AsyncStateMachineAttribute>()?.StateMachineType;
-        var method = stateMachine is null ? original : AccessTools.Method(stateMachine, "MoveNext");
+        MethodBase? method = stateMachine is null ? original : AccessTools.Method(stateMachine, "MoveNext");
         if (method?.GetMethodBody() is null)
         {
             Incomplete = true;
@@ -229,17 +231,36 @@ internal sealed class NativeRuleBody
                         args[i] = path.Pop();
                     var rawReceiver = code != OpCodes.Newobj && !target.IsStatic ? path.Pop() : null;
                     var receiver = rawReceiver is not null ? path.Deref(rawReceiver) : null;
-                    if (code == OpCodes.Call && target is ConstructorInfo && rawReceiver is LocalAddress ctorSlot)
+                    if (code == OpCodes.Call && target is ConstructorInfo
+                        && rawReceiver is LocalAddress or StateFieldAddress or ArrayElementAddress)
                     {
                         var hasWritableByRef = target.GetParameters().Any(IsWritableByRef);
                         InvalidateByRefArguments(path, target, args, skipIndex: -1);
-                        if (!hasWritableByRef)
+                        if (rawReceiver is LocalAddress ctorSlot)
                         {
-                            var constructed = new Call(target, null, args.Select(path.Materialize).ToArray());
-                            path.Locals[ctorSlot.Slot] = constructed;
-                            continue;
+                            if (!hasWritableByRef)
+                            {
+                                var constructed = new Call(target, null, args.Select(path.Materialize).ToArray());
+                                path.Locals[ctorSlot.Slot] = constructed;
+                                continue;
+                            }
+                            path.Locals.Remove(ctorSlot.Slot);
                         }
-                        path.Locals.Remove(ctorSlot.Slot);
+                        else if (rawReceiver is StateFieldAddress ctorSmSlot)
+                        {
+                            if (!hasWritableByRef)
+                            {
+                                var constructed = new Call(target, null, args.Select(path.Materialize).ToArray());
+                                path.StateFields[ctorSmSlot.Member] = constructed;
+                                continue;
+                            }
+                            path.StateFields[ctorSmSlot.Member] = Missing;
+                        }
+                        else if (rawReceiver is ArrayElementAddress { Array: ArrayInit ctorArr })
+                        {
+                            path.InvalidatedArrays.Add(ctorArr.Id);
+                            path.ArrayElements.Remove(ctorArr.Id);
+                        }
                     }
                     var isDictRemoveOut = false;
                     if (target.Name == "Remove" && target.DeclaringType is { IsGenericType: true } dictType
@@ -342,6 +363,8 @@ internal sealed class NativeRuleBody
                             path.Index = afterLoop;
                             continue;
                         }
+                        if (bodyStart < index)
+                            ForeachRanges.Add((bodyStart, index));
                         // Quantify the body over the enumerator's elements. The second visit
                         // leaves the representative iteration and proceeds after the loop.
                         if (visits == 0)
@@ -361,7 +384,7 @@ internal sealed class NativeRuleBody
                             || (decLeft is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "add", Left: var addL, Right: Constant { Data: 1 } }] }
                                 && (addL as Constant ?? Fold(addL)) is { Data: 0 });
                         if (visits == 0 && expected && isDecZero && IsCountedLoopBound(decRight)
-                            && !LoopBodyReadsCounter(instructions, destination, index))
+                            && !LoopBodyDependsOnIteration(method, instructions, destination, index, path))
                         {
                             Loops.Add(new Loop(destination, index, decRight));
                             path.Index = destination;
@@ -400,6 +423,8 @@ internal sealed class NativeRuleBody
                                 }
                                 continue;
                             }
+                            Incomplete = true;
+                            break;
                         }
                         // A counter loop also runs one representative iteration and records its count.
                         if (visits == 0 && expected && counter is { Operator: "blt" or "ble" }
@@ -409,23 +434,26 @@ internal sealed class NativeRuleBody
                             if (limit is Constant { Data: int fixedBound })
                             {
                                 var count = fixedBound - (alreadyIncremented ? start - 1 : start) + (counter.Operator == "ble" ? 1 : 0);
-                                if (count > 0)
+                                if (count > 0 && !LoopBodyDependsOnIteration(method, instructions, destination, index, path))
                                 {
                                     Loops.Add(new Loop(destination, index, new Constant(count)));
                                     if (!alreadyIncremented)
                                         path.Index = destination;
+                                    continue;
                                 }
-                                continue;
+                                if (count <= 0)
+                                    continue;
                             }
-                            if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
-                                && limit is not null && IsCountedLoopBound(limit))
+                            else if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
+                                && limit is not null && IsCountedLoopBound(limit)
+                                && !LoopBodyDependsOnIteration(method, instructions, destination, index, path))
                             {
                                 Loops.Add(new Loop(destination, index, limit));
                                 if (!alreadyIncremented)
                                     path.Index = destination;
                                 continue;
                             }
-                            if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
+                            else if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
                                 && limit is Operation { Operator: "ldlen" }
                                 && IsReadOnlyArrayScanLoop(instructions, destination, index))
                             {
@@ -466,7 +494,7 @@ internal sealed class NativeRuleBody
 
                 if (code == OpCodes.Ret)
                 {
-                    if (stateMachine is null && original.ReturnType != typeof(void))
+                    if (stateMachine is null && original is MethodInfo retMi && retMi.ReturnType != typeof(void))
                         Returns.Add(new Result(path.Materialize(path.Pop()), [.. path.Conditions]));
                     Terminals.Add(new Terminal([.. path.Conditions], path.CumulativeVisited.ToHashSet(), true));
                     break;
@@ -484,6 +512,13 @@ internal sealed class NativeRuleBody
                     var targetAddr = path.Pop();
                     if (targetAddr is LocalAddress initSlot)
                         path.Locals[initSlot.Slot] = new Constant(0);
+                    else if (targetAddr is StateFieldAddress initSmField)
+                        path.StateFields[initSmField.Member] = new Constant(0);
+                    else if (targetAddr is ArrayElementAddress { Array: ArrayInit initArr })
+                    {
+                        path.InvalidatedArrays.Add(initArr.Id);
+                        path.ArrayElements.Remove(initArr.Id);
+                    }
                     else if (targetAddr is Input initParam)
                     {
                         path.OutValues[initParam.Name] = new Constant(0m);
@@ -498,7 +533,27 @@ internal sealed class NativeRuleBody
                     if (address is LocalAddress loadSlot)
                         path.Stack.Add(path.Locals.GetValueOrDefault(loadSlot.Slot, Missing));
                     else if (address is StateFieldAddress loadSmField)
-                        path.Stack.Add(path.StateFields.GetValueOrDefault(loadSmField.Member, Missing));
+                    {
+                        if (path.StateFields.TryGetValue(loadSmField.Member, out var smStored))
+                            path.Stack.Add(smStored);
+                        else if (arguments.FirstOrDefault(arg => arg.Name == loadSmField.Member.Name) is { } smArg)
+                        {
+                            ReadsParameters = true;
+                            path.Stack.Add(smArg);
+                        }
+                        else
+                            path.Stack.Add(new Field(loadSmField.Member, StateMachine));
+                    }
+                    else if (address is ArrayElementAddress loadElem)
+                    {
+                        if (loadElem.Array is ArrayInit init && !path.InvalidatedArrays.Contains(init.Id)
+                            && loadElem.Index is Constant { Data: int idx }
+                            && path.ArrayElements.TryGetValue(init.Id, out var slots)
+                            && slots.TryGetValue(idx, out var stored))
+                            path.Stack.Add(stored);
+                        else
+                            path.Stack.Add(new Operation("ldelem", loadElem.Array, loadElem.Index));
+                    }
                     else if (address is Input loadParam)
                         path.Stack.Add(path.OutValues.GetValueOrDefault(loadParam.Name, loadParam));
                     else
@@ -512,6 +567,11 @@ internal sealed class NativeRuleBody
                         path.Locals[storeSlot.Slot] = storedValue;
                     else if (address is StateFieldAddress storeSmField)
                         path.StateFields[storeSmField.Member] = storedValue;
+                    else if (address is ArrayElementAddress { Array: ArrayInit storeArr })
+                    {
+                        path.InvalidatedArrays.Add(storeArr.Id);
+                        path.ArrayElements.Remove(storeArr.Id);
+                    }
                     else if (address is Input storeParam)
                     {
                         path.OutValues[storeParam.Name] = storedValue;
@@ -603,6 +663,12 @@ internal sealed class NativeRuleBody
                         }
                     }
                 }
+                else if (code == OpCodes.Ldelema)
+                {
+                    var elemIdx = path.Pop();
+                    var arr = path.Pop();
+                    path.Stack.Add(new ArrayElementAddress(arr, elemIdx));
+                }
                 else if (code.Name?.StartsWith("ldelem", StringComparison.Ordinal) == true)
                 {
                     var element = path.Pop();
@@ -646,13 +712,18 @@ internal sealed class NativeRuleBody
             else if (args[i] is LocalAddress byRefLocal)
                 path.Locals.Remove(byRefLocal.Slot);
             else if (args[i] is StateFieldAddress byRefSmField)
-                path.StateFields.Remove(byRefSmField.Member);
+                path.StateFields[byRefSmField.Member] = Missing;
+            else if (args[i] is ArrayElementAddress { Array: ArrayInit byRefArr })
+            {
+                path.InvalidatedArrays.Add(byRefArr.Id);
+                path.ArrayElements.Remove(byRefArr.Id);
+            }
         }
     }
 
-    private static bool LoopBodyReadsCounter(List<CodeInstruction> instructions, int start, int end)
+    private static (FieldInfo? Field, int? Slot, int IncLoadCursor) FindLoopCounter(List<CodeInstruction> instructions, int start, int end)
     {
-        // Identify the loop counter read in the back-branch condition (`(decimal)i < bound`) and its increment store right before it.
+        // Locate the counter increment store right before the back-branch comparison.
         FieldInfo? counterField = null;
         int? counterSlot = null;
         var incCursor = -1;
@@ -660,7 +731,8 @@ internal sealed class NativeRuleBody
         {
             var code = instructions[cursor].opcode;
             if (code == OpCodes.Stfld && instructions[cursor].operand is FieldInfo field
-                && field.FieldType == typeof(int))
+                && (field.FieldType == typeof(int) || field.FieldType == typeof(decimal))
+                && HasPrecedingIncrementOp(instructions, start, cursor, field, null))
             {
                 counterField = field;
                 incCursor = cursor;
@@ -668,14 +740,19 @@ internal sealed class NativeRuleBody
             }
             if (code.Name?.StartsWith("stloc", StringComparison.Ordinal) == true)
             {
-                counterSlot = Slot(code.Name, instructions[cursor].operand);
-                incCursor = cursor;
-                break;
+                // Verify this stloc is an increment (`ldloc s; ...; add/op_Increment; stloc s`), not a bound temp.
+                var slot = Slot(code.Name, instructions[cursor].operand);
+                if (HasPrecedingIncrementOp(instructions, start, cursor, null, slot))
+                {
+                    counterSlot = slot;
+                    incCursor = cursor;
+                    break;
+                }
             }
         }
         if (incCursor < 0)
-            return true;
-        // Find the single load of that counter feeding the `i++` right before `incCursor` (in async state machines
+            return (null, null, -1);
+        // Find the single load of that counter feeding `i++` right before `incCursor` (in async state machines
         // Roslyn compiles `i++` via a temp local: `ldfld i; stloc tmp; ldarg.0; ldloc tmp; ldc.i4.1; add; stfld i`).
         var incLoadCursor = incCursor;
         for (var cursor = incCursor - 1; cursor >= Math.Max(start, incCursor - 8); cursor--)
@@ -690,18 +767,232 @@ internal sealed class NativeRuleBody
                 break;
             }
         }
-        for (var cursor = start; cursor < incLoadCursor; cursor++)
+        return (counterField, counterSlot, incLoadCursor);
+    }
+
+    private static bool HasPrecedingIncrementOp(List<CodeInstruction> instructions, int start, int storeCursor, FieldInfo? field, int? slot)
+    {
+        var sawAdd = false;
+        for (var cursor = storeCursor - 1; cursor >= Math.Max(start, storeCursor - 8); cursor--)
         {
             var code = instructions[cursor].opcode;
-            if (counterField is not null && (code == OpCodes.Ldfld || code == OpCodes.Ldflda)
-                && Equals(instructions[cursor].operand, counterField))
-                return true;
-            if (counterSlot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
-                && Slot(code.Name, instructions[cursor].operand) == counterSlot.Value)
+            if (code == OpCodes.Add
+                || ((code == OpCodes.Call || code == OpCodes.Callvirt)
+                    && instructions[cursor].operand is MethodInfo { Name: "op_Increment" or "op_Addition" }))
+                sawAdd = true;
+            if (sawAdd && ((field is not null && code == OpCodes.Ldfld && Equals(instructions[cursor].operand, field))
+                || (slot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                    && !code.Name.StartsWith("ldloca", StringComparison.Ordinal)
+                    && Slot(code.Name, instructions[cursor].operand) == slot.Value)))
                 return true;
         }
         return false;
     }
+
+    private static bool LoopBodyDependsOnIteration(MethodBase method, List<CodeInstruction> instructions, int start, int end, Path path)
+    {
+        var (counterField, counterSlot, incLoadCursor) = FindLoopCounter(instructions, start, end);
+        if (incLoadCursor < 0)
+            return true;
+
+        var localVars = method.GetMethodBody()?.LocalVariables;
+        var seenLocalWrite = new HashSet<int>();
+        var readLocals = new HashSet<int>();
+        var readBeforeWriteLocals = new HashSet<int>();
+        var writtenLocals = new HashSet<int>();
+        var seenFieldWrite = new HashSet<FieldInfo>();
+        var readFields = new HashSet<FieldInfo>();
+        var readBeforeWriteFields = new HashSet<FieldInfo>();
+        var writtenFields = new HashSet<FieldInfo>();
+
+        for (var cursor = start; cursor < incLoadCursor; cursor++)
+        {
+            var code = instructions[cursor].opcode;
+            var operand = instructions[cursor].operand;
+            // Reject any read or address-of on the loop counter inside the loop body,
+            // except when it only indexes a write-only output array (`array[i] = ...`) with no reads from arrays.
+            if (counterField is not null && (code == OpCodes.Ldfld || code == OpCodes.Ldflda)
+                && Equals(operand, counterField))
+            {
+                if (code == OpCodes.Ldflda || !IsWriteOnlyArrayIndexLoad(instructions, start, cursor, incLoadCursor))
+                    return true;
+                continue;
+            }
+            if (counterSlot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                && Slot(code.Name, operand) == counterSlot.Value)
+            {
+                if (code.Name.StartsWith("ldloca", StringComparison.Ordinal) || !IsWriteOnlyArrayIndexLoad(instructions, start, cursor, incLoadCursor))
+                    return true;
+                continue;
+            }
+
+            // Track locals and state-machine fields mutated in the body to reject loop-carried state (e.g. `reward++`).
+            if (code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true)
+            {
+                var slot = Slot(code.Name, operand);
+                if (slot != counterSlot && !IsCompilerPlumbingLocal(localVars, slot))
+                {
+                    readLocals.Add(slot);
+                    if (code.Name.StartsWith("ldloca", StringComparison.Ordinal))
+                    {
+                        writtenLocals.Add(slot);
+                        if (!seenLocalWrite.Contains(slot))
+                            readBeforeWriteLocals.Add(slot);
+                    }
+                    else if (!seenLocalWrite.Contains(slot))
+                    {
+                        readBeforeWriteLocals.Add(slot);
+                    }
+                }
+            }
+            else if (code.Name?.StartsWith("stloc", StringComparison.Ordinal) == true)
+            {
+                var slot = Slot(code.Name, operand);
+                if (slot != counterSlot && !IsCompilerPlumbingLocal(localVars, slot))
+                {
+                    seenLocalWrite.Add(slot);
+                    writtenLocals.Add(slot);
+                }
+            }
+            else if ((code == OpCodes.Ldfld || code == OpCodes.Ldflda) && operand is FieldInfo lf
+                && lf != counterField && IsUserStateField(lf))
+            {
+                readFields.Add(lf);
+                if (code == OpCodes.Ldflda)
+                {
+                    writtenFields.Add(lf);
+                    if (!seenFieldWrite.Contains(lf))
+                        readBeforeWriteFields.Add(lf);
+                }
+                else if (!seenFieldWrite.Contains(lf))
+                {
+                    readBeforeWriteFields.Add(lf);
+                }
+            }
+            else if (code == OpCodes.Stfld && operand is FieldInfo sf
+                && sf != counterField && IsUserStateField(sf))
+            {
+                seenFieldWrite.Add(sf);
+                writtenFields.Add(sf);
+            }
+        }
+
+        // Any local or lifted state-machine field written in the loop body that is also read before its first
+        // write (or initialized before the loop and read in the body) can vary across iterations.
+        foreach (var slot in writtenLocals)
+        {
+            if (readBeforeWriteLocals.Contains(slot) || (readLocals.Contains(slot) && path.Locals.ContainsKey(slot)))
+                return true;
+        }
+        foreach (var field in writtenFields)
+        {
+            if (readBeforeWriteFields.Contains(field) || (readFields.Contains(field) && path.StateFields.ContainsKey(field)))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool IsWriteOnlyArrayIndexLoad(List<CodeInstruction> instructions, int start, int loadCursor, int end)
+    {
+        if (loadCursor + 1 >= end)
+            return false;
+        // Require that the loop body does not read from any array element (`ldelem*`).
+        for (var c = start; c < end; c++)
+        {
+            if (instructions[c].opcode.Name?.StartsWith("ldelem", StringComparison.Ordinal) == true
+                && instructions[c].opcode != OpCodes.Ldelema)
+                return false;
+        }
+        var next = instructions[loadCursor + 1];
+        if (next.opcode == OpCodes.Ldelema && next.operand is Type elemType
+            && elemType == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardPileAddResult))
+            return true;
+        // Direct write into an output array: `ldloc arr; ldloc i; <compute item>; stelem.ref` (e.g. CallOfTheVoidPower).
+        var sawStoreElem = false;
+        for (var c = loadCursor + 1; c < Math.Min(end, loadCursor + 24); c++)
+        {
+            var op = instructions[c].opcode;
+            if (op == OpCodes.Stelem_Ref)
+            {
+                sawStoreElem = true;
+                break;
+            }
+            if (op.FlowControl is FlowControl.Branch or FlowControl.Cond_Branch or FlowControl.Return or FlowControl.Throw)
+                break;
+            if (op == OpCodes.Add || op == OpCodes.Sub || op == OpCodes.Mul || op == OpCodes.Div || op == OpCodes.Rem)
+                break;
+        }
+        if (sawStoreElem)
+            return true;
+        // Async lifted index temp: `ldfld i; stfld <>7__wrap; ...; ldfld <>7__wrap; [ldloc val;] stelem/ldelema CardPileAddResult` (PersonalHivePower).
+        if (next.opcode == OpCodes.Stfld && next.operand is FieldInfo tempField
+            && tempField.DeclaringType?.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false) == true)
+        {
+            var foundWrite = false;
+            for (var c = loadCursor + 2; c < end; c++)
+            {
+                if ((instructions[c].opcode == OpCodes.Ldfld || instructions[c].opcode == OpCodes.Ldflda)
+                    && Equals(instructions[c].operand, tempField))
+                {
+                    if (c + 1 < end && instructions[c + 1].opcode == OpCodes.Ldelema
+                        && instructions[c + 1].operand is Type et
+                        && et == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardPileAddResult))
+                    {
+                        foundWrite = true;
+                        continue;
+                    }
+                    if (c + 2 < end
+                        && instructions[c + 1].opcode.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                        && instructions[c + 2].opcode == OpCodes.Stelem
+                        && instructions[c + 2].operand is Type et2
+                        && et2 == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardPileAddResult))
+                    {
+                        foundWrite = true;
+                        continue;
+                    }
+                    return false;
+                }
+            }
+            return foundWrite;
+        }
+        if (next.opcode.Name?.StartsWith("stloc", StringComparison.Ordinal) == true)
+        {
+            var tempSlot = Slot(next.opcode.Name, next.operand);
+            var foundWriteIdx = false;
+            for (var c = loadCursor + 2; c < end; c++)
+            {
+                if (instructions[c].opcode.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                    && Slot(instructions[c].opcode.Name!, instructions[c].operand) == tempSlot)
+                {
+                    if (c + 1 < end && instructions[c + 1].opcode == OpCodes.Stfld
+                        && instructions[c + 1].operand is FieldInfo liftedField
+                        && liftedField.DeclaringType?.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false) == true)
+                    {
+                        foundWriteIdx = true;
+                        continue;
+                    }
+                    if (c + 1 < end && instructions[c + 1].opcode == OpCodes.Ldelema
+                        && instructions[c + 1].operand is Type et
+                        && et == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardPileAddResult))
+                    {
+                        foundWriteIdx = true;
+                        continue;
+                    }
+                    return false;
+                }
+            }
+            return foundWriteIdx;
+        }
+        return false;
+    }
+
+    private static bool IsCompilerPlumbingLocal(IList<LocalVariableInfo>? localVars, int slot)
+        => localVars is not null && slot >= 0 && slot < localVars.Count
+            && localVars[slot].LocalType.Namespace == "System.Runtime.CompilerServices";
+
+    private static bool IsUserStateField(FieldInfo field)
+        => field.DeclaringType?.IsDefined(typeof(CompilerGeneratedAttribute), inherit: false) == true
+            && !field.Name.StartsWith("<>", StringComparison.Ordinal);
 
     private static bool IsDecimalConstant(Value value, int expected)
         => (value is Call { Method.Name: "op_Implicit", Arguments: [var arg] } && (arg as Constant ?? Fold(arg)) is { Data: int n } && n == expected)
@@ -747,32 +1038,20 @@ internal sealed class NativeRuleBody
 
     private static bool BodyBranchesOnLoopCounter(List<CodeInstruction> instructions, int start, int end)
     {
-        // Look at the operand loaded immediately before the back-branch limit (`i < bound`).
-        FieldInfo? counterField = null;
-        int? counterSlot = null;
-        for (var cursor = Math.Max(start, end - 4); cursor < end; cursor++)
+        var (counterField, counterSlot, incLoadCursor) = FindLoopCounter(instructions, start, end);
+        if (incLoadCursor < 0)
+            return false;
+        for (var cursor = start; cursor < incLoadCursor; cursor++)
         {
             var code = instructions[cursor].opcode;
-            if (code == OpCodes.Ldfld && instructions[cursor].operand is FieldInfo field)
-                counterField = field;
-            else if (code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
-                && !code.Name.StartsWith("ldloca", StringComparison.Ordinal))
-                counterSlot = Slot(code.Name, instructions[cursor].operand);
+            if (counterField is not null && (code == OpCodes.Ldfld || code == OpCodes.Ldflda)
+                && Equals(instructions[cursor].operand, counterField))
+                return true;
+            if (counterSlot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                && Slot(code.Name, instructions[cursor].operand) == counterSlot.Value)
+                return true;
         }
-        var loads = 0;
-        for (var cursor = start; cursor < end; cursor++)
-        {
-            var code = instructions[cursor].opcode;
-            if (counterField is not null && code == OpCodes.Ldfld && Equals(instructions[cursor].operand, counterField))
-                loads++;
-            else if (counterSlot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
-                && !code.Name.StartsWith("ldloca", StringComparison.Ordinal)
-                && Slot(code.Name, instructions[cursor].operand) == counterSlot)
-                loads++;
-        }
-        // One load is for the loop increment (`i++`) and one is for the back-branch test (`i < bound`).
-        // Any additional load means the loop body itself reads the iteration index.
-        return loads > 2;
+        return false;
     }
 
     private static Operation CaseMatch(Value selector, int arm)

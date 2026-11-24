@@ -31,6 +31,9 @@ internal static class NativeHookDispatch
         var unread = new List<string>();
         foreach (var dispatcher in new[] { typeof(Hook), typeof(Creature), typeof(CreatureCmd), typeof(PowerCmd) })
             ReadType(dispatcher, slots, unread);
+        // CardModel.OnPlayWrapper dispatches AfterModifyingCardPlayResultLocation directly outside Hook.
+        if (typeof(AbstractModel).GetMethod("AfterModifyingCardPlayResultLocation", Declared) is { IsVirtual: true } cardLocAfter)
+            slots.Add(cardLocAfter.GetBaseDefinition());
         return new DispatchIndex(slots, unread);
     }
 

@@ -673,7 +673,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     private sealed record Effect(string Text, bool Attack = false, string? Trigger = null, bool ChangesGuard = false,
         Type? AddedPower = null, Type? AddedCard = null, Type? AddedSummon = null, string? ForcedMove = null, bool KillsSelf = false);
 
-    private sealed record GuardedEffects(Test[] Path, string Guard, Effect[] Effects, string? Repetitions = null, Loop? Loop = null);
+    private sealed record GuardedEffects(Test[] Path, string Guard, Effect[] Effects, string? Repetitions = null, Loop? Loop = null, (int Start, int End)? ForeachRange = null);
 
     private IEnumerable<Effect> RenderBranches(List<GuardedEffects> effects)
     {
@@ -871,6 +871,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 .GroupBy(l => (l.Start, l.End))
                 .OrderBy(g => g.Key.Start)
                 .ToArray();
+            var foreachRange = body.ForeachRanges
+                .Where(r => group.Key.Index >= r.Start && group.Key.Index < r.End)
+                .OrderByDescending(r => r.Start)
+                .Cast<(int Start, int End)?>()
+                .FirstOrDefault();
             var loop = enclosingLoopGroups.Length > 0 ? enclosingLoopGroups[^1].First() : null;
             string? repetitions = null;
             if (enclosingLoopGroups.Length > 0)
@@ -984,17 +989,17 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 GuardedEffects combinedGuardEffect;
                 if (pathGuards.Any(pg => pg.Guard.Length == 0))
                 {
-                    combinedGuardEffect = new([], "", extracted.ToArray(), repetitions, loop);
+                    combinedGuardEffect = new([], "", extracted.ToArray(), repetitions, loop, foreachRange);
                 }
                 else if (pathGuards.Count == 1)
                 {
-                    combinedGuardEffect = new(pathGuards[0].Path, pathGuards[0].Guard, extracted.ToArray(), repetitions, loop);
+                    combinedGuardEffect = new(pathGuards[0].Path, pathGuards[0].Guard, extracted.ToArray(), repetitions, loop, foreachRange);
                 }
                 else
                 {
                     var joinedGuard = string.Join(" or ", pathGuards.Select(pg =>
                         pg.Guard.Contains(" and ", StringComparison.Ordinal) ? $"({pg.Guard})" : pg.Guard));
-                    combinedGuardEffect = new([], joinedGuard, extracted.ToArray(), repetitions, loop);
+                    combinedGuardEffect = new([], joinedGuard, extracted.ToArray(), repetitions, loop, foreachRange);
                 }
 
                 if (!rendered.Any(previous => previous.Guard == combinedGuardEffect.Guard && previous.Effects.SequenceEqual(extracted)))
@@ -1036,14 +1041,14 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         for (var i = 0; i < input.Count;)
         {
             var first = input[i];
-            if (first.Repetitions is null && first.Effects.Length == 1
+            if (first.Repetitions is null && first.ForeachRange is not null && first.Effects.Length == 1
                 && first.Effects[0].Text.IndexOf(marker, StringComparison.Ordinal) is >= 0 and var startIdx)
             {
                 var subject = ExtractEachOfSubject(first.Effects[0].Text, startIdx);
                 if (subject is not null && i + 1 < input.Count)
                 {
                     var next = input[i + 1];
-                    if (next.Repetitions is null && next.Effects.Length == 1
+                    if (next.Repetitions is null && next.ForeachRange == first.ForeachRange && next.Effects.Length == 1
                         && next.Effects[0].Text.Contains(subject, StringComparison.Ordinal)
                         && (next.Guard == first.Guard
                             || (first.Guard.Length > 0 && next.Guard.StartsWith(first.Guard + " and ", StringComparison.Ordinal)
@@ -1474,7 +1479,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 return null;
             }
             return ValueText(assigned) is { } amount
-                ? new Effect($"set counter {HumanizeLower(key)} to {amount}")
+                ? new Effect($"set counter {HumanizeLower(key)} to {amount}", ChangesGuard: true)
                 : null;
         }
 
@@ -1560,9 +1565,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     return null;
                 if (Argument(call, "amount") is { } dealt)
                 {
-                    if (ValueText(dealt) is not { } amount)
+                    if (ValueText(dealt) is not { } amount || ResolveDamageProps(Argument(call, "props"), power) is not { } props)
                         return null;
-                    var props = ResolveDamageProps(Argument(call, "props"), power);
                     return new Effect($"deal {amount}{DamageFlags(props)} damage to {who}");
                 }
                 if (Argument(call, "damageVar") is { } dmgVarArg)
@@ -1725,8 +1729,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             var destWhere = destPile == PileType.Hand
                 ? "into hand"
                 : destPile == PileType.Draw && destPos != CardPilePosition.Bottom
-                    ? $"to {destPile.ToString().ToLowerInvariant()} pile ({destPos.ToString().ToLowerInvariant()})"
-                    : $"to {destPile.ToString().ToLowerInvariant()} pile";
+                    ? $"to {PileLocationLabel(destPile)} ({destPos.ToString().ToLowerInvariant()})"
+                    : $"to {PileLocationLabel(destPile)}";
             return new Effect($"move {movedCards} {destWhere}");
         }
 
@@ -1745,10 +1749,18 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             var apPlayerArg = Argument(call, "player") ?? args.ElementAtOrDefault(1);
             var apCountArg = Argument(call, "count") ?? args.ElementAtOrDefault(2);
             var apPosArg = Argument(call, "position") ?? args.ElementAtOrDefault(3);
+            var forceExhaustArg = Argument(call, "forceExhaust") ?? args.ElementAtOrDefault(4);
+            string exhaustSuffix;
+            if (forceExhaustArg is null || forceExhaustArg is Constant { Data: 0 or false })
+                exhaustSuffix = "";
+            else if (forceExhaustArg is Constant { Data: 1 or true })
+                exhaustSuffix = $" (and {KeywordLabel(CardKeyword.Exhaust)} it)";
+            else
+                return null;
             if (apPlayerArg is not null && apCountArg is not null && ValueText(apPlayerArg) is { } apWho && ValueText(apCountArg) is { } apCnt)
             {
                 var posLabel = Numeric(apPosArg) is { } rawPos ? ((CardPilePosition)(int)rawPos).ToString().ToLowerInvariant() + " " : "";
-                return new Effect($"auto-play the {posLabel}{apCnt} card(s) of {Possessive(apWho)} draw pile");
+                return new Effect($"auto-play the {posLabel}{apCnt} card(s) of {Possessive(apWho)} draw pile{exhaustSuffix}");
             }
         }
 
@@ -2117,18 +2129,21 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         => value is Call { Receiver: Input { Name: "this" }, Method.Name: "get_Owner" or "get_Creature" }
             || value is Call { Method.Name: "get_Creature", Receiver: Call { Receiver: Input { Name: "this" }, Method.Name: "get_Owner" } };
 
-    private static ValueProp ResolveDamageProps(Value? propsArg, Type? power)
+    private ValueProp? ResolveDamageProps(Value? propsArg, Type? power)
     {
+        if (propsArg is null)
+            return (ValueProp)0;
         if (propsArg is Constant { Data: int rawProps })
             return (ValueProp)rawProps;
-        if (propsArg is Call { Method.Name: "get_Props", Receiver: var rec } && power is not null)
+        var owner = power ?? _hookOwner;
+        if (propsArg is Call { Method.Name: "get_Props", Receiver: var rec } && owner is not null)
         {
             var inner = rec is Operation { Operator: "castclass" or "isinst", Left: var castInner } ? castInner : rec;
-            if (DynamicKey(inner) is { } key && TryGetCanonicalPower(power) is { } cp
-                && cp.DynamicVars.TryGetValue(key, out var dv) && dv is DamageVar dmgVar)
+            if (DynamicKey(inner) is { } key && TryGetCanonicalDynamicVars(owner) is { } vars
+                && vars.TryGetValue(key, out var dv) && dv is DamageVar dmgVar)
                 return dmgVar.Props;
         }
-        return (ValueProp)0;
+        return null;
     }
 
     private static string? DynamicKey(Value? value)
@@ -2610,11 +2625,33 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 return expected ? "an encounter slot is empty" : "no encounter slot is empty";
             if (name == "get_Player" && call.Method.DeclaringType == typeof(Creature) && ValueText(call.Receiver) is { } playerWho)
                 return expected ? $"{playerWho} is a player" : $"{playerWho} is not a player";
-            if (BooleanGetter(call) is { } property)
+            if (BooleanGetter(call) is { } property && call.Method is MethodInfo boolGetter)
             {
-                if (call.Method.DeclaringType is { } ownerType && BackingField(ownerType, (MethodInfo)call.Method) is { } bField
-                    && !IsGameplayField(bField))
-                    return "";
+                if (boolGetter.DeclaringType is { } ownerType && BackingField(ownerType, boolGetter) is { } bField)
+                {
+                    if (!IsGameplayField(bField))
+                        return "";
+                    return $"{property}={expected.ToString().ToLowerInvariant()}";
+                }
+                // For power/relic computed bool properties without a backing field (e.g., ShrinkPower.IsInfinite,
+                // VelvetChoker.ShouldPreventCardPlay), inline their single-return body or fail closed.
+                if (monster is null)
+                {
+                    if (_expandingGetters.Count < MaxGetterDepth && _expandingGetters.Add(boolGetter))
+                    {
+                        try
+                        {
+                            var gBody = Body(boolGetter);
+                            if (!gBody.Incomplete && gBody.Returns is [{ Conditions.Length: 0, Value: var retVal }])
+                                return Condition(new Test(retVal, expected));
+                        }
+                        finally
+                        {
+                            _expandingGetters.Remove(boolGetter);
+                        }
+                    }
+                    return null;
+                }
                 return $"{property}={expected.ToString().ToLowerInvariant()}";
             }
         }
@@ -2723,8 +2760,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             Call { Method.Name: "get_Creature", Receiver: var playerRec } when ValueText(playerRec) is { } playerWho => playerWho,
             Call { Method.Name: "GetResolved", Receiver: Call { Method.Name: "get_EnergyCost", Receiver: var costCard } }
                 when ValueText(costCard) is { } costCardLabel => $"{Possessive(costCardLabel)} Energy cost",
-            Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost", Receiver: var modCostCard } }
-                when ValueText(modCostCard) is { } modCostCardLabel => $"{Possessive(modCostCardLabel)} modified Energy cost",
+            Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost", Receiver: var modCostCard }, Arguments: var modCostArgs }
+                when ValueText(modCostCard) is { } modCostCardLabel && DescribeCostModifierScope(modCostArgs.FirstOrDefault()) is { } modScope
+                => $"{Possessive(modCostCardLabel)} {modScope} Energy cost",
             Call { Method.Name: "get_StarsSpent", Receiver: Call { Method.Name: "get_Resources" } } => "Stars spent on played card",
             Call { Method.Name: "get_EnergyValue", Receiver: Call { Method.Name: "get_Resources" } } => "played card's Energy value",
             Call { Method.Name: "get_EnergySpent", Receiver: Call { Method.Name: "get_Resources" } } => "Energy spent on played card",
@@ -2992,11 +3030,42 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         var body = Body(selector);
         if (body.Incomplete || body.Returns.Count == 0)
             return false;
-        var checksAlive = body.Returns.Any(r => r.Value is Call { Method.Name: "get_IsAlive" }
-            || r.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: "get_IsAlive" } }));
-        var checksNotSelf = body.Returns.Any(r =>
-            r.Value is Operation { Operator: "ceq", Left: Operation { Operator: "ceq" }, Right: Constant { Data: 0 } }
-            || r.Conditions.Any(c => IsEquality(c, false, out _, out _)));
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
+            return false;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var retBool) && retBool))
+            tests.Add(new Test(positive[0].Value, true));
+
+        var checksAlive = false;
+        var checksNotSelf = false;
+        foreach (var raw in tests)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expected && expr is Input)
+                continue;
+            if (expected && expr is Call { Method.Name: "get_IsAlive" })
+            {
+                checksAlive = true;
+                continue;
+            }
+            if (expected && expr is Call { Method.Name: "get_IsPlayer" })
+                continue;
+            if (IsEquality(new Test(expr, expected), false, out var neqL, out var neqR)
+                && (IsOwnerPlayerOrCreature(neqL) || IsOwnerPlayerOrCreature(neqR)
+                    || neqL is Field { Member.Name: "forger" } || neqR is Field { Member.Name: "forger" }))
+            {
+                checksNotSelf = true;
+                continue;
+            }
+            return false;
+        }
         return checksAlive && checksNotSelf;
     }
 
@@ -3086,7 +3155,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             }
             if (expr is Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" }, Arguments: var bareCostArgs })
             {
-                var scope = DescribeCostModifierScope(bareCostArgs.FirstOrDefault());
+                if (costFilter is not null || DescribeCostModifierScope(bareCostArgs.FirstOrDefault()) is not { } scope)
+                    return null;
                 costFilter = expected ? $"{scope} Energy cost ≠ 0" : $"{scope} Energy cost = 0";
                 continue;
             }
@@ -3094,7 +3164,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 Left: Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" }, Arguments: var opCostArgs },
                 Right: Constant { Data: int costVal } } costOp)
             {
-                var scope = DescribeCostModifierScope(opCostArgs.FirstOrDefault());
+                if (costFilter is not null || DescribeCostModifierScope(opCostArgs.FirstOrDefault()) is not { } scope)
+                    return null;
                 if (costOp.Operator is "ceq" or "beq" && expected)
                 {
                     costFilter = $"{scope} Energy cost = {costVal}";
@@ -3141,7 +3212,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
         var qualifiers = new List<string>();
         if (excludesUnplayable)
-            qualifiers.Add("non-Unplayable");
+            qualifiers.Add($"non-{KeywordLabel(CardKeyword.Unplayable)}");
         if (excludesXCost)
             qualifiers.Add("non-Energy-X-cost");
         qualifiers.AddRange(requiredKeywords);
@@ -3155,16 +3226,17 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         return costFilter is not null ? $"{baseNoun} with {costFilter}" : baseNoun;
     }
 
-    private static string DescribeCostModifierScope(Value? modifierArg)
+    private static string? DescribeCostModifierScope(Value? modifierArg)
         => modifierArg is Constant { Data: int rawMod }
             ? (CostModifiers)rawMod switch
             {
+                CostModifiers.None => "base",
                 CostModifiers.Local => "local",
                 CostModifiers.Global => "global",
                 CostModifiers.All => "modified",
-                _ => "base",
+                _ => null,
             }
-            : "modified";
+            : null;
 
     private decimal? Numeric(Value? value, int depth = 0)
     {

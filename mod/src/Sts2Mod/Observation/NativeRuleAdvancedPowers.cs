@@ -520,12 +520,6 @@ internal sealed partial class NativeRuleText
             handled.Add("AfterSideTurnEnd");
             lines.Add(darkEmbraceLine);
         }
-        if (ReadPanacheHooks(type, powerPrefix, out var panacheLine))
-        {
-            handled.Add("AfterCardPlayed");
-            handled.Add("AfterSideTurnEnd");
-            lines.Add(panacheLine);
-        }
         if (ReadDoomHooks(type, powerPrefix, out var doomLine))
         {
             handled.Add("BeforeSideTurnEnd");
@@ -921,7 +915,8 @@ internal sealed partial class NativeRuleText
                 who = "a random hittable enemy";
             if (who is null)
                 return false;
-            var props = ResolveDamageProps(Argument(dmgStep.Call, "props"), power);
+            if (ResolveDamageProps(Argument(dmgStep.Call, "props"), power) is not { } props)
+                return false;
             line = $"{prefix}Card-play damage timing: snapshots stacks before each {cardActor} {cardNoun} play starts, then deals that much{DamageFlags(props)} damage to {who} after that card play resolves";
             return true;
         }
@@ -1006,29 +1001,6 @@ internal sealed partial class NativeRuleText
         return true;
     }
 
-    private bool ReadPanacheHooks(Type power, string prefix, out string line)
-    {
-        line = "";
-        if (FindOverride(power, "AfterCardPlayed") is not { } played
-            || FindOverride(power, "AfterSideTurnEnd") is not { } turnEnd
-            || Body(played) is not { Incomplete: false } playedBody
-            || Body(turnEnd) is not { Incomplete: false }
-            || TryGetCanonicalPower(power) is not { } canonical
-            || !canonical.DynamicVars.TryGetValue("CardsLeft", out var cardsVar))
-        {
-            return false;
-        }
-
-        var countsDown = playedBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
-        var damagesEnemies = playedBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage));
-        if (!countsDown || !damagesEnemies)
-            return false;
-
-        var threshold = Number(cardsVar.BaseValue);
-        line = $"{prefix}Card-count trigger: every {threshold} owned card plays in the same turn, deals stacks unpowered damage to all hittable enemies; counter resets to {threshold} after owner's turn ends";
-        return true;
-    }
-
     private bool ReadDoomHooks(Type power, string prefix, out string line)
     {
         line = "";
@@ -1092,7 +1064,8 @@ internal sealed partial class NativeRuleText
         if (dmgCall is null || setAmountCall is null || !hitsAllEnemies)
             return false;
 
-        var props = ResolveDamageProps(Argument(dmgCall.Call, "props"), power);
+        if (ResolveDamageProps(Argument(dmgCall.Call, "props"), power) is not { } props)
+            return false;
         var increment = Number(damageVar.BaseValue);
         line = $"{prefix}After owner's turn starts: deal stacks{DamageFlags(props)} damage to all hittable enemies, then increase stacks by {increment}";
         return true;
@@ -1148,7 +1121,8 @@ internal sealed partial class NativeRuleText
         var capNote = capValue is { } limit
             ? $" (capped at {limit} auto-plays per turn while all hittable enemies have infinite HP; cap resets after owner's turn ends or when any hittable enemy has finite HP)"
             : "";
-        line = $"{prefix}After drawing a card (early, before affliction hooks such as Bound): if that card's player=owner and that card has tag {requiredTag.Value}: auto-play that card{capNote}";
+        var boundLabel = ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Afflictions.Bound));
+        line = $"{prefix}After drawing a card (early, before affliction hooks such as {boundLabel}): if that card's player=owner and that card has tag {requiredTag.Value}: auto-play that card{capNote}";
         return true;
     }
 
@@ -1238,7 +1212,17 @@ internal sealed partial class NativeRuleText
             : "";
 
         var checksZeroEnergy = locStep.Conditions.Any(c =>
-            c.Value is Operation { Left: Call { Method.Name: "get_EnergyValue" }, Right: Constant { Data: 0 } });
+        {
+            var expr = c.Value;
+            var expected = c.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            return expr is Operation { Operator: "cgt" or "bgt" or "ble", Left: Call { Method.Name: "get_EnergyValue" }, Right: Constant { Data: 0 } } op
+                && (op.Operator == "ble" ? expected : !expected);
+        });
         var checksCounterLimit = locStep.Conditions.Any(c =>
             c.Value is Operation { Left: Field f } && InternalDataField(f)?.FieldType == typeof(int));
         var cardType = locStep.Conditions
@@ -1254,7 +1238,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var destLabel = PileLocationLabel((PileType)rawPile);
-        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel}{posSuffix} instead of their normal destination (overriding Exhaust as well); counter resets after owner's turn starts";
+        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel}{posSuffix} instead of their normal destination (overriding {KeywordLabel(CardKeyword.Exhaust)} as well); counter resets after owner's turn starts";
         return true;
     }
 
@@ -1325,8 +1309,8 @@ internal sealed partial class NativeRuleText
 
         var energyActive = energyBody.Returns.Where(r => TryTruth(r.Value, out var m) && m && !IsUnreachableNullablePath(r.Conditions)).ToArray();
         var starActive = starBody.Returns.Where(r => TryTruth(r.Value, out var m) && m && !IsUnreachableNullablePath(r.Conditions)).ToArray();
-        var energyStores = energyBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost" && s.Assigned is not Input).ToArray();
-        var starStores = starBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost" && s.Assigned is not Input).ToArray();
+        var energyStores = energyBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost").ToArray();
+        var starStores = starBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost").ToArray();
         var energyZero = energyActive.Length > 0
             && energyActive.All(r => energyStores.LastOrDefault(s => ConditionsImply(r.Conditions, s.Conditions)) is { } s && Numeric(s.Assigned) == 0m);
         var starZero = starActive.Length > 0
@@ -1338,10 +1322,65 @@ internal sealed partial class NativeRuleText
         if (!energyZero || !starZero || !incrementsPlayed || !resetsOnStart)
             return false;
 
-        lines.Add($"{prefix}In-combat Energy and Star cost (late): owner's first N non-autoplay card plays each turn (where N = stacks, for cards in Hand or Play) cost 0 Energy and 0 Stars (manual plays of Energy X-cost and Star X-cost cards still spend all Energy/Stars; auto-plays spend 0); counter resets before owner's turn starts");
-        if (FindOverride(power, "BeforeApplied") is not null || FindOverride(power, "BeforePowerAmountChanged") is not null)
+        // Inspect lifecycle hooks before marking them handled so unexpected gameplay logic fails closed.
+        foreach (var vfxHookName in new[] { "AfterApplied", "AfterRemoved" })
+        {
+            if (FindOverride(power, vfxHookName) is { } vfxHook && !IsVoidFormPresentationHook(power, vfxHook))
+                return false;
+        }
+        var disablesOnApply = false;
+        foreach (var timingHookName in new[] { "BeforeApplied", "BeforePowerAmountChanged" })
+        {
+            if (FindOverride(power, timingHookName) is { } timingHook)
+            {
+                if (!IsVoidFormDisableForTurnHook(power, timingHook))
+                    return false;
+                disablesOnApply = true;
+            }
+        }
+
+        lines.Add($"{prefix}In-combat Energy and Star cost (late): while fewer than stacks non-autoplay card plays have finished this turn, all owned cards in Hand or Play (including auto-played cards) cost 0 Energy and 0 Stars (Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources); only non-autoplay plays (at the end of their play series) consume one of the stacks free plays; counter resets before owner's turn starts");
+        if (disablesOnApply)
             lines.Add($"{prefix}Application timing: applying or changing stacks of this power disables the free-cost effect for the remainder of the current turn until owner's next turn starts");
         return true;
+    }
+
+    private bool IsVoidFormPresentationHook(Type power, MethodInfo hook)
+    {
+        var body = Body(hook);
+        if (body.Incomplete || body.Writes.Count > 0 || body.FieldSteps.Count > 0)
+            return false;
+        return body.Calls.All(s =>
+            IsBenignReadOrPlumbingCall(s.Call.Method)
+            || (s.Call.Method.DeclaringType == power && s.Call.Method.Name is "get_Vfx" or "set_Vfx")
+            || (s.Call.Method.DeclaringType?.Name.Contains("Vfx", StringComparison.Ordinal) == true));
+    }
+
+    private bool IsVoidFormDisableForTurnHook(Type power, MethodInfo hook)
+    {
+        var body = Body(hook);
+        if (body.Incomplete || body.Writes.Count > 0 || body.FieldSteps.Count > 0)
+            return false;
+        var disables = false;
+        foreach (var step in body.Calls)
+        {
+            if (IsBenignReadOrPlumbingCall(step.Call.Method))
+                continue;
+            if (step.Call.Method is MethodInfo helper && helper.DeclaringType == power)
+            {
+                var helperBody = Body(helper);
+                if (helperBody.Incomplete || helperBody.Writes.Count > 0
+                    || !helperBody.Calls.All(s => IsBenignReadOrPlumbingCall(s.Call.Method))
+                    || helperBody.FieldSteps.Count == 0
+                    || !helperBody.FieldSteps.All(fs => InternalDataField(fs.Assignment.Target)?.FieldType == typeof(int)
+                        && Numeric(fs.Assignment.Assigned) is >= 999999m))
+                    return false;
+                disables = true;
+                continue;
+            }
+            return false;
+        }
+        return disables;
     }
 
     private bool ReadSwordSageHooks(Type power, string prefix, out string line)
@@ -1389,7 +1428,7 @@ internal sealed partial class NativeRuleText
         if (factorTexts is not [{ } factorText])
             return false;
 
-        line = $"{prefix}Damage multiplier per hit, after additions: if powered attack from owner's first Attack card play this turn (excluding replays of that card): ×{factorText}";
+        line = $"{prefix}Damage multiplier per hit, after additions: if powered attack from an owned card, not a replay (CurrentPlayIndex = 0), and at most 1 owned Attack play has started this turn (0 if the source card is not currently in Play): ×{factorText}";
         return true;
     }
 
@@ -1404,9 +1443,18 @@ internal sealed partial class NativeRuleText
             s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name == nameof(CardCmd.ApplyKeyword));
         var addStep = body.Calls.FirstOrDefault(s =>
             s.Call.Method.DeclaringType == typeof(CardPileCmd) && s.Call.Method.Name == nameof(CardPileCmd.AddGeneratedCardsToCombat));
-        var usesFactory = body.Calls.Any(s =>
+        var factoryStep = body.Calls.FirstOrDefault(s =>
             s.Call.Method.DeclaringType?.Name == "CardFactory" && s.Call.Method.Name == "GetDistinctForCombat");
-        if (keywordStep is null || addStep is null || !usesFactory)
+        if (keywordStep is null || addStep is null || factoryStep is null)
+            return false;
+
+        // Verify the pool filter actually excludes Basic and Ancient from the unlocked character pool.
+        var whereCall = body.Calls.FirstOrDefault(s =>
+            s.Call.Method.Name == nameof(Enumerable.Where)
+            && s.Call.Arguments is [Call { Method.Name: "GetUnlockedCards", Receiver: Call { Method.Name: "get_CardPool" } },
+                Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }]);
+        if (whereCall is null || whereCall.Call.Arguments[1] is not Call { Arguments: [_, Constant { Data: MethodInfo poolPred }] }
+            || !IsExcludeBasicAndAncientPredicate(poolPred))
             return false;
 
         if (keywordStep.Call.Arguments.ElementAtOrDefault(1) is not ArrayValue { Elements: [Constant { Data: int rawKw }] }
@@ -1419,6 +1467,41 @@ internal sealed partial class NativeRuleText
         var pileLabel = PileLocationLabel((PileType)(int)rawPile);
         line = $"{prefix}Before turn-start hand draw: if player=owner: generate stacks random combat-generatable non-Basic non-Ancient unlocked character card(s) with {kwLabel} into owner's {pileLabel}";
         return true;
+    }
+
+    private bool IsExcludeBasicAndAncientPredicate(MethodInfo pred)
+    {
+        var body = Body(pred);
+        if (body.Incomplete || body.Returns.Count == 0)
+            return false;
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
+            return false;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var rb) && rb))
+            tests.Add(new Test(positive[0].Value, true));
+        var excluded = new HashSet<CardRarity>();
+        foreach (var raw in tests)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int rawRar } } rarOp
+                && Enum.IsDefined(typeof(CardRarity), rawRar))
+            {
+                var isEq = rarOp.Operator == "bne.un" ? !expected : expected;
+                if (isEq)
+                    return false;
+                excluded.Add((CardRarity)rawRar);
+                continue;
+            }
+            return false;
+        }
+        return excluded.SetEquals([CardRarity.Basic, CardRarity.Ancient]);
     }
 
     private bool ReadAutomationHooks(Type power, string prefix, out string line)

@@ -184,7 +184,12 @@ def _fmt_intents(intents: object) -> str:
         desc = _one_line(it.get("description"))
         pieces = [t]
         if dmg is not None:
-            pieces.append(f"{dmg}x{hits}" if hits is not None and hits != 1 else f"{dmg}")
+            if "hits" in it and hits is None:
+                pieces.append(f"{dmg}x?")
+            elif hits is not None and hits != 1:
+                pieces.append(f"{dmg}x{hits}")
+            else:
+                pieces.append(f"{dmg}")
         elif amt is not None:
             pieces.append(f"amt={amt}")
         if desc:
@@ -366,13 +371,23 @@ def _fmt_card_line(
     return " ".join(parts)
 
 
+def _fmt_hp(obj: JsonObj) -> str:
+    hpd = obj.get("hp_display")
+    hp = obj.get("hp")
+    max_hp = obj.get("max_hp")
+    if hpd in (None, "numeric"):
+        return f"{hp}/{max_hp}"
+    if hp is not None and max_hp is not None:
+        return f"{hp}/{max_hp}({hpd})"
+    return f"{hpd}"
+
+
 def _fmt_enemy_line(en: JsonObj) -> str:
     epow = _fmt_powers(en.get("powers"))
     ep_s = f" powers=[{epow}]" if epow else ""
     nm = en.get("next_move_id")
     nm_s = f" next_move={nm}" if isinstance(nm, str) and nm else ""
-    hpd = en.get("hp_display")
-    hp_s = f"{en.get('hp')}/{en.get('max_hp')}" if hpd in (None, "numeric") else f"{hpd}"
+    hp_s = _fmt_hp(en)
     return (
         f"  {en.get('ref')} | {en.get('name')} ({en.get('definition_id')}) "
         f"HP={hp_s} blk={en.get('block')}{nm_s} intent=[{_fmt_intents(en.get('intents'))}]{ep_s}"
@@ -476,19 +491,53 @@ def _node_key(state: JsonObj) -> str:
     return f"{prog.get('act')}:{prog.get('floor')}:{prog.get('position')}"
 
 
+def _append_guard(items: list[str], key: str, *, limit: int = 32) -> list[str]:
+    out = [x for x in items if x != key]
+    out.append(key)
+    return out[-limit:]
+
+
+def _reset_session_if_new_run(payload: JsonObj, cache: JsonObj) -> bool:
+    """Reset cache when a new run begins (act/floor drop, character change, or post-terminal)."""
+    state = _as_dict(payload.get("state"))
+    if not state:
+        return False
+    phase = _str(state.get("phase"))
+    prog = _as_dict(state.get("progress"))
+    act = _int(prog.get("act"), -1)
+    floor = _int(prog.get("floor"), -1)
+    player = _as_dict(state.get("player"))
+    player_did = _str(player.get("definition_id"))
+
+    last_act = _int(cache.get("last_act"), -1)
+    last_floor = _int(cache.get("last_floor"), -1)
+    last_player = _str(cache.get("player_definition_id"))
+    was_terminal = cache.get("was_terminal") is True
+
+    is_new_run = (
+        (was_terminal and phase != "terminal")
+        or (bool(last_player) and bool(player_did) and player_did != last_player)
+        or (act >= 0 and last_act >= 0 and act < last_act)
+        or (floor >= 0 and last_floor >= 0 and floor < last_floor)
+    )
+    if is_new_run:
+        cache.clear()
+
+    if act >= 0:
+        cache["last_act"] = act
+    if floor >= 0:
+        cache["last_floor"] = floor
+    if player_did:
+        cache["player_definition_id"] = player_did
+    cache["was_terminal"] = phase == "terminal"
+    return is_new_run
+
+
 def _record_observed_auto_guards(payload: JsonObj, cache: JsonObj) -> None:
     """Track visited shop entrances and opened card reward offers across calls."""
     state = _as_dict(payload.get("state"))
     if state.get("phase") != "run":
         return
-    prog = _as_dict(state.get("progress"))
-    floor = _int(prog.get("floor"), -1)
-    last_floor = _int(cache.get("last_floor"), -1)
-    if floor >= 0 and last_floor >= 0 and floor < last_floor:
-        cache["opened_shops"] = []
-        cache["opened_card_offers"] = []
-    if floor >= 0:
-        cache["last_floor"] = floor
 
     nkey = _node_key(state)
     actions = [_as_dict(a) for a in _as_list(state.get("actions"))]
@@ -498,17 +547,16 @@ def _record_observed_auto_guards(payload: JsonObj, cache: JsonObj) -> None:
 
     # If the shop panel is currently open (close_shop enabled or shop offers shown), mark visited.
     if "close_shop" in enabled_ops or (state.get("screen") == "shop" and offers):
-        opened_shops = set(_str(x) for x in _as_list(cache.get("opened_shops")))
-        opened_shops.add(nkey)
-        cache["opened_shops"] = sorted(opened_shops)[-32:]
+        opened_shops = [_str(x) for x in _as_list(cache.get("opened_shops"))]
+        cache["opened_shops"] = _append_guard(opened_shops, nkey)
 
     # If a rewards selection is currently open, mark all visible card offers as already opened.
     if state.get("screen") == "rewards" and state.get("selection") is not None:
-        opened_cards = set(_str(x) for x in _as_list(cache.get("opened_card_offers")))
+        opened_cards = [_str(x) for x in _as_list(cache.get("opened_card_offers"))]
         for of in offers:
             if of.get("kind") == "card":
-                opened_cards.add(f"{nkey}:{_str(of.get('ref'))}")
-        cache["opened_card_offers"] = sorted(opened_cards)[-32:]
+                opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
+        cache["opened_card_offers"] = opened_cards
 
 
 def _next_auto_step(
@@ -518,7 +566,7 @@ def _next_auto_step(
     opened_card_offers: set[str],
     allow_stateful_auto: bool,
     skip_card_open: bool,
-) -> tuple[JsonObj, str] | None:
+) -> tuple[JsonObj, str, tuple[str, str] | None] | None:
     """Return one strictly mechanical, zero-branch Run step, or None if a decision is needed."""
     outcome = _as_dict(payload.get("outcome"))
     if outcome.get("status") != "completed":
@@ -563,6 +611,7 @@ def _next_auto_step(
                             return (
                                 {"kind": "interact", "action": _str(act.get("ref"))},
                                 f"claim {kind}: {_str(act.get('label'))}",
+                                None,
                             )
         if (
             allow_stateful_auto
@@ -577,10 +626,10 @@ def _next_auto_step(
             if len(of_actions) == 1 and oref not in opened_card_offers:
                 act = enabled_by_ref.get(_str(of_actions[0]))
                 if act is not None and act.get("subject") == of.get("ref"):
-                    opened_card_offers.add(oref)
                     return (
                         {"kind": "interact", "action": _str(act.get("ref"))},
                         f"open card reward: {_str(act.get('label'))}",
+                        ("card", oref),
                     )
         return None
 
@@ -599,6 +648,7 @@ def _next_auto_step(
                 return (
                     {"kind": "interact", "action": _str(act.get("ref"))},
                     f"claim event potion: {_str(act.get('label'))}",
+                    None,
                 )
         return None
 
@@ -636,11 +686,12 @@ def _next_auto_step(
                         return (
                             {"kind": "use_potion", "potion": pref},
                             f"use merchant potion: {_str(pot.get('name'))}",
+                            None,
                         )
-            opened_shops.add(nkey)
             return (
                 {"kind": "interact", "action": _str(opening.get("ref"))},
                 f"open shop: {_str(opening.get('label'))}",
+                ("shop", nkey),
             )
 
     # 4. Single legal map destination.
@@ -653,6 +704,7 @@ def _next_auto_step(
             return (
                 {"kind": "interact", "action": _str(act.get("ref"))},
                 f"travel sole path -> {legal[0]}",
+                None,
             )
 
     # 5. Treasure chest open or sole unambiguous chest relic claim.
@@ -663,6 +715,7 @@ def _next_auto_step(
             return (
                 {"kind": "interact", "action": _str(act.get("ref"))},
                 f"open chest: {_str(act.get('label'))}",
+                None,
             )
         if room_type == "treasure":
             avail = [a for a in enabled if a.get("operation") != "proceed"]
@@ -676,6 +729,7 @@ def _next_auto_step(
                         return (
                             {"kind": "interact", "action": _str(act.get("ref"))},
                             f"claim chest relic: {_str(obj.get('name'))}",
+                            None,
                         )
 
     # 6. Sole proceed action.
@@ -684,6 +738,7 @@ def _next_auto_step(
         return (
             {"kind": "interact", "action": _str(act.get("ref"))},
             f"proceed: {_str(act.get('label'))}",
+            None,
         )
 
     return None
@@ -712,26 +767,39 @@ def _run_auto_advance(
     max_steps: int = 12,
 ) -> tuple[JsonObj, list[str]]:
     """Advance strictly deterministic mechanical Run steps after a completed call."""
+    _reset_session_if_new_run(payload, cache)
     _record_observed_auto_guards(payload, cache)
-    opened_shops = set(_str(x) for x in _as_list(cache.get("opened_shops")))
-    opened_card_offers = set(_str(x) for x in _as_list(cache.get("opened_card_offers")))
+    opened_shops_list = [_str(x) for x in _as_list(cache.get("opened_shops"))]
+    opened_card_offers_list = [_str(x) for x in _as_list(cache.get("opened_card_offers"))]
     log: list[str] = []
     current = payload
     endpoint = f"{url.rstrip('/')}/tools/run_act"
+
+    def _record_guard(guard: tuple[str, str] | None) -> None:
+        nonlocal opened_shops_list, opened_card_offers_list
+        if guard is None:
+            return
+        gkind, gkey = guard
+        if gkind == "shop":
+            opened_shops_list = _append_guard(opened_shops_list, gkey)
+        elif gkind == "card":
+            opened_card_offers_list = _append_guard(opened_card_offers_list, gkey)
+
     for step_idx in range(max_steps):
         nxt = _next_auto_step(
             current,
-            opened_shops=opened_shops,
-            opened_card_offers=opened_card_offers,
+            opened_shops=set(opened_shops_list),
+            opened_card_offers=set(opened_card_offers_list),
             allow_stateful_auto=allow_stateful_auto,
             skip_card_open=skip_card_open and step_idx == 0,
         )
         if nxt is None:
             break
-        step, desc = nxt
+        step, desc, guard = nxt
         body = json.dumps({"steps": [step], "reason": desc}, ensure_ascii=False)
         code, text = _http_post(endpoint, body)
         if code != 200:
+            _record_guard(guard)
             log.append(f"uncertain (HTTP {code}) during {desc}")
             current = _uncertain_auto_reply(
                 f"Auto-advance step '{desc}' got HTTP {code}; state is unconfirmed."
@@ -740,15 +808,21 @@ def _run_auto_advance(
         try:
             next_payload = _as_dict(json.loads(text))
         except json.JSONDecodeError:
+            _record_guard(guard)
             log.append(f"uncertain (bad JSON) during {desc}")
             current = _uncertain_auto_reply(
                 f"Auto-advance step '{desc}' returned invalid JSON; state is unconfirmed."
             )
             break
-        if _as_dict(next_payload.get("outcome")).get("status") != "completed":
+        out_status = _str(_as_dict(next_payload.get("outcome")).get("status"))
+        if out_status != "completed":
+            # Only burn a one-shot guard if execution may have occurred; never on rejected.
+            if out_status != "rejected":
+                _record_guard(guard)
             current = next_payload
             log.append(f"stopped on {desc}")
             break
+        _record_guard(guard)
         if next_payload.get("state") == current.get("state"):
             current = next_payload
             log.append(f"no-progress on {desc}")
@@ -756,10 +830,12 @@ def _run_auto_advance(
         log.append(desc)
         current = next_payload
         _record_observed_auto_guards(current, cache)
-        opened_shops.update(_str(x) for x in _as_list(cache.get("opened_shops")))
-        opened_card_offers.update(_str(x) for x in _as_list(cache.get("opened_card_offers")))
-    cache["opened_shops"] = sorted(opened_shops)[-32:]
-    cache["opened_card_offers"] = sorted(opened_card_offers)[-32:]
+        for x in _as_list(cache.get("opened_shops")):
+            opened_shops_list = _append_guard(opened_shops_list, _str(x))
+        for x in _as_list(cache.get("opened_card_offers")):
+            opened_card_offers_list = _append_guard(opened_card_offers_list, _str(x))
+    cache["opened_shops"] = opened_shops_list[-32:]
+    cache["opened_card_offers"] = opened_card_offers_list[-32:]
     return current, log
 
 
@@ -773,6 +849,8 @@ def render_reply(
     handoff_trim: bool = False,
     auto_log: list[str] | None = None,
 ) -> str:
+    if _reset_session_if_new_run(payload, cache):
+        full = True
     lines: list[str] = []
     calls = _int(cache.get("calls")) + 1
     cache["calls"] = calls
@@ -1021,10 +1099,7 @@ def render_reply(
                 apow = _fmt_powers(al.get("powers"))
                 ap_s = f" powers=[{apow}]" if apow else ""
                 adid = f" ({al.get('definition_id')})" if al.get("definition_id") else ""
-                ahpd = al.get("hp_display")
-                ahp_s = (
-                    f"{al.get('hp')}/{al.get('max_hp')}" if ahpd in (None, "numeric") else f"{ahpd}"
-                )
+                ahp_s = _fmt_hp(al)
                 lines.append(
                     f"  {al.get('ref')} | {al.get('name')}{adid} "
                     f"HP={ahp_s} blk={al.get('block')} alive={al.get('alive')}{ap_s}"
@@ -1042,6 +1117,7 @@ def render_reply(
         piles = _as_dict(state.get("piles"))
         hand = [_str(r) for r in _as_list(piles.get("hand"))]
         lines.append(f"HAND ({len(hand)}):")
+        hand_seen: JsonObj = {}
         for ref in hand:
             ce = _as_dict(objects.get(ref))
             lines.append(
@@ -1052,8 +1128,8 @@ def render_reply(
                     descriptions.get(ref),
                     _as_dict(mod_descriptions.get(ref)),
                     upgrades.get(ref),
-                    seen_defs,
-                    force_text=False,
+                    hand_seen,
+                    force_text=True,
                 )
             )
         new_piles_hash: JsonObj = {}
@@ -1542,7 +1618,42 @@ def cmd_call(
     return 0
 
 
-def main() -> int:
+def _build_parser() -> argparse.ArgumentParser:
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--url", default=argparse.SUPPRESS, help="External backend base URL.")
+    shared.add_argument(
+        "--session",
+        default=argparse.SUPPRESS,
+        help="Session ID for deduplicating unchanged descriptions/relics/deck/mechanisms.",
+    )
+    shared.add_argument(
+        "--full",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Print a full compact snapshot and reset this session's delta baseline.",
+    )
+    shared.add_argument(
+        "--auto",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help=(
+            "Auto-advance strictly mechanical zero-branch Run steps "
+            "(gold/relic/free potion/open sole card/open shop/chest/proceed/sole map path)."
+        ),
+    )
+    shared.add_argument(
+        "--handoff",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Trim cross-phase payload on combat entry/exit for multi-agent handoffs.",
+    )
+    shared.add_argument(
+        "--raw",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Print raw JSON response.",
+    )
+
     parser = argparse.ArgumentParser(
         description="Compact CLI client for STS2 Harness external HTTP tools."
     )
@@ -1573,19 +1684,21 @@ def main() -> int:
     parser.add_argument("--raw", action="store_true", help="Print raw JSON response.")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("tools", help="List available run and combat tools.")
+    sub.add_parser("tools", parents=[shared], help="List available run and combat tools.")
 
-    p_call = sub.add_parser("call", help="Invoke POST /tools/<name> with JSON arguments.")
+    p_call = sub.add_parser(
+        "call", parents=[shared], help="Invoke POST /tools/<name> with JSON arguments."
+    )
     p_call.add_argument("tool", help="Tool name (e.g., run_inspect, combat_act).")
     p_call.add_argument("json_arg", nargs="?", default="{}", help="JSON argument object.")
 
-    p_state = sub.add_parser("state", help="Inspect current state.")
+    p_state = sub.add_parser("state", parents=[shared], help="Inspect current state.")
     p_state.add_argument("role", choices=["run", "combat"])
 
-    p_map = sub.add_parser("map", help="Inspect act map.")
+    p_map = sub.add_parser("map", parents=[shared], help="Inspect act map.")
     p_map.add_argument("role", choices=["run", "combat"])
 
-    p_act = sub.add_parser("act", help="Submit run_act or combat_act steps.")
+    p_act = sub.add_parser("act", parents=[shared], help="Submit run_act or combat_act steps.")
     p_act.add_argument("role", choices=["run", "combat"])
     p_act.add_argument(
         "payload",
@@ -1593,10 +1706,14 @@ def main() -> int:
     )
     p_act.add_argument("--reason", default=None, help="Optional short reason string.")
 
-    p_notes = sub.add_parser("notes", help="Read or write run_notes.")
+    p_notes = sub.add_parser("notes", parents=[shared], help="Read or write run_notes.")
     p_notes.add_argument("mode", choices=["read", "write"])
     p_notes.add_argument("payload", nargs="?", default="{}", help="JSON fields for mode=write.")
+    return parser
 
+
+def main() -> int:
+    parser = _build_parser()
     args = parser.parse_args()
     url = _str(args.url)
     session = args.session if isinstance(args.session, str) else None
