@@ -52,7 +52,7 @@ internal sealed partial class NativeRuleText
         if (FindOverride(type, "ModifyOrbValue") is { } orbValueHook)
         {
             handled.Add(orbValueHook.Name);
-            if (ReadPlayerDeltaHook(type, orbValueHook, "value", "Orb passive and evoke values") is { } orbValueLine)
+            if (ReadPlayerDeltaHook(type, orbValueHook, "value", "Focus-affected orb values (applies to orb stats scaled by Focus: Lightning/Frost passive and evoke, Glass passive and 2× evoke, Dark per-turn growth only; Plasma is unaffected)") is { } orbValueLine)
                 lines.Add($"{powerPrefix}{orbValueLine}");
             else
                 Gap($"{type.Name}.{orbValueHook.Name}");
@@ -106,7 +106,7 @@ internal sealed partial class NativeRuleText
         if (FindOverride(type, "ModifyPreBlockDamageTarget") is { } preBlockTargetHook)
         {
             handled.Add(preBlockTargetHook.Name);
-            if (ReadDamageTargetRedirectHook(preBlockTargetHook, "Damage target redirection (before Block)") is { } redirectLine)
+            if (ReadDamageTargetRedirectHook(preBlockTargetHook, "Damage target redirection (before Block)", "redirect damage to owner first; any overkill continues to original target's Block and HP") is { } redirectLine)
                 lines.Add($"{powerPrefix}{redirectLine}");
             else
                 Gap($"{type.Name}.{preBlockTargetHook.Name}");
@@ -114,14 +114,14 @@ internal sealed partial class NativeRuleText
         if (FindOverride(type, "ModifyUnblockedDamageTarget") is { } unblockedTargetHook)
         {
             handled.Add(unblockedTargetHook.Name);
-            if (ReadDamageTargetRedirectHook(unblockedTargetHook, "Damage target redirection (after Block, unblocked damage)") is { } redirectLine)
+            if (ReadDamageTargetRedirectHook(unblockedTargetHook, "Damage target redirection (after Block, unblocked damage)", "redirect unblocked damage to owner first; any overkill continues to original target") is { } redirectLine)
                 lines.Add($"{powerPrefix}{redirectLine}");
             else
                 Gap($"{type.Name}.{unblockedTargetHook.Name}");
         }
     }
 
-    private string? ReadDamageTargetRedirectHook(MethodInfo hook, string label)
+    private string? ReadDamageTargetRedirectHook(MethodInfo hook, string label, string redirectText)
     {
         var body = Body(hook);
         if (body.Incomplete || body.Returns.Count == 0)
@@ -139,7 +139,7 @@ internal sealed partial class NativeRuleText
             if (result.Value is Input { Name: "target" })
                 outcomes.Add(("", result.Conditions));
             else if (IsOwner(result.Value))
-                outcomes.Add(("redirect damage to owner", result.Conditions));
+                outcomes.Add((redirectText, result.Conditions));
             else
                 return null;
         }
@@ -300,7 +300,7 @@ internal sealed partial class NativeRuleText
         var subject = string.Join(" ", subjectParts);
         var timingTag = hook.Name == "TryModifyEnergyCostInCombatLate" ? "In-combat Energy cost (late)" : "In-combat Energy cost";
         return setsZero
-            ? $"{timingTag}: {subject} cost 0 Energy"
+            ? $"{timingTag}: {subject} cost 0 Energy (Energy X-cost cards still spend all Energy)"
             : $"{timingTag}: {subject} cost +stacks Energy";
     }
 

@@ -542,10 +542,12 @@ def _next_auto_step(
     enabled_by_ref = {_str(a.get("ref")): a for a in enabled}
     offers = [_as_dict(o) for o in _as_list(state.get("offers"))]
 
-    # 1. Battle rewards: claim relic, gold, unambiguous potions, or open sole card selection offer.
+    # 1. Battle rewards: claim gold, fitting potions, relics (only when no card offer is
+    # pending), or open a sole card selection offer.
     if screen == "rewards" and room_type in ("monster", "elite", "boss") and offers:
         potion_offers = [of for of in offers if of.get("kind") == "potion"]
-        claim_kinds = ["relic", "gold"]
+        has_card_offer = any(of.get("kind") == "card" for of in offers)
+        claim_kinds = ["gold"] if has_card_offer else ["relic", "gold"]
         if 0 < len(potion_offers) <= empty_potions:
             claim_kinds.append("potion")
         for kind in claim_kinds:
@@ -599,12 +601,14 @@ def _next_auto_step(
     if offers:
         return None
 
-    # 3. Unopened shop entrance (at most once per map node; use POTION.FOUL_POTION first if usable).
+    # 3. Unopened real shop entrance (at most once per map node; use POTION.FOUL_POTION
+    # first if usable). Require room_type == "shop" so FakeMerchant events never auto-fight.
     all_ops = {_str(a.get("operation")) for a in actions if a.get("operation") is not None}
     enabled_ops = {_str(a.get("operation")) for a in enabled if a.get("operation") is not None}
     shop_ops = {"open_shop", "close_shop", "leave_shop"}
     is_shop_entrance = (
-        {"open_shop", "leave_shop"} <= all_ops
+        room_type == "shop"
+        and {"open_shop", "leave_shop"} <= all_ops
         and "close_shop" not in enabled_ops
         and all(_str(a.get("operation")) in shop_ops for a in enabled)
     )

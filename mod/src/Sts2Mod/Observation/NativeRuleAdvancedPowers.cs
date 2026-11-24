@@ -1245,7 +1245,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var destLabel = PileLocationLabel((PileType)rawPile);
-        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel} instead of discard pile; counter resets after owner's turn starts";
+        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel} (top) instead of their normal destination (overriding Exhaust as well); counter resets after owner's turn starts";
         return true;
     }
 
@@ -1314,8 +1314,12 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        var energyZero = energyBody.OutStores.Where(s => s.Assigned is not Input).All(s => Numeric(s.Assigned) == 0m);
-        var starZero = starBody.OutStores.Where(s => s.Assigned is not Input).All(s => Numeric(s.Assigned) == 0m);
+        var energyActive = energyBody.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
+        var starActive = starBody.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
+        var energyStores = energyBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost" && s.Assigned is not Input).ToArray();
+        var starStores = starBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost" && s.Assigned is not Input).ToArray();
+        var energyZero = energyActive.Length > 0 && energyStores.Length > 0 && energyStores.All(s => Numeric(s.Assigned) == 0m);
+        var starZero = starActive.Length > 0 && starStores.Length > 0 && starStores.All(s => Numeric(s.Assigned) == 0m);
         var incrementsPlayed = afterBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
             && s.Assignment.Assigned is Operation { Operator: "add", Right: Constant { Data: 1 } });
         var resetsOnStart = startBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
@@ -1323,7 +1327,7 @@ internal sealed partial class NativeRuleText
         if (!energyZero || !starZero || !incrementsPlayed || !resetsOnStart)
             return false;
 
-        lines.Add($"{prefix}In-combat Energy and Star cost (late): owner's first N non-autoplay card plays each turn (where N = stacks, for cards in Hand or Play) cost 0 Energy and 0 Stars; counter resets before owner's turn starts");
+        lines.Add($"{prefix}In-combat Energy and Star cost (late): owner's first N non-autoplay card plays each turn (where N = stacks, for cards in Hand or Play) cost 0 Energy and 0 Stars (Energy X-cost and Star X-cost cards still spend all Energy/Stars); counter resets before owner's turn starts");
         if (FindOverride(power, "BeforeApplied") is not null || FindOverride(power, "BeforePowerAmountChanged") is not null)
             lines.Add($"{prefix}Application timing: applying or changing stacks of this power disables the free-cost effect for the remainder of the current turn until owner's next turn starts");
         return true;
@@ -1351,7 +1355,7 @@ internal sealed partial class NativeRuleText
         if (targetCardType is null || !callsHelper)
             return false;
 
-        line = $"{prefix}Card replay bonus: increases BaseReplayCount of all owned {ModelLabel(targetCardType)} cards in combat (including non-clone cards entering combat) by stacks while this power is active; removes that bonus when this power is removed";
+        line = $"{prefix}Card replay bonus: each stack causes owned {ModelLabel(targetCardType)} cards in combat (including non-clone cards entering combat) to replay 1 additional time while this power is active; removing this power removes those extra replays";
         return true;
     }
 

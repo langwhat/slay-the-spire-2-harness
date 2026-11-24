@@ -436,15 +436,51 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             var reaching = group.Select(outcome => outcome.Conditions).ToArray();
             var others = outcomes.Where(outcome => outcome.Text != group.Key).Select(outcome => outcome.Conditions)
                 .Concat(excludedPaths);
-            foreach (var path in NativeRuleGuards.Minimize(reaching, others, TestKey) ?? MergeTests(reaching))
+            var minimized = (NativeRuleGuards.Minimize(reaching, others, TestKey) ?? MergeTests(reaching)).ToArray();
+            var pathGuards = new List<(Test[] Path, string Guard)>();
+            foreach (var path in minimized)
             {
                 if (Guard(path) is not { } guard)
                     return null;
-                if (guard != Never)
-                    rendered.Add(new(path, guard, [new Effect(group.Key)]));
+                if (guard == Never)
+                    continue;
+                if (!pathGuards.Any(prev => prev.Guard == guard))
+                    pathGuards.Add((path, guard));
+            }
+            if (pathGuards.Count == 0)
+                continue;
+            if (pathGuards.Any(pg => pg.Guard.Length == 0))
+            {
+                rendered.Add(new([], "", [new Effect(group.Key)]));
+            }
+            else if (pathGuards.Count == 1)
+            {
+                rendered.Add(new(pathGuards[0].Path, pathGuards[0].Guard, [new Effect(group.Key)]));
+            }
+            else
+            {
+                var combinedGuard = CombineDisjunctiveGuards(pathGuards.Select(pg => pg.Guard).ToArray());
+                rendered.Add(new([], combinedGuard, [new Effect(group.Key)]));
             }
         }
         return RenderBranches(rendered).Select(effect => effect.Text).Distinct().ToList();
+    }
+
+    private static string CombineDisjunctiveGuards(string[] guards)
+    {
+        var split = guards.Select(g => g.Split(" and ", StringSplitOptions.RemoveEmptyEntries)).ToArray();
+        var common = split[0].Where(part => split.Skip(1).All(other => other.Contains(part, StringComparer.Ordinal))).ToArray();
+        var remainders = split
+            .Select(parts => parts.Where(p => !common.Contains(p, StringComparer.Ordinal)).ToArray())
+            .Select(rem => rem.Length == 0 ? "" : rem.Length == 1 ? rem[0] : $"({string.Join(" and ", rem)})")
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (remainders.Any(r => r.Length == 0))
+            return string.Join(" and ", common);
+        var disjunction = remainders.Length == 1 ? remainders[0] : $"({string.Join(" or ", remainders)})";
+        return common.Length == 0
+            ? string.Join(" or ", remainders)
+            : $"{string.Join(" and ", common)} and {disjunction}";
     }
 
     // A relic or power that rewrites a number exposes its own rule; name it instead of restating it.
@@ -802,6 +838,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         {
             var loop = stepLoop(body, group.Key.Index);
             var repetitions = loop is null ? null : ValueText(loop.Count);
+            if (loop is not null && repetitions is null)
+            {
+                MarkIncomplete($"{method.Name}/loop-count");
+                continue;
+            }
             var rendered = new List<GuardedEffects>();
             var alternatives = group.GroupBy(step => Key(step.Action));
             foreach (var alternative in alternatives)
@@ -1520,7 +1561,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     || backing is not null && backing.FieldType == typeof(bool)
                     || (power is not null && type == power || type is not null && typeof(RelicModel).IsAssignableFrom(type))
                         && call.Method.GetParameters() is [{ ParameterType: var flagType }] && flagType == typeof(bool)))
-                return new Effect($"{HumanizeLower(propName)} = {(flag == 1 ? "true" : "false")}", ChangesGuard: caller.Name == "AfterAttack");
+                return new Effect($"{HumanizeLower(propName)} = {(flag == 1 ? "true" : "false")}", ChangesGuard: true);
             if ((power is null || (type is not null && typeof(RelicModel).IsAssignableFrom(type)))
                 && call.Method.GetParameters() is [{ ParameterType: var intType }] && intType == typeof(int)
                 && type is not null && BackingField(type, (MethodInfo)call.Method) is { } intBacking && IsGameplayField(intBacking))
@@ -2460,7 +2501,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             if (name == "get_IsEnemy" && call.Receiver is { } isEnemyRec && ValueText(isEnemyRec) is { } isEnemyWho)
                 return expected ? $"{isEnemyWho} is an enemy" : $"{isEnemyWho} is not an enemy";
             if (name == "get_IsMonster" && call.Receiver is { } isMonsterRec && ValueText(isMonsterRec) is { } isMonsterWho)
-                return expected ? $"{isMonsterWho} is an enemy" : $"{isMonsterWho} is not an enemy";
+                return expected ? $"{isMonsterWho} is a monster/pet" : $"{isMonsterWho} is not a monster/pet";
             if (IsFreeSlotSearch(call))
                 return expected ? "an encounter slot is empty" : "no encounter slot is empty";
             if (name == "get_Player" && call.Method.DeclaringType == typeof(Creature) && ValueText(call.Receiver) is { } playerWho)
@@ -2592,7 +2633,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             Call { Method.Name: "get_Item", Receiver: Call { Method.Name: "get_Orbs" }, Arguments: [Constant { Data: 0 }] } => "owner's first (next) orb",
             Call { Method.Name: "get_Orbs" } => "each orb in owner's orb queue",
             Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: nameof(Enumerable.GroupBy), Arguments: [Call { Method.Name: "get_Orbs" }, ..] }] }
-                => "number of unique orb types channeled by owner",
+                => "number of distinct orb types currently in owner's orb queue",
             Call { Method.Name: "FloorToInt", Method.DeclaringType.Name: "Mathf", Arguments: [var floorInner] }
                 when ValueText(floorInner) is { } floorText => $"floor({floorText})",
             Call { Method.Name: "get_Count", Receiver: var countedList } when DescribeCardSelectionValue(countedList) is not null
@@ -2893,7 +2934,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             tests.Add(new Test(positive[0].Value, true));
 
         CardType? cardType = null;
-        var requiresPlayable = false;
+        var excludesUnplayable = false;
         var excludesXCost = false;
         string? costFilter = null;
         var requiredKeywords = new List<string>();
@@ -2923,21 +2964,25 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 excludesXCost = true;
                 continue;
             }
-            if (expr is Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" } })
+            if (expr is Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" }, Arguments: var bareCostArgs })
             {
-                costFilter = expected ? "nonzero-Energy" : "0-Energy";
+                var scope = DescribeCostModifierScope(bareCostArgs.FirstOrDefault());
+                costFilter = expected ? $"{scope} Energy cost ≠ 0" : $"{scope} Energy cost = 0";
                 continue;
             }
-            if (expr is Operation { Operator: "ceq" or "beq" or "cgt" or "bgt", Left: Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" } }, Right: Constant { Data: int costVal } } costOp)
+            if (expr is Operation { Operator: "ceq" or "beq" or "cgt" or "bgt" or "ble" or "clt" or "blt",
+                Left: Call { Method.Name: "GetWithModifiers", Receiver: Call { Method.Name: "get_EnergyCost" }, Arguments: var opCostArgs },
+                Right: Constant { Data: int costVal } } costOp)
             {
+                var scope = DescribeCostModifierScope(opCostArgs.FirstOrDefault());
                 if (costOp.Operator is "ceq" or "beq" && expected)
                 {
-                    costFilter = $"{costVal}-Energy";
+                    costFilter = $"{scope} Energy cost = {costVal}";
                     continue;
                 }
-                if (costOp.Operator is "cgt" or "bgt" && expected && costVal == 0)
+                if ((costOp.Operator is "cgt" or "bgt" && expected) || (costOp.Operator == "ble" && !expected))
                 {
-                    costFilter = "nonzero-Energy";
+                    costFilter = $"{scope} Energy cost > {costVal}";
                     continue;
                 }
                 return null;
@@ -2948,7 +2993,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 var kw = (CardKeyword)rawKw;
                 if (!expected && kw == CardKeyword.Unplayable)
                 {
-                    requiresPlayable = true;
+                    excludesUnplayable = true;
                     continue;
                 }
                 if (expected)
@@ -2975,19 +3020,31 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         }
 
         var qualifiers = new List<string>();
-        if (requiresPlayable)
-            qualifiers.Add("playable");
+        if (excludesUnplayable)
+            qualifiers.Add("non-Unplayable");
         if (excludesXCost)
-            qualifiers.Add("non-X-cost");
-        if (costFilter is not null)
-            qualifiers.Add(costFilter);
+            qualifiers.Add("non-Energy-X-cost");
         qualifiers.AddRange(requiredKeywords);
         qualifiers.AddRange(excludedKeywords);
         qualifiers.AddRange(requiredTags);
         if (cardType is { } kind)
             qualifiers.Add(kind.ToString());
-        return qualifiers.Count > 0 ? $"{string.Join(" ", qualifiers)} card(s)" : null;
+        if (qualifiers.Count == 0 && costFilter is null)
+            return null;
+        var baseNoun = qualifiers.Count > 0 ? $"{string.Join(" ", qualifiers)} card(s)" : "card(s)";
+        return costFilter is not null ? $"{baseNoun} with {costFilter}" : baseNoun;
     }
+
+    private static string DescribeCostModifierScope(Value? modifierArg)
+        => modifierArg is Constant { Data: int rawMod }
+            ? (CostModifiers)rawMod switch
+            {
+                CostModifiers.Local => "local",
+                CostModifiers.Global => "global",
+                CostModifiers.All => "modified",
+                _ => "base",
+            }
+            : "modified";
 
     private decimal? Numeric(Value? value, int depth = 0)
     {

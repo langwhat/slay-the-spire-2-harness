@@ -225,18 +225,31 @@ internal sealed class NativeRuleBody
                     var receiver = rawReceiver is not null ? path.Deref(rawReceiver) : null;
                     if (code == OpCodes.Call && target is ConstructorInfo && rawReceiver is LocalAddress ctorSlot)
                     {
-                        var constructed = new Call(target, null, args.Select(path.Materialize).ToArray());
-                        path.Locals[ctorSlot.Slot] = constructed;
-                        continue;
+                        var hasWritableByRef = target.GetParameters().Any(p => p.ParameterType.IsByRef && !p.IsIn);
+                        InvalidateByRefArguments(path, target, args, skipIndex: -1);
+                        if (!hasWritableByRef)
+                        {
+                            var constructed = new Call(target, null, args.Select(path.Materialize).ToArray());
+                            path.Locals[ctorSlot.Slot] = constructed;
+                            continue;
+                        }
+                        path.Locals.Remove(ctorSlot.Slot);
                     }
+                    var isDictRemoveOut = false;
                     if (target.Name == "Remove" && target.DeclaringType is { IsGenericType: true } dictType
                         && dictType.GetGenericTypeDefinition() == typeof(Dictionary<,>)
                         && receiver is not null && args.Length == 2)
                     {
                         if (args[1] is LocalAddress removedValSlot)
+                        {
                             path.Locals[removedValSlot.Slot] = new Operation("dict_removed_value", receiver);
+                            isDictRemoveOut = true;
+                        }
                         else if (args[1] is Field { Receiver: var smRec, Member: var smField } && smRec == StateMachine)
+                        {
                             path.StateFields[smField] = new Operation("dict_removed_value", receiver);
+                            isDictRemoveOut = true;
+                        }
                     }
                     if (target.Name == "Deconstruct" && target.DeclaringType is { IsGenericType: true } pair
                         && pair.GetGenericTypeDefinition() == typeof(KeyValuePair<,>)
@@ -246,6 +259,7 @@ internal sealed class NativeRuleBody
                         path.Locals[valueSlot.Slot] = new Operation("kvp_value", receiver);
                         continue;
                     }
+                    InvalidateByRefArguments(path, target, args, skipIndex: isDictRemoveOut ? 1 : -1);
                     for (var i = 0; i < args.Length; i++)
                         args[i] = path.Materialize(path.Deref(args[i]));
                     var call = new Call(target, receiver is not null ? path.Materialize(receiver) : null, args);
@@ -327,24 +341,27 @@ internal sealed class NativeRuleBody
                         && condition is Call { Method.DeclaringType: var decType, Method.Name: "op_LessThan", Arguments: [var decLeft, var decRight] }
                         && decType == typeof(decimal))
                     {
-                        var isDecZero = decLeft is Call { Method.Name: "op_Implicit", Arguments: [Constant { Data: 0 }] }
-                            || decLeft is Field { Member.Name: "Zero", Member.DeclaringType: var zt } && zt == typeof(decimal);
-                        var isDecIncremented = decLeft is Call { Method.Name: "op_Increment" or "op_Addition" }
-                            || decLeft is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "add", Right: Constant { Data: 1 } }] };
+                        var isDecZero = IsDecimalConstant(decLeft, 0);
+                        var isDecIncrementedFromZero =
+                            (decLeft is Call { Method.Name: "op_Increment", Arguments: [var incArg] } && IsDecimalConstant(incArg, 0))
+                            || (decLeft is Call { Method.Name: "op_Addition", Arguments: [var decAddL, var decAddR] }
+                                && IsDecimalConstant(decAddL, 0) && IsDecimalConstant(decAddR, 1))
+                            || (decLeft is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "add", Left: var addL, Right: Constant { Data: 1 } }] }
+                                && (addL as Constant ?? Fold(addL)) is { Data: 0 });
                         if (visits == 0 && expected && isDecZero && IsCountedLoopBound(decRight))
                         {
                             Loops.Add(new Loop(destination, index, decRight));
                             path.Index = destination;
                             continue;
                         }
-                        if (visits == 0 && expected && isDecIncremented && IsCountedLoopBound(decRight))
+                        if (visits == 0 && expected && isDecIncrementedFromZero && IsCountedLoopBound(decRight))
                         {
-                            // Bottom-tested decimal loop already ran its representative iteration.
+                            // Bottom-tested decimal loop starting at 0 already ran its representative iteration.
                             Loops.Add(new Loop(destination, index, decRight));
                             continue;
                         }
                         if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
-                            && isDecIncremented)
+                            && isDecIncrementedFromZero)
                             continue;
                     }
                     if (destination < index && condition is Operation { Right: var rawLimit } counter)
@@ -599,6 +616,28 @@ internal sealed class NativeRuleBody
             }
         }
     }
+
+    private static void InvalidateByRefArguments(Path path, MethodBase target, Value[] args, int skipIndex)
+    {
+        var parameters = target.GetParameters();
+        for (var i = 0; i < args.Length && i < parameters.Length; i++)
+        {
+            if (i == skipIndex)
+                continue;
+            var param = parameters[i];
+            if (!param.ParameterType.IsByRef || param.IsIn)
+                continue;
+            if (args[i] is Input byRefParam)
+                path.OutValues.Remove(byRefParam.Name);
+            else if (args[i] is LocalAddress byRefLocal)
+                path.Locals.Remove(byRefLocal.Slot);
+        }
+    }
+
+    private static bool IsDecimalConstant(Value value, int expected)
+        => (value is Call { Method.Name: "op_Implicit", Arguments: [var arg] } && (arg as Constant ?? Fold(arg)) is { Data: int n } && n == expected)
+            || (expected == 0 && value is Field { Member.Name: "Zero", Member.DeclaringType: var zt } && zt == typeof(decimal))
+            || (expected == 1 && value is Field { Member.Name: "One", Member.DeclaringType: var ot } && ot == typeof(decimal));
 
     private static bool IsReadOnlyArrayScanLoop(List<CodeInstruction> instructions, int start, int end)
     {

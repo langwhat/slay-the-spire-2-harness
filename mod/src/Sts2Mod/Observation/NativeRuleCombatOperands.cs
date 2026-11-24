@@ -75,7 +75,9 @@ internal sealed partial class NativeRuleText
             && ValueText(factoryCall.Arguments[2]) is { } factoryCount)
         {
             var poolDesc = DescribeCardFactoryPool(factoryCall.Arguments[1]);
-            return new Effect($"generate {factoryCount} {poolDesc} card(s) into {Possessive(factoryRecipient)} {pileLabel}");
+            if (factoryCall.Method.Name == "GetDistinctForCombat")
+                return new Effect($"generate up to {factoryCount} distinct {poolDesc} card(s) into {Possessive(factoryRecipient)} {pileLabel}");
+            return new Effect($"generate {factoryCount} {poolDesc} card(s) (duplicates allowed) into {Possessive(factoryRecipient)} {pileLabel}");
         }
 
         return null;
@@ -115,9 +117,13 @@ internal sealed partial class NativeRuleText
         var poolName = current is Call { Method.Name: "GetUnlockedCards", Receiver: Call { Method: { Name: "CardPool", IsGenericMethod: true } cp } }
             ? HumanizeLower(cp.GetGenericArguments()[0].Name.Replace("CardPool", "", StringComparison.Ordinal))
             : current is Call { Method.Name: "GetUnlockedCards", Receiver: Call { Method.Name: "get_CardPool" } }
-                ? "character"
-                : "random";
-        return filters.Count > 0 ? $"random {string.Join(" ", filters)}" : poolName == "random" ? "random" : $"random {poolName}";
+                ? "unlocked character"
+                : null;
+        var parts = new List<string>();
+        if (poolName is not null)
+            parts.Add(poolName);
+        parts.AddRange(filters);
+        return parts.Count > 0 ? $"random {string.Join(" ", parts)}" : "random";
     }
 
     private static string? CardSlot(Field field)
@@ -211,6 +217,39 @@ internal sealed partial class NativeRuleText
                 continue;
             }
             var steps = RenderBranches(nested).ToList();
+            // Fold pure self-reentrancy guards (`if ... and Flag=false: (flag = true; body; flag = false)`)
+            // into human-readable non-recursive wording instead of exposing internal C# guard names.
+            if (steps.Count >= 3
+                && steps[0].Text.EndsWith(" = true", StringComparison.Ordinal)
+                && steps[^1].Text.EndsWith(" = false", StringComparison.Ordinal))
+            {
+                var flagHuman = steps[0].Text[..^" = true".Length];
+                if (steps[^1].Text[..^" = false".Length] == flagHuman)
+                {
+                    var expectedGuardToken = flagHuman.Replace(" ", "", StringComparison.Ordinal) + "=false";
+                    var matchingCond = first.Path.FirstOrDefault(t =>
+                        Condition(t) is { } condText
+                        && condText.Equals(expectedGuardToken, StringComparison.OrdinalIgnoreCase));
+                    if (matchingCond is not null)
+                    {
+                        var trimmedPath = first.Path.Where(t => t != matchingCond).ToArray();
+                        if (Guard(trimmedPath) is { } trimmedGuard)
+                        {
+                            var middle = steps.Skip(1).Take(steps.Count - 2).ToList();
+                            var middleText = middle.Count == 1
+                                ? $"{middle[0].Text} (does not re-trigger itself)"
+                                : $"({string.Join("; ", middle.Select(s => s.Text))}; does not re-trigger itself)";
+                            groups.Add(first with
+                            {
+                                Path = trimmedPath,
+                                Guard = trimmedGuard,
+                                Effects = [Combine(middle, middleText)],
+                            });
+                            continue;
+                        }
+                    }
+                }
+            }
             groups.Add(first with { Effects = [Combine(steps, $"({string.Join("; ", steps.Select(step => step.Text))})")] });
         }
         return groups;
@@ -310,7 +349,7 @@ internal sealed partial class NativeRuleText
         if (test.Value is Call { Method: MethodInfo histProp, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
             && histProp.ReturnType == typeof(bool) && histProp.DeclaringType == _hookOwner
             && IsLostHpInPreviousTurnGetter(histProp))
-            return expected ? "owner lost unblocked HP last player turn" : "owner did not lose unblocked HP last player turn";
+            return expected ? "owner received a hit that was not fully blocked last player turn" : "owner did not receive a hit that was not fully blocked last player turn";
 
         if (test.Value is Call { Method: MethodInfo segmentCheck, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
             && TeammatePowerAllDeadType(segmentCheck) is { } sharedPower)
@@ -432,7 +471,7 @@ internal sealed partial class NativeRuleText
             Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
                 Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo blkPred }] }] }
                 when ofType.GetGenericArguments()[0].Name == "BlockGainedEntry" && IsBlockGainedThisTurnPredicate(blkPred)
-                => "earlier card/move Block gains by owner this turn",
+                => "earlier card/move Block gains from other card plays by owner this turn",
             Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysFinished" },
                 Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo finPred }] }] }
                 when DescribeHistoryEntryCount("finished", finPred) is { } finLabel
@@ -496,9 +535,17 @@ internal sealed partial class NativeRuleText
     private bool IsBlockGainedThisTurnPredicate(MethodInfo pred)
     {
         var body = Body(pred);
-        return !body.Incomplete
-            && body.Calls.Any(s => s.Call.Method.Name == "HappenedThisTurn")
-            && body.Calls.Any(s => s.Call.Method.Name == "IsCardOrMonsterMove");
+        if (body.Incomplete || body.Returns.Count == 0)
+            return false;
+        var hasTurnCheck = body.Calls.Any(s => s.Call.Method.Name == "HappenedThisTurn");
+        var hasMoveCheck = body.Calls.Any(s => s.Call.Method.Name == "IsCardOrMonsterMove");
+        var hasOwnerCheck = body.Calls.Any(s => s.Call.Method.Name == "get_Player");
+        var excludesCurrentCardPlay = body.Returns.Any(r =>
+            r.Value is Operation { Operator: "ceq", Left: Operation { Operator: "ceq", Left: Call { Method.Name: "get_CardPlay" }, Right: Field { Member.Name: "cardPlay" } }, Right: Constant { Data: 0 } }
+            || r.Value is Operation { Operator: "bne.un", Left: Call { Method.Name: "get_CardPlay" }, Right: Field { Member.Name: "cardPlay" } }
+            || r.Conditions.Any(c => IsEquality(c, false, out var l, out var rhs)
+                && l is Call { Method.Name: "get_CardPlay" } && rhs is Field { Member.Name: "cardPlay" }));
+        return hasTurnCheck && hasMoveCheck && hasOwnerCheck && excludesCurrentCardPlay;
     }
 
     private Type? OrbTypeFromPredicate(MethodInfo predicate)

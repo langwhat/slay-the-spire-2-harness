@@ -36,6 +36,9 @@ internal sealed partial class NativeRuleText
         parts.Add(unplayable ? "Unplayable" : $"{card.EnergyCost.Canonical} Energy");
         foreach (var keyword in keywords.Where(k => k != CardKeyword.Unplayable))
             parts.Add(keyword.ToString());
+        var tags = card.Tags.OrderBy(t => t.ToString(), StringComparer.Ordinal).ToList();
+        if (tags.Count > 0)
+            parts.Add($"tags: {string.Join(", ", tags)}");
 
         var clauses = new List<string> { string.Join(", ", parts) };
         if (card.HasTurnEndInHandEffect)
@@ -122,14 +125,20 @@ internal sealed partial class NativeRuleText
             var minimized = (NativeRuleGuards.Minimize(reaching, missing, TestKey) ?? MergeTests(reaching)).ToArray();
             var isTargetedEnemyPowerGuard = declaring == typeof(PowerCmd) && name == nameof(PowerCmd.ModifyAmount)
                 && call.Arguments.Length >= 2 && EnemyPowerTargetingCardOwner(card.GetType(), call.Arguments[1]) is not null
-                && minimized.All(path => path.All(c => IsDreadTest(c) || IsEnemyPowerPresenceCheck(card.GetType(), c)));
+                && minimized.Length > 0
+                && minimized.All(path => path.Any(c => IsEnemyPowerPresenceCheck(card.GetType(), c))
+                    && path.All(c => IsDreadTest(c) || IsEnemyPowerPresenceCheck(card.GetType(), c)));
             var isOstyPresentGuard = declaring?.Name == "AttackCommand" && name == "Execute"
-                && minimized.All(path => path.All(c => IsDreadTest(c)
-                    || (c is { Expected: false, Value: Call { Method.DeclaringType: var ostyDecl, Method.Name: "CheckMissingWithAnim" } }
-                        && ostyDecl == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))));
+                && minimized.Length > 0
+                && minimized.All(path => path.Any(IsOstyMissingCheck)
+                    && path.All(c => IsDreadTest(c) || IsOstyMissingCheck(c)));
             if (!isTargetedEnemyPowerGuard && !isOstyPresentGuard
                 && minimized.Any(path => path.Any(c => !IsDreadTest(c) && Condition(c) is not "")))
                 return null;
+
+            static bool IsOstyMissingCheck(Test c)
+                => c is { Expected: false, Value: Call { Method.DeclaringType: var ostyDecl, Method.Name: "CheckMissingWithAnim" } }
+                    && ostyDecl == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty);
 
             if (declaring?.Name == "AttackCommand" && name == "Execute" && call.Receiver is Call attackBuilder)
             {

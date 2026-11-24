@@ -632,7 +632,7 @@ internal static class ModifierMechanismReader
         if (excludesUnplayable)
             parts.Add("playable");
         if (excludesXCost)
-            parts.Add("non-X-cost");
+            parts.Add("non-Energy-X-cost");
         if (rarities.Count > 0)
             parts.Add(string.Join("/", rarities));
         if (tags.Count > 0)
