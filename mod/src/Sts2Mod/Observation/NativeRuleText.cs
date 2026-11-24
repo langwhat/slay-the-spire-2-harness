@@ -1276,7 +1276,7 @@ internal sealed partial class NativeRuleText(MonsterModel monster)
             || typeof(RelicModel).IsAssignableFrom(type) && type != typeof(RelicModel)
             || typeof(AfflictionModel).IsAssignableFrom(type) && type != typeof(AfflictionModel);
 
-    private static string ModelLabel(Type type)
+    internal static string ModelLabel(Type type)
     {
         var id = ModelDb.GetId(type);
         var title = ModelDb.GetByIdOrNull<AbstractModel>(id) switch

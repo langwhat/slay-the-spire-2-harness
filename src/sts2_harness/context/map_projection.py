@@ -25,6 +25,7 @@ class MapPosition(SemanticValue):
 
 class MapView(SemanticValue):
     boss: tuple[native.NamedDefinition, ...]
+    elite_pool: tuple[native.NamedDefinition, ...] | MISSING = MISSING
     at: MapPosition | None
     next: tuple[str, ...] | None
     stretches: tuple[StretchView, ...]
@@ -355,6 +356,7 @@ def project_map(
     )
     return MapView(
         boss=public_map.bosses,
+        elite_pool=public_map.elite_pool,
         at=at,
         next=(
             tuple(_entry(graph, position, node) for node in public_map.legal_destinations)
@@ -378,3 +380,24 @@ def project_map(
         unknown_odds=summary,
         plan=planned_stretches(graph, position, plan),
     )
+
+
+def is_post_boss(progress: native.Progress, public_map: native.PublicMap | MISSING) -> bool:
+    return (
+        progress.room_type == MapRoom.BOSS
+        and public_map is not MISSING
+        and not public_map.legal_destinations
+        and any(
+            node.position == progress.position and not node.children for node in public_map.nodes
+        )
+    )
+
+
+def upcoming_act_bosses(
+    public_map: native.PublicMap | MISSING, progress: native.Progress
+) -> tuple[native.NamedDefinition, ...]:
+    if public_map is MISSING or is_post_boss(progress, public_map) or progress.bosses_left == 0:
+        return ()
+    if isinstance(progress.bosses_left, int) and progress.bosses_left > 0:
+        return public_map.bosses[-progress.bosses_left :]
+    return public_map.bosses

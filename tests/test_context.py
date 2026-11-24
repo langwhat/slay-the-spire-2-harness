@@ -486,3 +486,139 @@ def test_combat_state_format_explains_unpowered_vs_unblockable_damage() -> None:
         "POWER.WEAK_POWER, and POWER.VULNERABLE_POWER, "
         "and is still blockable unless marked unblockable."
     ) in text
+
+
+def test_precombat_boss_and_elite_mechanisms_route_by_role_and_remaining_bosses() -> None:
+    from sts2_harness.client.models import NamedDefinition, PublicMap
+    from sts2_harness.deck import card_rewards, deck_context, deck_observation
+    from sts2_harness.prompts import PackagedPrompts
+    from sts2_harness.run import run_observation
+
+    base = Observation.model_validate_json(RUN)
+    assert isinstance(base.state, RunState)
+    public_map = PublicMap.model_validate_json(
+        '{"bosses":[{"name":"女王","definition_id":"ENCOUNTER.QUEEN_BOSS"},'
+        '{"name":"实验体","definition_id":"ENCOUNTER.TEST_SUBJECT_BOSS"}],'
+        '"elite_pool":[{"name":"骑士","definition_id":"ENCOUNTER.KNIGHTS_ELITE"}],'
+        '"nodes":[{"position":"map:0:0","room_type":"monster","children":["map:1:0"]},'
+        '{"position":"map:1:0","room_type":"boss","children":[]}],'
+        '"legal_destinations":["map:1:0"]}'
+    )
+    boss_first = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="ENCOUNTER.QUEEN_BOSS",
+        name="女王",
+        text="Monsters: 1× 女王 (MONSTER.QUEEN, 419 HP)",
+        owner="act",
+    )
+    boss_second = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="ENCOUNTER.TEST_SUBJECT_BOSS",
+        name="实验体",
+        text="Monsters: 1× 实验体 (MONSTER.TEST_SUBJECT, 211 HP)",
+        owner="act",
+    )
+    elite_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="ENCOUNTER.KNIGHTS_ELITE",
+        name="骑士",
+        text="Monsters: 1× 连枷骑士 (MONSTER.FLAIL_KNIGHT, 108 HP)",
+        owner="act",
+    )
+    active = base.model_copy(
+        update={
+            "map": public_map,
+            "state": base.state.model_copy(
+                update={
+                    "progress": base.state.progress.model_copy(
+                        update={"position": "map:0:0", "room_type": "monster", "bosses_left": 2}
+                    )
+                }
+            ),
+            "mechanisms": (*base.mechanisms, boss_first, boss_second, elite_rule),
+        }
+    )
+
+    # Run receives both upcoming Boss rules and the act's candidate Elite rules once per act.
+    run_ctx = Context(DecisionOwner.RUN)
+    run_ctx.append_task(RunActInput(), run_observation(active))
+    run_payload = json.loads(run_ctx.model_input()[-1].text)["observation"]
+    run_mech_ids = [row["definition_id"] for row in run_payload["mechanisms"]]
+    assert "ENCOUNTER.QUEEN_BOSS" in run_mech_ids
+    assert "ENCOUNTER.TEST_SUBJECT_BOSS" in run_mech_ids
+    assert "ENCOUNTER.KNIGHTS_ELITE" in run_mech_ids
+    assert run_payload["map"]["elite_pool"] == [
+        {"name": "骑士", "definition_id": "ENCOUNTER.KNIGHTS_ELITE"}
+    ]
+
+    # Deck receives remaining Bosses in progress.boss and Boss rules, excluding Elite pool rules.
+    offers, _ = card_rewards(active)
+    deck_view = deck_observation(active, offers)
+    deck_ctx = deck_context(PackagedPrompts(), (), deck_view, minimal=False)
+    deck_ctx.append_task(RunActInput(), deck_view)
+    deck_payload = json.loads(deck_ctx.model_input()[-1].text)["observation"]
+    assert deck_payload["progress"]["boss"] == [
+        {"name": "女王", "definition_id": "ENCOUNTER.QUEEN_BOSS"},
+        {"name": "实验体", "definition_id": "ENCOUNTER.TEST_SUBJECT_BOSS"},
+    ]
+    deck_mech_ids = [row["definition_id"] for row in deck_payload.get("mechanisms", [])]
+    assert "ENCOUNTER.QUEEN_BOSS" in deck_mech_ids
+    assert "ENCOUNTER.TEST_SUBJECT_BOSS" in deck_mech_ids
+    assert "ENCOUNTER.KNIGHTS_ELITE" not in deck_mech_ids
+
+    # When only the second Boss remains, Deck keeps only the remaining Boss.
+    one_left = active.model_copy(
+        update={
+            "state": active.state.model_copy(
+                update={"progress": active.state.progress.model_copy(update={"bosses_left": 1})}
+            )
+        }
+    )
+    one_left_view = deck_observation(one_left, offers)
+    one_left_ctx = deck_context(PackagedPrompts(), (), one_left_view, minimal=False)
+    one_left_ctx.append_task(RunActInput(), one_left_view)
+    one_left_payload = json.loads(one_left_ctx.model_input()[-1].text)["observation"]
+    assert one_left_payload["progress"]["boss"] == [
+        {"name": "实验体", "definition_id": "ENCOUNTER.TEST_SUBJECT_BOSS"}
+    ]
+    assert [
+        row["definition_id"]
+        for row in one_left_payload.get("mechanisms", [])
+        if str(row.get("definition_id", "")).startswith("ENCOUNTER.")
+    ] == ["ENCOUNTER.TEST_SUBJECT_BOSS"]
+
+    # Post-Boss rewards omit defeated Bosses from Deck, and Combat ignores act-scoped Run rules.
+    post_boss = active.model_copy(
+        update={
+            "map": public_map.model_copy(
+                update={
+                    "bosses": (NamedDefinition(name="女王", definition_id="ENCOUNTER.QUEEN_BOSS"),),
+                    "legal_destinations": (),
+                }
+            ),
+            "state": active.state.model_copy(
+                update={
+                    "progress": active.state.progress.model_copy(
+                        update={"position": "map:1:0", "room_type": "boss", "bosses_left": 0}
+                    )
+                }
+            ),
+        }
+    )
+    post_view = deck_observation(post_boss, offers)
+    post_ctx = deck_context(PackagedPrompts(), (), post_view, minimal=False)
+    post_ctx.append_task(RunActInput(), post_view)
+    post_payload = json.loads(post_ctx.model_input()[-1].text)["observation"]
+    assert "boss" not in post_payload["progress"]
+    assert not any(
+        str(row.get("definition_id", "")).startswith("ENCOUNTER.")
+        for row in post_payload.get("mechanisms", [])
+    )
+
+    combat_ctx = Context(DecisionOwner.COMBAT)
+    combat_ctx.append_task(CombatActInput(), active)
+    combat_payload = json.loads(combat_ctx.model_input()[-1].text)["observation"]
+    assert not any(
+        str(row.get("definition_id", "")).startswith("ENCOUNTER.")
+        for row in combat_payload.get("mechanisms", [])
+    )

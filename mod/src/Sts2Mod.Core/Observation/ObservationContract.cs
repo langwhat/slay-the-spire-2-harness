@@ -596,6 +596,7 @@ public sealed record PublicMap(
     ImmutableArray<PublicMapNode> Nodes)
 {
     public ImmutableArray<string>? LegalDestinations { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<NamedDefinition>? ElitePool { get; init; }
 }
 
 public sealed record NativeObservation(

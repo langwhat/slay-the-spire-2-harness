@@ -9,7 +9,13 @@ from pydantic import MISSING, JsonValue, TypeAdapter
 
 from sts2_harness.card_projection import card_rules, upgrade_changes
 from sts2_harness.client import models as native
-from sts2_harness.context.map_projection import MapUnavailable, planned_route, project_map
+from sts2_harness.context.map_projection import (
+    MapUnavailable,
+    is_post_boss,
+    planned_route,
+    project_map,
+    upcoming_act_bosses,
+)
 from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
 from sts2_harness.context.run_models import RunObservation
 from sts2_harness.fights import Fight, FightEncounter
@@ -295,16 +301,7 @@ class RunDelivery:
             sections["deck_stats"] = self.deck_stats
         if self.role is native.DecisionOwner.RUN and self.fights:
             sections["fights"] = [_json(fight) for fight in self.fights]
-        post_boss = (
-            isinstance(state, native.RunState)
-            and state.progress.room_type == "boss"
-            and source.map is not MISSING
-            and not source.map.legal_destinations
-            and any(
-                node.position == state.progress.position and not node.children
-                for node in source.map.nodes
-            )
-        )
+        post_boss = isinstance(state, native.RunState) and is_post_boss(state.progress, source.map)
         if (
             self.role is native.DecisionOwner.RUN
             and not self.focused_deck
@@ -328,6 +325,12 @@ class RunDelivery:
                     progress = sections["progress"]
                     assert isinstance(progress, dict)
                     progress["route"] = list(route)
+            if self.focused_deck and isinstance(state, native.RunState):
+                upcoming = upcoming_act_bosses(source.map, state.progress)
+                if upcoming:
+                    progress = sections["progress"]
+                    assert isinstance(progress, dict)
+                    progress["boss"] = [_json(boss) for boss in upcoming]
         if self.role is native.DecisionOwner.COMBAT:
             player = sections["player"]
             assert isinstance(player, dict)

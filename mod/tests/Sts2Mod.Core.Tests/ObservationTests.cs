@@ -73,6 +73,7 @@ public sealed class ObservationTests
             [new PublicMapNode("map:0:1", "monster", ["map:0:2"])])
         {
             LegalDestinations = ["map:0:2"],
+            ElitePool = [new NamedDefinition("Bygone Effigy", "ENCOUNTER.BYGONE_EFFIGY_ELITE")],
         };
 
         var observation = new NativeObservation(
@@ -191,6 +192,7 @@ public sealed class ObservationTests
         Assert.Equal(200, mapCode);
         using var mapDoc = JsonDocument.Parse(mapJson);
         Assert.Equal("ENCOUNTER.THE_KIN", mapDoc.RootElement.GetProperty("data").GetProperty("map").GetProperty("bosses")[0].GetProperty("definition_id").GetString());
+        Assert.Equal("ENCOUNTER.BYGONE_EFFIGY_ELITE", mapDoc.RootElement.GetProperty("data").GetProperty("map").GetProperty("elite_pool")[0].GetProperty("definition_id").GetString());
 
         var (rewardCode, rewardJson) = ObservationReader.Inspect(
             publication,

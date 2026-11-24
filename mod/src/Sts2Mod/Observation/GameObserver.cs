@@ -587,6 +587,27 @@ internal sealed class GameObserver(
             BattleTurns = battleTurns is > 0 ? battleTurns : null,
         };
 
+        var mapView = MapObserver.Observe(run);
+        if (mapView is not null)
+        {
+            var upcomingBosses = RemainingBossEncounters(includeCurrentCombatBoss: false).ToArray();
+            if (upcomingBosses.Length > 0)
+            {
+                foreach (var encounter in upcomingBosses.Concat(run.Act.AllEliteEncounters))
+                {
+                    if (EncounterMechanismReader.Read(encounter, run.AscensionLevel, run.GameMode, gameLanguage) is { } rules)
+                    {
+                        _mechanisms.Add(new MechanismView(
+                            MechanismKind.Other,
+                            encounter.Id.ToString(),
+                            encounter.Title.GetFormattedText(),
+                            rules,
+                            "act"));
+                    }
+                }
+            }
+        }
+
         return new NativeObservation(
             new ObservationStamp(gameId, sequence),
             new ObservationLocation(gameId, $"run-{runInstanceId}", registry.NodeId, ObservationOwner.Run),
@@ -601,7 +622,7 @@ internal sealed class GameObserver(
             _mechanisms.ToImmutableArray(),
             CaptureRunRules())
         {
-            Map = MapObserver.Observe(run),
+            Map = mapView,
         };
     }
 
@@ -628,22 +649,26 @@ internal sealed class GameObserver(
                     AscensionHelper.GetDescription(level, run.GameMode).GetFormattedText()))
                 .ToImmutableArray());
 
-    private int CountBossesLeft()
+    private IEnumerable<EncounterModel> RemainingBossEncounters(bool includeCurrentCombatBoss)
     {
         if (run.Map is null or NullActMap)
-            return 0;
+            yield break;
 
         var current = run.CurrentMapPoint;
-        var bosses = run.Map.SecondBossMapPoint is { } second
-            ? new[] { run.Map.BossMapPoint, second }
-            : [run.Map.BossMapPoint];
-
-        return bosses.Count(point =>
+        bool IsRemaining(MegaCrit.Sts2.Core.Map.MapPoint? point) =>
             point is not null
             && (current is null
                 || point.coord.row > current.coord.row
-                || (point.coord.row == current.coord.row && combat is not null)));
+                || (includeCurrentCombatBoss && point.coord.row == current.coord.row));
+
+        if (IsRemaining(run.Map.BossMapPoint))
+            yield return run.Act.BossEncounter;
+        if (IsRemaining(run.Map.SecondBossMapPoint) && run.Act.SecondBossEncounter is { } secondEncounter)
+            yield return secondEncounter;
     }
+
+    private int CountBossesLeft() =>
+        RemainingBossEncounters(includeCurrentCombatBoss: combat is not null).Count();
 
     private void AddInventory(bool hasBlockingSelection, bool combatReady)
     {

@@ -1,6 +1,6 @@
 # Map
 
-`map.boss` identifies the known Bosses. `map.at` identifies the current node, its stretch, and its 1-based room number within that stretch; it is null before entering the act's first node. `map.next` is the set of destinations the game currently allows: null means availability is unknown, and an empty list means no destination is currently available. `map.elites_fought` lists this act's Elite battles so far, in order; it is absent when unknown.
+`map.boss` identifies the known Bosses. `map.elite_pool` lists this act's candidate Elite encounters when known. `map.at` identifies the current node, its stretch, and its 1-based room number within that stretch; it is null before entering the act's first node. `map.next` is the set of destinations the game currently allows: null means availability is unknown, and an empty list means no destination is currently available. `map.elites_fought` lists this act's Elite battles so far, in order; it is absent when unknown.
 
 A stretch has no fork inside: entering it commits to every room in it. `floors` gives its native act-local row or row range, and `rooms` lists the rooms in order. The room codes are M (Monster), E (Elite), R (rest site), $ (shop), T (treasure), ? (unknown), B (Boss), and A (Ancient). Each stretch's `next` lists its successor stretches. Stretch IDs are stable within the act. `unknown_odds` gives the native odds for unknown rooms, either once when they match or by stretch and 1-based room number when they differ; absent odds are unknown.
 

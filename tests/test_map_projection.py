@@ -11,7 +11,8 @@ from sts2_harness.route_plan import Edge, RoutePlan
 
 def test_map_uses_one_odds_value_when_all_reachable_unknown_rooms_match() -> None:
     raw_map = PublicMap.model_validate_json(
-        '{"bosses":[{"name":"首领","definition_id":"ENCOUNTER.BOSS"}],"nodes":['
+        '{"bosses":[{"name":"首领","definition_id":"ENCOUNTER.BOSS"}],'
+        '"elite_pool":[{"name":"精英","definition_id":"ENCOUNTER.ELITE"}],"nodes":['
         '{"position":"map:0:0","room_type":"ancient","children":["map:1:0"]},'
         '{"position":"map:1:0","room_type":"unknown","children":["map:2:0"],'
         '"odds":{"monster":0.6,"event":0.4}},'
@@ -23,6 +24,7 @@ def test_map_uses_one_odds_value_when_all_reachable_unknown_rooms_match() -> Non
     view = json.loads(project_map(raw_map, progress, None).to_json())
 
     assert view["boss"] == [{"name": "首领", "definition_id": "ENCOUNTER.BOSS"}]
+    assert view["elite_pool"] == [{"name": "精英", "definition_id": "ENCOUNTER.ELITE"}]
     assert view["next"] == ["s1"]
     assert view["stretches"] == [{"id": "s1", "floors": "0-2", "rooms": "A??", "next": []}]
     assert view["unknown_odds"] == {"monster": 0.6, "event": 0.4}

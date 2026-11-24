@@ -60,9 +60,16 @@ internal static class MapObserver
             })
             .ToImmutableArray();
 
+        var elitePool = run.Act.AllEliteEncounters
+            .Select(elite => new NamedDefinition(
+                elite.Title.GetFormattedText(),
+                elite.Id.ToString()))
+            .ToImmutableArray();
+
         return new PublicMap(bosses.ToImmutable(), nodes)
         {
             LegalDestinations = ObserveLegalDestinations(run, map),
+            ElitePool = elitePool.IsEmpty ? null : elitePool,
         };
     }
 

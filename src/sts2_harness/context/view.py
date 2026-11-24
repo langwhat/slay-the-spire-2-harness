@@ -207,11 +207,14 @@ def visible_observation(
     mechanisms = tuple(
         entry
         for entry in observation.mechanisms
-        if own_menu
-        or (
-            entry.owner not in excluded
-            if entry.owner is not MISSING
-            else entry.definition_id in identities
+        if not (entry.owner == "act" and role is not native.DecisionOwner.RUN)
+        and (
+            own_menu
+            or (
+                entry.owner not in excluded
+                if entry.owner is not MISSING
+                else entry.definition_id in identities
+            )
         )
     )
     return VisibleObservation(

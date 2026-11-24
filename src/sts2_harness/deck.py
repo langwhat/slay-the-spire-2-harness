@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
+from sts2_harness.context.map_projection import upcoming_act_bosses
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
@@ -151,6 +152,11 @@ def deck_observation(
         for ref, entry in observation.objects.items()
         if ref in refs and isinstance(entry.definition_id, str)
     }
+    identities.update(
+        boss.definition_id
+        for boss in upcoming_act_bosses(observation.map, state.progress)
+        if isinstance(boss.definition_id, str)
+    )
     return observation.model_copy(
         update={
             "state": state.model_copy(

@@ -696,6 +696,7 @@ class PublicMap(WireModel):
     bosses: tuple[NamedDefinition, ...]
     nodes: tuple[MapNode, ...]
     legal_destinations: tuple[Nonempty, ...] | None
+    elite_pool: tuple[NamedDefinition, ...] | MISSING = MISSING
 
 
 class MapNode(WireModel):
