@@ -212,9 +212,9 @@ internal static class ItemMechanismReader
     private static string? DescribeCardCostLifetime(NativeRuleBody body)
     {
         if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisTurn"))
-            return "Cost reduction sets target card(s) Energy cost to 0 until played or until the turn ends (whichever comes first).";
+            return "Cost reduction sets target card(s) Energy and Star costs to 0 until played or until the turn ends (whichever comes first).";
         if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisCombat"))
-            return "Cost reduction sets target card(s) to 0 Energy for the rest of combat.";
+            return "Cost reduction sets target card(s) Energy and Star costs to 0 for the rest of combat.";
         return null;
     }
 
@@ -323,7 +323,14 @@ internal static class ItemMechanismReader
                 var conditionClause = DescribeCombatPileSelectionCondition(body, selGroup, out var condValid);
                 var filterClause = DescribeCombatPileSelectionFilter(selCall, out var filterValid);
                 if (!condValid || !filterValid)
+                {
+                    if (LoggedGaps.TryAdd($"card-select:{cardType.Name}", 0) && MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)
+                    {
+                        var reason = !condValid ? "selection condition" : "selection filter";
+                        Godot.GD.PushWarning($"[sts2agent] Unresolved native combat-pile {reason} for {cardType.Name}");
+                    }
                     return null;
+                }
 
                 var dstWhere = dstPile == PileType.Draw && dstPos == CardPilePosition.Top
                     ? "on top of draw pile"
@@ -535,7 +542,7 @@ internal static class ItemMechanismReader
                     && s.Call.Method.Name == nameof(CardSelectCmd.FromCombatPile)
                     && ExtractPileType(s.Call.Arguments.ElementAtOrDefault(1)) == PileType.Discard));
                 if (selectsDiscard && setsFreeThisTurn)
-                    notes.Add("Selects from discard pile, sets Energy cost to 0 until played or until the turn ends (whichever comes first), and moves into hand.");
+                    notes.Add("Selects from discard pile, sets Energy and Star costs to 0 until played or until the turn ends (whichever comes first), and moves into hand.");
             }
             else if (CallsOnlyRandomPotionFill(onUse))
             {

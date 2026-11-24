@@ -82,6 +82,48 @@ internal sealed partial class NativeRuleText
             else
                 Gap($"{type.Name}.{playLocHook.Name}");
         }
+        if (FindOverride(type, "ModifyPreBlockDamageTarget") is { } preBlockTargetHook)
+        {
+            handled.Add(preBlockTargetHook.Name);
+            if (ReadDamageTargetRedirectHook(preBlockTargetHook, "Damage target redirection (before Block)") is { } redirectLine)
+                lines.Add($"{powerPrefix}{redirectLine}");
+            else
+                Gap($"{type.Name}.{preBlockTargetHook.Name}");
+        }
+        if (FindOverride(type, "ModifyUnblockedDamageTarget") is { } unblockedTargetHook)
+        {
+            handled.Add(unblockedTargetHook.Name);
+            if (ReadDamageTargetRedirectHook(unblockedTargetHook, "Damage target redirection (after Block, unblocked damage)") is { } redirectLine)
+                lines.Add($"{powerPrefix}{redirectLine}");
+            else
+                Gap($"{type.Name}.{unblockedTargetHook.Name}");
+        }
+    }
+
+    private string? ReadDamageTargetRedirectHook(MethodInfo hook, string label)
+    {
+        var body = Body(hook);
+        if (body.Incomplete || body.Returns.Count == 0)
+            return null;
+        var outcomes = new List<(string Text, Test[] Conditions)>();
+        foreach (var result in body.Returns)
+        {
+            // Skip impossible paths where a non-null incoming damage target equals null (from `Owner.PetOwner?.Creature`).
+            if (result.Conditions.Any(c => IsEquality(c, true, out var l, out var r)
+                && ((l is Input { Name: "target" or "originalTarget" } && r is Constant { Data: null })
+                    || (r is Input { Name: "target" or "originalTarget" } && l is Constant { Data: null }))))
+            {
+                continue;
+            }
+            if (result.Value is Input { Name: "target" })
+                outcomes.Add(("", result.Conditions));
+            else if (IsOwner(result.Value))
+                outcomes.Add(("redirect damage to owner", result.Conditions));
+            else
+                return null;
+        }
+        var rendered = RenderOutcomes(outcomes, body.Terminals.Where(t => !t.Returned).Select(t => t.Conditions));
+        return rendered is { Count: > 0 } ? $"{label}: {string.Join("; ", rendered)}" : null;
     }
 
     private string? ReadEnergyCostHook(MethodInfo hook)
@@ -90,39 +132,179 @@ internal sealed partial class NativeRuleText
         if (body.Incomplete)
             return null;
         var active = body.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
-        var store = body.OutStores.LastOrDefault(s => s.Assigned is not Input);
-        if (active is not [var ret] || store is null)
+        var nonPassthroughStores = body.OutStores.Where(s => s.Assigned is not Input).ToArray();
+        if (active.Length == 0 || nonPassthroughStores.Length == 0)
+            return null;
+
+        // Every non-passthrough store must agree on the same cost rewrite (0 or originalCost + stacks).
+        var setsZero = nonPassthroughStores.All(s => Numeric(s.Assigned) == 0m);
+        var addsStacks = !setsZero && nonPassthroughStores.All(s =>
+            s.Assigned is Call { Method.Name: "op_Addition", Arguments: [Input { Name: "originalCost" }, var delta] }
+            && IsStackAmount(delta));
+        if (!setsZero && !addsStacks)
             return null;
 
         CardType? filteredType = null;
+        CardKeyword? requiredKeyword = null;
         Type? requiredAffliction = null;
-        foreach (var cond in ret.Conditions)
+        var allowedPiles = new List<PileType>();
+        var firstPath = true;
+
+        var reachablePaths = 0;
+
+        foreach (var ret in active)
         {
-            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type" } && Numeric(r) is { } ct
-                && Enum.IsDefined(typeof(CardType), (int)ct))
+            if (IsUnreachableNullablePath(ret.Conditions))
+                continue;
+
+            CardType? pathType = null;
+            CardKeyword? pathKeyword = null;
+            Type? pathAffliction = null;
+            PileType? pathPile = null;
+
+            foreach (var rawCond in ret.Conditions)
             {
-                filteredType = (CardType)(int)ct;
+                var condExpr = rawCond.Value;
+                var condExpected = rawCond.Expected;
+                while (condExpr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                {
+                    condExpr = inner;
+                    condExpected = !condExpected;
+                }
+
+                // Nullable<T>.HasValue on a constructed Nullable<T> is always true (and false on default).
+                if (condExpr is Call { Method.Name: "get_HasValue", Method.DeclaringType: { IsGenericType: true } nullableDecl } hvCall
+                    && nullableDecl.GetGenericTypeDefinition() == typeof(Nullable<>))
+                {
+                    if ((condExpected && hvCall.Receiver is Call { Method: ConstructorInfo })
+                        || (!condExpected && hvCall.Receiver is Constant { Data: 0 }))
+                        continue;
+                    return null;
+                }
+
+                // Owner check: card.Owner.Creature == base.Owner or card.Owner == base.Owner.Player
+                if (IsEquality(new Test(condExpr, condExpected), true, out var eqL, out var eqR)
+                    && ((eqL is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } } } && IsOwner(eqR))
+                        || (eqR is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } } } && IsOwner(eqL))
+                        || (eqL is Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } }
+                            && eqR is Call { Method.Name: "get_Player", Receiver: var pRecL } && IsOwner(pRecL))
+                        || (eqR is Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } }
+                            && eqL is Call { Method.Name: "get_Player", Receiver: var pRecR } && IsOwner(pRecR))))
+                {
+                    continue;
+                }
+                // CardType check: card.Type == X
+                if (IsEquality(new Test(condExpr, condExpected), true, out var tL, out var tR)
+                    && tL is Call { Method.Name: "get_Type", Receiver: Input { Name: "card" } }
+                    && Numeric(tR) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
+                {
+                    pathType = (CardType)(int)ct;
+                    continue;
+                }
+                // CardKeyword check: card.Keywords.Contains(K)
+                if (condExpected && condExpr is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords", Receiver: Input { Name: "card" } }, Arguments: [Constant { Data: int rawKw }] }
+                    && Enum.IsDefined(typeof(CardKeyword), rawKw))
+                {
+                    pathKeyword = (CardKeyword)rawKw;
+                    continue;
+                }
+                // Affliction check: card.Affliction is T
+                if (condExpected && condExpr is Operation { Operator: "isinst", Left: Call { Method.Name: "get_Affliction" }, Right: Constant { Data: Type affType } }
+                    && typeof(AfflictionModel).IsAssignableFrom(affType))
+                {
+                    pathAffliction = affType;
+                    continue;
+                }
+                if (condExpected && condExpr is Operation { Operator: "cgt.un",
+                        Left: Operation { Operator: "isinst", Left: Call { Method.Name: "get_Affliction" }, Right: Constant { Data: Type affTypePos } },
+                        Right: Constant { Data: 0 or null } }
+                    && typeof(AfflictionModel).IsAssignableFrom(affTypePos))
+                {
+                    pathAffliction = affTypePos;
+                    continue;
+                }
+                // Nullable PileType plumbing: card.Pile != null
+                if (condExpected && condExpr is Call { Method.Name: "get_Pile", Receiver: Input { Name: "card" } })
+                    continue;
+                // PileType equality or inequality from switch (card.Pile?.Type)
+                if (condExpr is Operation { Operator: "beq" or "ceq" or "bne.un" } pileOp
+                    && UnwrapPileTypeExpr(pileOp.Left) is Input { Name: "card" }
+                    && Numeric(pileOp.Right) is { } rawPt && Enum.IsDefined(typeof(PileType), (int)rawPt))
+                {
+                    var isPileEq = condExpected == (pileOp.Operator != "bne.un");
+                    if (isPileEq)
+                    {
+                        pathPile = (PileType)(int)rawPt;
+                        continue;
+                    }
+                    // Inequality against an earlier switch case on a multi-case path (e.g., != Hand before == Play).
+                    continue;
+                }
+                // Fail closed on any unrecognized condition (e.g., turn counters on VoidFormPower or EnsemblePower).
+                return null;
             }
-            if (cond is { Expected: true, Value: Operation { Operator: "isinst",
-                    Left: Call { Method.Name: "get_Affliction" }, Right: Constant { Data: Type affType } } }
-                && typeof(AfflictionModel).IsAssignableFrom(affType))
+
+            reachablePaths++;
+            if (firstPath)
             {
-                requiredAffliction = affType;
+                filteredType = pathType;
+                requiredKeyword = pathKeyword;
+                requiredAffliction = pathAffliction;
+                firstPath = false;
+            }
+            else if (filteredType != pathType || requiredKeyword != pathKeyword || requiredAffliction != pathAffliction)
+            {
+                return null;
+            }
+
+            if (pathPile is { } ptVal && !allowedPiles.Contains(ptVal))
+                allowedPiles.Add(ptVal);
+        }
+
+        if (reachablePaths == 0 || (reachablePaths > 1 && allowedPiles.Count == 0))
+            return null;
+
+        allowedPiles.Sort();
+
+        var subjectParts = new List<string> { "owned" };
+        if (requiredKeyword is { } kw)
+            subjectParts.Add(KeywordLabel(kw));
+        if (filteredType is { } kind)
+            subjectParts.Add(kind.ToString());
+        subjectParts.Add("cards");
+        if (requiredAffliction is not null)
+            subjectParts.Add($"afflicted with {ModelLabel(requiredAffliction)}");
+        if (allowedPiles.Count > 0)
+            subjectParts.Add($"in {string.Join(" or ", allowedPiles.Select(p => p.ToString()))}");
+        var subject = string.Join(" ", subjectParts);
+        var timingTag = hook.Name == "TryModifyEnergyCostInCombatLate" ? "In-combat Energy cost (late)" : "In-combat Energy cost";
+        return setsZero
+            ? $"{timingTag}: {subject} cost 0 Energy"
+            : $"{timingTag}: {subject} cost +stacks Energy";
+    }
+
+    private static bool IsUnreachableNullablePath(Test[] conditions)
+    {
+        foreach (var raw in conditions)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expr is Call { Method.Name: "get_HasValue", Method.DeclaringType: { IsGenericType: true } nullableDecl } hvCall
+                && nullableDecl.GetGenericTypeDefinition() == typeof(Nullable<>))
+            {
+                if ((expected && hvCall.Receiver is Constant { Data: 0 })
+                    || (!expected && hvCall.Receiver is Call { Method: ConstructorInfo }))
+                {
+                    return true;
+                }
             }
         }
-        var subject = requiredAffliction is not null
-            ? $"owned cards afflicted with {ModelLabel(requiredAffliction)}"
-            : filteredType is { } kind
-                ? $"owned {kind} cards"
-                : "owned cards";
-        if (Numeric(store.Assigned) == 0m)
-            return $"In-combat Energy cost: {subject} cost 0 Energy";
-        if (store.Assigned is Call { Method.Name: "op_Addition", Arguments: [Input { Name: "originalCost" }, var delta] }
-            && IsStackAmount(delta))
-        {
-            return $"In-combat Energy cost: {subject} cost +stacks Energy";
-        }
-        return null;
+        return false;
     }
 
     private string? ReadCardPlayCountHook(Type power, MethodInfo hook, HashSet<string> handled)

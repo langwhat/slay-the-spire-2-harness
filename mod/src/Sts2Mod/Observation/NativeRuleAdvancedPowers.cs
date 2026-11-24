@@ -557,6 +557,26 @@ internal sealed partial class NativeRuleText
             handled.Add("AfterDeath");
             lines.AddRange(surroundedLines);
         }
+        if (ReadRollingBoulderHook(type, powerPrefix, out var boulderLine))
+        {
+            handled.Add("AfterPlayerTurnStart");
+            lines.Add(boulderLine);
+        }
+        if (ReadHellraiserHooks(type, powerPrefix, out var hellraiserLine))
+        {
+            handled.Add("AfterCardDrawnEarly");
+            handled.Add("AfterSideTurnEnd");
+            handled.Add("BeforeAttack");
+            lines.Add(hellraiserLine);
+        }
+        if (ReadJugglingHooks(type, powerPrefix, out var jugglingLine))
+        {
+            handled.Add("AfterApplied");
+            handled.Add("BeforeCardPlayed");
+            handled.Add("AfterCardPlayed");
+            handled.Add("AfterSideTurnEnd");
+            lines.Add(jugglingLine);
+        }
     }
 
     private bool ReadVigorHooks(Type power, string prefix, out string line)
@@ -959,6 +979,147 @@ internal sealed partial class NativeRuleText
 
         var accelLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.AccelerantPower));
         line = $"{prefix}After owner's turn starts: deals stacks unblockable unpowered damage to owner and subtracts 1 stack (repeated 1 + opposing {accelLabel} stacks times in sequence while owner stays alive)";
+        return true;
+    }
+
+    private bool ReadRollingBoulderHook(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterPlayerTurnStart") is not { } start
+            || power.GetMethod("DoDamage", Declared) is not { } doDamage
+            || Body(start) is not { Incomplete: false } startBody
+            || Body(doDamage) is not { Incomplete: false } damageBody
+            || TryGetCanonicalPower(power) is not { } canonical
+            || !canonical.DynamicVars.TryGetValue("Damage", out var damageVar))
+        {
+            return false;
+        }
+
+        var dmgCall = damageBody.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(CreatureCmd)
+            && s.Call.Method.Name == nameof(CreatureCmd.Damage)
+            && Argument(s.Call, "amount") is { } amt && IsStackAmount(amt));
+        var setAmountCall = startBody.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(PowerModel)
+            && s.Call.Method.Name == "SetAmount");
+        var hitsAllEnemies = startBody.Calls.Any(s =>
+            s.Call.Method == doDamage
+            && s.Call.Arguments.Any(a => a is Call { Method.Name: "get_HittableEnemies" }));
+        if (dmgCall is null || setAmountCall is null || !hitsAllEnemies)
+            return false;
+
+        var props = ResolveDamageProps(Argument(dmgCall.Call, "props"), power);
+        var increment = Number(damageVar.BaseValue);
+        line = $"{prefix}After owner's turn starts: deal stacks{DamageFlags(props)} damage to all hittable enemies, then increase stacks by {increment}";
+        return true;
+    }
+
+    private bool ReadHellraiserHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterCardDrawnEarly") is not { } drawnEarly
+            || FindOverride(power, "AfterSideTurnEnd") is not { } turnEnd
+            || Body(drawnEarly) is not { Incomplete: false } drawnBody
+            || Body(turnEnd) is not { Incomplete: false } endBody)
+        {
+            return false;
+        }
+
+        if (FindOverride(power, "BeforeAttack") is { } beforeAttack)
+        {
+            var beforeBody = Body(beforeAttack);
+            if (beforeBody.Incomplete || beforeBody.Writes.Count > 0 || beforeBody.FieldSteps.Count > 0)
+                return false;
+            var nonVfxCall = beforeBody.Calls.Any(s =>
+                !IsBenignReadOrPlumbingCall(s.Call.Method)
+                && s.Call.Method.Name is not ("WithHitFx" or "WithAttackerAnim" or "SpawningHitVfxOnEachCreature" or "WithHitVfxSpawnedAtBase" or "Contains"));
+            if (nonVfxCall)
+                return false;
+        }
+
+        var autoPlayStep = drawnBody.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(CardCmd)
+            && s.Call.Method.Name == nameof(CardCmd.AutoPlay)
+            && s.Call.Arguments.ElementAtOrDefault(1) is Input { Name: "card" });
+        if (autoPlayStep is null)
+            return false;
+
+        var requiredTag = autoPlayStep.Conditions
+            .Select(c => c is { Expected: true, Value: Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags" }, Constant { Data: int rawTag }] } }
+                && Enum.IsDefined(typeof(CardTag), rawTag) ? (CardTag?)rawTag : null)
+            .FirstOrDefault(t => t is not null);
+        if (requiredTag is null)
+            return false;
+
+        var capValue = drawnBody.Calls.SelectMany(s => s.Conditions)
+            .Concat(drawnBody.FieldSteps.SelectMany(s => s.Conditions))
+            .Select(c => c.Value is Operation { Left: Field f, Right: Constant { Data: int cap } }
+                && InternalDataField(f) is not null && cap > 0 ? (int?)cap : null)
+            .FirstOrDefault(cap => cap is not null);
+        var resetsOnTurnEnd = endBody.Calls.Any(s => s.Call.Method.DeclaringType == power)
+            || endBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target) is not null);
+        if (!resetsOnTurnEnd)
+            return false;
+
+        var capNote = capValue is { } limit
+            ? $" (capped at {limit} auto-plays per turn while all hittable enemies have infinite HP; cap resets after owner's turn ends or when any hittable enemy has finite HP)"
+            : "";
+        line = $"{prefix}After drawing a card (early, before affliction hooks such as Bound): if that card's player=owner and that card has tag {requiredTag.Value}: auto-play that card{capNote}";
+        return true;
+    }
+
+    private bool ReadJugglingHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterApplied") is not { } applied
+            || FindOverride(power, "BeforeCardPlayed") is not { } beforePlayed
+            || FindOverride(power, "AfterCardPlayed") is not { } afterPlayed
+            || FindOverride(power, "AfterSideTurnEnd") is not { } turnEnd
+            || Body(applied) is not { Incomplete: false } appliedBody
+            || Body(beforePlayed) is not { Incomplete: false } beforeBody
+            || Body(afterPlayed) is not { Incomplete: false } afterBody
+            || Body(turnEnd) is not { Incomplete: false } endBody)
+        {
+            return false;
+        }
+
+        var initializesFromHistory = appliedBody.FieldSteps.Any(s =>
+            InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
+            && s.Assignment.Assigned is Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] });
+        var recordsCardStep = beforeBody.FieldSteps.FirstOrDefault(s =>
+            InternalDataField(s.Assignment.Target)?.FieldType == typeof(CardModel)
+            && s.Assignment.Assigned is Call { Method.Name: "get_Card" });
+        var addsCloneStep = afterBody.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(CardPileCmd)
+            && s.Call.Method.Name == nameof(CardPileCmd.AddGeneratedCardToCombat)
+            && s.Call.Arguments.FirstOrDefault() is Call { Method.Name: "CreateClone" });
+        var resetsCounter = endBody.FieldSteps.Any(s =>
+            InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
+            && Numeric(s.Assignment.Assigned) == 0m);
+        if (!initializesFromHistory || recordsCardStep is null || addsCloneStep is null || !resetsCounter)
+            return false;
+
+        var countedType = recordsCardStep.Conditions
+            .Select(c => IsEquality(c, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
+                && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct) ? (CardType?)(int)ct : null)
+            .FirstOrDefault(t => t is not null);
+        var threshold = recordsCardStep.Conditions
+            .Select(c => IsEquality(c, true, out var l, out var r) && l is Field f
+                && InternalDataField(f)?.FieldType == typeof(int) && Numeric(r) is { } n && n > 0 ? (int?)(int)n : null)
+            .FirstOrDefault(n => n is not null);
+        var destPileNum = Numeric(Argument(addsCloneStep.Call, "newPileType"));
+        if (countedType is null || threshold is null || destPileNum is null || !Enum.IsDefined(typeof(PileType), (int)destPileNum))
+            return false;
+
+        var ordinal = threshold.Value switch
+        {
+            1 => "1st",
+            2 => "2nd",
+            3 => "3rd",
+            var n => $"{n}th",
+        };
+        var destLabel = PileLocationLabel((PileType)(int)destPileNum);
+        line = $"{prefix}Card-count clone trigger: counts owner's {countedType.Value} plays this turn (retroactively including {countedType.Value} plays already started earlier this turn before this power was applied); after the {ordinal} {countedType.Value} play resolves, adds stacks clone(s) of that played card to owner's {destLabel}; counter resets after owner's turn ends";
         return true;
     }
 }

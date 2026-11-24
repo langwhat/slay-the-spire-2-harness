@@ -106,7 +106,7 @@ internal static class ModifierMechanismReader
 
         var parts = new List<string>();
 
-        if (DescribeEnchantmentEligibility(type) is { } elig)
+        if (DescribeEnchantmentEligibility(type, gaps) is { } elig)
             parts.Add(elig);
 
         var afterPlayMethod = type.GetMethod("AfterCardPlayed", DeclaredInstance);
@@ -209,11 +209,12 @@ internal static class ModifierMechanismReader
             }
             else
             {
-                var addsOne = playCntBody.Returns.Any(r => r.Value is Operation { Operator: "add", Right: Constant { Data: 1 } });
-                if (addsOne)
+                var extraPlays = ResolveEnchantPlayCountDelta(type, playCntBody);
+                if (extraPlays is > 0)
                 {
                     var suffix = disablesAfterPlay ? " on its first play each combat" : " every time it is played";
-                    parts.Add($"Replays this card 1 additional time{suffix}.");
+                    var noun = extraPlays.Value == 1 ? "time" : "times";
+                    parts.Add($"Replays this card {extraPlays.Value.ToString(CultureInfo.InvariantCulture)} additional {noun}{suffix}.");
                 }
                 else
                 {
@@ -399,6 +400,25 @@ internal static class ModifierMechanismReader
         return false;
     }
 
+    private static int? ResolveEnchantPlayCountDelta(Type type, NativeRuleBody playCntBody)
+    {
+        foreach (var ret in playCntBody.Returns)
+        {
+            if (ret.Value is not Operation { Operator: "add", Right: var right })
+                continue;
+            if (right is Constant { Data: int literal } && literal > 0)
+                return literal;
+            if (right is Call { Method.Name: "get_IntValue" or "get_BaseValue", Receiver: Call { Method.Name: "get_Item", Arguments: [Constant { Data: string varKey }] } }
+                && ModelDb.GetByIdOrNull<EnchantmentModel>(ModelDb.GetId(type)) is { } canonical
+                && canonical.DynamicVars.TryGetValue(varKey, out var dv)
+                && dv.BaseValue > 0m && dv.BaseValue == decimal.Truncate(dv.BaseValue))
+            {
+                return (int)dv.BaseValue;
+            }
+        }
+        return null;
+    }
+
     private static string? DescribeEnchantDamageAdditive(
         Type type,
         NativeRuleBody body,
@@ -496,8 +516,9 @@ internal static class ModifierMechanismReader
         return value;
     }
 
-    private static string? DescribeEnchantmentEligibility(Type type)
+    private static string? DescribeEnchantmentEligibility(Type type, HashSet<string> gaps)
     {
+        var clauses = new List<string>();
         if (type.GetMethod("CanEnchantCardType", DeclaredInstance) is { } byType
             && NativeRuleBody.Read(byType) is { Incomplete: false } body)
         {
@@ -508,21 +529,115 @@ internal static class ModifierMechanismReader
                 .Distinct()
                 .ToArray();
             if (types.Length > 0)
-                return $"Eligible cards: {string.Join("/", types)} only.";
+                clauses.Add($"Eligible cards: {string.Join("/", types)} only.");
         }
-        if (type.GetMethod("CanEnchant", DeclaredInstance) is { } custom
-            && NativeRuleBody.Read(custom) is { Incomplete: false } customBody)
+        if (type.GetMethod("CanEnchant", DeclaredInstance) is { } custom)
         {
-            if (customBody.Calls.Any(s => s.Call.Method.Name == "get_GainsBlock"))
-                return "Eligible cards: cards that gain Block.";
-            if (customBody.Calls.Any(s => s.Call.Method.Name == "GetKeywordsWithSources")
+            var customBody = NativeRuleBody.Read(custom);
+            if (customBody.Incomplete)
+            {
+                gaps.Add("CanEnchant");
+            }
+            else if (customBody.Calls.Any(s => s.Call.Method.Name == "get_GainsBlock"))
+            {
+                clauses.Add("Eligible cards: cards that gain Block.");
+            }
+            else if (customBody.Calls.Any(s => s.Call.Method.Name == "GetKeywordsWithSources")
                 && customBody.Calls.FirstOrDefault(s => s.Call.Method.Name == "Contains" && s.Call.Arguments.OfType<Constant>().Any(c => c.Data is int kw && Enum.IsDefined(typeof(CardKeyword), kw))) is { } kwStep)
             {
                 var kw = (CardKeyword)(int)kwStep.Call.Arguments.OfType<Constant>().First(c => c.Data is int k && Enum.IsDefined(typeof(CardKeyword), k)).Data!;
-                return $"Eligible cards: cards with local {NativeRuleText.KeywordLabel(kw)} keyword.";
+                clauses.Add($"Eligible cards: cards with local {NativeRuleText.KeywordLabel(kw)} keyword.");
+            }
+            else if (DescribeCustomCanEnchant(customBody) is { } customDesc)
+            {
+                clauses.Add($"Eligible cards: {customDesc}.");
+            }
+            else
+            {
+                gaps.Add("CanEnchant");
             }
         }
-        return null;
+        return clauses.Count > 0 ? string.Join(" ", clauses) : null;
+    }
+
+    private static string? DescribeCustomCanEnchant(NativeRuleBody body)
+    {
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length == 0)
+            return null;
+
+        var rarities = new List<CardRarity>();
+        var tags = new List<CardTag>();
+        var excludesUnplayable = false;
+        var excludesXCost = false;
+
+        foreach (var ret in positive)
+        {
+            var tests = new List<Test>(ret.Conditions);
+            if (!(TryTruth(ret.Value, out var rb) && rb))
+                tests.Add(new Test(ret.Value, true));
+
+            foreach (var raw in tests)
+            {
+                var expr = raw.Value;
+                var expected = raw.Expected;
+                while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                {
+                    expr = inner;
+                    expected = !expected;
+                }
+                if (expected && expr is Call { Method.Name: "CanEnchant", Method.DeclaringType: var decl } && decl == typeof(EnchantmentModel))
+                    continue;
+                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int rawRar } } rarOp
+                    && Enum.IsDefined(typeof(CardRarity), rawRar))
+                {
+                    var isEq = rarOp.Operator == "bne.un" ? !expected : expected;
+                    if (!isEq)
+                        return null;
+                    if (!rarities.Contains((CardRarity)rawRar))
+                        rarities.Add((CardRarity)rawRar);
+                    continue;
+                }
+                if (expr is Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags" }, Constant { Data: int rawTag }] }
+                    && Enum.IsDefined(typeof(CardTag), rawTag))
+                {
+                    if (expected)
+                    {
+                        if (!tags.Contains((CardTag)rawTag))
+                            tags.Add((CardTag)rawTag);
+                    }
+                    // Allow short-circuit `!Contains(TagA)` on the second branch of `Contains(TagA) || Contains(TagB)`
+                    // only when there are multiple positive returns covering the OR branches.
+                    else if (positive.Length <= 1)
+                    {
+                        return null;
+                    }
+                    continue;
+                }
+                if (!expected && expr is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords" }, Arguments: [Constant { Data: (int)CardKeyword.Unplayable }] })
+                {
+                    excludesUnplayable = true;
+                    continue;
+                }
+                if (!expected && expr is Call { Method.Name: "get_CostsX" })
+                {
+                    excludesXCost = true;
+                    continue;
+                }
+                return null;
+            }
+        }
+
+        var parts = new List<string>();
+        if (excludesUnplayable)
+            parts.Add("playable");
+        if (excludesXCost)
+            parts.Add("non-X-cost");
+        if (rarities.Count > 0)
+            parts.Add(string.Join("/", rarities));
+        if (tags.Count > 0)
+            parts.Add($"{string.Join(" or ", tags)}-tagged");
+        return parts.Count > 0 ? $"{string.Join(" ", parts)} cards" : null;
     }
 
     private static string[] ExtractKeywordArguments(NativeRuleBody body, params string[] methodNames)

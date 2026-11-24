@@ -288,7 +288,8 @@ internal static class EventMechanismReader
         EventModel activeEvent,
         EventOption? option,
         MethodInfo method,
-        int depth = 0)
+        int depth = 0,
+        IReadOnlyDictionary<string, Value>? bindings = null)
     {
         var body = ReadBody(method);
         if (body.Incomplete)
@@ -358,7 +359,18 @@ internal static class EventMechanismReader
             {
                 if (helper.ContainsGenericParameters || helper.IsGenericMethod || helper.ReturnType != typeof(Task) || depth >= 1)
                     return (null, $"unresolved-helper:{helper.Name}");
-                var (nested, nestedGap) = DescribeOptionMethod(activeEvent, option, helper, depth + 1);
+                var helperParams = helper.GetParameters();
+                Dictionary<string, Value>? childBindings = null;
+                if (helperParams.Length > 0)
+                {
+                    childBindings = new Dictionary<string, Value>(StringComparer.Ordinal);
+                    for (var i = 0; i < helperParams.Length && i < call.Arguments.Length; i++)
+                    {
+                        if (helperParams[i].Name is { } pName)
+                            childBindings[pName] = SubstituteBinding(call.Arguments[i], bindings);
+                    }
+                }
+                var (nested, nestedGap) = DescribeOptionMethod(activeEvent, option, helper, depth + 1, childBindings);
                 if (nestedGap is not null)
                     return (null, nestedGap);
                 if (nested is not null)
@@ -389,7 +401,7 @@ internal static class EventMechanismReader
                     else
                     {
                         dmgText = amountParam is not null && amountParam.Position < call.Arguments.Length
-                            ? ResolveEventAmount(activeEvent, call.Arguments[amountParam.Position])
+                            ? ResolveEventAmount(activeEvent, call.Arguments[amountParam.Position], bindings)
                             : null;
                         if (propsParam is not null && propsParam.Position < call.Arguments.Length
                             && call.Arguments[propsParam.Position] is Constant { Data: int rawProps })
@@ -404,19 +416,19 @@ internal static class EventMechanismReader
                 }
                 if (name == nameof(CreatureCmd.Heal))
                 {
-                    var healText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1));
+                    var healText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1), bindings);
                     steps.Add(healText is not null ? $"heal {healText} HP" : "heal HP");
                     continue;
                 }
                 if (name == nameof(CreatureCmd.GainMaxHp))
                 {
-                    var maxHpText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1));
+                    var maxHpText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(1), bindings);
                     steps.Add(maxHpText is not null ? $"gain {maxHpText} Max HP" : "gain Max HP");
                     continue;
                 }
                 if (name == nameof(CreatureCmd.LoseMaxHp))
                 {
-                    var maxHpText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(2));
+                    var maxHpText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(2), bindings);
                     steps.Add(maxHpText is not null ? $"lose {maxHpText} Max HP" : "lose Max HP");
                     continue;
                 }
@@ -427,13 +439,13 @@ internal static class EventMechanismReader
             {
                 if (name == nameof(PlayerCmd.GainGold))
                 {
-                    var goldText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0));
+                    var goldText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0), bindings);
                     steps.Add(goldText is not null ? $"gain {goldText} Gold" : "gain Gold");
                     continue;
                 }
                 if (name == nameof(PlayerCmd.LoseGold))
                 {
-                    var goldText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0));
+                    var goldText = ResolveEventAmount(activeEvent, call.Arguments.ElementAtOrDefault(0), bindings);
                     steps.Add(goldText is not null ? $"lose {goldText} Gold" : "lose Gold");
                     continue;
                 }
@@ -458,12 +470,13 @@ internal static class EventMechanismReader
             if (declaring == typeof(CardSelectCmd))
             {
                 hasSelection = true;
-                var countText = ExtractSelectorCount(activeEvent, body, group.First(), call) ?? "eligible";
+                var countText = ExtractSelectorCount(activeEvent, body, group.First(), call, bindings) ?? "eligible";
                 var cardNoun = countText == "1" ? "card" : "card(s)";
                 var hasFilter = HasSelectionFilterPredicate(call);
                 var hasNonNullFilter = false;
-                var filterDesc = hasFilter ? DescribeGenericDeckFilter(call, out hasNonNullFilter) : null;
-                if (filterDesc is null && hasNonNullFilter)
+                var redundantEnchantFilter = false;
+                var filterDesc = hasFilter ? DescribeGenericDeckFilter(call, name == nameof(CardSelectCmd.FromDeckForEnchantment), out hasNonNullFilter, out redundantEnchantFilter) : null;
+                if (filterDesc is null && hasNonNullFilter && !redundantEnchantFilter)
                     return (null, "unresolved-selection-filter");
 
                 if (name == nameof(CardSelectCmd.FromDeckGeneric))
@@ -491,10 +504,10 @@ internal static class EventMechanismReader
                 if (name == nameof(CardSelectCmd.FromDeckForTransformation))
                 {
                     var qualifiedNoun = filterDesc is not null
-                        ? (filterDesc.Contains("removable", StringComparison.Ordinal) || filterDesc.Contains("transformable", StringComparison.Ordinal)
+                        ? (filterDesc.Contains("transformable", StringComparison.Ordinal)
                             ? $"{filterDesc} {cardNoun}"
-                            : $"removable {filterDesc} {cardNoun}")
-                        : $"removable {cardNoun}";
+                            : $"transformable (removable non-Quest) {filterDesc} {cardNoun}")
+                        : $"transformable (removable non-Quest) {cardNoun}";
                     steps.Add($"select {countText} {qualifiedNoun} from deck to transform");
                     continue;
                 }
@@ -884,7 +897,12 @@ internal static class EventMechanismReader
         _ => false,
     };
 
-    private static string? ExtractSelectorCount(EventModel activeEvent, NativeRuleBody body, Step selectStep, Call call)
+    private static string? ExtractSelectorCount(
+        EventModel activeEvent,
+        NativeRuleBody body,
+        Step selectStep,
+        Call call,
+        IReadOnlyDictionary<string, Value>? bindings = null)
     {
         var parameters = call.Method.GetParameters();
         var prefsParam = parameters.FirstOrDefault(p => p.ParameterType.Name == "CardSelectorPrefs");
@@ -892,7 +910,7 @@ internal static class EventMechanismReader
         {
             var prefsArg = call.Arguments[prefsParam.Position];
             if (prefsArg is Call { Method: ConstructorInfo } directCtor
-                && ReadPrefsCount(activeEvent, directCtor) is { } directCount)
+                && ReadPrefsCount(activeEvent, directCtor, bindings) is { } directCount)
             {
                 return directCount;
             }
@@ -901,10 +919,11 @@ internal static class EventMechanismReader
             var precedingCtor = body.Calls
                 .Where(s => s.Call.Method is ConstructorInfo { DeclaringType.Name: "CardSelectorPrefs" }
                     && (s.Epoch < selectStep.Epoch || (s.Epoch == selectStep.Epoch && s.Order < selectStep.Order))
-                    && (s.Call.Receiver is null || NativeRuleText.ValueKey(s.Call.Receiver) == prefsKey))
+                    && s.Call.Receiver is not null
+                    && NativeRuleText.ValueKey(s.Call.Receiver) == prefsKey)
                 .OrderByDescending(s => (s.Epoch, s.Order))
                 .FirstOrDefault();
-            if (precedingCtor is not null && ReadPrefsCount(activeEvent, precedingCtor.Call) is { } ctorCount)
+            if (precedingCtor is not null && ReadPrefsCount(activeEvent, precedingCtor.Call, bindings) is { } ctorCount)
                 return ctorCount;
 
             return null;
@@ -913,22 +932,22 @@ internal static class EventMechanismReader
         // Only inspect explicit count parameters when no CardSelectorPrefs is present (never enchantment `amount`).
         var countParam = parameters.FirstOrDefault(p => p.ParameterType == typeof(int) && p.Name is "count" or "numCards");
         if (countParam is not null && countParam.Position < call.Arguments.Length)
-            return ResolveEventAmount(activeEvent, call.Arguments[countParam.Position]);
+            return ResolveEventAmount(activeEvent, call.Arguments[countParam.Position], bindings);
 
         return null;
     }
 
-    private static string? ReadPrefsCount(EventModel activeEvent, Call prefsCtor)
+    private static string? ReadPrefsCount(EventModel activeEvent, Call prefsCtor, IReadOnlyDictionary<string, Value>? bindings)
     {
         if (prefsCtor.Arguments is [_, var singleCount]
-            && ResolveEventAmount(activeEvent, singleCount) is { } singleText)
+            && ResolveEventAmount(activeEvent, singleCount, bindings) is { } singleText)
         {
             return singleText;
         }
         if (prefsCtor.Arguments is [_, var minArg, var maxArg])
         {
-            var minText = ResolveEventAmount(activeEvent, minArg);
-            var maxText = ResolveEventAmount(activeEvent, maxArg);
+            var minText = ResolveEventAmount(activeEvent, minArg, bindings);
+            var maxText = ResolveEventAmount(activeEvent, maxArg, bindings);
             if (minText is not null && maxText is not null)
             {
                 if (minText == maxText)
@@ -952,9 +971,14 @@ internal static class EventMechanismReader
         return call.Arguments[filterParam.Position] is not Constant { Data: null };
     }
 
-    private static string? DescribeGenericDeckFilter(Call call, out bool hasNonNullFilter)
+    private static string? DescribeGenericDeckFilter(
+        Call call,
+        bool isEnchantmentSelection,
+        out bool hasNonNullFilter,
+        out bool redundantEnchantFilter)
     {
         hasNonNullFilter = false;
+        redundantEnchantFilter = false;
         var filterParam = call.Method.GetParameters().FirstOrDefault(p => p.ParameterType == typeof(Func<CardModel, bool>));
         if (filterParam is null || filterParam.Position >= call.Arguments.Length)
             return null;
@@ -964,8 +988,37 @@ internal static class EventMechanismReader
         if (call.Arguments[filterParam.Position] is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo predMethod }] })
             return null;
 
+        if (isEnchantmentSelection && IsRedundantEnchantmentCanEnchantFilter(call, predMethod))
+        {
+            redundantEnchantFilter = true;
+            return null;
+        }
+
         return DescribeCardFilterPredicate(predMethod, boundTag: null, depth: 0);
     }
+
+    private static bool IsRedundantEnchantmentCanEnchantFilter(Call selectCall, MethodInfo predMethod)
+    {
+        var enchParam = selectCall.Method.GetParameters().FirstOrDefault(p => typeof(EnchantmentModel).IsAssignableFrom(p.ParameterType));
+        if (enchParam is null || enchParam.Position >= selectCall.Arguments.Length)
+            return false;
+        var targetEnchantment = ExtractEnchantmentType(selectCall.Arguments[enchParam.Position]);
+        if (targetEnchantment is null)
+            return false;
+
+        var body = ReadBody(predMethod);
+        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: Call { Method.Name: "CanEnchant", Receiver: var rec } }])
+            return false;
+        return ExtractEnchantmentType(rec) == targetEnchantment;
+    }
+
+    private static Type? ExtractEnchantmentType(Value? value) => value switch
+    {
+        Call { Method.Name: "ToMutable", Receiver: var inner } => ExtractEnchantmentType(inner),
+        Call { Method: { Name: "Enchantment", IsGenericMethod: true } lookup } when lookup.DeclaringType == typeof(ModelDb)
+            => lookup.GetGenericArguments()[0],
+        _ => null,
+    };
 
     private static string? DescribeCardFilterPredicate(MethodInfo predMethod, CardTag? boundTag, int depth)
     {
@@ -1115,11 +1168,22 @@ internal static class EventMechanismReader
         _ => false,
     };
 
-    private static string? ResolveEventAmount(EventModel activeEvent, Value? expr)
+    private static Value SubstituteBinding(Value value, IReadOnlyDictionary<string, Value>? bindings)
+    {
+        if (bindings is null)
+            return value;
+        if (value is Input { Name: var name } && bindings.TryGetValue(name, out var bound))
+            return bound;
+        return value;
+    }
+
+    private static string? ResolveEventAmount(EventModel activeEvent, Value? expr, IReadOnlyDictionary<string, Value>? bindings = null)
     {
         while (true)
         {
-            if (expr is Call { Method.Name: "op_Implicit", Arguments: [var implicitInner] })
+            if (expr is Input { Name: var inputName } && bindings is not null && bindings.TryGetValue(inputName, out var boundExpr))
+                expr = boundExpr;
+            else if (expr is Call { Method.Name: "op_Implicit", Arguments: [var implicitInner] })
                 expr = implicitInner;
             else if (expr is Operation { Operator: "castclass" or "isinst", Left: var castInner })
                 expr = castInner;

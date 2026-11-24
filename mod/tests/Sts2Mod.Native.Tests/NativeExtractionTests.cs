@@ -72,6 +72,7 @@ internal static class NativeTestBootstrap
                     ["DEBT.title"] = "Debt",
                     ["ULTIMATE_STRIKE.title"] = "Ultimate Strike",
                     ["ULTIMATE_DEFEND.title"] = "Ultimate Defend",
+                    ["DINGY_DAGGER.title.dingy"] = "Dingy Dagger",
                 },
                 "enchantments" => new Dictionary<string, string>
                 {
@@ -248,6 +249,40 @@ public sealed class NativeExtractionTests
         var (chestSummary, chestGap) = EventMechanismReader.DescribeOptionMethod(treasury, null, secondChest);
         Assert.Null(chestGap);
         Assert.Contains("CARD.GREED", chestSummary!, StringComparison.Ordinal);
+
+        // FromDeckForTransformation excludes Quest cards (e.g. AromaOfChaos.LetGo).
+        var aroma = ModelDb.Event<AromaOfChaos>();
+        var letGo = typeof(AromaOfChaos).GetMethod("LetGo", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (letGoSummary, letGoGap) = EventMechanismReader.DescribeOptionMethod(aroma, null, letGo);
+        Assert.Null(letGoGap);
+        Assert.Contains("transformable (removable non-Quest)", letGoSummary!, StringComparison.Ordinal);
+
+        // SpiralingWhirlpool.ObserveTheSpiral repeats Spiral.CanEnchant and must restore its summary without gap.
+        var whirlpool = ModelDb.Event<SpiralingWhirlpool>();
+        var observeSpiral = typeof(SpiralingWhirlpool).GetMethod("ObserveTheSpiral", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (spiralSummary, spiralGap) = EventMechanismReader.DescribeOptionMethod(whirlpool, null, observeSpiral);
+        Assert.Null(spiralGap);
+        Assert.Contains("ENCHANTMENT.SPIRAL", spiralSummary!, StringComparison.Ordinal);
+
+        // WaterfallOfObviousSecrets.BeNice must include DingyDagger's localized base title alongside CARD.DINGY_DAGGER.
+        var waterfall = ModelDb.Event<WaterfallOfObviousSecrets>();
+        var beNice = typeof(WaterfallOfObviousSecrets).GetMethod("BeNice", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (beNiceSummary, beNiceGap) = EventMechanismReader.DescribeOptionMethod(waterfall, null, beNice);
+        Assert.Null(beNiceGap);
+        Assert.Contains("Dingy Dagger (CARD.DINGY_DAGGER)", beNiceSummary!, StringComparison.Ordinal);
+
+        // ZenWeaver parameterized helper RemoveCardsAndProceed must resolve 1/125 vs 2/250 distinctly.
+        var weaver = ModelDb.Event<ZenWeaver>();
+        var emotional = typeof(ZenWeaver).GetMethod("EmotionalAwareness", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var acupuncture = typeof(ZenWeaver).GetMethod("ArachnidAcupuncture", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var (emotionalSummary, emotionalGap) = EventMechanismReader.DescribeOptionMethod(weaver, null, emotional);
+        var (acupunctureSummary, acupunctureGap) = EventMechanismReader.DescribeOptionMethod(weaver, null, acupuncture);
+        Assert.Null(emotionalGap);
+        Assert.Contains("select 1 removable card", emotionalSummary!, StringComparison.Ordinal);
+        Assert.Contains("lose 125 Gold", emotionalSummary!, StringComparison.Ordinal);
+        Assert.Null(acupunctureGap);
+        Assert.Contains("select 2 removable card(s)", acupunctureSummary!, StringComparison.Ordinal);
+        Assert.Contains("lose 250 Gold", acupunctureSummary!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -276,8 +311,19 @@ public sealed class NativeExtractionTests
     {
         var (goopyText, goopyGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Goopy));
         Assert.Empty(goopyGaps);
+        Assert.Contains("Defend-tagged cards", goopyText!, StringComparison.Ordinal);
         Assert.Contains("+(amount - 1) Block", goopyText!, StringComparison.Ordinal);
         Assert.DoesNotContain("+amount Block", goopyText!, StringComparison.Ordinal);
+
+        var (slitherText, slitherGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Slither));
+        Assert.Empty(slitherGaps);
+        Assert.Contains("playable non-X-cost cards", slitherText!, StringComparison.Ordinal);
+
+        var (spiralEnchText, spiralEnchGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Spiral));
+        Assert.Empty(spiralEnchGaps);
+        Assert.Contains("Basic", spiralEnchText!, StringComparison.Ordinal);
+        Assert.Contains("Strike", spiralEnchText!, StringComparison.Ordinal);
+        Assert.Contains("Defend", spiralEnchText!, StringComparison.Ordinal);
 
         var (momentumText, momentumGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Momentum));
         Assert.Empty(momentumGaps);
@@ -350,7 +396,7 @@ public sealed class NativeExtractionTests
 
         var bulletTimeRule = ItemMechanismReader.DescribeCard(ModelDb.Card<BulletTime>());
         Assert.NotNull(bulletTimeRule);
-        Assert.Contains("until played or until the turn ends", bulletTimeRule!, StringComparison.Ordinal);
+        Assert.Contains("Energy and Star costs to 0 until played or until the turn ends", bulletTimeRule!, StringComparison.Ordinal);
 
         var arrowStabRule = ItemMechanismReader.DescribeCard(ModelDb.Card<ArrowStab>());
         Assert.NotNull(arrowStabRule);
@@ -360,11 +406,74 @@ public sealed class NativeExtractionTests
 
         var liquidRule = ItemMechanismReader.DescribePotion(ModelDb.Potion<LiquidMemories>());
         Assert.NotNull(liquidRule);
-        Assert.Contains("until played or until the turn ends", liquidRule!, StringComparison.Ordinal);
+        Assert.Contains("Energy and Star costs to 0 until played or until the turn ends", liquidRule!, StringComparison.Ordinal);
 
         var lizardRule = ItemMechanismReader.DescribeRelic(ModelDb.Relic<LizardTail>());
         Assert.NotNull(lizardRule);
         Assert.DoesNotContain("ShouldDie", lizardRule!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LiveObservedIroncladAndPetPowers_ExtractCleanlyWithoutGaps()
+    {
+        var (stampedeText, stampedeGaps) = PowerMechanismReader.Describe(typeof(StampedePower), true);
+        Assert.Empty(stampedeGaps);
+        Assert.Contains("At end of turn before hand discard", stampedeText!, StringComparison.Ordinal);
+        Assert.Contains("playable Attack card(s) in owner's hand", stampedeText!, StringComparison.Ordinal);
+        Assert.Contains("auto-play", stampedeText!, StringComparison.Ordinal);
+
+        var (hellraiserText, hellraiserGaps) = PowerMechanismReader.Describe(typeof(HellraiserPower), true);
+        Assert.Empty(hellraiserGaps);
+        Assert.Contains("early, before affliction hooks such as Bound", hellraiserText!, StringComparison.Ordinal);
+        Assert.Contains("tag Strike", hellraiserText!, StringComparison.Ordinal);
+        Assert.Contains("capped at 9", hellraiserText!, StringComparison.Ordinal);
+
+        var (boulderText, boulderGaps) = PowerMechanismReader.Describe(typeof(RollingBoulderPower), true);
+        Assert.Empty(boulderGaps);
+        Assert.Contains("deal stacks unpowered damage to all hittable enemies", boulderText!, StringComparison.Ordinal);
+        Assert.Contains("increase stacks by 5", boulderText!, StringComparison.Ordinal);
+
+        var (freeAtkText, freeAtkGaps) = PowerMechanismReader.Describe(typeof(FreeAttackPower), true);
+        Assert.Empty(freeAtkGaps);
+        Assert.Contains("In-combat Energy cost (late): owned Attack cards in Hand or Play cost 0 Energy", freeAtkText!, StringComparison.Ordinal);
+        Assert.Contains("Before card play:", freeAtkText!, StringComparison.Ordinal);
+        Assert.Contains("subtract 1", freeAtkText!, StringComparison.Ordinal);
+
+        var (veilText, veilGaps) = PowerMechanismReader.Describe(typeof(VeilpiercerPower), true);
+        Assert.Empty(veilGaps);
+        Assert.Contains("Ethereal", veilText!, StringComparison.Ordinal);
+        Assert.Contains("in Hand or Play cost 0 Energy", veilText!, StringComparison.Ordinal);
+
+        var (aggressionText, aggressionGaps) = PowerMechanismReader.Describe(typeof(AggressionPower), true);
+        Assert.Empty(aggressionGaps);
+        Assert.Contains("Before side turn starts:", aggressionText!, StringComparison.Ordinal);
+        Assert.Contains("Attack card(s) in owner's discard pile into hand", aggressionText!, StringComparison.Ordinal);
+        Assert.Contains("upgrade", aggressionText!, StringComparison.Ordinal);
+
+        var (wuppyText, wuppyGaps) = PowerMechanismReader.Describe(typeof(WuppysLoyaltyPower), true);
+        Assert.Empty(wuppyGaps);
+        Assert.Contains("Damage target redirection (before Block):", wuppyText!, StringComparison.Ordinal);
+        Assert.Contains("redirect damage to owner", wuppyText!, StringComparison.Ordinal);
+        Assert.Contains("Targetable by hits: if event target is dead: no", wuppyText!, StringComparison.Ordinal);
+
+        var (dieForYouText, dieForYouGaps) = PowerMechanismReader.Describe(typeof(DieForYouPower), true);
+        Assert.Empty(dieForYouGaps);
+        Assert.Contains("Damage target redirection (after Block, unblocked damage):", dieForYouText!, StringComparison.Ordinal);
+        Assert.Contains("redirect damage to owner", dieForYouText!, StringComparison.Ordinal);
+
+        var (jugglingText, jugglingGaps) = PowerMechanismReader.Describe(typeof(JugglingPower), true);
+        Assert.Empty(jugglingGaps);
+        Assert.Contains("retroactively including Attack plays already started earlier this turn", jugglingText!, StringComparison.Ordinal);
+        Assert.Contains("after the 3rd Attack play resolves", jugglingText!, StringComparison.Ordinal);
+        Assert.Contains("owner's hand", jugglingText!, StringComparison.Ordinal);
+
+        // TangledPower must remain intact and VoidFormPower/EnsemblePower must continue failing closed on unrecognized cost conditions.
+        var (tangledText, tangledGaps) = PowerMechanismReader.Describe(typeof(TangledPower), true);
+        Assert.Empty(tangledGaps);
+        Assert.Contains("cost +stacks Energy", tangledText!, StringComparison.Ordinal);
+
+        var (_, voidFormGaps) = PowerMechanismReader.Describe(typeof(VoidFormPower), true);
+        Assert.Contains("VoidFormPower.TryModifyEnergyCostInCombatLate", voidFormGaps);
     }
 
     [Fact]
