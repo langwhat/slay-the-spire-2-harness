@@ -476,7 +476,7 @@ public sealed class NativeExtractionTests
         // TangledPower must remain intact and EnsemblePower must continue failing closed on unrecognized cost conditions.
         var (tangledText, tangledGaps) = PowerMechanismReader.Describe(typeof(TangledPower), true);
         Assert.Empty(tangledGaps);
-        Assert.Contains("cost +stacks Energy (Energy X-cost cards ignore cost modifiers and spend all remaining Energy when played)", tangledText!, StringComparison.Ordinal);
+        Assert.Contains("cost +stacks Energy (Energy X-cost cards ignore cost modifiers and spend all remaining Energy when paying resources)", tangledText!, StringComparison.Ordinal);
 
         var (_, ensembleGaps) = PowerMechanismReader.Describe(typeof(EnsemblePower), true);
         Assert.Contains("EnsemblePower.TryModifyEnergyCostInCombatLate", ensembleGaps);
@@ -964,13 +964,80 @@ public sealed class NativeExtractionTests
         var havocIncomplete = (bool)havocRes.GetType().GetField("Item2")!.GetValue(havocRes)!;
         Assert.False(havocIncomplete);
         var havocTexts = havocEffectsObj.Cast<object>().Select(e => (string)e.GetType().GetProperty("Text")!.GetValue(e)!).ToArray();
-        Assert.Contains(havocTexts, t => t.Contains("Exhaust", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(havocTexts, t => t.Contains("ExhaustOnNextPlay", StringComparison.Ordinal) && t.Contains("non-Power", StringComparison.Ordinal));
 
         var joatMethod = typeof(JackOfAllTrades).GetMethod("OnPlay", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var joatReader = new NativeRuleText();
         var joatRes = readEffects.Invoke(joatReader, [joatMethod, null, 0, false, null])!;
         var joatIncomplete = (bool)joatRes.GetType().GetField("Item2")!.GetValue(joatRes)!;
         Assert.True(joatIncomplete);
+
+        // 19. EchoFormPower/BurstPower do not exclude dupes; MonologuePower/DoomPower/PoisonPower reflect exact native semantics.
+        var (echoText, echoGaps) = PowerMechanismReader.Describe(typeof(EchoFormPower), true);
+        Assert.Empty(echoGaps);
+        Assert.DoesNotContain("non-dupe", echoText!, StringComparison.Ordinal);
+
+        var (monologueText, monologueGaps) = PowerMechanismReader.Describe(typeof(MonologuePower), true);
+        Assert.Empty(monologueGaps);
+        Assert.Contains("snapshots 1 before each owned card play starts", monologueText!, StringComparison.Ordinal);
+        Assert.Contains("add 1 to counter strength applied", monologueText!, StringComparison.Ordinal);
+
+        var (doomText, doomGaps) = PowerMechanismReader.Describe(typeof(DoomPower), true);
+        Assert.Empty(doomGaps);
+        Assert.Contains("before enemy turn ends", doomText!, StringComparison.Ordinal);
+        Assert.Contains("after player turn ends", doomText!, StringComparison.Ordinal);
+
+        var (poisonText, poisonGaps) = PowerMechanismReader.Describe(typeof(PoisonPower), true);
+        Assert.Empty(poisonGaps);
+        Assert.Contains("min(stacks, 1 + total opposing", poisonText!, StringComparison.Ordinal);
+
+        // 20. Counted loop exit invalidates loop counter; sync parameter ref clear invalidates stale parameter;
+        // foreach without reading element preserves per-item repetition.
+        var postLoopMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.ReadCounterAfterLoop), BindingFlags.Static | BindingFlags.Public)!;
+        var postLoopBody = NativeRuleBody.Read(postLoopMethod);
+        Assert.DoesNotContain(postLoopBody.Returns, r => r.Value is NativeRuleBody.Constant { Data: 1 });
+
+        var (syncParamText, syncParamGaps) = PowerMechanismReader.Describe(typeof(SyntheticSyncParamClearPower), true);
+        Assert.Null(syncParamText);
+        Assert.NotEmpty(syncParamGaps);
+
+        var (foreachNonItemText, foreachNonItemGaps) = PowerMechanismReader.Describe(typeof(SyntheticForeachNonItemPower), true);
+        Assert.Empty(foreachNonItemGaps);
+        Assert.Contains("for each item in owner's hand: owner gains 1 Energy", foreachNonItemText!, StringComparison.Ordinal);
+
+        // 21. Cost hook ref-helper restore, non-constant return, and multi-keyword preservation.
+        var (refRestoreText, refRestoreGaps) = PowerMechanismReader.Describe(typeof(SyntheticRefRestoreCostPower), true);
+        Assert.Null(refRestoreText);
+        Assert.NotEmpty(refRestoreGaps);
+
+        var (nonConstRetText, nonConstRetGaps) = PowerMechanismReader.Describe(typeof(SyntheticNonConstReturnCostPower), true);
+        Assert.Null(nonConstRetText);
+        Assert.NotEmpty(nonConstRetGaps);
+
+        var (multiKwText, multiKwGaps) = PowerMechanismReader.Describe(typeof(SyntheticMultiKeywordCostPower), true);
+        Assert.Empty(multiKwGaps);
+        Assert.Contains("Retain", multiKwText!, StringComparison.Ordinal);
+        Assert.Contains("Exhaust", multiKwText!, StringComparison.Ordinal);
+
+        // 22. Inverted GainsBlock enchantment and conditional EnchantPlayCount must fail closed.
+        var negBlockMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.NegatedGainsBlock), BindingFlags.Static | BindingFlags.Public)!;
+        var isPosBlock = typeof(ModifierMechanismReader).GetMethod("IsPositiveGainsBlockCanEnchant", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.False((bool)isPosBlock.Invoke(null, [NativeRuleBody.Read(negBlockMethod)])!);
+
+        var condReplayMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.ConditionalEnchantPlayCount), BindingFlags.Static | BindingFlags.Public)!;
+        var resolveDelta = typeof(ModifierMechanismReader).GetMethod("ResolveEnchantPlayCountDelta", BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.Null(resolveDelta.Invoke(null, [typeof(Spiral), NativeRuleBody.Read(condReplayMethod)]));
+
+        // 23. Event helper self-named parameter binding (`Pay(amount) -> Give(amount)`) must terminate cleanly.
+        var selfBindEvent = new SyntheticSelfBindEvent();
+        var payMethod = typeof(SyntheticSelfBindEvent).GetMethod(nameof(SyntheticSelfBindEvent.Pay), BindingFlags.Instance | BindingFlags.Public)!;
+        var (_, selfBindGap) = EventMechanismReader.DescribeOptionMethod(selfBindEvent, null, payMethod);
+        Assert.Null(selfBindGap);
+
+        // 24. Constant GroupBy key selector (`group orb by 0`) must fail closed instead of claiming distinct orb types.
+        var (constGroupText, constGroupGaps) = PowerMechanismReader.Describe(typeof(SyntheticConstGroupCoolantPower), true);
+        Assert.Null(constGroupText);
+        Assert.NotEmpty(constGroupGaps);
     }
 
     [Fact]
@@ -1160,6 +1227,117 @@ public sealed class NativeExtractionTests
 
         public static bool MixedOrCanEnchant(CardModel card)
             => card.Rarity == CardRarity.Basic || card.Tags.Contains(CardTag.Strike);
+
+        public static int ReadCounterAfterLoop()
+        {
+            int i;
+            for (i = 0; i < 3; i++)
+                _ = i.GetHashCode();
+            return i;
+        }
+
+        public static bool NegatedGainsBlock(CardModel card) => !card.GainsBlock;
+
+        public static int ConditionalEnchantPlayCount(CardModel card, int playCount)
+            => card.IsUpgraded ? playCount + 3 : playCount + 1;
+    }
+
+    private sealed class SyntheticSyncParamClearPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        private static void ZeroInt(ref int x) => x = 0;
+        public override Task AfterEnergySpent(CardModel card, int amount)
+        {
+            ZeroInt(ref amount);
+            return PlayerCmd.GainEnergy(amount, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticForeachNonItemPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            foreach (var _ in PileType.Hand.GetPile(Owner.Player!).Cards)
+                await PlayerCmd.GainEnergy(1m, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticRefRestoreCostPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        private static void Restore(ref decimal target, decimal original) => target = original;
+        public override bool TryModifyEnergyCostInCombatLate(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            modifiedCost = 0m;
+            if (card.Owner.Creature != Owner)
+                return false;
+            Restore(ref modifiedCost, originalCost);
+            return true;
+        }
+    }
+
+    private sealed class SyntheticNonConstReturnCostPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override bool TryModifyEnergyCostInCombatLate(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            if (card.Owner.Creature != Owner)
+            {
+                modifiedCost = originalCost;
+                return false;
+            }
+            if (card.Type == CardType.Skill)
+            {
+                modifiedCost = 0m;
+                return true;
+            }
+            modifiedCost = 9m;
+            return card.IsUpgradable;
+        }
+    }
+
+    private sealed class SyntheticMultiKeywordCostPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override bool TryModifyEnergyCostInCombatLate(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            if (card.Owner.Creature != Owner || !card.Keywords.Contains(CardKeyword.Retain) || !card.Keywords.Contains(CardKeyword.Exhaust))
+            {
+                modifiedCost = originalCost;
+                return false;
+            }
+            modifiedCost = 0m;
+            return true;
+        }
+    }
+
+    private sealed class SyntheticConstGroupCoolantPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (participants.Contains(Owner))
+            {
+                var num = (from orb in Owner.Player!.PlayerCombatState!.OrbQueue.Orbs group orb by 0).Count();
+                await CreatureCmd.GainBlock(Owner, num * Amount, ValueProp.Unpowered, null);
+            }
+        }
+    }
+
+    private sealed class SyntheticSelfBindEvent : EventModel
+    {
+        protected override IReadOnlyList<EventOption> GenerateInitialOptions() => [];
+        public Task Pay(int amount) => Give(amount);
+        private Task Give(int amount) => PlayerCmd.GainGold(amount, Owner!);
     }
 
     private sealed class SyntheticAsyncParamClearPower : PowerModel

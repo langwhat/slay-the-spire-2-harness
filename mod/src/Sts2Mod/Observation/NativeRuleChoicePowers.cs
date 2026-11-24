@@ -159,9 +159,12 @@ internal sealed partial class NativeRuleText
         var body = Body(hook);
         if (body.Incomplete)
             return null;
-        var active = body.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
+        var nonFalse = body.Returns.Where(r => !(TryTruth(r.Value, out var m) && !m)).ToArray();
+        if (nonFalse.Length == 0 || nonFalse.Any(r => !(TryTruth(r.Value, out var b) && b)))
+            return null;
+        var active = nonFalse;
         var allModifiedCostStores = body.OutStores.Where(s => s.Parameter.Name == "modifiedCost").ToArray();
-        if (active.Length == 0 || allModifiedCostStores.Length == 0)
+        if (allModifiedCostStores.Length == 0)
             return null;
 
         // Every reachable active return path must have its final implied OutStore agree on the same cost rewrite
@@ -181,7 +184,7 @@ internal sealed partial class NativeRuleText
             return null;
 
         CardType? filteredType = null;
-        CardKeyword? requiredKeyword = null;
+        var requiredKeywords = new List<CardKeyword>();
         Type? requiredAffliction = null;
         var allowedPiles = new List<PileType>();
         var excludedPilesPerPath = new List<(PileType? PositivePile, List<PileType> ExcludedPiles)>();
@@ -196,7 +199,7 @@ internal sealed partial class NativeRuleText
 
             var hasOwnerCheck = false;
             CardType? pathType = null;
-            CardKeyword? pathKeyword = null;
+            var pathKeywords = new List<CardKeyword>();
             Type? pathAffliction = null;
             PileType? pathPile = null;
             var pathExcludedPiles = new List<PileType>();
@@ -245,7 +248,9 @@ internal sealed partial class NativeRuleText
                 if (condExpected && condExpr is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords", Receiver: Input { Name: "card" } }, Arguments: [Constant { Data: int rawKw }] }
                     && Enum.IsDefined(typeof(CardKeyword), rawKw))
                 {
-                    pathKeyword = (CardKeyword)rawKw;
+                    var kwVal = (CardKeyword)rawKw;
+                    if (!pathKeywords.Contains(kwVal))
+                        pathKeywords.Add(kwVal);
                     continue;
                 }
                 // Affliction check: card.Affliction is T
@@ -291,15 +296,16 @@ internal sealed partial class NativeRuleText
             if (!hasOwnerCheck)
                 return null;
 
+            pathKeywords.Sort();
             reachablePaths++;
             if (firstPath)
             {
                 filteredType = pathType;
-                requiredKeyword = pathKeyword;
+                requiredKeywords.AddRange(pathKeywords);
                 requiredAffliction = pathAffliction;
                 firstPath = false;
             }
-            else if (filteredType != pathType || requiredKeyword != pathKeyword || requiredAffliction != pathAffliction)
+            else if (filteredType != pathType || !requiredKeywords.SequenceEqual(pathKeywords) || requiredAffliction != pathAffliction)
             {
                 return null;
             }
@@ -326,7 +332,7 @@ internal sealed partial class NativeRuleText
         allowedPiles.Sort();
 
         var subjectParts = new List<string> { "owned" };
-        if (requiredKeyword is { } kw)
+        foreach (var kw in requiredKeywords)
             subjectParts.Add(KeywordLabel(kw));
         if (filteredType is { } kind)
             subjectParts.Add(kind.ToString());
@@ -339,7 +345,7 @@ internal sealed partial class NativeRuleText
         var timingTag = hook.Name == "TryModifyEnergyCostInCombatLate" ? "In-combat Energy cost (late)" : "In-combat Energy cost";
         return setsZero
             ? $"{timingTag}: {subject} cost 0 Energy (Energy X-cost cards ignore cost modifiers and still spend all remaining Energy when paying resources)"
-            : $"{timingTag}: {subject} cost +stacks Energy (Energy X-cost cards ignore cost modifiers and spend all remaining Energy when played)";
+            : $"{timingTag}: {subject} cost +stacks Energy (Energy X-cost cards ignore cost modifiers and spend all remaining Energy when paying resources)";
     }
 
     private static bool IsUnreachableNullablePath(Test[] conditions)
@@ -376,6 +382,7 @@ internal sealed partial class NativeRuleText
             return null;
 
         var hasOwnerCheck = false;
+        var excludesDupe = false;
         CardType? filteredType = null;
         var firstPlaysPerTurn = false;
         foreach (var rawCond in active.Conditions)
@@ -394,7 +401,10 @@ internal sealed partial class NativeRuleText
                 continue;
             }
             if (!condExpected && condExpr is Call { Method.Name: "get_IsDupe", Receiver: Input { Name: "card" } })
+            {
+                excludesDupe = true;
                 continue;
+            }
             if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type", Receiver: Input { Name: "card" } }
                 && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
             {
@@ -430,11 +440,12 @@ internal sealed partial class NativeRuleText
             }
         }
 
+        var dupeQualifier = excludesDupe ? "non-dupe " : "";
         var subject = firstPlaysPerTurn
-            ? "each of owner's first N non-dupe card plays each turn (where N = stacks)"
+            ? $"each of owner's first N {dupeQualifier}card plays each turn (where N = stacks)"
             : filteredType is { } kind
-                ? $"owned non-dupe {kind} cards"
-                : "owned non-dupe cards";
+                ? $"owned {dupeQualifier}{kind} cards"
+                : $"owned {dupeQualifier}cards";
         return $"Card replay: plays {subject} 1 additional time{consumeSuffix}";
     }
 

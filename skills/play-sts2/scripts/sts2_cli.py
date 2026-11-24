@@ -550,11 +550,13 @@ def _record_observed_auto_guards(payload: JsonObj, cache: JsonObj) -> None:
         opened_shops = [_str(x) for x in _as_list(cache.get("opened_shops"))]
         cache["opened_shops"] = _append_guard(opened_shops, nkey)
 
-    # If a rewards selection is currently open, mark all visible card offers as already opened.
+    # If a rewards selection is currently open, mark only the open card offer (non-empty
+    # contents, or sole card offer) so unopened Prayer Wheel card offers stay auto-openable.
     if state.get("screen") == "rewards" and state.get("selection") is not None:
         opened_cards = [_str(x) for x in _as_list(cache.get("opened_card_offers"))]
-        for of in offers:
-            if of.get("kind") == "card":
+        card_offers = [of for of in offers if of.get("kind") == "card"]
+        for of in card_offers:
+            if _as_list(of.get("contents")) or len(card_offers) == 1:
                 opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
         cache["opened_card_offers"] = opened_cards
 

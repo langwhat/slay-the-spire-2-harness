@@ -673,7 +673,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
     private sealed record Effect(string Text, bool Attack = false, string? Trigger = null, bool ChangesGuard = false,
         Type? AddedPower = null, Type? AddedCard = null, Type? AddedSummon = null, string? ForcedMove = null, bool KillsSelf = false);
 
-    private sealed record GuardedEffects(Test[] Path, string Guard, Effect[] Effects, string? Repetitions = null, Loop? Loop = null, (int Start, int End)? ForeachRange = null);
+    private sealed record GuardedEffects(Test[] Path, string Guard, Effect[] Effects, string? Repetitions = null, Loop? Loop = null, ForeachLoop? ForeachLoop = null);
 
     private IEnumerable<Effect> RenderBranches(List<GuardedEffects> effects)
     {
@@ -871,10 +871,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 .GroupBy(l => (l.Start, l.End))
                 .OrderBy(g => g.Key.Start)
                 .ToArray();
-            var foreachRange = body.ForeachRanges
+            var foreachLoop = body.ForeachRanges
                 .Where(r => group.Key.Index >= r.Start && group.Key.Index < r.End)
                 .OrderByDescending(r => r.Start)
-                .Cast<(int Start, int End)?>()
                 .FirstOrDefault();
             var loop = enclosingLoopGroups.Length > 0 ? enclosingLoopGroups[^1].First() : null;
             string? repetitions = null;
@@ -954,6 +953,19 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
                 if (extracted.Count == 0)
                     continue;
+                // When a foreach loop executes an effect that does not reference the enumerated item,
+                // preserve the per-element repetition explicitly instead of emitting a single unconditional effect.
+                if (foreachLoop is not null && !ReferencesEnumerator(action)
+                    && !matching.Any(s => s.Conditions.Any(c => ReferencesEnumerator(c.Value))))
+                {
+                    if (ValueText(foreachLoop.Collection) is not { } colText)
+                    {
+                        MarkIncomplete($"{method.Name}/foreach-count");
+                        continue;
+                    }
+                    if (!extracted.Any(item => item.Text.Contains(colText, StringComparison.Ordinal)))
+                        extracted = extracted.Select(item => item with { Text = $"for each item in {colText}: {item.Text}" }).ToList();
+                }
                 if (method.Name == "AfterDamageReceived" && action is Call { Method.Name: "AddGeneratedCardToCombat" })
                     extracted = extracted.Select(item => item with { Trigger = AfterEachReceivedHit }).ToList();
                 if (method.Name == "AfterAttack" && matching.Any(step => step.Conditions.Any(test =>
@@ -989,17 +1001,17 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 GuardedEffects combinedGuardEffect;
                 if (pathGuards.Any(pg => pg.Guard.Length == 0))
                 {
-                    combinedGuardEffect = new([], "", extracted.ToArray(), repetitions, loop, foreachRange);
+                    combinedGuardEffect = new([], "", extracted.ToArray(), repetitions, loop, foreachLoop);
                 }
                 else if (pathGuards.Count == 1)
                 {
-                    combinedGuardEffect = new(pathGuards[0].Path, pathGuards[0].Guard, extracted.ToArray(), repetitions, loop, foreachRange);
+                    combinedGuardEffect = new(pathGuards[0].Path, pathGuards[0].Guard, extracted.ToArray(), repetitions, loop, foreachLoop);
                 }
                 else
                 {
                     var joinedGuard = string.Join(" or ", pathGuards.Select(pg =>
                         pg.Guard.Contains(" and ", StringComparison.Ordinal) ? $"({pg.Guard})" : pg.Guard));
-                    combinedGuardEffect = new([], joinedGuard, extracted.ToArray(), repetitions, loop, foreachRange);
+                    combinedGuardEffect = new([], joinedGuard, extracted.ToArray(), repetitions, loop, foreachLoop);
                 }
 
                 if (!rendered.Any(previous => previous.Guard == combinedGuardEffect.Guard && previous.Effects.SequenceEqual(extracted)))
@@ -1030,6 +1042,21 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         }
     }
 
+    private static bool ReferencesEnumerator(Value? value, int depth = 0)
+    {
+        if (value is null || depth > 8)
+            return false;
+        return value switch
+        {
+            Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator" } } => true,
+            Call c => ReferencesEnumerator(c.Receiver, depth + 1) || c.Arguments.Any(a => ReferencesEnumerator(a, depth + 1)),
+            Operation op => ReferencesEnumerator(op.Left, depth + 1) || ReferencesEnumerator(op.Right, depth + 1),
+            Field f => ReferencesEnumerator(f.Receiver, depth + 1),
+            Assignment a => ReferencesEnumerator(a.Target, depth + 1) || ReferencesEnumerator(a.Assigned, depth + 1),
+            _ => false,
+        };
+    }
+
     // When a foreach iterates once over a sampled slice (`each of up to ...`) and performs multiple actions
     // on each element (e.g. AggressionPower: move into hand, then if upgradable upgrade it), bind the sample once.
     private static List<GuardedEffects> CollapseSameEnumeratorTakenCards(List<GuardedEffects> input)
@@ -1041,14 +1068,16 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         for (var i = 0; i < input.Count;)
         {
             var first = input[i];
-            if (first.Repetitions is null && first.ForeachRange is not null && first.Effects.Length == 1
+            if (first.Repetitions is null && first.ForeachLoop is not null && first.Effects.Length == 1
                 && first.Effects[0].Text.IndexOf(marker, StringComparison.Ordinal) is >= 0 and var startIdx)
             {
                 var subject = ExtractEachOfSubject(first.Effects[0].Text, startIdx);
                 if (subject is not null && i + 1 < input.Count)
                 {
                     var next = input[i + 1];
-                    if (next.Repetitions is null && next.ForeachRange == first.ForeachRange && next.Effects.Length == 1
+                    if (next.Repetitions is null && next.ForeachLoop is not null
+                        && next.ForeachLoop.Start == first.ForeachLoop.Start && next.ForeachLoop.End == first.ForeachLoop.End
+                        && next.Effects.Length == 1
                         && next.Effects[0].Text.Contains(subject, StringComparison.Ordinal)
                         && (next.Guard == first.Guard
                             || (first.Guard.Length > 0 && next.Guard.StartsWith(first.Guard + " and ", StringComparison.Ordinal)
@@ -1754,7 +1783,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             if (forceExhaustArg is null || forceExhaustArg is Constant { Data: 0 or false })
                 exhaustSuffix = "";
             else if (forceExhaustArg is Constant { Data: 1 or true })
-                exhaustSuffix = $" (and {KeywordLabel(CardKeyword.Exhaust)} it)";
+                exhaustSuffix = $" (setting ExhaustOnNextPlay so non-Power non-dupe cards {KeywordLabel(CardKeyword.Exhaust)} after play)";
             else
                 return null;
             if (apPlayerArg is not null && apCountArg is not null && ValueText(apPlayerArg) is { } apWho && ValueText(apCountArg) is { } apCnt)
@@ -2774,7 +2803,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Orbs" } } => "owner's orb count",
             Call { Method.Name: "get_Item", Receiver: Call { Method.Name: "get_Orbs" }, Arguments: [Constant { Data: 0 }] } => "owner's first (next) orb",
             Call { Method.Name: "get_Orbs" } => "each orb in owner's orb queue",
-            Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: nameof(Enumerable.GroupBy), Arguments: [Call { Method.Name: "get_Orbs" }, ..] }] }
+            Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: nameof(Enumerable.GroupBy), Arguments: [Call { Method.Name: "get_Orbs" }, Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo orbKeySelector }] }] }] }
+                when IsOrbIdentityKeySelector(orbKeySelector)
                 => "number of distinct orb types currently in owner's orb queue",
             Call { Method.Name: "FloorToInt", Method.DeclaringType.Name: "Mathf", Arguments: [var floorInner] }
                 when ValueText(floorInner) is { } floorText => $"floor({floorText})",
@@ -2882,6 +2912,15 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
         string? Formula(Value left, string symbol, Value right)
             => ValueText(left) is { } a && ValueText(right) is { } b ? $"({a} {symbol} {b})" : null;
+    }
+
+    private bool IsOrbIdentityKeySelector(MethodInfo keySelector)
+    {
+        if (keySelector.ContainsGenericParameters || Body(keySelector) is not { Incomplete: false, Returns: [{ Conditions.Length: 0, Value: var retVal }] })
+            return false;
+        var paramName = keySelector.GetParameters().FirstOrDefault()?.Name;
+        return retVal is Call { Method.Name: "get_Id" or "GetType", Receiver: Input { Name: var rn } }
+            && (paramName is null || rn == paramName);
     }
 
     private string? FilteredSet(Call filter)

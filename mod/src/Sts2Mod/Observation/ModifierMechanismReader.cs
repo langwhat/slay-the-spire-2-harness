@@ -402,21 +402,52 @@ internal static class ModifierMechanismReader
 
     private static int? ResolveEnchantPlayCountDelta(Type type, NativeRuleBody playCntBody)
     {
-        foreach (var ret in playCntBody.Returns)
+        var nonPassthrough = playCntBody.Returns
+            .Where(r => r.Value is not Input { Name: "originalPlayCount" or "playCount" })
+            .ToArray();
+        if (nonPassthrough.Length == 0)
+            return null;
+
+        int? agreedDelta = null;
+        foreach (var ret in nonPassthrough)
         {
-            if (ret.Value is not Operation { Operator: "add", Right: var right })
-                continue;
+            // Every boosted path must be unguarded or guarded solely by `base.Status != EnchantmentStatus.Disabled`.
+            foreach (var cond in ret.Conditions)
+            {
+                var expr = cond.Value;
+                var expected = cond.Expected;
+                while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                {
+                    expr = inner;
+                    expected = !expected;
+                }
+                var isNotDisabled = expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Status", Receiver: Input { Name: "this" } }, Right: Constant { Data: (int)MegaCrit.Sts2.Core.Entities.Enchantments.EnchantmentStatus.Disabled } } statusOp
+                    && (statusOp.Operator == "bne.un" ? expected : !expected);
+                if (!isNotDisabled)
+                    return null;
+            }
+
+            if (ret.Value is not Operation { Operator: "add", Left: Input { Name: "originalPlayCount" or "playCount" }, Right: var right })
+                return null;
+            int? delta = null;
             if (right is Constant { Data: int literal } && literal > 0)
-                return literal;
-            if (right is Call { Method.Name: "get_IntValue" or "get_BaseValue", Receiver: Call { Method.Name: "get_Item", Arguments: [Constant { Data: string varKey }] } }
+            {
+                delta = literal;
+            }
+            else if (right is Call { Method.Name: "get_IntValue" or "get_BaseValue", Receiver: Call { Method.Name: "get_Item", Arguments: [Constant { Data: string varKey }] } }
                 && ModelDb.GetByIdOrNull<EnchantmentModel>(ModelDb.GetId(type)) is { } canonical
                 && canonical.DynamicVars.TryGetValue(varKey, out var dv)
                 && dv.BaseValue > 0m && dv.BaseValue == decimal.Truncate(dv.BaseValue))
             {
-                return (int)dv.BaseValue;
+                delta = (int)dv.BaseValue;
             }
+            if (delta is null)
+                return null;
+            if (agreedDelta is not null && agreedDelta != delta)
+                return null;
+            agreedDelta = delta;
         }
-        return null;
+        return agreedDelta;
     }
 
     private static string? DescribeEnchantDamageAdditive(
@@ -538,15 +569,13 @@ internal static class ModifierMechanismReader
             {
                 gaps.Add("CanEnchant");
             }
-            else if (customBody.Calls.Any(s => s.Call.Method.Name == "get_GainsBlock"))
+            else if (IsPositiveGainsBlockCanEnchant(customBody))
             {
                 clauses.Add("Eligible cards: cards that gain Block.");
             }
-            else if (customBody.Calls.Any(s => s.Call.Method.Name == "GetKeywordsWithSources")
-                && customBody.Calls.FirstOrDefault(s => s.Call.Method.Name == "Contains" && s.Call.Arguments.OfType<Constant>().Any(c => c.Data is int kw && Enum.IsDefined(typeof(CardKeyword), kw))) is { } kwStep)
+            else if (TryReadLocalKeywordCanEnchant(customBody) is { } localKw)
             {
-                var kw = (CardKeyword)(int)kwStep.Call.Arguments.OfType<Constant>().First(c => c.Data is int k && Enum.IsDefined(typeof(CardKeyword), k)).Data!;
-                clauses.Add($"Eligible cards: cards with local {NativeRuleText.KeywordLabel(kw)} keyword.");
+                clauses.Add($"Eligible cards: cards with local {NativeRuleText.KeywordLabel(localKw)} keyword.");
             }
             else if (DescribeCustomCanEnchant(customBody) is { } customDesc)
             {
@@ -558,6 +587,68 @@ internal static class ModifierMechanismReader
             }
         }
         return clauses.Count > 0 ? string.Join(" ", clauses) : null;
+    }
+
+    private static bool IsPositiveGainsBlockCanEnchant(NativeRuleBody body)
+    {
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
+            return false;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var rb) && rb))
+            tests.Add(new Test(positive[0].Value, true));
+        var sawGainsBlock = false;
+        foreach (var raw in tests)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expected && expr is Call { Method.Name: "CanEnchant", Method.DeclaringType: var decl } && decl == typeof(EnchantmentModel))
+                continue;
+            if (expected && expr is Call { Method.Name: "get_GainsBlock", Receiver: Input })
+            {
+                sawGainsBlock = true;
+                continue;
+            }
+            return false;
+        }
+        return sawGainsBlock;
+    }
+
+    private static CardKeyword? TryReadLocalKeywordCanEnchant(NativeRuleBody body)
+    {
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
+            return null;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var rb) && rb))
+            tests.Add(new Test(positive[0].Value, true));
+        CardKeyword? matched = null;
+        foreach (var raw in tests)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expected && expr is Call { Method.Name: "CanEnchant", Method.DeclaringType: var decl } && decl == typeof(EnchantmentModel))
+                continue;
+            if (expected && expr is Call { Method.Name: "Contains", Arguments: var args }
+                && args.OfType<Constant>().FirstOrDefault(c => c.Data is int kw && Enum.IsDefined(typeof(CardKeyword), kw)) is { Data: int rawKw }
+                && body.Calls.Any(s => s.Call.Method.Name == "GetKeywordsWithSources"))
+            {
+                matched = (CardKeyword)rawKw;
+                continue;
+            }
+            return null;
+        }
+        return matched;
     }
 
     private sealed record CanEnchantBranch(

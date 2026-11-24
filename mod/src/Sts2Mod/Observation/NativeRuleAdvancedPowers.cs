@@ -928,8 +928,25 @@ internal sealed partial class NativeRuleText
             var who = targetArg is not null ? ValueText(targetArg) : "owner";
             if (who is null)
                 return false;
+            var snapVal = snapshotStep.Call.Arguments.LastOrDefault();
+            var snapText = IsStackAmount(snapVal) ? "stacks" : ValueText(snapVal);
+            if (snapText is null)
+                return false;
+            var counterNote = "";
+            if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(DynamicVar)
+                    && s.Call.Method.Name == "set_BaseValue"
+                    && DynamicKey(s.Call.Receiver) is { } ck && ck != "DisplayAmount") is { } counterStep
+                && DynamicKey(counterStep.Call.Receiver) is { } counterKey)
+            {
+                var deltaText = counterStep.Call.Arguments is [Call { Method.Name: "op_Addition", Arguments: [_, var addDelta] }]
+                    ? ValueText(addDelta)
+                    : null;
+                counterNote = deltaText is not null
+                    ? $" and add {deltaText} to counter {HumanizeLower(counterKey)}"
+                    : $" and update counter {HumanizeLower(counterKey)}";
+            }
             _powers.Add(appliedType);
-            line = $"{prefix}Card-play power timing: snapshots stacks before each {cardActor} {cardNoun} play starts, then attempts to apply that many {PowerLabel(appliedType)} to {who} after that card play resolves";
+            line = $"{prefix}Card-play power timing: snapshots {snapText} before each {cardActor} {cardNoun} play starts, then attempts to apply that many {PowerLabel(appliedType)} to {who}{counterNote} after that card play resolves";
             return true;
         }
         if (afterBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(OrbCmd)
@@ -1013,7 +1030,7 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        line = $"{prefix}End-of-turn execution check: if owner's current HP ≤ stacks before owner's turn ends, kills owner after owner's turn ends";
+        line = $"{prefix}End-of-turn execution check: for enemies, checks and kills if current HP ≤ stacks before enemy turn ends; for players, checks and kills if current HP ≤ stacks after player turn ends (after end-of-turn hand effects)";
         return true;
     }
 
@@ -1034,7 +1051,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var accelLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.AccelerantPower));
-        line = $"{prefix}After owner's turn starts: deals stacks unblockable unpowered damage to owner and subtracts 1 stack (repeated 1 + opposing {accelLabel} stacks times in sequence while owner stays alive)";
+        line = $"{prefix}After owner's turn starts: deals stacks unblockable unpowered damage to owner and subtracts 1 stack (repeated min(stacks, 1 + total opposing {accelLabel} stacks on living opponents) times in sequence while owner stays alive)";
         return true;
     }
 
@@ -1224,7 +1241,18 @@ internal sealed partial class NativeRuleText
                 && (op.Operator == "ble" ? expected : !expected);
         });
         var checksCounterLimit = locStep.Conditions.Any(c =>
-            c.Value is Operation { Left: Field f } && InternalDataField(f)?.FieldType == typeof(int));
+        {
+            var expr = c.Value;
+            var expected = c.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            return expr is Operation { Operator: "bge" or "blt" or "clt", Left: Field f, Right: var rhs } op
+                && InternalDataField(f)?.FieldType == typeof(int) && IsStackAmount(rhs)
+                && (op.Operator == "bge" ? !expected : expected);
+        });
         var cardType = locStep.Conditions
             .Select(c => IsEquality(c, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
                 && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct) ? (CardType?)(int)ct : null)
@@ -1307,8 +1335,13 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        var energyActive = energyBody.Returns.Where(r => TryTruth(r.Value, out var m) && m && !IsUnreachableNullablePath(r.Conditions)).ToArray();
-        var starActive = starBody.Returns.Where(r => TryTruth(r.Value, out var m) && m && !IsUnreachableNullablePath(r.Conditions)).ToArray();
+        var energyNonFalse = energyBody.Returns.Where(r => !(TryTruth(r.Value, out var m) && !m)).ToArray();
+        var starNonFalse = starBody.Returns.Where(r => !(TryTruth(r.Value, out var m) && !m)).ToArray();
+        if (energyNonFalse.Any(r => !(TryTruth(r.Value, out var b) && b))
+            || starNonFalse.Any(r => !(TryTruth(r.Value, out var b) && b)))
+            return false;
+        var energyActive = energyNonFalse.Where(r => !IsUnreachableNullablePath(r.Conditions)).ToArray();
+        var starActive = starNonFalse.Where(r => !IsUnreachableNullablePath(r.Conditions)).ToArray();
         var energyStores = energyBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost").ToArray();
         var starStores = starBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost").ToArray();
         var energyZero = energyActive.Length > 0
@@ -1416,20 +1449,38 @@ internal sealed partial class NativeRuleText
             || Body(mult) is not { Incomplete: false } multBody)
             return false;
 
-        var checksCurrentPlayIndex = multBody.Returns.SelectMany(r => r.Conditions)
-            .Any(c => c.Value is Operation { Left: Call { Method.Name: "get_CurrentPlayIndex" } });
-        var checksStartedAttacks = multBody.Returns.SelectMany(r => r.Conditions)
-            .Any(c => c.Value is Operation { Left: Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] } });
         var activeReturns = multBody.Returns.Where(r => Numeric(r.Value) != 1m).ToArray();
-        if (!checksCurrentPlayIndex || !checksStartedAttacks || activeReturns.Length == 0)
+        if (activeReturns.Length == 0)
+            return false;
+
+        var checksCurrentPlayIndex = activeReturns.Any(r =>
+            r.Conditions.Any(c => IsLessOrEqualCheck(c, v => v is Call { Method.Name: "get_CurrentPlayIndex" })));
+        var allValidActive = checksCurrentPlayIndex && activeReturns.All(r =>
+            r.Conditions.Any(c => IsLessOrEqualCheck(c, v => v is Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] }))
+            && r.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: "IsPoweredAttack" } }));
+        if (!allValidActive)
             return false;
 
         var factorTexts = activeReturns.Select(r => ValueText(r.Value)).Distinct(StringComparer.Ordinal).ToArray();
         if (factorTexts is not [{ } factorText])
             return false;
 
-        line = $"{prefix}Damage multiplier per hit, after additions: if powered attack from an owned card, not a replay (CurrentPlayIndex = 0), and at most 1 owned Attack play has started this turn (0 if the source card is not currently in Play): ×{factorText}";
+        line = $"{prefix}Damage multiplier per hit, after additions: if powered attack from an owned card, not a replay (CurrentPlayIndex = 0), and at most 1 owned Attack play has started this turn (0 during previews or if the source card is not currently in Play): ×{factorText}";
         return true;
+    }
+
+    private static bool IsLessOrEqualCheck(Test raw, Func<Value, bool> matchLeft)
+    {
+        var expr = raw.Value;
+        var expected = raw.Expected;
+        while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+        {
+            expr = inner;
+            expected = !expected;
+        }
+        return expr is Operation { Operator: "bgt" or "cgt" or "ble", Left: var left } op
+            && matchLeft(left)
+            && (op.Operator == "ble" ? expected : !expected);
     }
 
     private bool ReadCallOfTheVoidHook(Type power, string prefix, out string line)

@@ -367,7 +367,11 @@ internal static class EventMechanismReader
                     for (var i = 0; i < helperParams.Length && i < call.Arguments.Length; i++)
                     {
                         if (helperParams[i].Name is { } pName)
-                            childBindings[pName] = SubstituteBinding(call.Arguments[i], bindings);
+                        {
+                            var boundVal = SubstituteBinding(call.Arguments[i], bindings);
+                            if (boundVal is not Input { Name: var bn } || bn != pName)
+                                childBindings[pName] = boundVal;
+                        }
                     }
                 }
                 var (nested, nestedGap) = DescribeOptionMethod(activeEvent, option, helper, depth + 1, childBindings);
@@ -1184,9 +1188,12 @@ internal static class EventMechanismReader
 
     private static string? ResolveEventAmount(EventModel activeEvent, Value? expr, IReadOnlyDictionary<string, Value>? bindings = null)
     {
-        while (true)
+        var visitedInputs = new HashSet<string>(StringComparer.Ordinal);
+        for (var guard = 0; guard < 16; guard++)
         {
-            if (expr is Input { Name: var inputName } && bindings is not null && bindings.TryGetValue(inputName, out var boundExpr))
+            if (expr is Input { Name: var inputName } && bindings is not null
+                && visitedInputs.Add(inputName)
+                && bindings.TryGetValue(inputName, out var boundExpr))
                 expr = boundExpr;
             else if (expr is Call { Method.Name: "op_Implicit", Arguments: [var implicitInner] })
                 expr = implicitInner;

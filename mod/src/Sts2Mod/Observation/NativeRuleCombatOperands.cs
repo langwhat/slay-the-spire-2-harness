@@ -68,11 +68,11 @@ internal sealed partial class NativeRuleText
         }
 
         // CardFactory.GetDistinctForCombat / GetForCombat(player, pool, count, rng)
-        var factoryCall = UnwrapCardFactoryCall(cardArg);
+        var factoryCall = UnwrapCardFactoryCall(cardArg, out var takesSingle);
         if (factoryCall is { Method.DeclaringType.Name: "CardFactory", Method.Name: "GetDistinctForCombat" or "GetForCombat" }
             && factoryCall.Arguments.Length >= 3
             && ValueText(factoryCall.Arguments[0]) is { } factoryRecipient
-            && ValueText(factoryCall.Arguments[2]) is { } factoryCount
+            && (takesSingle ? "1" : ValueText(factoryCall.Arguments[2])) is { } factoryCount
             && DescribeCardFactoryPool(factoryCall.Arguments[1]) is { } poolDesc)
         {
             if (factoryCall.Method.Name == "GetDistinctForCombat")
@@ -83,13 +83,28 @@ internal sealed partial class NativeRuleText
         return null;
     }
 
-    private static Call? UnwrapCardFactoryCall(Value? value) => value switch
+    private static Call? UnwrapCardFactoryCall(Value? value, out bool takesSingle)
     {
-        Call { Method.DeclaringType.Name: "CardFactory" } cf => cf,
-        Call { Method.Name: "First" or "FirstOrDefault" or "ToList" or "ToArray" or "Select", Arguments: [var inner, ..] } => UnwrapCardFactoryCall(inner),
-        Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator", Receiver: var col } } => UnwrapCardFactoryCall(col),
-        _ => null,
-    };
+        takesSingle = false;
+        switch (value)
+        {
+            case Call { Method.DeclaringType.Name: "CardFactory" } cf:
+                return cf;
+            case Call { Method.Name: "First" or "FirstOrDefault", Arguments: [var inner, ..] }:
+                var foundSingle = UnwrapCardFactoryCall(inner, out _);
+                takesSingle = foundSingle is not null;
+                return foundSingle;
+            case Call { Method.Name: "ToList" or "ToArray" or "Select", Arguments: [var inner, ..] }:
+                return UnwrapCardFactoryCall(inner, out takesSingle);
+            case Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator", Receiver: var col } }:
+                return UnwrapCardFactoryCall(col, out takesSingle);
+            default:
+                return null;
+        }
+    }
+
+    private static Call? UnwrapCardFactoryCall(Value? value)
+        => UnwrapCardFactoryCall(value, out _);
 
     private string? DescribeCardFactoryPool(Value poolExpr)
     {
@@ -99,6 +114,9 @@ internal sealed partial class NativeRuleText
             current = inner;
         if (current is Call { Method.Name: "Where", Arguments: [var source, Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] })
         {
+            var predParamName = pred.GetParameters().FirstOrDefault(p => typeof(CardModel).IsAssignableFrom(p.ParameterType))?.Name;
+            if (predParamName is null)
+                return null;
             var predBody = Body(pred);
             if (predBody.Incomplete || predBody.Returns.Count == 0)
                 return null;
@@ -117,8 +135,8 @@ internal sealed partial class NativeRuleText
                     expr = inner;
                     expected = !expected;
                 }
-                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Type" }, Right: Constant { Data: int rawType } } typeOp
-                    && Enum.IsDefined(typeof(CardType), rawType))
+                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Type", Receiver: Input { Name: var typeRec } }, Right: Constant { Data: int rawType } } typeOp
+                    && typeRec == predParamName && Enum.IsDefined(typeof(CardType), rawType))
                 {
                     var isEq = typeOp.Operator == "bne.un" ? !expected : expected;
                     if (!isEq)
@@ -126,8 +144,8 @@ internal sealed partial class NativeRuleText
                     filters.Add(((CardType)rawType).ToString());
                     continue;
                 }
-                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Rarity" }, Right: Constant { Data: int rawRarity } } rarOp
-                    && Enum.IsDefined(typeof(CardRarity), rawRarity))
+                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Rarity", Receiver: Input { Name: var rarRec } }, Right: Constant { Data: int rawRarity } } rarOp
+                    && rarRec == predParamName && Enum.IsDefined(typeof(CardRarity), rawRarity))
                 {
                     var isEq = rarOp.Operator == "bne.un" ? !expected : expected;
                     if (!isEq)
@@ -135,13 +153,13 @@ internal sealed partial class NativeRuleText
                     filters.Add(((CardRarity)rawRarity).ToString());
                     continue;
                 }
-                if (expected && expr is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords" }, Arguments: [Constant { Data: int rawKw }] }
-                    && Enum.IsDefined(typeof(CardKeyword), rawKw))
+                if (expected && expr is Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Keywords", Receiver: Input { Name: var kwRec } }, Arguments: [Constant { Data: int rawKw }] }
+                    && kwRec == predParamName && Enum.IsDefined(typeof(CardKeyword), rawKw))
                 {
                     filters.Add(KeywordLabel((CardKeyword)rawKw));
                     continue;
                 }
-                // Fail closed on any unrecognized pool filter (e.g., `!(c is JackOfAllTrades)`).
+                // Fail closed on any unrecognized pool filter (e.g., `!(c is JackOfAllTrades)` or non-candidate checks).
                 return null;
             }
             current = source;

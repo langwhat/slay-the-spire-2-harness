@@ -36,6 +36,7 @@ internal sealed class NativeRuleBody
     internal sealed record Terminal(Test[] Conditions, IReadOnlySet<(int Epoch, int Index)> Visited, bool Returned);
     // A counted loop runs the instructions from Start up to its back branch at End Count times.
     internal sealed record Loop(int Start, int End, Value Count);
+    internal sealed record ForeachLoop(int Start, int End, Value? Collection);
 
     private sealed class Path
     {
@@ -44,6 +45,7 @@ internal sealed class NativeRuleBody
         public List<Value> Stack { get; } = [];
         public Dictionary<int, Value> Locals { get; } = [];
         public Dictionary<string, Value> OutValues { get; } = new(StringComparer.Ordinal);
+        public HashSet<string> InvalidatedInputs { get; } = new(StringComparer.Ordinal);
         public Dictionary<FieldInfo, Value> StateFields { get; } = [];
         public Dictionary<int, int> Visits { get; } = [];
         public HashSet<(int Epoch, int Index)> CumulativeVisited { get; } = [];
@@ -71,6 +73,8 @@ internal sealed class NativeRuleBody
                 copy.Locals.Add(key, value);
             foreach (var (key, value) in OutValues)
                 copy.OutValues.Add(key, value);
+            foreach (var inv in InvalidatedInputs)
+                copy.InvalidatedInputs.Add(inv);
             foreach (var (key, value) in StateFields)
                 copy.StateFields.Add(key, value);
             foreach (var (key, value) in Visits)
@@ -152,7 +156,7 @@ internal sealed class NativeRuleBody
     public List<Terminal> Terminals { get; } = [];
     public HashSet<FieldInfo> Writes { get; } = [];
     public HashSet<Loop> Loops { get; } = [];
-    public HashSet<(int Start, int End)> ForeachRanges { get; } = [];
+    public HashSet<ForeachLoop> ForeachRanges { get; } = [];
     public bool Incomplete { get; private set; }
     public bool ReadsParameters { get; private set; }
 
@@ -235,7 +239,7 @@ internal sealed class NativeRuleBody
                         && rawReceiver is LocalAddress or StateFieldAddress or ArrayElementAddress)
                     {
                         var hasWritableByRef = target.GetParameters().Any(IsWritableByRef);
-                        InvalidateByRefArguments(path, target, args, skipIndex: -1);
+                        InvalidateByRefArguments(path, target, args, skipIndex: -1, outStores: hasWritableByRef ? OutStores : null);
                         if (rawReceiver is LocalAddress ctorSlot)
                         {
                             if (!hasWritableByRef)
@@ -291,7 +295,8 @@ internal sealed class NativeRuleBody
                         path.Locals[valueSlot.Slot] = new Operation("kvp_value", receiver);
                         continue;
                     }
-                    InvalidateByRefArguments(path, target, args, skipIndex: isDictRemoveOut ? 1 : -1);
+                    var hasWritableByRefCall = target.GetParameters().Any(IsWritableByRef);
+                    InvalidateByRefArguments(path, target, args, skipIndex: isDictRemoveOut ? 1 : -1, outStores: hasWritableByRefCall ? OutStores : null);
                     for (var i = 0; i < args.Length; i++)
                         args[i] = path.Materialize(path.Deref(args[i]));
                     var call = new Call(target, receiver is not null ? path.Materialize(receiver) : null, args);
@@ -364,7 +369,7 @@ internal sealed class NativeRuleBody
                             continue;
                         }
                         if (bodyStart < index)
-                            ForeachRanges.Add((bodyStart, index));
+                            ForeachRanges.Add(new ForeachLoop(bodyStart, index, enumerated));
                         // Quantify the body over the enumerator's elements. The second visit
                         // leaves the representative iteration and proceeds after the loop.
                         if (visits == 0)
@@ -392,7 +397,10 @@ internal sealed class NativeRuleBody
                         }
                         if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
                             && isDecIncrementedFromZero)
+                        {
+                            InvalidateLoopCounter(path, instructions, destination, index);
                             continue;
+                        }
                     }
                     if (destination < index && condition is Operation { Right: var rawLimit } counter)
                     {
@@ -439,6 +447,8 @@ internal sealed class NativeRuleBody
                                     Loops.Add(new Loop(destination, index, new Constant(count)));
                                     if (!alreadyIncremented)
                                         path.Index = destination;
+                                    else
+                                        InvalidateLoopCounter(path, instructions, destination, index);
                                     continue;
                                 }
                                 if (count <= 0)
@@ -451,6 +461,8 @@ internal sealed class NativeRuleBody
                                 Loops.Add(new Loop(destination, index, limit));
                                 if (!alreadyIncremented)
                                     path.Index = destination;
+                                else
+                                    InvalidateLoopCounter(path, instructions, destination, index);
                                 continue;
                             }
                             else if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
@@ -469,7 +481,11 @@ internal sealed class NativeRuleBody
                         if (visits == 1 && counter.Left is Operation { Operator: "add", Right: Constant { Data: 1 } }
                             && (Loops.Any(loop => loop.Start == destination && loop.End == index)
                                 || (limit is Operation { Operator: "ldlen" } && IsReadOnlyArrayScanLoop(instructions, destination, index))))
+                        {
+                            if (Loops.Any(loop => loop.Start == destination && loop.End == index))
+                                InvalidateLoopCounter(path, instructions, destination, index);
                             continue;
+                        }
                     }
                     if (TryTruth(condition, out var truth, isMonsterMove))
                     {
@@ -698,7 +714,16 @@ internal sealed class NativeRuleBody
         => param.ParameterType.IsByRef
             && !param.IsDefined(typeof(System.Runtime.CompilerServices.IsReadOnlyAttribute), inherit: false);
 
-    private static void InvalidateByRefArguments(Path path, MethodBase target, Value[] args, int skipIndex)
+    private static void InvalidateLoopCounter(Path path, List<CodeInstruction> instructions, int start, int end)
+    {
+        var (counterField, counterSlot, _) = FindLoopCounter(instructions, start, end);
+        if (counterField is not null)
+            path.StateFields[counterField] = Missing;
+        if (counterSlot is { } slot)
+            path.Locals.Remove(slot);
+    }
+
+    private static void InvalidateByRefArguments(Path path, MethodBase target, Value[] args, int skipIndex, List<OutStore>? outStores = null)
     {
         var parameters = target.GetParameters();
         for (var i = 0; i < args.Length && i < parameters.Length; i++)
@@ -708,7 +733,13 @@ internal sealed class NativeRuleBody
             if (!IsWritableByRef(parameters[i]))
                 continue;
             if (args[i] is Input byRefParam)
+            {
                 path.OutValues.Remove(byRefParam.Name);
+                if (byRefParam.Type?.IsByRef == true)
+                    outStores?.Add(new OutStore(byRefParam, Missing, [.. path.Conditions]));
+                else
+                    path.InvalidatedInputs.Add(byRefParam.Name);
+            }
             else if (args[i] is LocalAddress byRefLocal)
                 path.Locals.Remove(byRefLocal.Slot);
             else if (args[i] is StateFieldAddress byRefSmField)
@@ -1078,7 +1109,11 @@ internal sealed class NativeRuleBody
             else
             {
                 ReadsParameters = true;
-                path.Stack.Add(arguments[isStatic ? index : index - 1]);
+                var arg = arguments[isStatic ? index : index - 1];
+                if (!name.StartsWith("ldarga", StringComparison.Ordinal) && path.InvalidatedInputs.Contains(arg.Name))
+                    path.Stack.Add(Missing);
+                else
+                    path.Stack.Add(arg);
             }
         }
         else if (name.StartsWith("ldloca", StringComparison.Ordinal))
