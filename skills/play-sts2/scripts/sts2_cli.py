@@ -550,14 +550,23 @@ def _record_observed_auto_guards(payload: JsonObj, cache: JsonObj) -> None:
         opened_shops = [_str(x) for x in _as_list(cache.get("opened_shops"))]
         cache["opened_shops"] = _append_guard(opened_shops, nkey)
 
-    # If a rewards selection is currently open, mark only the open card offer (non-empty
-    # contents, or sole card offer) so unopened Prayer Wheel card offers stay auto-openable.
-    if state.get("screen") == "rewards" and state.get("selection") is not None:
+    # If a rewards selection is currently open, mark only card offers matching the active
+    # selection's candidate refs so unopened Prayer Wheel card offers (whose contents are
+    # pre-populated before opening) stay auto-openable.
+    selection = _as_dict(state.get("selection"))
+    if state.get("screen") == "rewards" and selection:
         opened_cards = [_str(x) for x in _as_list(cache.get("opened_card_offers"))]
         card_offers = [of for of in offers if of.get("kind") == "card"]
-        for of in card_offers:
-            if _as_list(of.get("contents")) or len(card_offers) == 1:
-                opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
+        cand_set = {_str(c) for c in _as_list(selection.get("candidates")) if c is not None}
+        matched = False
+        if cand_set:
+            for of in card_offers:
+                of_contents = {_str(c) for c in _as_list(of.get("contents")) if c is not None}
+                if of_contents and (of_contents == cand_set or bool(of_contents & cand_set)):
+                    opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
+                    matched = True
+        if not matched and len(card_offers) == 1:
+            opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(card_offers[0].get('ref'))}")
         cache["opened_card_offers"] = opened_cards
 
 

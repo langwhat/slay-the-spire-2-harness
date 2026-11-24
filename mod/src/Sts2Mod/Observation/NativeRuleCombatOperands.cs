@@ -94,7 +94,7 @@ internal sealed partial class NativeRuleText
                 var foundSingle = UnwrapCardFactoryCall(inner, out _);
                 takesSingle = foundSingle is not null;
                 return foundSingle;
-            case Call { Method.Name: "ToList" or "ToArray" or "Select", Arguments: [var inner, ..] }:
+            case Call { Method.Name: "ToList" or "ToArray", Arguments: [var inner, ..] }:
                 return UnwrapCardFactoryCall(inner, out takesSingle);
             case Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator", Receiver: var col } }:
                 return UnwrapCardFactoryCall(col, out takesSingle);

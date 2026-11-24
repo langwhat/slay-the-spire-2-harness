@@ -211,11 +211,25 @@ internal static class ItemMechanismReader
 
     private static string? DescribeCardCostLifetime(NativeRuleBody body)
     {
-        if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisTurn"))
+        var hasTurn = body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisTurn");
+        var hasCombat = body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisCombat");
+        if (hasTurn == hasCombat)
+            return null;
+        // Fail closed when the same card also applies another cost mutation (e.g. SetThisTurn / AddThisTurn / UpgradeBy).
+        var hasOtherCostMutation = body.Calls.Any(s =>
+            (s.Call.Method.DeclaringType == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardEnergyCost)
+                && !s.Call.Method.Name.StartsWith("get_", StringComparison.Ordinal)
+                && s.Call.Method.Name is not ("GetWithModifiers" or "GetAmountToSpend" or "GetResolved" or "SetToFreeThisTurn" or "SetToFreeThisCombat"))
+            || (s.Call.Method.DeclaringType == typeof(CardModel)
+                && s.Call.Method.Name is "SetToFreeThisTurn" or "SetToFreeThisCombat" ? false
+                : s.Call.Method.DeclaringType == typeof(CardModel)
+                    && (s.Call.Method.Name.Contains("StarCost", StringComparison.Ordinal) || s.Call.Method.Name.Contains("EnergyCost", StringComparison.Ordinal))
+                    && !s.Call.Method.Name.StartsWith("get_", StringComparison.Ordinal)));
+        if (hasOtherCostMutation)
+            return null;
+        if (hasTurn)
             return "Cost reduction sets target card(s)' local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).";
-        if (body.Calls.Any(s => s.Call.Method.Name == "SetToFreeThisCombat"))
-            return "Cost reduction sets target card(s)' local Energy and Star costs to 0 for the rest of combat (global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).";
-        return null;
+        return "Cost reduction sets target card(s)' local Energy and Star costs to 0 for the rest of combat (global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).";
     }
 
     private static string? DescribeCardHistoryPrecondition(Type cardType, NativeRuleBody body)
@@ -652,7 +666,7 @@ internal static class ItemMechanismReader
             && relic.DynamicVars.TryGetValue("Cards", out var scarfCards))
         {
             var threshold = (scarfCards.BaseValue - 1m).ToString("0.########", CultureInfo.InvariantCulture);
-            notes.Add($"Counts non-autoplay cards played by owner this turn; while counter equals {threshold}, sets both Energy and Star costs of owner's hand/play cards to 0.");
+            notes.Add($"Counts non-autoplay cards played by owner this turn; while counter equals {threshold}, sets both Energy and Star costs of owner's hand/play cards to 0 (Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources).");
         }
 
         // Attack-free turn Energy carry-over (e.g., ArtOfWar).

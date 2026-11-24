@@ -96,6 +96,15 @@ internal sealed partial class NativeRuleText
         if (body.Incomplete || body.Writes.Count > 0 || body.Loops.Count > 0
             || body.FieldSteps.Any(step => step.Assignment.Target.Member.DeclaringType?.IsDefined(typeof(CompilerGeneratedAttribute), false) != true))
             return null;
+        var chainedAttackCalls = new HashSet<Call>(ReferenceEqualityComparer.Instance);
+        foreach (var step in body.Calls)
+        {
+            if (step.Call.Method.DeclaringType?.Name == "AttackCommand" && step.Call.Method.Name == "Execute")
+            {
+                for (var cur = step.Call.Receiver as Call; cur is not null; cur = cur.Receiver as Call)
+                    chainedAttackCalls.Add(cur);
+            }
+        }
         var effects = new List<string>();
         foreach (var group in body.Calls.GroupBy(step => (step.Epoch, step.Index))
             .OrderBy(group => (group.Key.Epoch, group.Max(s => s.Order), group.Key.Index)))
@@ -110,8 +119,11 @@ internal sealed partial class NativeRuleText
             if (IsPresentationCall(call.Method)
                 || declaring?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
                 || (declaring == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty) && name == "CheckMissingWithAnim")
-                || declaring == typeof(DamageCmd)
-                || declaring?.Name == "AttackCommand" && name is not "Execute"
+                || ((declaring == typeof(DamageCmd) || (declaring?.Name == "AttackCommand" && name is not "Execute"))
+                    && (chainedAttackCalls.Contains(call)
+                        || name is "WithHitFx" or "WithAttackerFx" or "WithAttackerAnim" or "WithNoAttackerAnim"
+                            or "WithWaitBeforeHit" or "WithHitVfxNode" or "WithHitVfxSpawnedAtBase"
+                            or "SpawningHitVfxOnEachCreature" or "OnlyPlayAnimOnce"))
                 || name is "get_Owner" or "get_Creature" or "get_Osty" or "get_DynamicVars" or "get_Damage"
                     or "get_OstyDamage" or "get_HpLoss" or "get_Cards" or "get_BaseValue" or "get_EnergyCost"
                     or "get_CombatState" or "get_Enemies" or "get_Powers" or "OfType" or "FirstOrDefault"

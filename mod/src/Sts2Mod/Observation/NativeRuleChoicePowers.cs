@@ -408,7 +408,10 @@ internal sealed partial class NativeRuleText
             if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type", Receiver: Input { Name: "card" } }
                 && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
             {
-                filteredType = (CardType)(int)ct;
+                var nextType = (CardType)(int)ct;
+                if (filteredType is not null && filteredType != nextType)
+                    return null;
+                filteredType = nextType;
                 continue;
             }
             if (IsCountLessThanStacksCheck(cond, out var countPred) && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes) && countedTypes.Count == 0)
@@ -428,7 +431,7 @@ internal sealed partial class NativeRuleText
             if (IsSelfDecrement(afterHook))
             {
                 handled.Add(afterHook.Name);
-                consumeSuffix = $", then subtract 1 {PowerLabel(power)} stack";
+                consumeSuffix = $", consuming 1 {PowerLabel(power)} stack when play starts (before card effects/nested plays resolve)";
             }
             else if (IsPurePresentationHook(afterHook))
             {
@@ -442,7 +445,9 @@ internal sealed partial class NativeRuleText
 
         var dupeQualifier = excludesDupe ? "non-dupe " : "";
         var subject = firstPlaysPerTurn
-            ? $"each of owner's first N {dupeQualifier}card plays each turn (where N = stacks)"
+            ? filteredType is { } firstKind
+                ? $"owned {dupeQualifier}{firstKind} cards played among owner's first N card plays each turn (where N = stacks)"
+                : $"each of owner's first N {dupeQualifier}card plays each turn (where N = stacks)"
             : filteredType is { } kind
                 ? $"owned {dupeQualifier}{kind} cards"
                 : $"owned {dupeQualifier}cards";
@@ -555,7 +560,7 @@ internal sealed partial class NativeRuleText
             else if (IsSelfDecrement(afterLoc))
             {
                 handled.Add(afterLoc.Name);
-                consumeSuffix = $", then subtract 1 {PowerLabel(power)} stack";
+                consumeSuffix = $", consuming 1 {PowerLabel(power)} stack when play starts (before card effects/nested plays resolve)";
             }
             else
             {

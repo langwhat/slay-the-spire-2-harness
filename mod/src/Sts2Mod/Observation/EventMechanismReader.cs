@@ -1188,13 +1188,15 @@ internal static class EventMechanismReader
 
     private static string? ResolveEventAmount(EventModel activeEvent, Value? expr, IReadOnlyDictionary<string, Value>? bindings = null)
     {
-        var visitedInputs = new HashSet<string>(StringComparer.Ordinal);
+        var appliedBinding = false;
         for (var guard = 0; guard < 16; guard++)
         {
-            if (expr is Input { Name: var inputName } && bindings is not null
-                && visitedInputs.Add(inputName)
+            if (!appliedBinding && expr is Input { Name: var inputName } && bindings is not null
                 && bindings.TryGetValue(inputName, out var boundExpr))
+            {
                 expr = boundExpr;
+                appliedBinding = true;
+            }
             else if (expr is Call { Method.Name: "op_Implicit", Arguments: [var implicitInner] })
                 expr = implicitInner;
             else if (expr is Operation { Operator: "castclass" or "isinst", Left: var castInner })

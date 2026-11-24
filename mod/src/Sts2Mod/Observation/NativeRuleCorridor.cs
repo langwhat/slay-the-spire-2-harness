@@ -662,15 +662,18 @@ internal sealed partial class NativeRuleText
         if (FindOverride(power, "AfterAttack") is not { } after || Body(after) is not { Incomplete: false } body)
             return false;
 
-        var appliesStr = body.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd)
+        var applyStep = body.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(PowerCmd)
             && s.Call.Method.Name == nameof(PowerCmd.Apply) && s.Call.Method.IsGenericMethod
             && s.Call.Method.GetGenericArguments()[0] == typeof(StrengthPower));
+        var multipliesByHits = applyStep is not null
+            && Argument(applyStep.Call, "amount") is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "mul", Left: var ml, Right: var mr }] }
+            && (IsStackAmount(ml) || IsStackAmount(mr));
         var checksPetDedup = body.FieldSteps.Any(f => f.Assignment.Target.Member.Name == "petHit");
-        if (!appliesStr || !checksPetDedup)
+        if (applyStep is null || !multipliesByHits || !checksPetDedup)
             return false;
 
         _powers.Add(typeof(StrengthPower));
-        line = $"{prefix}Once after the entire attack resolves: if attacker=owner and attack is a powered attack and deals nonzero unblocked damage to an opponent (counting a player and their pet once total): attempt to apply stacks {PowerLabel(typeof(StrengthPower))} to owner";
+        line = $"{prefix}Once after the entire attack resolves: if attacker=owner and target side≠owner's side and attack is a powered attack: for each hit in the attack that deals nonzero unblocked damage to an opponent (ignoring a pet owner's hit when their pet was also hit by that hit), accumulate stacks {PowerLabel(typeof(StrengthPower))} and apply the total (stacks × qualifying hits) once to owner";
         return true;
     }
 

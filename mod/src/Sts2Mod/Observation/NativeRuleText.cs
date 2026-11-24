@@ -871,10 +871,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 .GroupBy(l => (l.Start, l.End))
                 .OrderBy(g => g.Key.Start)
                 .ToArray();
-            var foreachLoop = body.ForeachRanges
+            var enclosingForeachGroups = body.ForeachRanges
                 .Where(r => group.Key.Index >= r.Start && group.Key.Index < r.End)
-                .OrderByDescending(r => r.Start)
-                .FirstOrDefault();
+                .GroupBy(r => (r.Start, r.End))
+                .OrderByDescending(g => g.Key.Start)
+                .ToArray();
+            var foreachLoop = enclosingForeachGroups.Length > 0 ? enclosingForeachGroups[0].First() : null;
             var loop = enclosingLoopGroups.Length > 0 ? enclosingLoopGroups[^1].First() : null;
             string? repetitions = null;
             if (enclosingLoopGroups.Length > 0)
@@ -953,18 +955,39 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
                 if (extracted.Count == 0)
                     continue;
-                // When a foreach loop executes an effect that does not reference the enumerated item,
-                // preserve the per-element repetition explicitly instead of emitting a single unconditional effect.
-                if (foreachLoop is not null && !ReferencesEnumerator(action)
-                    && !matching.Any(s => s.Conditions.Any(c => ReferencesEnumerator(c.Value))))
+                // When enclosing foreach loops execute an effect that does not reference their enumerated item,
+                // preserve every such loop's per-element repetition explicitly (innermost to outermost).
+                if (enclosingForeachGroups.Length > 0)
                 {
-                    if (ValueText(foreachLoop.Collection) is not { } colText)
+                    var originalTexts = extracted.Select(item => item.Text).ToArray();
+                    var foreachFailed = false;
+                    foreach (var feGroup in enclosingForeachGroups)
                     {
-                        MarkIncomplete($"{method.Name}/foreach-count");
-                        continue;
-                    }
-                    if (!extracted.Any(item => item.Text.Contains(colText, StringComparison.Ordinal)))
+                        var sampleFe = feGroup.First();
+                        var boundCollection = bindings is not null && sampleFe.Collection is not null
+                            ? Bind(sampleFe.Collection, bindings)
+                            : sampleFe.Collection;
+                        var boundColKey = boundCollection is not null ? Key(boundCollection) : null;
+                        var referencesThis = bindings is null
+                            ? feGroup.Any(fe => ReferencesEnumerator(action, fe.Enumerator)
+                                || matching.Any(s => s.Conditions.Any(c => ReferencesEnumerator(c.Value, fe.Enumerator))))
+                            : boundColKey is not null && (ReferencesCollectionEnumerator(action, boundColKey)
+                                || matching.Any(s => s.Conditions.Any(c => ReferencesCollectionEnumerator(c.Value, boundColKey))));
+                        if (referencesThis)
+                            continue;
+                        if (boundCollection is null || ValueText(boundCollection) is not { } colText)
+                        {
+                            MarkIncomplete($"{method.Name}/foreach-count");
+                            foreachFailed = true;
+                            break;
+                        }
+                        if ((boundCollection is Input { Name: "targets" } || boundCollection is Call { Method.Name: "get_Players" or "GetOpponentsOf" })
+                            && originalTexts.Any(t => t.Contains(colText, StringComparison.Ordinal)))
+                            continue;
                         extracted = extracted.Select(item => item with { Text = $"for each item in {colText}: {item.Text}" }).ToList();
+                    }
+                    if (foreachFailed)
+                        continue;
                 }
                 if (method.Name == "AfterDamageReceived" && action is Call { Method.Name: "AddGeneratedCardToCombat" })
                     extracted = extracted.Select(item => item with { Trigger = AfterEachReceivedHit }).ToList();
@@ -1042,17 +1065,36 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         }
     }
 
-    private static bool ReferencesEnumerator(Value? value, int depth = 0)
+    private static bool ReferencesEnumerator(Value? value, Call enumerator, int depth = 0)
     {
         if (value is null || depth > 8)
             return false;
         return value switch
         {
-            Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator" } } => true,
-            Call c => ReferencesEnumerator(c.Receiver, depth + 1) || c.Arguments.Any(a => ReferencesEnumerator(a, depth + 1)),
-            Operation op => ReferencesEnumerator(op.Left, depth + 1) || ReferencesEnumerator(op.Right, depth + 1),
-            Field f => ReferencesEnumerator(f.Receiver, depth + 1),
-            Assignment a => ReferencesEnumerator(a.Target, depth + 1) || ReferencesEnumerator(a.Assigned, depth + 1),
+            Call { Method.Name: "get_Current", Receiver: Call en } when ReferenceEquals(en, enumerator) => true,
+            Call c => ReferencesEnumerator(c.Receiver, enumerator, depth + 1) || c.Arguments.Any(a => ReferencesEnumerator(a, enumerator, depth + 1)),
+            Operation op => ReferencesEnumerator(op.Left, enumerator, depth + 1) || ReferencesEnumerator(op.Right, enumerator, depth + 1),
+            Field f => ReferencesEnumerator(f.Receiver, enumerator, depth + 1),
+            Assignment a => ReferencesEnumerator(a.Target, enumerator, depth + 1) || ReferencesEnumerator(a.Assigned, enumerator, depth + 1),
+            _ => false,
+        };
+    }
+
+    private static bool ReferencesCollectionEnumerator(Value? value, string collectionKey, int depth = 0)
+    {
+        if (value is null || depth > 8)
+            return false;
+        return value switch
+        {
+            Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator", Receiver: { } col } }
+                when Key(col) == collectionKey => true,
+            Call c => ReferencesCollectionEnumerator(c.Receiver, collectionKey, depth + 1)
+                || c.Arguments.Any(a => ReferencesCollectionEnumerator(a, collectionKey, depth + 1)),
+            Operation op => ReferencesCollectionEnumerator(op.Left, collectionKey, depth + 1)
+                || ReferencesCollectionEnumerator(op.Right, collectionKey, depth + 1),
+            Field f => ReferencesCollectionEnumerator(f.Receiver, collectionKey, depth + 1),
+            Assignment a => ReferencesCollectionEnumerator(a.Target, collectionKey, depth + 1)
+                || ReferencesCollectionEnumerator(a.Assigned, collectionKey, depth + 1),
             _ => false,
         };
     }
@@ -1783,7 +1825,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             if (forceExhaustArg is null || forceExhaustArg is Constant { Data: 0 or false })
                 exhaustSuffix = "";
             else if (forceExhaustArg is Constant { Data: 1 or true })
-                exhaustSuffix = $" (setting ExhaustOnNextPlay so non-Power non-dupe cards {KeywordLabel(CardKeyword.Exhaust)} after play)";
+                exhaustSuffix = $" (setting ExhaustOnNextPlay so non-Power non-dupe cards default to {KeywordLabel(CardKeyword.Exhaust)} after play unless overridden by a destination modifier)";
             else
                 return null;
             if (apPlayerArg is not null && apCountArg is not null && ValueText(apPlayerArg) is { } apWho && ValueText(apCountArg) is { } apCnt)
@@ -1909,7 +1951,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             var ostyWho = Argument(call, "summoner", "player") is { } sumArg ? ValueText(sumArg) : "owner";
             var ostyHp = Argument(call, "amount", "hp") is { } hpArg ? ValueText(hpArg) : (args.Length >= 3 ? ValueText(args[2]) : null);
             if (ostyWho is not null && ostyHp is not null)
-                return new Effect($"{ostyWho} summons {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} with {ostyHp} HP");
+                return new Effect($"{ostyWho} summons {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} with {ostyHp} HP (or if already alive, increases its max HP and heals it by {ostyHp})");
         }
 
         if (type == typeof(CardCmd))

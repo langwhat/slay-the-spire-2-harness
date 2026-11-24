@@ -639,11 +639,16 @@ internal static class ModifierMechanismReader
             }
             if (expected && expr is Call { Method.Name: "CanEnchant", Method.DeclaringType: var decl } && decl == typeof(EnchantmentModel))
                 continue;
-            if (expected && expr is Call { Method.Name: "Contains", Arguments: var args }
-                && args.OfType<Constant>().FirstOrDefault(c => c.Data is int kw && Enum.IsDefined(typeof(CardKeyword), kw)) is { Data: int rawKw }
-                && body.Calls.Any(s => s.Call.Method.Name == "GetKeywordsWithSources"))
+            if (expected && expr is Call { Method.Name: "Contains", Receiver: var kwRec, Arguments: var args }
+                && (kwRec ?? args.ElementAtOrDefault(0)) is Call { Method.Name: "GetKeywordsWithSources", Receiver: Input { Name: "card" }, Arguments: [Constant { Data: int rawSrc }] }
+                && (KeywordSources)rawSrc == KeywordSources.Local
+                && (kwRec is not null ? args.ElementAtOrDefault(0) : args.ElementAtOrDefault(1)) is Constant { Data: int rawKw }
+                && Enum.IsDefined(typeof(CardKeyword), rawKw))
             {
-                matched = (CardKeyword)rawKw;
+                var nextKw = (CardKeyword)rawKw;
+                if (matched is not null && matched != nextKw)
+                    return null;
+                matched = nextKw;
                 continue;
             }
             return null;

@@ -1,6 +1,6 @@
 # Combat guide
 
-Play each Slay the Spire 2 battle so the run can be won: first guarantee victory in the battle, then minimize total HP and lasting resource loss. HP not needed to survive this fight or the fights before the next recovery is a spendable resource. When `state.progress.bosses_left > 1`, another Boss follows with no healing between.
+Play each Slay the Spire 2 battle so the run can be won: first guarantee victory in the battle, then minimize total HP and lasting resource loss. HP not needed to survive this fight or the fights before the next recovery is a spendable resource. When `state.progress.bosses_left > 1`, another Boss follows with no inter-act rest or full heal between (normal combat victory effects still trigger).
 
 ## Tools
 

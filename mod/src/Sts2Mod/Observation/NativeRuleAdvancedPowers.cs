@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.ValueProps;
 using static Sts2Mod.Observation.NativeRuleBody;
 
 namespace Sts2Mod.Observation;
@@ -643,21 +644,103 @@ internal sealed partial class NativeRuleText
             || Body(add) is not { Incomplete: false } addBody
             || Body(after) is not { Incomplete: false } afterBody)
             return false;
-        var recordsCommand = beforeBody.FieldSteps.Any(step => InternalDataField(step.Assignment.Target)?.FieldType == typeof(AttackCommand)
+        var cmdStep = beforeBody.FieldSteps.FirstOrDefault(step => InternalDataField(step.Assignment.Target)?.FieldType == typeof(AttackCommand)
             && step.Assignment.Assigned is Input { Name: "command" });
         var recordsAmount = beforeBody.FieldSteps.Any(step => InternalDataField(step.Assignment.Target)?.FieldType == typeof(int)
             && IsStackAmount(step.Assignment.Assigned));
-        var addsStacks = addBody.Returns.Any(ret => IsStackAmount(ret.Value));
+        var nonZeroReturns = addBody.Returns.Where(ret => Numeric(ret.Value) != 0m).ToArray();
+        var addsStacks = nonZeroReturns.Any(ret => IsStackAmount(ret.Value));
         var subtractsRecorded = afterBody.Calls.Any(step => step.Call.Method.DeclaringType == typeof(PowerCmd)
             && step.Call.Method.Name == nameof(PowerCmd.ModifyAmount)
             && step.Call.Arguments.Length >= 3
             && step.Call.Arguments[1] is Input { Name: "this" }
             && step.Call.Arguments[2] is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "neg", Left: Field recorded }] }
             && InternalDataField(recorded)?.FieldType == typeof(int));
-        if (!recordsCommand || !recordsAmount || !addsStacks || !subtractsRecorded)
+        if (cmdStep is null || !recordsAmount || !addsStacks || !subtractsRecorded)
             return false;
-        line = $"{prefix}Next powered attack bonus: adds +stacks damage per hit (before multipliers and block) to owner's first powered attack, then subtracts the stacks present when that attack started after the entire attack resolves";
+
+        // Inspect ValueProp flag filters (e.g. AimPower requires ValueProp.FromArrow) and fail closed on unknown flags.
+        var beforeFlags = ExtractRequiredValuePropFlags(cmdStep.Conditions);
+        if (beforeFlags is null)
+            return false;
+        var allAddFlags = nonZeroReturns.Select(r => ExtractRequiredValuePropFlags(r.Conditions)).ToArray();
+        if (allAddFlags.Any(f => f is null)
+            || allAddFlags.Any(f => !f!.SetEquals(beforeFlags)))
+            return false;
+        var fromArrow = beforeFlags.Contains(ValueProp.FromArrow);
+        if (beforeFlags.Any(f => f != ValueProp.FromArrow))
+            return false;
+
+        // Inspect any card-specific multiplier on non-zero returns (e.g. HeavyShot.ModifyAimAmount).
+        string cardBonusNote = "";
+        foreach (var ret in nonZeroReturns)
+        {
+            if (IsStackAmount(ret.Value))
+                continue;
+            if (ret.Value is Call { Method: MethodInfo { Name: "ModifyAimAmount", DeclaringType: { } cardType } multMethod, Arguments: [var multArg] }
+                && typeof(CardModel).IsAssignableFrom(cardType)
+                && IsStackAmount(multArg)
+                && Body(multMethod) is { Incomplete: false, Returns: [{ Value: Call { Method.Name: "op_Multiply", Arguments: [Input, var multFactor] } }] }
+                && TryReadCardDynamicVar(cardType, multFactor) is { } factor)
+            {
+                cardBonusNote = $" (×{Number(factor)} for {ModelLabel(cardType)})";
+                continue;
+            }
+            return false;
+        }
+
+        var attackKind = fromArrow ? "powered arrow attack (ValueProp.FromArrow)" : "powered attack";
+        var header = fromArrow ? "Next powered arrow attack bonus" : "Next powered attack bonus";
+        line = $"{prefix}{header}: adds +stacks damage per hit (before multipliers and block){cardBonusNote} to owner's first {attackKind}, then subtracts the stacks present when that attack started after the entire attack resolves";
         return true;
+    }
+
+    private static HashSet<ValueProp>? ExtractRequiredValuePropFlags(Test[] conditions)
+    {
+        var flags = new HashSet<ValueProp>();
+        foreach (var raw in conditions)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expr is Call { Method.Name: "HasFlag", Arguments: var args }
+                && args.OfType<Constant>().FirstOrDefault(c => c.Data is int) is { Data: int rawFlag })
+            {
+                if (!expected)
+                    return null;
+                flags.Add((ValueProp)rawFlag);
+            }
+            else if (expr is Operation { Operator: "and", Left: var andL, Right: Constant { Data: int mask } }
+                && (andL is Input { Name: "props" } || andL is Call { Method.Name: "get_DamageProps" }))
+            {
+                if (!expected)
+                    return null;
+                flags.Add((ValueProp)mask);
+            }
+        }
+        return flags;
+    }
+
+    private static decimal? TryReadCardDynamicVar(Type cardType, Value expr)
+    {
+        if (expr is not Call { Method.Name: "get_BaseValue", Receiver: var rec }
+            || DynamicKey(rec) is not { } key)
+            return null;
+        try
+        {
+            var dbMethod = typeof(ModelDb).GetMethod(nameof(ModelDb.Card), Type.EmptyTypes)?.MakeGenericMethod(cardType);
+            if (dbMethod?.Invoke(null, null) is CardModel card && card.DynamicVars.TryGetValue(key, out var dv))
+                return dv.BaseValue;
+        }
+        catch
+        {
+            return null;
+        }
+        return null;
     }
 
     private bool ReadDampenHooks(Type power, string prefix, out List<string> lines)
@@ -1039,15 +1122,31 @@ internal sealed partial class NativeRuleText
         line = "";
         if (FindOverride(power, "AfterSideTurnStart") is not { } start
             || power.GetMethod("Trigger", Declared) is not { } trigger
-            || Body(start) is not { Incomplete: false })
+            || power.GetMethod("get_TriggerCount", Declared) is not { } triggerCountGetter
+            || Body(start) is not { Incomplete: false }
+            || Body(trigger) is not { Incomplete: false } triggerBody
+            || Body(triggerCountGetter) is not { Incomplete: false } countBody)
         {
             return false;
         }
 
-        var triggerBody = Body(trigger);
-        var dealsDamage = triggerBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage));
-        var decrements = triggerBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Decrement));
-        if (!dealsDamage || !decrements)
+        var damageStep = triggerBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage));
+        var decrementStep = triggerBody.Calls.FirstOrDefault(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Decrement));
+        if (damageStep is null || decrementStep is null)
+            return false;
+        // Verify Trigger loops by TriggerCount (not a fixed constant) and TriggerCount caps at stacks with AccelerantPower.
+        var enclosingLoops = triggerBody.Loops
+            .Where(l => damageStep.Index >= l.Start && damageStep.Index < l.End
+                && decrementStep.Index >= l.Start && decrementStep.Index < l.End)
+            .DistinctBy(l => (l.Start, l.End))
+            .ToArray();
+        if (enclosingLoops is not [{ Count: Call { Method.Name: "get_TriggerCount" } }])
+            return false;
+        var capsByStacksAndAccelerant = countBody.Returns.Any(r =>
+            r.Value is Call { Method.Name: nameof(Math.Min), Arguments: [var a, var b] }
+            && (IsStackAmount(a) || IsStackAmount(b)))
+            && countBody.Calls.Any(s => s.Call.Method.Name == nameof(Enumerable.Sum));
+        if (!capsByStacksAndAccelerant)
             return false;
 
         var accelLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.AccelerantPower));
@@ -1125,11 +1224,24 @@ internal sealed partial class NativeRuleText
         if (requiredTag is null)
             return false;
 
-        var capValue = drawnBody.Calls.SelectMany(s => s.Conditions)
-            .Concat(drawnBody.FieldSteps.SelectMany(s => s.Conditions))
+        var capConds = drawnBody.Calls.Select(s => s.Conditions)
+            .Concat(drawnBody.FieldSteps.Select(s => s.Conditions))
+            .Where(conds => conds.Any(c => c.Value is Operation { Left: Field f, Right: Constant { Data: int cap } }
+                && InternalDataField(f) is not null && cap > 0))
+            .ToArray();
+        var capValue = capConds.SelectMany(c => c)
             .Select(c => c.Value is Operation { Left: Field f, Right: Constant { Data: int cap } }
                 && InternalDataField(f) is not null && cap > 0 ? (int?)cap : null)
             .FirstOrDefault(cap => cap is not null);
+        if (capValue is not null)
+        {
+            var requiresAllInfinite = capConds.All(conds => conds.Any(c =>
+                c is { Expected: true, Value: Call { Method.Name: nameof(Enumerable.All), Arguments: [Call { Method.Name: "get_HittableEnemies" }, Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] } }
+                && Body(pred) is { Incomplete: false } predBody
+                && predBody.Calls.Any(p => p.Call.Method.Name == "IsInfinite")));
+            if (!requiresAllInfinite)
+                return false;
+        }
         var resetsOnTurnEnd = endBody.Calls.Any(s => s.Call.Method.DeclaringType == power)
             || endBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target) is not null);
         if (!resetsOnTurnEnd)
@@ -1182,6 +1294,13 @@ internal sealed partial class NativeRuleText
             .Select(c => IsEquality(c, true, out var l, out var r) && l is Field f
                 && InternalDataField(f)?.FieldType == typeof(int) && Numeric(r) is { } n && n > 0 ? (int?)(int)n : null)
             .FirstOrDefault(n => n is not null);
+        var cloneLoops = afterBody.Loops
+            .Where(l => addsCloneStep.Index >= l.Start && addsCloneStep.Index < l.End)
+            .DistinctBy(l => (l.Start, l.End))
+            .ToArray();
+        if (cloneLoops is not [{ Count: var cloneCount }] || !IsStackAmount(cloneCount))
+            return false;
+
         var destPileNum = Numeric(Argument(addsCloneStep.Call, "newPileType"));
         if (countedType is null || threshold is null || destPileNum is null || !Enum.IsDefined(typeof(PileType), (int)destPileNum))
             return false;
@@ -1257,16 +1376,47 @@ internal sealed partial class NativeRuleText
             .Select(c => IsEquality(c, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
                 && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct) ? (CardType?)(int)ct : null)
             .FirstOrDefault(t => t is not null);
-        var incrementsAfter = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == power)
-            || afterBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
-        var resetsOnStart = startBody.Calls.Any(s => s.Call.Method.DeclaringType == power)
-            || startBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
+        var incrementsByOne = afterBody.FieldSteps.Any(s =>
+                InternalDataField(s.Assignment.Target) is { FieldType: var ft } targetField && ft == typeof(int)
+                && IsIntFieldIncrementByOne(s.Assignment.Assigned, targetField))
+            || afterBody.Calls.Any(s =>
+                s.Call.Method is MethodInfo setter && setter.DeclaringType == power && s.Call.Arguments is [var incArg]
+                && IsSetterWritingParamToIntDataField(setter, out var counterField)
+                && IsIntFieldIncrementByOne(incArg, counterField));
+        var resetsToZero = startBody.FieldSteps.Any(s =>
+                InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
+                && Numeric(s.Assignment.Assigned) == 0m)
+            || startBody.Calls.Any(s =>
+                s.Call.Method is MethodInfo setter && setter.DeclaringType == power && s.Call.Arguments is [var resetArg]
+                && IsSetterWritingParamToIntDataField(setter, out _)
+                && Numeric(resetArg) == 0m);
         var initFromHistory = appliedBody.Calls.Any(s => s.Call.Method.Name == nameof(Enumerable.Count));
-        if (!checksZeroEnergy || !checksCounterLimit || cardType is null || !incrementsAfter || !resetsOnStart || !initFromHistory)
+        if (!checksZeroEnergy || !checksCounterLimit || cardType is null || !incrementsByOne || !resetsToZero || !initFromHistory)
             return false;
 
         var destLabel = PileLocationLabel((PileType)rawPile);
-        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel}{posSuffix} instead of their normal destination (overriding {KeywordLabel(CardKeyword.Exhaust)} as well); counter resets after owner's turn starts";
+        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} card plays returned by this power each turn (where N = stacks; when applied mid-turn, initializes the counter from individual 0-Energy {cardType.Value} play starts earlier this turn, including replays) return to {destLabel}{posSuffix} instead of their normal destination (overriding {KeywordLabel(CardKeyword.Exhaust)} as well); counter resets after owner's turn starts";
+        return true;
+    }
+
+    private static bool IsIntFieldIncrementByOne(Value expr, FieldInfo targetField)
+        => expr is Operation { Operator: "add", Left: Field fL, Right: Constant { Data: 1 } } && Equals(InternalDataField(fL), targetField)
+            || expr is Operation { Operator: "add", Left: Constant { Data: 1 }, Right: Field fR } && Equals(InternalDataField(fR), targetField);
+
+    private bool IsSetterWritingParamToIntDataField(MethodInfo setter, out FieldInfo counterField)
+    {
+        counterField = null!;
+        if (setter.GetParameters() is not [var p] || p.ParameterType != typeof(int))
+            return false;
+        var setterBody = Body(setter);
+        if (setterBody.Incomplete)
+            return false;
+        var writeStep = setterBody.FieldSteps.FirstOrDefault(fs =>
+            InternalDataField(fs.Assignment.Target)?.FieldType == typeof(int)
+            && fs.Assignment.Assigned is Input { Name: var paramName } && paramName == p.Name);
+        if (writeStep is null || InternalDataField(writeStep.Assignment.Target) is not { } field)
+            return false;
+        counterField = field;
         return true;
     }
 
@@ -1281,13 +1431,15 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        var clonesForPlayer = beforeBody.Calls.Any(s => s.Call.Method.Name == "CreateCloneForPlayer");
+        var cloneSteps = beforeBody.Calls.Where(s => s.Call.Method.Name == "CreateCloneForPlayer").ToArray();
         var autoPlaysClone = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name == nameof(CardCmd.AutoPlay));
         var decrements = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Decrement));
-        if (!clonesForPlayer || !autoPlaysClone || !decrements)
+        var checksFirstInSeries = cloneSteps.Length > 0 && cloneSteps.All(s => s.Conditions.Any(c =>
+            NormalizeCondition(c) is { Expected: true, Value: Call { Method.Name: "get_IsFirstInSeries" } }));
+        if (!checksFirstInSeries || !autoPlaysClone || !decrements)
             return false;
 
-        var filteredType = beforeBody.Calls.Where(s => s.Call.Method.Name == "CreateCloneForPlayer")
+        var filteredType = cloneSteps
             .SelectMany(s => s.Conditions)
             .Select(c => IsEquality(c, true, out var l, out var r) && l is Call { Method.Name: "get_Type" }
                 && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct) ? (CardType?)(int)ct : null)
@@ -1308,16 +1460,45 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        var gainsEnergy = spentBody.Calls.Any(s =>
+        var gainStep = spentBody.Calls.FirstOrDefault(s =>
             s.Call.Method.DeclaringType == typeof(PlayerCmd)
             && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy));
-        var tracksEnergy = spentBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
-        if (!gainsEnergy || !tracksEnergy)
+        // Verify raw `amount` (without scaling) is added to the energy accumulator and divided by the Energy DynamicVar threshold.
+        var accumStep = spentBody.FieldSteps.FirstOrDefault(s =>
+            InternalDataField(s.Assignment.Target) is { FieldType: var ft } accField && ft == typeof(int)
+            && s.Assignment.Assigned is Operation { Operator: "add", Left: var addL, Right: var addR }
+            && ((addL is Field fl && Equals(InternalDataField(fl), accField) && addR is Input { Name: "amount" })
+                || (addR is Field fr && Equals(InternalDataField(fr), accField) && addL is Input { Name: "amount" })));
+        var gainUsesThreshold = gainStep is not null
+            && Argument(gainStep.Call, "amount") is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "mul", Left: var ml, Right: var mr }] }
+            && (IsStackAmount(ml) || IsStackAmount(mr))
+            && ContainsDivisor(IsStackAmount(ml) ? mr : ml, energyVar.BaseValue);
+        if (gainStep is null || accumStep is null || !gainUsesThreshold)
             return false;
 
         var threshold = Number(energyVar.BaseValue);
         line = $"{prefix}Energy-spent trigger: tracks cumulative Energy spent by owner on cards across combat; every {threshold} Energy spent, owner gains stacks Energy";
         return true;
+    }
+
+    private bool ContainsDivisor(Value? expr, decimal expectedDivisor) => expr switch
+    {
+        Operation { Operator: "div", Right: var r } when Numeric(r) == expectedDivisor => true,
+        Operation op => ContainsDivisor(op.Left, expectedDivisor) || ContainsDivisor(op.Right, expectedDivisor),
+        Call c => ContainsDivisor(c.Receiver, expectedDivisor) || c.Arguments.Any(a => ContainsDivisor(a, expectedDivisor)),
+        _ => false,
+    };
+
+    private static Test NormalizeCondition(Test raw)
+    {
+        var expr = raw.Value;
+        var expected = raw.Expected;
+        while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+        {
+            expr = inner;
+            expected = !expected;
+        }
+        return new Test(expr, expected, raw.Offset);
     }
 
     private bool ReadVoidFormHooks(Type power, string prefix, out List<string> lines)
@@ -1348,8 +1529,11 @@ internal sealed partial class NativeRuleText
             && energyActive.All(r => energyStores.LastOrDefault(s => ConditionsImply(r.Conditions, s.Conditions)) is { } s && Numeric(s.Assigned) == 0m);
         var starZero = starActive.Length > 0
             && starActive.All(r => starStores.LastOrDefault(s => ConditionsImply(r.Conditions, s.Conditions)) is { } s && Numeric(s.Assigned) == 0m);
-        var incrementsPlayed = afterBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
-            && s.Assignment.Assigned is Operation { Operator: "add", Right: Constant { Data: 1 } });
+        var incrementSteps = afterBody.FieldSteps.Where(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
+            && s.Assignment.Assigned is Operation { Operator: "add", Right: Constant { Data: 1 } }).ToArray();
+        var incrementsPlayed = incrementSteps.Length > 0 && incrementSteps.All(s =>
+            s.Conditions.Any(c => NormalizeCondition(c) is { Expected: false, Value: Call { Method.Name: "get_IsAutoPlay" } })
+            && s.Conditions.Any(c => NormalizeCondition(c) is { Expected: true, Value: Call { Method.Name: "get_IsLastInSeries" } }));
         var resetsOnStart = startBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
             && Numeric(s.Assignment.Assigned) == 0m);
         if (!energyZero || !starZero || !incrementsPlayed || !resetsOnStart)
@@ -1454,11 +1638,34 @@ internal sealed partial class NativeRuleText
             return false;
 
         var checksCurrentPlayIndex = activeReturns.Any(r =>
-            r.Conditions.Any(c => IsLessOrEqualCheck(c, v => v is Call { Method.Name: "get_CurrentPlayIndex" })));
+            r.Conditions.Any(c => IsLessOrEqualCheck(c, v => v is Call { Method.Name: "get_CurrentPlayIndex" }, out var idxLimit)
+                && Numeric(idxLimit) == 0m));
+        var sawInPlayThreshold = false;
+        var sawPreviewThreshold = false;
         var allValidActive = checksCurrentPlayIndex && activeReturns.All(r =>
-            r.Conditions.Any(c => IsLessOrEqualCheck(c, v => v is Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] }))
-            && r.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: "IsPoweredAttack" } }));
-        if (!allValidActive)
+        {
+            if (!r.Conditions.Any(c => c is { Expected: true, Value: Call { Method.Name: "IsPoweredAttack" } }))
+                return false;
+            var countChecks = r.Conditions.Where(c => IsLessOrEqualCheck(c,
+                v => v is Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] }, out _)).ToArray();
+            if (countChecks.Length == 0)
+                return false;
+            var inPlayWithCardPlay = r.Conditions.Any(c => IsEquality(NormalizeCondition(c), true, out var pl, out var pr)
+                && pl is Call { Method.Name: "get_Type" } && Numeric(pr) == (int)PileType.Play)
+                && r.Conditions.Any(c => NormalizeCondition(c) is { Expected: true, Value: Input { Name: "cardPlay" } });
+            var expectedLimit = inPlayWithCardPlay ? 1m : 0m;
+            foreach (var cc in countChecks)
+            {
+                if (!IsLessOrEqualCheck(cc, _ => true, out var rhs) || Numeric(rhs) != expectedLimit)
+                    return false;
+            }
+            if (expectedLimit == 1m)
+                sawInPlayThreshold = true;
+            else
+                sawPreviewThreshold = true;
+            return true;
+        });
+        if (!allValidActive || !sawInPlayThreshold || !sawPreviewThreshold)
             return false;
 
         var factorTexts = activeReturns.Select(r => ValueText(r.Value)).Distinct(StringComparer.Ordinal).ToArray();
@@ -1469,18 +1676,18 @@ internal sealed partial class NativeRuleText
         return true;
     }
 
-    private static bool IsLessOrEqualCheck(Test raw, Func<Value, bool> matchLeft)
+    private static bool IsLessOrEqualCheck(Test raw, Func<Value, bool> matchLeft, out Value? right)
     {
-        var expr = raw.Value;
-        var expected = raw.Expected;
-        while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
-        {
-            expr = inner;
-            expected = !expected;
-        }
-        return expr is Operation { Operator: "bgt" or "cgt" or "ble", Left: var left } op
+        right = null;
+        var normalized = NormalizeCondition(raw);
+        if (normalized.Value is Operation { Operator: "bgt" or "cgt" or "ble", Left: var left, Right: var rhs } op
             && matchLeft(left)
-            && (op.Operator == "ble" ? expected : !expected);
+            && (op.Operator == "ble" ? normalized.Expected : !normalized.Expected))
+        {
+            right = rhs;
+            return true;
+        }
+        return false;
     }
 
     private bool ReadCallOfTheVoidHook(Type power, string prefix, out string line)
@@ -1506,6 +1713,24 @@ internal sealed partial class NativeRuleText
                 Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }]);
         if (whereCall is null || whereCall.Call.Arguments[1] is not Call { Arguments: [_, Constant { Data: MethodInfo poolPred }] }
             || !IsExcludeBasicAndAncientPredicate(poolPred))
+            return false;
+
+        // Verify both the array allocation length and generation loop count equal base.Amount.
+        var genLoops = body.Loops
+            .Where(l => factoryStep.Index >= l.Start && factoryStep.Index < l.End
+                && keywordStep.Index >= l.Start && keywordStep.Index < l.End)
+            .DistinctBy(l => (l.Start, l.End))
+            .ToArray();
+        var cardsArg = Argument(addStep.Call, "cards");
+        var arrayLen = cardsArg switch
+        {
+            Operation { Operator: "newarr", Left: var len } => len,
+            ArrayInit { Length: var len } => len,
+            ArrayValue { Length: var len } => len,
+            _ => null,
+        };
+        if (genLoops is not [{ Count: var genCount }] || !IsStackAmount(genCount)
+            || arrayLen is null || !IsStackAmount(arrayLen))
             return false;
 
         if (keywordStep.Call.Arguments.ElementAtOrDefault(1) is not ArrayValue { Elements: [Constant { Data: int rawKw }] }
@@ -1566,9 +1791,22 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        var countsDown = drawnBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
-        var gainsEnergy = drawnBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy));
-        if (!countsDown || !gainsEnergy)
+        var decStep = drawnBody.FieldSteps.FirstOrDefault(s =>
+            InternalDataField(s.Assignment.Target) is { FieldType: var ft } field && ft == typeof(int)
+            && s.Assignment.Assigned is Operation { Operator: "sub", Left: Field fl, Right: Constant { Data: 1 } }
+            && Equals(InternalDataField(fl), field));
+        var counterField = decStep is not null ? InternalDataField(decStep.Assignment.Target) : null;
+        var gainStep = drawnBody.Calls.FirstOrDefault(s =>
+            s.Call.Method.DeclaringType == typeof(PlayerCmd) && s.Call.Method.Name == nameof(PlayerCmd.GainEnergy));
+        var resetsCounter = counterField is not null && drawnBody.FieldSteps.Any(s =>
+            Equals(InternalDataField(s.Assignment.Target), counterField)
+            && Numeric(s.Assignment.Assigned) == baseCardsVar.BaseValue);
+        var checksZeroThreshold = counterField is not null && gainStep is not null
+            && IsStackAmount(Argument(gainStep.Call, "amount") ?? gainStep.Call.Arguments.ElementAtOrDefault(0))
+            && gainStep.Conditions.Any(c =>
+                IsLessOrEqualCheck(c, v => v is Field f && Equals(InternalDataField(f), counterField), out var limit)
+                && Numeric(limit) == 0m);
+        if (decStep is null || gainStep is null || !resetsCounter || !checksZeroThreshold)
             return false;
 
         var threshold = Number(baseCardsVar.BaseValue);

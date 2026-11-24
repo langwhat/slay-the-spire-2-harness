@@ -36,7 +36,7 @@ internal sealed class NativeRuleBody
     internal sealed record Terminal(Test[] Conditions, IReadOnlySet<(int Epoch, int Index)> Visited, bool Returned);
     // A counted loop runs the instructions from Start up to its back branch at End Count times.
     internal sealed record Loop(int Start, int End, Value Count);
-    internal sealed record ForeachLoop(int Start, int End, Value? Collection);
+    internal sealed record ForeachLoop(int Start, int End, Value? Collection, Call Enumerator);
 
     private sealed class Path
     {
@@ -359,7 +359,7 @@ internal sealed class NativeRuleBody
                     var condition = branchName is "brtrue" or "brfalse"
                         ? path.Pop()
                         : ReadComparison(path, branchName);
-                    if (condition is Call { Method.Name: "MoveNext", Receiver: Call { Method.Name: "GetEnumerator", Receiver: var enumerated } })
+                    if (condition is Call { Method.Name: "MoveNext", Receiver: Call { Method.Name: "GetEnumerator", Receiver: var enumerated } enumerator })
                     {
                         var bodyStart = expected ? destination : path.Index;
                         var afterLoop = expected ? path.Index : destination;
@@ -369,7 +369,7 @@ internal sealed class NativeRuleBody
                             continue;
                         }
                         if (bodyStart < index)
-                            ForeachRanges.Add(new ForeachLoop(bodyStart, index, enumerated));
+                            ForeachRanges.Add(new ForeachLoop(bodyStart, index, enumerated, enumerator));
                         // Quantify the body over the enumerator's elements. The second visit
                         // leaves the representative iteration and proceeds after the loop.
                         if (visits == 0)
@@ -538,7 +538,10 @@ internal sealed class NativeRuleBody
                     else if (targetAddr is Input initParam)
                     {
                         path.OutValues[initParam.Name] = new Constant(0m);
-                        OutStores.Add(new OutStore(initParam, new Constant(0m), [.. path.Conditions]));
+                        if (initParam.Type?.IsByRef == true)
+                            OutStores.Add(new OutStore(initParam, new Constant(0m), [.. path.Conditions]));
+                        else
+                            path.InvalidatedInputs.Add(initParam.Name);
                     }
                     else if (targetAddr is Field initField && initField.Receiver != StateMachine)
                         FieldSteps.Add(new FieldStep(index, new Assignment(initField, new Constant(0m)), [.. path.Conditions], epoch, path.StepOrder++));
@@ -591,7 +594,10 @@ internal sealed class NativeRuleBody
                     else if (address is Input storeParam)
                     {
                         path.OutValues[storeParam.Name] = storedValue;
-                        OutStores.Add(new OutStore(storeParam, storedValue, [.. path.Conditions]));
+                        if (storeParam.Type?.IsByRef == true)
+                            OutStores.Add(new OutStore(storeParam, storedValue, [.. path.Conditions]));
+                        else
+                            path.InvalidatedInputs.Add(storeParam.Name);
                     }
                     else if (address is Field storeField && storeField.Receiver != StateMachine)
                         FieldSteps.Add(new FieldStep(index, new Assignment(storeField, storedValue), [.. path.Conditions], epoch, path.StepOrder++));
@@ -863,16 +869,25 @@ internal sealed class NativeRuleBody
                 var slot = Slot(code.Name, operand);
                 if (slot != counterSlot && !IsCompilerPlumbingLocal(localVars, slot))
                 {
-                    readLocals.Add(slot);
-                    if (code.Name.StartsWith("ldloca", StringComparison.Ordinal))
+                    if (code.Name.StartsWith("ldloca", StringComparison.Ordinal)
+                        && cursor + 1 < incLoadCursor && instructions[cursor + 1].opcode == OpCodes.Initobj)
                     {
+                        seenLocalWrite.Add(slot);
                         writtenLocals.Add(slot);
-                        if (!seenLocalWrite.Contains(slot))
-                            readBeforeWriteLocals.Add(slot);
                     }
-                    else if (!seenLocalWrite.Contains(slot))
+                    else
                     {
-                        readBeforeWriteLocals.Add(slot);
+                        readLocals.Add(slot);
+                        if (code.Name.StartsWith("ldloca", StringComparison.Ordinal))
+                        {
+                            writtenLocals.Add(slot);
+                            if (!seenLocalWrite.Contains(slot))
+                                readBeforeWriteLocals.Add(slot);
+                        }
+                        else if (!seenLocalWrite.Contains(slot))
+                        {
+                            readBeforeWriteLocals.Add(slot);
+                        }
                     }
                 }
             }

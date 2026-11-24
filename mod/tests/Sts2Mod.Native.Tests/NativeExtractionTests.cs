@@ -9,8 +9,10 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.GameActions.Multiplayer;
 using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Afflictions;
 using MegaCrit.Sts2.Core.Models.Cards;
@@ -521,7 +523,7 @@ public sealed class NativeExtractionTests
 
         var (feralText, feralGaps) = PowerMechanismReader.Describe(typeof(FeralPower), true);
         Assert.Empty(feralGaps);
-        Assert.Contains("0-Energy Attack plays", feralText!, StringComparison.Ordinal);
+        Assert.Contains("0-Energy Attack card plays returned by this power each turn", feralText!, StringComparison.Ordinal);
         Assert.Contains("overriding Exhaust as well", feralText!, StringComparison.Ordinal);
 
         var (iterText, iterGaps) = PowerMechanismReader.Describe(typeof(IterationPower), true);
@@ -868,7 +870,8 @@ public sealed class NativeExtractionTests
         // 11. ReboundPower, NostalgiaPower, VelvetChoker, ShrinkPower, CharonsAshes, LostWisp, BufferPower, JossPaper, CacophonyPower, ThrowingAxe.
         var (reboundText, reboundGaps) = PowerMechanismReader.Describe(typeof(ReboundPower), true);
         Assert.Empty(reboundGaps);
-        Assert.Contains("move to draw pile (top) instead of discard pile, then subtract 1", reboundText!, StringComparison.Ordinal);
+        Assert.Contains("move to draw pile (top) instead of discard pile, consuming 1", reboundText!, StringComparison.Ordinal);
+        Assert.Contains("when play starts (before card effects/nested plays resolve)", reboundText!, StringComparison.Ordinal);
 
         var (nostalgiaText, nostalgiaGaps) = PowerMechanismReader.Describe(typeof(NostalgiaPower), true);
         Assert.Empty(nostalgiaGaps);
@@ -1038,6 +1041,86 @@ public sealed class NativeExtractionTests
         var (constGroupText, constGroupGaps) = PowerMechanismReader.Describe(typeof(SyntheticConstGroupCoolantPower), true);
         Assert.Null(constGroupText);
         Assert.NotEmpty(constGroupGaps);
+
+        // 25. Native gameplay accuracy: AimPower (FromArrow + HeavyShot), SuckPower (multi-hit), OstyCmd.Summon, BrilliantScarf X-cost, Havoc default-Exhaust.
+        var (aimText, aimGaps) = PowerMechanismReader.Describe(typeof(AimPower), true);
+        Assert.Empty(aimGaps);
+        Assert.Contains("ValueProp.FromArrow", aimText!, StringComparison.Ordinal);
+        Assert.Contains("CARD.HEAVY_SHOT", aimText!, StringComparison.Ordinal);
+
+        var (suckText, suckGaps) = PowerMechanismReader.Describe(typeof(SuckPower), true);
+        Assert.Empty(suckGaps);
+        Assert.Contains("stacks × qualifying hits", suckText!, StringComparison.Ordinal);
+
+        var (phylacteryText, phylacteryGaps) = RelicMechanismReader.Describe(typeof(PhylacteryUnbound));
+        Assert.Empty(phylacteryGaps);
+        Assert.Contains("or if already alive, increases its max HP and heals it by 2", phylacteryText!, StringComparison.Ordinal);
+
+        var scarfText = ItemMechanismReader.ReadRelic(ModelDb.Relic<BrilliantScarf>(), "eng");
+        Assert.NotNull(scarfText);
+        Assert.Contains("X-cost cards ignore cost modifiers", scarfText!, StringComparison.Ordinal);
+        Assert.Contains(havocTexts, t => t.Contains("default to", StringComparison.Ordinal) && t.Contains("unless overridden by a destination modifier", StringComparison.Ordinal));
+
+        // 26. Sync ref-local alias write (`ref int alias = ref amount; alias = 0`) must invalidate `amount` and fail closed.
+        var (aliasText, aliasGaps) = PowerMechanismReader.Describe(typeof(SyntheticRefAliasPower), true);
+        Assert.Null(aliasText);
+        Assert.NotEmpty(aliasGaps);
+
+        // 27. Nested foreach loops must preserve BOTH outer and inner repetition prefixes.
+        var (nestedFeText, nestedFeGaps) = PowerMechanismReader.Describe(typeof(SyntheticNestedForeachPower), true);
+        Assert.Empty(nestedFeGaps);
+        Assert.Contains("for each item in owner's hand: for each item in owner's discard pile: owner gains 1 Energy", nestedFeText!, StringComparison.Ordinal);
+
+        // 28. CardFactory followed by `.Select(...)` projection must fail closed instead of claiming the original pool.
+        var (selectProjText, selectProjGaps) = PowerMechanismReader.Describe(typeof(SyntheticCardFactorySelectPower), true);
+        Assert.Null(selectProjText);
+        Assert.NotEmpty(selectProjGaps);
+
+        // 29. Event helper shadowed parameter (`Pay(int amount) => Give(9, amount)`) must not re-bind caller's `amount` to callee's `9`.
+        var shadowEvent = new SyntheticShadowBindEvent();
+        var shadowPay = typeof(SyntheticShadowBindEvent).GetMethod(nameof(SyntheticShadowBindEvent.Pay), BindingFlags.Instance | BindingFlags.Public)!;
+        var (shadowDesc, shadowGap) = EventMechanismReader.DescribeOptionMethod(shadowEvent, null, shadowPay);
+        Assert.Null(shadowGap);
+        Assert.DoesNotContain("9", shadowDesc ?? "", StringComparison.Ordinal);
+
+        // 30. SoulsPower keyword source (`KeywordSources.None`) and dual-keyword `CanEnchant` must fail closed.
+        var tryReadLocalKw = typeof(ModifierMechanismReader).GetMethod("TryReadLocalKeywordCanEnchant", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var noneSrcMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.CanEnchantNoneSourceExhaust), BindingFlags.Static | BindingFlags.Public)!;
+        var dualKwMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.CanEnchantRetainAndExhaust), BindingFlags.Static | BindingFlags.Public)!;
+        Assert.Null(tryReadLocalKw.Invoke(null, [NativeRuleBody.Read(noneSrcMethod)]));
+        Assert.Null(tryReadLocalKw.Invoke(null, [NativeRuleBody.Read(dualKwMethod)]));
+
+        // 31. Combined first-N + CardType replay preserves CardType; standalone `attack.WithHitCount(3)` and mixed card cost mutations fail closed.
+        var (typedEchoText, typedEchoGaps) = PowerMechanismReader.Describe(typeof(SyntheticTypedEchoFormPower), true);
+        Assert.Empty(typedEchoGaps);
+        Assert.Contains("Attack", typedEchoText!, StringComparison.Ordinal);
+
+        var (mutatedAttackCardText, _) = PowerMechanismReader.Describe(typeof(SyntheticStandaloneAttackMutatorPower), true);
+        Assert.DoesNotContain("deal 25 damage to all enemies", mutatedAttackCardText ?? "", StringComparison.Ordinal);
+
+        var describeCardCost = typeof(ItemMechanismReader).GetMethod("DescribeCardCostLifetime", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var mixedCostMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.SetFreeThenSetNine), BindingFlags.Static | BindingFlags.Public)!;
+        Assert.Null(describeCardCost.Invoke(null, [NativeRuleBody.Read(mixedCostMethod)]));
+
+        // 32. Mutated specialized power variants must never emit the unmutated specialized template.
+        foreach (var mutatedPower in new[]
+        {
+            typeof(SyntheticMutatedAutomationPower),
+            typeof(SyntheticMutatedOrbitPower),
+            typeof(SyntheticMutatedVoidFormPower),
+            typeof(SyntheticMutatedImitationPower),
+            typeof(SyntheticMutatedHellraiserPower),
+            typeof(SyntheticMutatedJugglingPower),
+        })
+        {
+            var (mutText, mutGaps) = PowerMechanismReader.Describe(mutatedPower, true);
+            Assert.NotEmpty(mutGaps);
+            Assert.Null(mutText);
+        }
+        var (mutPoisonText, mutPoisonGaps) = PowerMechanismReader.Describe(typeof(SyntheticMutatedPoisonPower), true);
+        Assert.Empty(mutPoisonGaps);
+        Assert.Contains("1 times:", mutPoisonText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("ACCELERANT", mutPoisonText!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1240,6 +1323,19 @@ public sealed class NativeExtractionTests
 
         public static int ConditionalEnchantPlayCount(CardModel card, int playCount)
             => card.IsUpgraded ? playCount + 3 : playCount + 1;
+
+        public static bool CanEnchantNoneSourceExhaust(CardModel card)
+            => card.GetKeywordsWithSources(KeywordSources.None).Contains(CardKeyword.Exhaust);
+
+        public static bool CanEnchantRetainAndExhaust(CardModel card)
+            => card.GetKeywordsWithSources(KeywordSources.Local).Contains(CardKeyword.Retain)
+                && card.GetKeywordsWithSources(KeywordSources.Local).Contains(CardKeyword.Exhaust);
+
+        public static void SetFreeThenSetNine(CardModel card)
+        {
+            card.SetToFreeThisTurn();
+            card.EnergyCost.SetThisTurn(9);
+        }
     }
 
     private sealed class SyntheticSyncParamClearPower : PowerModel
@@ -1474,6 +1570,285 @@ public sealed class NativeExtractionTests
             branch.AddBranch(valid, MoveRepeatType.CanRepeatForever, () => 1f);
             branch.AddBranch(unregistered, MoveRepeatType.CanRepeatForever, () => 1f);
             return new MonsterMoveStateMachine([valid, branch], valid);
+        }
+    }
+
+    private sealed class SyntheticRefAliasPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override Task AfterEnergySpent(CardModel card, int amount)
+        {
+            ref int alias = ref amount;
+            alias = 0;
+            return PlayerCmd.GainEnergy(amount, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticNestedForeachPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            foreach (var _ in PileType.Hand.GetPile(Owner.Player!).Cards)
+                foreach (var __ in PileType.Discard.GetPile(Owner.Player!).Cards)
+                    await PlayerCmd.GainEnergy(1m, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticCardFactorySelectPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            var pool = Owner.Player!.Character.CardPool.GetUnlockedCards(Owner.Player.UnlockState, Owner.Player.RunState.CardMultiplayerConstraint)
+                .Where(c => c.Type == CardType.Attack);
+            var replaced = CardFactory.GetDistinctForCombat(Owner.Player, pool, 3, Owner.Player.RunState.Rng.CombatCardGeneration)
+                .Select(_ => combatState.CreateCard<DefendIronclad>(Owner.Player))
+                .First();
+            await CardPileCmd.AddGeneratedCardToCombat(replaced, PileType.Hand, Owner.Player);
+        }
+    }
+
+    private sealed class SyntheticShadowBindEvent : EventModel
+    {
+        protected override IReadOnlyList<EventOption> GenerateInitialOptions() => [];
+        public Task Pay(int amount) => Give(9, amount);
+        private Task Give(int amount, int actual) => PlayerCmd.GainGold(actual, Owner!);
+    }
+
+    private sealed class SyntheticTypedEchoFormPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override int ModifyCardPlayCount(CardModel card, Creature? target, int playCount)
+        {
+            if (card.Owner.Creature != Owner || card.Type != CardType.Attack)
+                return playCount;
+            if (CombatManager.Instance.History.CardPlaysStarted.Count(e => e.Actor == Owner && e.CardPlay.IsFirstInSeries && e.HappenedThisTurn(CombatState)) >= Amount)
+                return playCount;
+            return playCount + 1;
+        }
+    }
+
+    private sealed class SyntheticStandaloneAttackCard : CardModel
+    {
+        public SyntheticStandaloneAttackCard() : base(1, CardType.Attack, CardRarity.Token, TargetType.AllEnemies) { }
+        protected override async Task OnPlay(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            var attack = DamageCmd.Attack(25m).TargetingAllOpponents(CombatState!);
+            attack.WithHitCount(3);
+            await attack.Execute(choiceContext);
+        }
+    }
+
+    private sealed class SyntheticStandaloneAttackMutatorPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            var card = combatState.CreateCard<SyntheticStandaloneAttackCard>(Owner.Player!);
+            await CardPileCmd.AddGeneratedCardToCombat(card, PileType.Hand, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticMutatedAutomationPower : PowerModel
+    {
+        private sealed class Data { public int cardsLeft = 10; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        protected override IEnumerable<DynamicVar> CanonicalVars => [new DynamicVar("BaseCards", 10m)];
+        protected override object InitInternalData() => new Data();
+        public override async Task AfterCardDrawn(PlayerChoiceContext choiceContext, CardModel card, bool fromHandDraw)
+        {
+            if (card.Owner == Owner.Player)
+            {
+                var data = GetInternalData<Data>();
+                data.cardsLeft--;
+                if (data.cardsLeft <= 8)
+                {
+                    await PlayerCmd.GainEnergy(Amount, Owner.Player);
+                    data.cardsLeft = 10;
+                }
+            }
+        }
+    }
+
+    private sealed class SyntheticMutatedOrbitPower : PowerModel
+    {
+        private sealed class Data { public int energySpent; public int triggerCount; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        protected override IEnumerable<DynamicVar> CanonicalVars => [new EnergyVar(4)];
+        protected override object InitInternalData() => new Data();
+        public override async Task AfterEnergySpent(CardModel card, int amount)
+        {
+            if (card.Owner.Creature == Owner && amount > 0)
+            {
+                var data = GetInternalData<Data>();
+                data.energySpent += amount * 2;
+                int triggers = data.energySpent / 4 - data.triggerCount;
+                if (triggers > 0)
+                {
+                    await PlayerCmd.GainEnergy(Amount * triggers, Owner.Player!);
+                    data.triggerCount += triggers;
+                }
+            }
+        }
+    }
+
+    private sealed class SyntheticMutatedVoidFormPower : PowerModel
+    {
+        private sealed class Data { public int cardsPlayedThisTurn; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        protected override object InitInternalData() => new Data();
+        public override bool TryModifyEnergyCostInCombatLate(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            modifiedCost = originalCost;
+            if (card.Owner.Creature != Owner || GetInternalData<Data>().cardsPlayedThisTurn >= Amount) return false;
+            modifiedCost = 0m;
+            return true;
+        }
+        public override bool TryModifyStarCost(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            modifiedCost = originalCost;
+            if (card.Owner.Creature != Owner || GetInternalData<Data>().cardsPlayedThisTurn >= Amount) return false;
+            modifiedCost = 0m;
+            return true;
+        }
+        public override Task AfterCardPlayed(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (cardPlay.Card.Owner.Creature == Owner && cardPlay.IsAutoPlay && cardPlay.IsLastInSeries)
+                GetInternalData<Data>().cardsPlayedThisTurn++;
+            return Task.CompletedTask;
+        }
+        public override Task BeforeSideTurnStart(PlayerChoiceContext choiceContext, CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (participants.Contains(Owner))
+                GetInternalData<Data>().cardsPlayedThisTurn = 0;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class SyntheticMutatedImitationPower : PowerModel
+    {
+        private sealed class Data { public readonly List<(CardModel Card, CardModel Clone)> list = []; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        protected override object InitInternalData() => new Data();
+        public override Task BeforeCardPlayed(CardPlay cardPlay)
+        {
+            if (cardPlay.Card.Type != CardType.Power || !cardPlay.IsLastInSeries)
+                return Task.CompletedTask;
+            GetInternalData<Data>().list.Add((cardPlay.Card, cardPlay.Card.CreateCloneForPlayer(Owner.Player!)));
+            return Task.CompletedTask;
+        }
+        public override async Task AfterCardPlayed(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            var data = GetInternalData<Data>();
+            int idx = data.list.FindIndex(p => p.Card == cardPlay.Card);
+            if (idx >= 0)
+            {
+                var clone = data.list[idx].Clone;
+                data.list.RemoveAt(idx);
+                await PowerCmd.Decrement(this);
+                await CardCmd.AutoPlay(choiceContext, clone, null);
+            }
+        }
+    }
+
+    private sealed class SyntheticMutatedHellraiserPower : PowerModel
+    {
+        private sealed class Data { public int count; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        protected override object InitInternalData() => new Data();
+        public override async Task AfterCardDrawnEarly(PlayerChoiceContext choiceContext, CardModel card, bool fromHandDraw)
+        {
+            if (card.Owner.Creature != Owner || !card.Tags.Contains(CardTag.Strike))
+                return;
+            var data = GetInternalData<Data>();
+            bool ok = true;
+            if (Owner.CombatState!.HittableEnemies.Any(c => c.HpDisplay.IsInfinite()))
+            {
+                if (data.count >= 9) ok = false;
+                data.count++;
+            }
+            if (ok)
+                await CardCmd.AutoPlay(choiceContext, card, null);
+        }
+        public override Task AfterSideTurnEnd(PlayerChoiceContext choiceContext, CombatSide side, IEnumerable<Creature> participants)
+        {
+            if (participants.Contains(Owner))
+                GetInternalData<Data>().count = 0;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class SyntheticMutatedJugglingPower : PowerModel
+    {
+        private sealed class Data { public int count; public CardModel? card; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        protected override object InitInternalData() => new Data();
+        public override Task AfterApplied(Creature? applier, CardModel? cardSource)
+        {
+            GetInternalData<Data>().count = CombatManager.Instance.History.CardPlaysStarted.Count(e => e.CardPlay.Card.Type == CardType.Attack && e.CardPlay.Player == Owner.Player && e.HappenedThisTurn(CombatState));
+            return Task.CompletedTask;
+        }
+        public override Task BeforeCardPlayed(CardPlay cardPlay)
+        {
+            if (cardPlay.Card.Owner != Owner.Player || cardPlay.Card.Type != CardType.Attack) return Task.CompletedTask;
+            GetInternalData<Data>().count++;
+            if (GetInternalData<Data>().count == 3) GetInternalData<Data>().card = cardPlay.Card;
+            return Task.CompletedTask;
+        }
+        public override async Task AfterCardPlayed(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            var data = GetInternalData<Data>();
+            if (data.card == cardPlay.Card)
+            {
+                data.card = null;
+                for (int i = 0; i < 1; i++)
+                    await CardPileCmd.AddGeneratedCardToCombat(cardPlay.Card.CreateClone(), PileType.Hand, Owner.Player!);
+            }
+        }
+        public override Task AfterSideTurnEnd(PlayerChoiceContext choiceContext, CombatSide side, IEnumerable<Creature> participants)
+        {
+            if (participants.Contains(Owner)) GetInternalData<Data>().count = 0;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class SyntheticMutatedPoisonPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Debuff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        private int TriggerCount => Math.Min(Amount, 1 + Owner.CombatState!.GetOpponentsOf(Owner).Where(c => c.IsAlive).Sum(a => a.GetPowerAmount<AccelerantPower>()));
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (participants.Contains(Owner))
+                await Trigger();
+        }
+        public async Task Trigger()
+        {
+            _ = TriggerCount;
+            for (int i = 0; i < 1; i++)
+            {
+                await CreatureCmd.Damage(new ThrowingPlayerChoiceContext(), Owner, Amount, ValueProp.Unblockable | ValueProp.Unpowered, null, null);
+                if (Owner.IsAlive)
+                    await PowerCmd.Decrement(this);
+            }
         }
     }
 }
