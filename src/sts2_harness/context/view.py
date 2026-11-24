@@ -12,6 +12,8 @@ from sts2_harness.context.models import (
     VisibleObservation,
 )
 
+ACT_MECHANISM_OWNER = "act"
+
 
 def _run_player(player: native.CombatPlayer | native.Player) -> native.Player:
     return native.Player(
@@ -207,7 +209,7 @@ def visible_observation(
     mechanisms = tuple(
         entry
         for entry in observation.mechanisms
-        if not (entry.owner == "act" and role is not native.DecisionOwner.RUN)
+        if not (entry.owner == ACT_MECHANISM_OWNER and role is not native.DecisionOwner.RUN)
         and (
             own_menu
             or (

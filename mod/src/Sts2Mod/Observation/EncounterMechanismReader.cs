@@ -16,7 +16,7 @@ internal static class EncounterMechanismReader
 
     private sealed record CacheKey(string EncounterId, int AscensionLevel, GameMode Mode, string Language);
 
-    private sealed record IntSetter(PropertyInfo Property, int? ConstantValue, int? RngId, int RngOffset);
+    private sealed record IntSetter(PropertyInfo Property, int? ConstantValue, Call? RngSource, int RngOffset, int SampleCount);
 
     private sealed record SpawnSpec(Type MonsterType, IReadOnlyList<IntSetter> Setters);
 
@@ -28,10 +28,12 @@ internal static class EncounterMechanismReader
         string? RuleText);
 
     private static readonly ConcurrentDictionary<CacheKey, string?> Cache = new();
+    private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
 
     public static string? Read(EncounterModel encounter, int ascensionLevel, GameMode gameMode, string language)
     {
-        var key = new CacheKey(encounter.Id.ToString(), ascensionLevel, gameMode, language);
+        var id = encounter.Id.ToString();
+        var key = new CacheKey(id, ascensionLevel, gameMode, language);
         if (Cache.TryGetValue(key, out var cached))
             return cached;
 
@@ -40,15 +42,16 @@ internal static class EncounterMechanismReader
         {
             // Unresolved native paths are extractor work items. They stay in the diagnostics log.
             (text, var gaps) = Describe(encounter);
-            if (gaps.Count > 0)
+            if (gaps.Count > 0 && LoggedGaps.TryAdd(id, 0))
             {
                 GD.PushWarning(
-                    $"[sts2agent] Unresolved native encounter rules for {encounter.Id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
+                    $"[sts2agent] Unresolved native encounter rules for {id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
             }
         }
         catch (Exception error)
         {
-            GD.PushWarning($"[sts2agent] Encounter mechanism unavailable for {encounter.Id}: {error.Message}");
+            if (LoggedGaps.TryAdd(id, 0))
+                GD.PushWarning($"[sts2agent] Encounter mechanism unavailable for {id}: {error.Message}");
         }
 
         Cache[key] = text;
@@ -78,6 +81,8 @@ internal static class EncounterMechanismReader
             gaps.Add("GenerateMonsters/empty");
             return (null, gaps);
         }
+        if (gaps.Count > 0)
+            return (null, gaps);
 
         var sequentialRngGroups = FindSequentialRngGroups(spawns);
         var described = new List<SpawnDescribe>(spawns.Count);
@@ -90,8 +95,8 @@ internal static class EncounterMechanismReader
 
             if (ruleText is not null && spawn.Setters.FirstOrDefault(setter => setter.ConstantValue is null) is { } rngSetter)
             {
-                var isSequential = rngSetter.RngId is { } rngId && sequentialRngGroups.Contains((rngId, rngSetter.Property.Name));
-                ruleText = ReplaceFirstMoveWithRngVariants(spawn, rngSetter.Property, isSequential, ruleText);
+                var isSequential = rngSetter.RngSource is not null && sequentialRngGroups.Contains((rngSetter.RngSource, rngSetter.Property.Name));
+                ruleText = ReplaceFirstMoveWithRngVariants(spawn, rngSetter.Property, rngSetter.SampleCount, isSequential, ruleText, gaps);
             }
 
             described.Add(new SpawnDescribe(
@@ -152,15 +157,15 @@ internal static class EncounterMechanismReader
 
                 if (assigned is Constant { Data: int constantInt })
                 {
-                    setters.Add(new IntSetter(property, constantInt, null, 0));
+                    setters.Add(new IntSetter(property, constantInt, null, 0, 1));
                 }
-                else if (TryReadRngOffset(assigned, out var rngId, out var offset))
+                else if (TryReadRngOffset(assigned, out var rngSource, out var offset, out var sampleCount))
                 {
-                    setters.Add(new IntSetter(property, null, rngId, offset));
+                    setters.Add(new IntSetter(property, null, rngSource, offset, sampleCount));
                 }
                 else if (DependsOnRng(assigned))
                 {
-                    setters.Add(new IntSetter(property, null, null, 0));
+                    setters.Add(new IntSetter(property, null, null, 0, ExtractRngUpperBound(assigned) ?? 6));
                 }
                 else
                 {
@@ -174,15 +179,24 @@ internal static class EncounterMechanismReader
         return spawns;
     }
 
-    private static HashSet<(int RngId, string PropertyName)> FindSequentialRngGroups(IReadOnlyList<SpawnSpec> spawns)
+    private sealed class ReferencePairComparer : IEqualityComparer<(Call RngSource, string PropertyName)>
+    {
+        public static readonly ReferencePairComparer Instance = new();
+        public bool Equals((Call RngSource, string PropertyName) x, (Call RngSource, string PropertyName) y)
+            => ReferenceEquals(x.RngSource, y.RngSource) && StringComparer.Ordinal.Equals(x.PropertyName, y.PropertyName);
+        public int GetHashCode((Call RngSource, string PropertyName) obj)
+            => HashCode.Combine(RuntimeHelpers.GetHashCode(obj.RngSource), StringComparer.Ordinal.GetHashCode(obj.PropertyName));
+    }
+
+    private static HashSet<(Call RngSource, string PropertyName)> FindSequentialRngGroups(IReadOnlyList<SpawnSpec> spawns)
     {
         var groups = spawns
             .SelectMany(spawn => spawn.Setters
-                .Where(setter => setter.ConstantValue is null && setter.RngId is not null)
-                .Select(setter => (RngId: setter.RngId!.Value, PropertyName: setter.Property.Name, setter.RngOffset)))
-            .GroupBy(entry => (entry.RngId, entry.PropertyName));
+                .Where(setter => setter.ConstantValue is null && setter.RngSource is not null)
+                .Select(setter => (RngSource: setter.RngSource!, PropertyName: setter.Property.Name, setter.RngOffset)))
+            .GroupBy(entry => (entry.RngSource, entry.PropertyName), ReferencePairComparer.Instance);
 
-        var result = new HashSet<(int RngId, string PropertyName)>();
+        var result = new HashSet<(Call RngSource, string PropertyName)>(ReferencePairComparer.Instance);
         foreach (var group in groups)
         {
             var offsets = group.Select(entry => entry.RngOffset).Order().ToArray();
@@ -215,18 +229,23 @@ internal static class EncounterMechanismReader
     private static string ReplaceFirstMoveWithRngVariants(
         SpawnSpec spawn,
         PropertyInfo property,
+        int sampleCount,
         bool sequentialAcrossCopies,
-        string baselineText)
+        string baselineText,
+        HashSet<string> gaps)
     {
         var lines = baselineText.Split('\n');
         if (lines.Length == 0 || !lines[0].StartsWith(FirstMovePrefix, StringComparison.Ordinal))
             return baselineText;
 
         var firstMoves = new List<string>();
-        for (var candidate = 0; candidate < 6; candidate++)
+        var upperBound = Math.Clamp(sampleCount, 1, 12);
+        for (var candidate = 0; candidate < upperBound; candidate++)
         {
             var sample = CreateConfiguredMonster(spawn.MonsterType, spawn.Setters, (property, candidate));
-            var (sampleText, _) = EnemyMechanismReader.Describe(sample);
+            var (sampleText, sampleGaps) = EnemyMechanismReader.Describe(sample);
+            foreach (var gap in sampleGaps)
+                gaps.Add($"{spawn.MonsterType.Name}/{gap}");
             if (sampleText is null)
                 continue;
             var firstLine = sampleText.Split('\n')[0];
@@ -240,7 +259,7 @@ internal static class EncounterMechanismReader
         if (firstMoves.Count <= 1)
             return baselineText;
 
-        var qualifier = sequentialAcrossCopies ? "one each of" : "one of";
+        var qualifier = sequentialAcrossCopies ? "distinct initial moves across copies from" : "one of";
         lines[0] = $"First move: {qualifier} {string.Join(", ", firstMoves)}";
         return string.Join("\n", lines);
     }
@@ -335,27 +354,45 @@ internal static class EncounterMechanismReader
         _ => value,
     };
 
-    private static bool TryReadRngOffset(Value value, out int? rngId, out int offset)
+    private static bool TryReadRngOffset(Value value, out Call? rngSource, out int offset, out int sampleCount)
     {
-        rngId = null;
+        rngSource = null;
         offset = 0;
+        sampleCount = 6;
         switch (value)
         {
             case Call { Method.Name: "NextInt", Receiver: Call { Method.Name: "get_Rng" } } rngCall:
-                rngId = RuntimeHelpers.GetHashCode(rngCall);
+                rngSource = rngCall;
+                if (rngCall.Arguments is [Constant { Data: int maxExclusive }] && maxExclusive > 0)
+                    sampleCount = maxExclusive;
+                else if (rngCall.Arguments is [Constant { Data: int minInclusive }, Constant { Data: int upperExclusive }] && upperExclusive > minInclusive)
+                    sampleCount = upperExclusive;
                 return true;
             case Operation { Operator: "add", Left: var left, Right: Constant { Data: int delta } }
-                when TryReadRngOffset(left, out rngId, out var innerOffset):
+                when TryReadRngOffset(left, out rngSource, out var innerOffset, out sampleCount):
                 offset = innerOffset + delta;
+                sampleCount = Math.Max(sampleCount, offset + 1);
                 return true;
             case Operation { Operator: "rem", Left: var left, Right: Constant { Data: int modulus } }
-                when modulus > 0 && TryReadRngOffset(left, out rngId, out var innerOffset):
+                when modulus > 0 && TryReadRngOffset(left, out rngSource, out var innerOffset, out _):
                 offset = ((innerOffset % modulus) + modulus) % modulus;
+                sampleCount = modulus;
                 return true;
             default:
                 return false;
         }
     }
+
+    private static int? ExtractRngUpperBound(Value? value) => value switch
+    {
+        Operation { Operator: "rem", Right: Constant { Data: int modulus } } when modulus > 0 => modulus,
+        Call { Method.Name: "NextInt", Arguments: [Constant { Data: int maxExclusive }] } when maxExclusive > 0 => maxExclusive,
+        Call { Method.Name: "NextInt", Arguments: [Constant { Data: int minInc }, Constant { Data: int maxExc }] } when maxExc > minInc => maxExc,
+        Call { Method.Name: "NextBool" } => 2,
+        Operation op => ExtractRngUpperBound(op.Left) ?? ExtractRngUpperBound(op.Right),
+        Call call => call.Arguments.Select(ExtractRngUpperBound).FirstOrDefault(v => v is not null) ?? ExtractRngUpperBound(call.Receiver),
+        _ => null,
+    };
 
     private static bool DependsOnRng(Value? value) => value switch
     {

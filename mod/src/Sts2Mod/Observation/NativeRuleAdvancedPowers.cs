@@ -72,6 +72,14 @@ internal sealed partial class NativeRuleText
     {
         if (field.DeclaringType is not { } declaring)
             return true;
+        var fieldNs = field.FieldType.Namespace ?? "";
+        if (declaring.Name == "ExtraRunFields"
+            || declaring.Namespace?.StartsWith("MegaCrit.Sts2.Core.Saves", StringComparison.Ordinal) == true
+            || fieldNs.StartsWith("Godot", StringComparison.Ordinal)
+            || fieldNs.StartsWith("MegaCrit.Sts2.Core.Nodes", StringComparison.Ordinal)
+            || fieldNs.StartsWith("MegaCrit.Sts2.Core.Animation", StringComparison.Ordinal)
+            || fieldNs.StartsWith("MegaCrit.Sts2.Core.Bindings", StringComparison.Ordinal))
+            return false;
         var owner = declaring.IsNested && declaring.DeclaringType is { } outer && typeof(AbstractModel).IsAssignableFrom(outer)
             ? outer
             : declaring;
@@ -141,6 +149,11 @@ internal sealed partial class NativeRuleText
                 }
                 foreach (var loop in body.Loops)
                     CollectFieldsFromValue(loop.Count, owner, result);
+                foreach (var write in body.Writes)
+                {
+                    if (write.DeclaringType == owner)
+                        deferredWrites.Add((write, new Constant(0), []));
+                }
                 foreach (var fstep in body.FieldSteps)
                 {
                     if (OwnedField(fstep.Assignment.Target, owner) is { } ownedTarget)
@@ -153,8 +166,9 @@ internal sealed partial class NativeRuleText
                         if (!IsPresentationTest(cond.Value))
                             CollectFieldsFromValue(cond.Value, owner, result);
                 }
-                foreach (var step in body.Calls)
+                foreach (var callGroup in body.Calls.GroupBy(s => (s.Epoch, s.Index)))
                 {
+                    var step = callGroup.First();
                     if (IsPresentationCall(step.Call.Method))
                         continue;
                     if (step.Call.Receiver == Self && step.Call.Method is MethodInfo accessor
@@ -164,7 +178,8 @@ internal sealed partial class NativeRuleText
                         && setter.Name.StartsWith("set_", StringComparison.Ordinal)
                         && BackingField(owner, setter) is { } mutated && step.Call.Arguments is [var rhs])
                     {
-                        deferredWrites.Add((mutated, rhs, step.Conditions));
+                        foreach (var candidate in callGroup)
+                            deferredWrites.Add((mutated, rhs, candidate.Conditions));
                         continue;
                     }
                     if (step.Call.Receiver == Self && step.Call.Method is MethodInfo presentationHelper
@@ -174,9 +189,10 @@ internal sealed partial class NativeRuleText
                         && phBody.Calls.All(c => IsBenignReadOrPlumbingCall(c.Call.Method)))
                         continue;
                     CollectFieldsFromCall(step.Call, owner, result);
-                    foreach (var cond in step.Conditions)
-                        if (!IsPresentationTest(cond.Value))
-                            CollectFieldsFromValue(cond.Value, owner, result);
+                    foreach (var mergedPath in MergeTests(callGroup.Select(s => s.Conditions)))
+                        foreach (var cond in mergedPath)
+                            if (!IsPresentationTest(cond.Value))
+                                CollectFieldsFromValue(cond.Value, owner, result);
                 }
             }
         }
@@ -217,7 +233,8 @@ internal sealed partial class NativeRuleText
 
     private static FieldInfo? OwnedField(Field field, Type owner)
     {
-        if (field.Receiver is Input { Name: "this" } && field.Member.DeclaringType == owner)
+        if ((field.Receiver is Input { Name: "this" } || field.Receiver is null && field.Member.IsStatic)
+            && field.Member.DeclaringType == owner)
             return field.Member;
         if (InternalDataField(field) is { } internalMember && internalMember.DeclaringType?.DeclaringType == owner)
             return internalMember;
@@ -297,7 +314,13 @@ internal sealed partial class NativeRuleText
         => method.Name is "GenerateAnimator" or "GenerateBestiaryMoveList" or "ShouldShowMoveInBestiary"
             or "SetupSkins" or "BeforeAnimPlayedInCompendium" or "BeforeRemovedFromRoom"
             or "get_ShouldFadeAfterDeath" or "get_DeathSfx" or "get_HurtSfx" or "get_CastSfx"
-            or "get_Title" or "get_AssetPaths" or "get_Background";
+            or "get_TakeDamageSfxType" or "get_HasDeathSfx" or "get_AttackSfx"
+            or "get_Title" or "get_AssetPaths" or "get_Background"
+            || method.Name.StartsWith("<GenerateAnimator>", StringComparison.Ordinal)
+            || method.Name.StartsWith("<SetupSkins>", StringComparison.Ordinal)
+            || method.Name.StartsWith("<BeforeAnimPlayedInCompendium>", StringComparison.Ordinal)
+            || method.Name.StartsWith("<ShouldShowMoveInBestiary>", StringComparison.Ordinal)
+            || method.Name.StartsWith("<BeforeRemovedFromRoom>", StringComparison.Ordinal);
 
     private static bool IsPresentationTest(Value value)
         => value is Call { Method: var method } && IsPresentationCall(method);
@@ -318,8 +341,9 @@ internal sealed partial class NativeRuleText
         {
             ("SfxCmd" or "VfxCmd" or "TalkCmd" or "ThinkCmd" or "Cmd" or "LocalContext" or "NodeHelper" or "GodotTreeExtensions", _) => true,
             ("CreatureCmd", "TriggerAnim" or "ChangeCreatureAnim") => true,
-            ("PowerModel", "Flash" or "InvokeDisplayAmountChanged") => true,
-            ("MonsterModel", "AssertMutable" or "L10NMonsterLookup") => true,
+            ("PowerModel", "Flash" or "InvokeDisplayAmountChanged" or "StartPulsing" or "StopPulsing") => true,
+            (_, "AssertMutable") => true,
+            ("MonsterModel", "L10NMonsterLookup") => true,
             ("Creature", "GetCreatureNode" or "GetVfxContainer" or "GetBackVfxContainer" or "SetNodeVisible") => true,
             ("ExtraRunFields", _) => true,
             ("Mathf", _) => true,
@@ -336,7 +360,9 @@ internal sealed partial class NativeRuleText
         if (ns is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
             || type == typeof(IDisposable) || type == typeof(Math) || type == typeof(string) || type == typeof(object))
             return true;
-        if (method.Name is "GetEnumerator" or "MoveNext" or "get_Current" or "get_IsOff" or "get_IsOn" or "GetInternalData")
+        if (method.Name is "GetEnumerator" or "MoveNext" or "get_Current" or "get_IsOff" or "get_IsOn" or "GetInternalData"
+            || method.Name.StartsWith("<>n__", StringComparison.Ordinal)
+            || (type == typeof(MonsterModel) && method.Name == "AfterAddedToRoom"))
             return true;
         if (method is MethodInfo info && info.IsSpecialName && info.Name.StartsWith("get_", StringComparison.Ordinal)
             && info.GetParameters().Length == 0)
@@ -366,6 +392,8 @@ internal sealed partial class NativeRuleText
         {
             var m = step.Call.Method;
             if (m.IsSpecialName && m.DeclaringType == typeof(Creature) && m.Name.StartsWith("remove_", StringComparison.Ordinal))
+                continue;
+            if (m is ConstructorInfo { DeclaringType: var dt } && typeof(Delegate).IsAssignableFrom(dt))
                 continue;
             if (IsBenignReadOrPlumbingCall(m))
                 continue;
@@ -428,13 +456,70 @@ internal sealed partial class NativeRuleText
     private bool IsPresentationTaskHelper(MethodInfo helper)
     {
         var body = Body(helper);
-        if (body.Incomplete || body.Writes.Count > 0 || body.FieldSteps.Count > 0)
+        if (body.Incomplete || body.Writes.Count > 0)
             return false;
-        return body.Calls.All(step => IsBenignReadOrPlumbingCall(step.Call.Method));
+        if (body.FieldSteps.Any(step => IsGameplayField(step.Assignment.Target.Member)))
+            return false;
+        foreach (var step in body.Calls)
+        {
+            var m = step.Call.Method;
+            if (IsBenignReadOrPlumbingCall(m))
+                continue;
+            if (step.Call.Receiver == Self && m is MethodInfo setter && setter.Name.StartsWith("set_", StringComparison.Ordinal)
+                && setter.DeclaringType is { } owner && BackingField(owner, setter) is { } field && !IsGameplayField(field))
+                continue;
+            return false;
+        }
+        return true;
     }
 
     private void ReadSpecialPowerHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
     {
+        ReadCorridorPowerHooks(type, powerPrefix, handled, lines);
+        if (ReadTemporaryStatPowerHooks(type, powerPrefix, out var tempStatLine))
+        {
+            handled.Add("BeforeApplied");
+            handled.Add("AfterApplied");
+            handled.Add("AfterPowerAmountChanged");
+            handled.Add("AfterSideTurnEnd");
+            lines.Add(tempStatLine);
+        }
+        if (ReadAfterimageHooks(type, powerPrefix, out var afterimageLine))
+        {
+            handled.Add("BeforeCardPlayed");
+            handled.Add("AfterCardPlayed");
+            lines.Add(afterimageLine);
+        }
+        if (ReadRuptureHooks(type, powerPrefix, out var ruptureLine))
+        {
+            handled.Add("BeforeCardPlayed");
+            handled.Add("AfterDamageReceived");
+            handled.Add("AfterCardPlayed");
+            lines.Add(ruptureLine);
+        }
+        if (ReadDarkEmbraceHooks(type, powerPrefix, out var darkEmbraceLine))
+        {
+            handled.Add("AfterCardExhausted");
+            handled.Add("AfterSideTurnEnd");
+            lines.Add(darkEmbraceLine);
+        }
+        if (ReadPanacheHooks(type, powerPrefix, out var panacheLine))
+        {
+            handled.Add("AfterCardPlayed");
+            handled.Add("AfterSideTurnEnd");
+            lines.Add(panacheLine);
+        }
+        if (ReadDoomHooks(type, powerPrefix, out var doomLine))
+        {
+            handled.Add("BeforeSideTurnEnd");
+            handled.Add("AfterSideTurnEnd");
+            lines.Add(doomLine);
+        }
+        if (ReadPoisonHooks(type, powerPrefix, out var poisonLine))
+        {
+            handled.Add("AfterSideTurnStart");
+            lines.Add(poisonLine);
+        }
         if (ReadVigorHooks(type, powerPrefix, out var vigorLine))
         {
             handled.Add("BeforeAttack");
@@ -601,10 +686,17 @@ internal sealed partial class NativeRuleText
 
     private static string? ResolveInitialEnumValue(PowerModel canonicalPower, FieldInfo enumField)
     {
-        if (enumField.DeclaringType == canonicalPower.GetType())
-            return enumField.GetValue(canonicalPower)?.ToString();
-        if (enumField.DeclaringType?.IsNested == true && Activator.CreateInstance(enumField.DeclaringType, nonPublic: true) is { } data)
-            return enumField.GetValue(data)?.ToString();
+        try
+        {
+            if (enumField.DeclaringType == canonicalPower.GetType())
+                return enumField.GetValue(canonicalPower)?.ToString();
+            if (enumField.DeclaringType?.IsNested == true && Activator.CreateInstance(enumField.DeclaringType, nonPublic: true) is { } data)
+                return enumField.GetValue(data)?.ToString();
+        }
+        catch
+        {
+            return null;
+        }
         return null;
     }
 
@@ -656,4 +748,176 @@ internal sealed partial class NativeRuleText
             || value is Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
                 && getter.DeclaringType == power && getter.Name.StartsWith("get_", StringComparison.Ordinal)
                 && BackingField(power, getter) == facingField;
+
+    private bool ReadTemporaryStatPowerHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        PropertyInfo? statProp = null;
+        PropertyInfo? signProp = null;
+        for (var t = power; t is not null && t != typeof(PowerModel); t = t.BaseType)
+        {
+            statProp ??= t.GetProperty("InternallyAppliedPower", flags);
+            signProp ??= t.GetProperty("Sign", flags);
+        }
+        if (statProp is null
+            || signProp is null
+            || FindOverride(power, "BeforeApplied") is null
+            || FindOverride(power, "AfterSideTurnEnd") is null)
+        {
+            return false;
+        }
+
+        PowerModel? internalStat;
+        int sign;
+        try
+        {
+            var instance = TryGetCanonicalPower(power) ?? Activator.CreateInstance(power, nonPublic: true) as PowerModel;
+            if (instance is null
+                || statProp.GetValue(instance) is not PowerModel statModel
+                || signProp.GetValue(instance) is not int rawSign || rawSign == 0)
+            {
+                return false;
+            }
+            internalStat = statModel;
+            sign = rawSign;
+        }
+        catch
+        {
+            return false;
+        }
+
+        var statLabel = PowerLabel(internalStat.GetType());
+        line = sign > 0
+            ? $"{prefix}Temporary stat adjustment: applies +N {statLabel} when applied or increased; after holder's side turn ends, removes this power and applies −(this power's current stacks) {statLabel} to holder"
+            : $"{prefix}Temporary stat reduction: applies −N {statLabel} when applied or increased; after holder's side turn ends, removes this power and restores +(this power's current stacks) {statLabel} to holder";
+        return true;
+    }
+
+    private bool ReadAfterimageHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "BeforeCardPlayed") is not { } before
+            || FindOverride(power, "AfterCardPlayed") is not { } after
+            || Body(before) is not { Incomplete: false } beforeBody
+            || Body(after) is not { Incomplete: false } afterBody)
+        {
+            return false;
+        }
+
+        var snapshotsAmount = beforeBody.Calls.Any(s => s.Call.Method.Name is "Add" or "set_Item"
+            && s.Call.Receiver is Field f && InternalDataField(f)?.FieldType == typeof(Dictionary<CardModel, int>));
+        var gainsBlock = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.GainBlock));
+        if (!snapshotsAmount || !gainsBlock)
+            return false;
+
+        line = $"{prefix}Card-play Block timing: snapshots this power's stacks before each owned card play starts, then gains that much unpowered Block after that card play resolves (if holder is alive and combat continues)";
+        return true;
+    }
+
+    private bool ReadRuptureHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "BeforeCardPlayed") is not { } before
+            || FindOverride(power, "AfterDamageReceived") is not { } dmgReceived
+            || FindOverride(power, "AfterCardPlayed") is not { } after
+            || Body(before) is not { Incomplete: false }
+            || Body(dmgReceived) is not { Incomplete: false } dmgBody
+            || Body(after) is not { Incomplete: false } afterBody)
+        {
+            return false;
+        }
+
+        var tracksDict = dmgBody.Calls.Any(s => s.Call.Receiver is Field f && InternalDataField(f)?.FieldType == typeof(Dictionary<CardModel, int>));
+        var grantsStr = afterBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd)
+            && s.Call.Method.Name == nameof(PowerCmd.Apply) && s.Call.Method.IsGenericMethod
+            && s.Call.Method.GetGenericArguments()[0] == typeof(MegaCrit.Sts2.Core.Models.Powers.StrengthPower));
+        if (!tracksDict || !grantsStr)
+            return false;
+
+        var strLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.StrengthPower));
+        line = $"{prefix}Self-damage timing: whenever holder loses unblocked HP on holder's side turn, gains this power's current stacks {strLabel} (if caused by a card, {strLabel} gain is deferred until after that card play finishes resolving)";
+        return true;
+    }
+
+    private bool ReadDarkEmbraceHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterCardExhausted") is not { } exhausted
+            || FindOverride(power, "AfterSideTurnEnd") is not { } turnEnd
+            || Body(exhausted) is not { Incomplete: false } exhBody
+            || Body(turnEnd) is not { Incomplete: false } endBody)
+        {
+            return false;
+        }
+
+        var drawsImmediate = exhBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardPileCmd) && s.Call.Method.Name == nameof(CardPileCmd.Draw));
+        var batchesEthereal = exhBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int))
+            && endBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardPileCmd) && s.Call.Method.Name == nameof(CardPileCmd.Draw));
+        if (!drawsImmediate || !batchesEthereal)
+            return false;
+
+        line = $"{prefix}Exhaust draw timing: when an owned card is exhausted without Ethereal, holder immediately draws this power's current stacks card(s); Ethereal turn-end exhausts batch together and draw (exhausted Ethereal count × this power's current stacks) card(s) after side turn ends";
+        return true;
+    }
+
+    private bool ReadPanacheHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterCardPlayed") is not { } played
+            || FindOverride(power, "AfterSideTurnEnd") is not { } turnEnd
+            || Body(played) is not { Incomplete: false } playedBody
+            || Body(turnEnd) is not { Incomplete: false }
+            || TryGetCanonicalPower(power) is not { } canonical
+            || !canonical.DynamicVars.TryGetValue("CardsLeft", out var cardsVar))
+        {
+            return false;
+        }
+
+        var countsDown = playedBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int));
+        var damagesEnemies = playedBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage));
+        if (!countsDown || !damagesEnemies)
+            return false;
+
+        var threshold = Number(cardsVar.BaseValue);
+        line = $"{prefix}Card-count trigger: every {threshold} owned card plays in the same turn, deals this power's current stacks unpowered damage to all hittable enemies; counter resets to {threshold} after side turn ends";
+        return true;
+    }
+
+    private bool ReadDoomHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (power != typeof(MegaCrit.Sts2.Core.Models.Powers.DoomPower)
+            || FindOverride(power, "BeforeSideTurnEnd") is not { } beforeEnd
+            || FindOverride(power, "AfterSideTurnEnd") is not { } afterEnd
+            || Body(beforeEnd) is not { Incomplete: false }
+            || Body(afterEnd) is not { Incomplete: false })
+        {
+            return false;
+        }
+
+        line = $"{prefix}End-of-turn execution check: if holder's current HP ≤ this power's current stacks before holder's side turn ends, kills holder after holder's side turn ends";
+        return true;
+    }
+
+    private bool ReadPoisonHooks(Type power, string prefix, out string line)
+    {
+        line = "";
+        if (FindOverride(power, "AfterSideTurnStart") is not { } start
+            || power.GetMethod("Trigger", Declared) is not { } trigger
+            || Body(start) is not { Incomplete: false })
+        {
+            return false;
+        }
+
+        var triggerBody = Body(trigger);
+        var dealsDamage = triggerBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Damage));
+        var decrements = triggerBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Decrement));
+        if (!dealsDamage || !decrements)
+            return false;
+
+        var accelLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.AccelerantPower));
+        line = $"{prefix}After holder's side turn starts: deals this power's current stacks unblockable unpowered damage to holder and subtracts 1 stack (repeated 1 + opposing {accelLabel} stacks times in sequence while holder stays alive)";
+        return true;
+    }
 }

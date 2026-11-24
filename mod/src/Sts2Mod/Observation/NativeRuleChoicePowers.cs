@@ -10,12 +10,25 @@ namespace Sts2Mod.Observation;
 
 internal sealed partial class NativeRuleText
 {
+    [ThreadStatic]
+    private static HashSet<Type>? _activeChoicePowerProbes;
+
     private bool HasReadableChoicePower(Type power)
     {
-        var probe = new NativeRuleText(monster);
-        var lines = new List<string>();
-        probe.ReadHooks(power, lines);
-        return lines.Count > 0 && probe.Gaps.Count == 0;
+        _activeChoicePowerProbes ??= [];
+        if (!_activeChoicePowerProbes.Add(power))
+            return false;
+        try
+        {
+            var probe = new NativeRuleText(monster);
+            var lines = new List<string>();
+            probe.ReadHooks(power, lines);
+            return lines.Count > 0 && probe.Gaps.Count == 0;
+        }
+        finally
+        {
+            _activeChoicePowerProbes.Remove(power);
+        }
     }
 
     private void ReadPlayerResourceHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
@@ -43,7 +56,163 @@ internal sealed partial class NativeRuleText
             handled.Add("ShouldPlay");
             lines.Add($"{powerPrefix}Card play limit: prevent holder from starting another card play once the turn's play count (including replays and autoplay) reaches this power's current stacks; resets before holder's turn starts");
         }
+        foreach (var costHookName in new[] { "TryModifyEnergyCostInCombat", "TryModifyEnergyCostInCombatLate" })
+        {
+            if (FindOverride(type, costHookName) is not { } costHook)
+                continue;
+            handled.Add(costHook.Name);
+            if (ReadEnergyCostHook(costHook) is { } costLine)
+                lines.Add($"{powerPrefix}{costLine}");
+            else
+                Gap($"{type.Name}.{costHook.Name}");
+        }
+        if (FindOverride(type, "ModifyCardPlayCount") is { } playCountHook)
+        {
+            handled.Add(playCountHook.Name);
+            if (ReadCardPlayCountHook(type, playCountHook, handled) is { } playCountLine)
+                lines.Add($"{powerPrefix}{playCountLine}");
+            else
+                Gap($"{type.Name}.{playCountHook.Name}");
+        }
+        if (FindOverride(type, "ModifyCardPlayResultLocation") is { } playLocHook)
+        {
+            handled.Add(playLocHook.Name);
+            if (ReadCardPlayResultLocationHook(type, playLocHook, handled) is { } playLocLine)
+                lines.Add($"{powerPrefix}{playLocLine}");
+            else
+                Gap($"{type.Name}.{playLocHook.Name}");
+        }
     }
+
+    private string? ReadEnergyCostHook(MethodInfo hook)
+    {
+        var body = Body(hook);
+        if (body.Incomplete)
+            return null;
+        var active = body.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
+        var store = body.OutStores.LastOrDefault(s => s.Assigned is not Input);
+        if (active is not [var ret] || store is null)
+            return null;
+
+        CardType? filteredType = null;
+        Type? requiredAffliction = null;
+        foreach (var cond in ret.Conditions)
+        {
+            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type" } && Numeric(r) is { } ct
+                && Enum.IsDefined(typeof(CardType), (int)ct))
+            {
+                filteredType = (CardType)(int)ct;
+            }
+            if (cond is { Expected: true, Value: Operation { Operator: "isinst",
+                    Left: Call { Method.Name: "get_Affliction" }, Right: Constant { Data: Type affType } } }
+                && typeof(AfflictionModel).IsAssignableFrom(affType))
+            {
+                requiredAffliction = affType;
+            }
+        }
+        var subject = requiredAffliction is not null
+            ? $"owned cards afflicted with {ModelLabel(requiredAffliction)}"
+            : filteredType is { } kind
+                ? $"owned {kind} cards"
+                : "owned cards";
+        if (Numeric(store.Assigned) == 0m)
+            return $"In-combat Energy cost: {subject} cost 0 Energy";
+        if (store.Assigned is Call { Method.Name: "op_Addition", Arguments: [Input { Name: "originalCost" }, var delta] }
+            && IsStackAmount(delta))
+        {
+            return $"In-combat Energy cost: {subject} cost +this power's current stacks Energy";
+        }
+        return null;
+    }
+
+    private string? ReadCardPlayCountHook(Type power, MethodInfo hook, HashSet<string> handled)
+    {
+        var body = Body(hook);
+        if (body.Incomplete)
+            return null;
+        var boosted = body.Returns.Where(r => r.Value is Operation { Operator: "add", Left: Input { Name: "playCount" }, Right: Constant { Data: 1 } }).ToArray();
+        if (boosted is not [var active])
+            return null;
+
+        CardType? filteredType = null;
+        var firstPlaysPerTurn = false;
+        foreach (var cond in active.Conditions)
+        {
+            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type" } && Numeric(r) is { } ct
+                && Enum.IsDefined(typeof(CardType), (int)ct))
+            {
+                filteredType = (CardType)(int)ct;
+            }
+            if (cond.Value is Operation { Left: Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysStarted" }, ..] } })
+                firstPlaysPerTurn = true;
+        }
+
+        var consumeSuffix = "";
+        if (FindOverride(power, "AfterModifyingCardPlayCount") is { } afterHook)
+        {
+            if (IsSelfDecrement(afterHook))
+            {
+                handled.Add(afterHook.Name);
+                consumeSuffix = $", then subtract 1 {PowerLabel(power)} stack";
+            }
+            else if (IsPurePresentationHook(afterHook))
+            {
+                handled.Add(afterHook.Name);
+            }
+        }
+
+        var subject = firstPlaysPerTurn
+            ? "each of holder's first N non-dupe card plays each turn (where N = this power's current stacks)"
+            : filteredType is { } kind
+                ? $"owned non-dupe {kind} cards"
+                : "owned non-dupe cards";
+        return $"Card replay: plays {subject} 1 additional time{consumeSuffix}";
+    }
+
+    private string? ReadCardPlayResultLocationHook(Type power, MethodInfo hook, HashSet<string> handled)
+    {
+        var body = Body(hook);
+        if (body.Incomplete)
+            return null;
+
+        int? rawPile = null;
+        Test[]? conditions = null;
+        var redirected = body.Returns.Where(r => r.Value is Constant { Data: int p } && Enum.IsDefined(typeof(PileType), p)).ToArray();
+        if (redirected is [var activeRet] && activeRet.Value is Constant { Data: int retPile })
+        {
+            rawPile = retPile;
+            conditions = activeRet.Conditions;
+        }
+        else if (body.FieldSteps.FirstOrDefault(f => f.Assignment.Target.Receiver is Input { Name: "location" }
+                && f.Assignment.Assigned is Constant { Data: int fp } && Enum.IsDefined(typeof(PileType), fp)) is { } locStep
+            && locStep.Assignment.Assigned is Constant { Data: int fieldPile })
+        {
+            rawPile = fieldPile;
+            conditions = locStep.Conditions;
+        }
+        if (rawPile is null || conditions is null)
+            return null;
+
+        CardType? filteredType = null;
+        foreach (var cond in conditions)
+        {
+            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type" } && Numeric(r) is { } ct
+                && Enum.IsDefined(typeof(CardType), (int)ct))
+            {
+                filteredType = (CardType)(int)ct;
+            }
+        }
+        if (FindOverride(power, "AfterModifyingCardPlayResultLocation") is { } afterLoc && IsPurePresentationHook(afterLoc))
+            handled.Add(afterLoc.Name);
+
+        var subject = filteredType is { } kind ? $"owned {kind} cards" : "owned cards";
+        var destPile = ((PileType)rawPile.Value).ToString().ToLowerInvariant();
+        return $"Card destination after play: {subject} move to {destPile} pile instead of discard pile";
+    }
+
+    private bool IsPurePresentationHook(MethodInfo method)
+        => Body(method) is { Incomplete: false, Writes.Count: 0, FieldSteps.Count: 0 } body
+            && body.Calls.All(step => IsBenignReadOrPlumbingCall(step.Call.Method));
 
     private void ReadPowerReceptionHooks(Type type, string powerPrefix, HashSet<string> handled, List<string> lines)
     {
@@ -118,6 +287,31 @@ internal sealed partial class NativeRuleText
             handled.Add("BeforeSideTurnStart");
             lines.Add($"{powerPrefix}HP loss cap per side turn: total unblocked HP lost by holder during each side turn is capped at this power's current stacks (resets before every side turn starts)");
         }
+        if (FindOverride(type, "ModifyHpLostAfterOstyLate") is { } bufferHook)
+        {
+            handled.Add(bufferHook.Name);
+            if (ReadZeroHpLossLateHook(type, bufferHook, handled) is { } bufferLine)
+                lines.Add($"{powerPrefix}{bufferLine}");
+            else
+                Gap($"{type.Name}.{bufferHook.Name}");
+        }
+    }
+
+    private string? ReadZeroHpLossLateHook(Type power, MethodInfo hook, HashSet<string> handled)
+    {
+        var body = Body(hook);
+        if (body.Incomplete)
+            return null;
+        var zeroed = body.Returns.Where(r => Numeric(r.Value) == 0m).ToArray();
+        if (zeroed.Length == 0)
+            return null;
+        var consumeSuffix = "";
+        if (FindOverride(power, "AfterModifyingHpLostAfterOsty") is { } afterHook && IsSelfDecrement(afterHook))
+        {
+            handled.Add(afterHook.Name);
+            consumeSuffix = $" and subtract 1 {PowerLabel(power)} stack";
+        }
+        return $"Prevent next HP loss: when holder would lose nonzero HP (checked after Block and {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} redirection), reduce HP loss to 0{consumeSuffix}";
     }
 
     private List<string>? ReadDamageCap(MethodInfo hook)

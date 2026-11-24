@@ -38,13 +38,16 @@ internal sealed partial class NativeRuleText
                 ? "recorded card instance"
                 : null;
 
-    private static string? PowerBoolSlot(Field field)
+    private string? PowerBoolSlot(Field field)
     {
         if (field.Member.FieldType != typeof(bool))
             return null;
         if (InternalDataField(field) is { } internalBool)
-            return UpperFirst(internalBool.Name.TrimStart('_'));
-        if (field.Receiver is Input { Name: "this" } && typeof(PowerModel).IsAssignableFrom(field.Member.DeclaringType))
+            return IsGameplayField(internalBool) ? UpperFirst(internalBool.Name.TrimStart('_')) : null;
+        if (field.Receiver is Input { Name: "this" }
+            && (typeof(PowerModel).IsAssignableFrom(field.Member.DeclaringType)
+                || typeof(MonsterModel).IsAssignableFrom(field.Member.DeclaringType))
+            && IsGameplayField(field.Member))
             return UpperFirst(field.Member.Name.TrimStart('_'));
         return null;
     }
@@ -52,7 +55,7 @@ internal sealed partial class NativeRuleText
     private static string UpperFirst(string name)
         => name.Length == 0 ? name : char.ToUpperInvariant(name[0]) + name[1..];
 
-    private static Effect? DescribeSlotAssignment(Assignment assignment, MethodInfo method)
+    private Effect? DescribeSlotAssignment(Assignment assignment, MethodInfo method)
     {
         if (CardSlot(assignment.Target) is not null)
         {
@@ -80,7 +83,7 @@ internal sealed partial class NativeRuleText
         return null;
     }
 
-    private static bool IsTrackedSlot(Field field)
+    private bool IsTrackedSlot(Field field)
         => CardSlot(field) is not null || PowerBoolSlot(field) is not null;
 
     private static bool IsUnchangedAssignment(EffectStep step)
@@ -125,6 +128,9 @@ internal sealed partial class NativeRuleText
 
     private string? CombatCondition(Test test)
     {
+        if (CorridorCombatCondition(test) is { } corridorCond)
+            return corridorCond;
+
         var expected = test.Expected;
         if (test.Value is Operation { Operator: "isinst", Right: Constant { Data: Type card },
             Left: Call { Method.Name: "get_ModelSource", Method.DeclaringType: var attack } source }
@@ -231,22 +237,31 @@ internal sealed partial class NativeRuleText
         return null;
     }
 
-    private string? CombatValue(Value value) => value switch
+    private string? CombatValue(Value value)
     {
-        Field { Member: var field, Receiver: Input { Name: "this" } } when _choiceCursors.Contains(field) => "choice rounds completed",
-        Field field when CardSlot(field) is { } slot => slot,
-        Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
-            when getter.DeclaringType == monster.GetType() && _choiceCursors.Count != 0
-            && Body(getter) is { Incomplete: false, Returns: [{ Value: Field { Receiver: Input { Name: "this" }, Member: var cursor }, Conditions.Length: 0 }] }
-            && _choiceCursors.Contains(cursor) => "choice rounds completed",
-        Call { Method: MethodInfo scalarGetter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
-            when scalarGetter.ReturnType == typeof(int) && scalarGetter.Name.StartsWith("get_", StringComparison.Ordinal)
-                && scalarGetter.DeclaringType?.IsInstanceOfType(monster) == true
-                && MonsterScalarText(scalarGetter) is { } scalar => scalar,
-        Call { Method.Name: "get_CurrentHp", Method.DeclaringType: var creatureType, Receiver: { } who }
-            when creatureType == typeof(Creature) && ValueText(who) is { } targetLabel => $"{Possessive(targetLabel)} current HP",
-        Call { Method.Name: "get_SlotName", Method.DeclaringType: var slotOwner }
-            when slotOwner == typeof(Creature) => "encounter slot",
+        if (CorridorCombatValue(value) is { } corridorVal)
+            return corridorVal;
+
+        return value switch
+        {
+            Field { Member: var field, Receiver: Input { Name: "this" } } when _choiceCursors.Contains(field) => "choice rounds completed",
+            Field field when CardSlot(field) is { } slot => slot,
+            Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+                when monster is not null && getter.DeclaringType == monster.GetType() && _choiceCursors.Count != 0
+                && Body(getter) is { Incomplete: false, Returns: [{ Value: Field { Receiver: Input { Name: "this" }, Member: var cursor }, Conditions.Length: 0 }] }
+                && _choiceCursors.Contains(cursor) => "choice rounds completed",
+            Call { Method: MethodInfo scalarGetter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+                when scalarGetter.ReturnType == typeof(int)
+                    && monster is not null && scalarGetter.DeclaringType?.IsInstanceOfType(monster) == true
+                    && MonsterScalarText(scalarGetter) is { } scalar => scalar,
+            Call { Method.Name: "get_CurrentHp", Method.DeclaringType: var creatureType, Receiver: { } who }
+                when creatureType == typeof(Creature) && ValueText(who) is { } targetLabel => $"{Possessive(targetLabel)} current HP",
+            Call { Method.Name: "get_MaxHp", Method.DeclaringType: var creatureMaxType, Receiver: { } maxWho }
+                when creatureMaxType == typeof(Creature) && ValueText(maxWho) is { } maxLabel => $"{Possessive(maxLabel)} maximum HP",
+            Call { Method.Name: "get_Block", Method.DeclaringType: var creatureBlkType, Receiver: { } blkWho }
+                when creatureBlkType == typeof(Creature) && ValueText(blkWho) is { } blkLabel => $"{Possessive(blkLabel)} Block",
+            Call { Method.Name: "get_SlotName", Method.DeclaringType: var slotOwner }
+                when slotOwner == typeof(Creature) => "encounter slot",
         Call { Method.Name: "get_Target", Method.DeclaringType: var powerType, Receiver: Input { Name: "this" } }
             when powerType == typeof(PowerModel) => "this power's target",
         Call { Method.Name: "get_AllAffectedCreatures", Receiver: Input { Name: "this" } }
@@ -273,12 +288,13 @@ internal sealed partial class NativeRuleText
         Call { Method.Name: "get_Amount", Method.DeclaringType: var type, Receiver: { } power }
             when type == typeof(PowerModel) && OwnedPower(power) is { } kind => $"self's {ModelLabel(kind)} stacks",
         Call call when OwnedPower(call) is { } power => $"self's {ModelLabel(power)}",
-        Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
-            Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo countPred }] }] }
-            when ofType.GetGenericArguments()[0].Name == "CardAfflictedEntry" && AfflictionFromPredicate(countPred) is { } affType
-            => $"holder's cards afflicted with {ModelLabel(affType)} this turn",
-        _ => AttackHit(value),
-    };
+            Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
+                Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo countPred }] }] }
+                when ofType.GetGenericArguments()[0].Name == "CardAfflictedEntry" && AfflictionFromPredicate(countPred) is { } affType
+                => $"holder's cards afflicted with {ModelLabel(affType)} this turn",
+            _ => AttackHit(value),
+        };
+    }
 
     private Type? AfflictionFromPredicate(MethodInfo predicate)
         => Body(predicate).Returns.SelectMany(r => FindAfflictionTypes(r.Value)).FirstOrDefault();
@@ -293,7 +309,8 @@ internal sealed partial class NativeRuleText
 
     private string? MonsterScalarText(MethodInfo getter)
     {
-        if (getter.DeclaringType is { } owner && BackingField(owner, getter) is { } backing)
+        var isPropertyGetter = getter.Name.StartsWith("get_", StringComparison.Ordinal);
+        if (isPropertyGetter && getter.DeclaringType is { } owner && BackingField(owner, getter) is { } backing)
         {
             if (!IsGameplayField(backing))
                 return null;
@@ -301,13 +318,28 @@ internal sealed partial class NativeRuleText
             return getter.Name[4..];
         }
         var body = Body(getter);
-        if (body.Incomplete)
+        if (body.Incomplete || (!isPropertyGetter && (body.Writes.Count > 0 || body.FieldSteps.Count > 0)))
             return null;
+        if (isPropertyGetter
+            && body.Returns is [{ Conditions.Length: 0, Value: Call { Method.Name: "GetValueOrDefault",
+                Receiver: Field { Receiver: Input { Name: "this" }, Member: var nullableField },
+                Arguments: [Constant { Data: int defaultVal }] } }]
+            && monster is not null && nullableField.DeclaringType?.IsInstanceOfType(monster) == true)
+        {
+            var canonical = ModelDb.GetByIdOrNull<MonsterModel>(monster.Id);
+            var initial = canonical is not null && nullableField.DeclaringType.IsInstanceOfType(canonical)
+                && nullableField.GetValue(canonical) is int setVal
+                ? setVal
+                : defaultVal;
+            _trackedMonsterNullableDefaults.Add((getter.Name[4..], initial));
+            return getter.Name[4..];
+        }
         var active = body.Returns.Where(r => r.Conditions.All(IsCurrentRun)).ToArray();
         return active is [var ret] && ret.Conditions.All(IsDreadTest) ? ValueText(ret.Value) : null;
     }
 
     private readonly HashSet<(string Name, FieldInfo Field)> _trackedMonsterInts = [];
+    private readonly HashSet<(string Name, int DefaultValue)> _trackedMonsterNullableDefaults = [];
 
     private static Type? OwnedPower(Value source)
         => source is Call { Method.DeclaringType: var first, Method.Name: nameof(Enumerable.FirstOrDefault),

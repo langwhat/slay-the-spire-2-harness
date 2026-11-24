@@ -622,3 +622,294 @@ def test_precombat_boss_and_elite_mechanisms_route_by_role_and_remaining_bosses(
         str(row.get("definition_id", "")).startswith("ENCOUNTER.")
         for row in combat_payload.get("mechanisms", [])
     )
+
+
+def test_act_event_item_and_power_native_mechanisms_route_cleanly_across_roles() -> None:
+    from sts2_harness.client.models import (
+        Action,
+        EventEntry,
+        EventState,
+        ObjectKind,
+        Offer,
+        OfferEntry,
+        OfferKind,
+        PublicMap,
+        RelicEntry,
+        RunScreen,
+    )
+    from sts2_harness.deck import card_rewards, deck_context, deck_observation
+    from sts2_harness.prompts import PackagedPrompts
+    from sts2_harness.run import run_observation
+
+    base = Observation.model_validate_json(RUN)
+    assert isinstance(base.state, RunState)
+    combat_base = Observation.model_validate_json(COMBAT)
+    deck_card = combat_base.objects["c1"]
+    reward_card = combat_base.objects["c2"]
+    assert isinstance(deck_card, CardEntry) and isinstance(reward_card, CardEntry)
+
+    public_map = PublicMap.model_validate_json(
+        '{"bosses":[{"name":"女王","definition_id":"ENCOUNTER.QUEEN_BOSS"}],'
+        '"elite_pool":[],"nodes":[{"position":"map:0:0","room_type":"event","children":["map:1:0"]},'
+        '{"position":"map:1:0","room_type":"boss","children":[]}],'
+        '"legal_destinations":[]}'
+    )
+    act_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="ACT.OVERGROWTH",
+        name="繁茂之地",
+        text=(
+            "Entering the next act's opening Ancient room after defeating this act's boss(es) "
+            "heals floor(0.8 × missing HP)."
+        ),
+        owner="act",
+    )
+    event_rule_page1 = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="EVENT.FIELD_OF_MAN_SIZED_HOLES",
+        name="人形孔洞之野",
+        text=(
+            "Option [钻入]: select 1 removable card(s) from deck to remove, "
+            "then unconditionally add 1 常态 (CARD.NORMALITY) to deck"
+        ),
+        owner="ev1",
+    )
+    relic_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="RELIC.JUZU_BRACELET",
+        name="数珠手链",
+        text="Unknown (?) map nodes exclude room types: Monster, Elite.",
+        owner="r1",
+    )
+    deck_card_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="CARD.ONE",
+        name="打击",
+        text=(
+            "Resolves attack damage first, "
+            "then selects from discard pile to move on top of draw pile."
+        ),
+        owner="c_deck",
+    )
+    reward_card_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="CARD.BURNING_PACT",
+        name="燃烧契约",
+        text=(
+            "Selects card(s) in hand to exhaust first "
+            "(auto-selects when only 1 other card is in hand); "
+            "draws cards only if a card was selected and exhausted."
+        ),
+        owner="c_offer",
+    )
+    reward_power_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="POWER.DARK_EMBRACE_POWER",
+        name="黑暗之拥",
+        text=(
+            "Exhaust draw timing: when an owned card is exhausted without Ethereal, "
+            "holder immediately draws this power's current stacks card(s)"
+        ),
+        owner="c_offer",
+    )
+
+    event_obs = base.model_copy(
+        update={
+            "map": public_map,
+            "state": base.state.model_copy(
+                update={
+                    "screen": RunScreen.EVENT,
+                    "deck": ("c_deck",),
+                    "relics": ("r1",),
+                    "event": EventState(
+                        ref="ev1",
+                        name="人形孔洞之野",
+                        ancient=False,
+                        definition_id="EVENT.FIELD_OF_MAN_SIZED_HOLES",
+                    ),
+                }
+            ),
+            "objects": {
+                **base.objects,
+                "ev1": EventEntry(
+                    kind=ObjectKind.EVENT,
+                    name="人形孔洞之野",
+                    ancient=False,
+                    definition_id="EVENT.FIELD_OF_MAN_SIZED_HOLES",
+                ),
+                "r1": RelicEntry(
+                    kind=ObjectKind.RELIC,
+                    definition_id="RELIC.JUZU_BRACELET",
+                    name="数珠手链",
+                    status="normal",
+                    is_used_up=False,
+                    is_melted=False,
+                    stack_count=1,
+                ),
+                "c_deck": deck_card,
+            },
+            "descriptions": {
+                **base.descriptions,
+                "ev1": "事件描述",
+                "r1": "未知房间不再遇到怪物。",
+                "c_deck": "造成6点伤害。",
+            },
+            "modifier_descriptions": {"c_deck": combat_base.modifier_descriptions["c1"]},
+            "upgrades": {"c_deck": combat_base.upgrades["c1"]},
+            "mechanisms": (act_rule, event_rule_page1, relic_rule, deck_card_rule),
+        }
+    )
+
+    # Run receives act-transition, event-option, owned relic, and owned card rules once,
+    # and re-delivers event rules when follow-up event options change rule text.
+    run_ctx = Context(DecisionOwner.RUN)
+    run_ctx.append_task(RunActInput(), run_observation(event_obs))
+    run_mechs = json.loads(run_ctx.model_input()[-1].text)["observation"]["mechanisms"]
+    assert {row["definition_id"] for row in run_mechs} == {
+        "ACT.OVERGROWTH",
+        "EVENT.FIELD_OF_MAN_SIZED_HOLES",
+        "RELIC.JUZU_BRACELET",
+        "CARD.ONE",
+    }
+    event_rule_page2 = event_rule_page1.model_copy(
+        update={"text": "Option [深入]: lose 5 Max HP, then obtain 1 relic directly"}
+    )
+    event_page2_obs = event_obs.model_copy(
+        update={"mechanisms": (act_rule, event_rule_page2, relic_rule, deck_card_rule)}
+    )
+    run_ctx.append_task(RunActInput(), run_observation(event_page2_obs))
+    page2_mechs = json.loads(run_ctx.model_input()[-1].text)["observation"]["mechanisms"]
+    assert [row["definition_id"] for row in page2_mechs] == ["EVENT.FIELD_OF_MAN_SIZED_HOLES"]
+    assert page2_mechs[0]["text"] == event_rule_page2.text
+
+    # On a card-reward screen, Deck receives owned + offered card/relic/power rules
+    # and excludes act/event rules, while Run hides unowned card-reward rules until taken.
+    reward_obs = event_obs.model_copy(
+        update={
+            "state": event_obs.state.model_copy(
+                update={
+                    "screen": RunScreen.REWARDS,
+                    "event": None,
+                    "offers": (
+                        Offer(
+                            ref="offer_card",
+                            kind=OfferKind.CARD,
+                            contents=("c_offer",),
+                            actions=("act_offer",),
+                            requires_selection=True,
+                        ),
+                    ),
+                    "actions": (
+                        Action(
+                            ref="act_offer",
+                            label="卡牌奖励",
+                            enabled=True,
+                            subject="offer_card",
+                        ),
+                    ),
+                }
+            ),
+            "objects": {
+                **event_obs.objects,
+                "offer_card": OfferEntry(kind=ObjectKind.OFFER, name="卡牌奖励"),
+                "c_offer": reward_card.model_copy(update={"definition_id": "CARD.BURNING_PACT"}),
+            },
+            "descriptions": {
+                **event_obs.descriptions,
+                "offer_card": "卡牌奖励",
+                "c_offer": "消耗1张牌，抽2张牌。",
+            },
+            "modifier_descriptions": {
+                **event_obs.modifier_descriptions,
+                "c_offer": combat_base.modifier_descriptions["c1"],
+            },
+            "upgrades": {
+                **event_obs.upgrades,
+                "c_offer": combat_base.upgrades["c2"],
+            },
+            "mechanisms": (
+                act_rule,
+                event_rule_page1,
+                relic_rule,
+                deck_card_rule,
+                reward_card_rule,
+                reward_power_rule,
+            ),
+        }
+    )
+    offers, _ = card_rewards(reward_obs)
+    deck_view = deck_observation(reward_obs, offers)
+    deck_ctx = deck_context(PackagedPrompts(), (), deck_view, minimal=False)
+    deck_ctx.append_task(RunActInput(), deck_view)
+    deck_mechs = json.loads(deck_ctx.model_input()[-1].text)["observation"]["mechanisms"]
+    assert {row["definition_id"] for row in deck_mechs} == {
+        "RELIC.JUZU_BRACELET",
+        "CARD.ONE",
+        "CARD.BURNING_PACT",
+        "POWER.DARK_EMBRACE_POWER",
+    }
+
+    run_reward_ctx = Context(DecisionOwner.RUN)
+    run_reward_ctx.append_task(RunActInput(), run_observation(reward_obs))
+    run_reward_obs = json.loads(run_reward_ctx.model_input()[-1].text)["observation"]
+    run_reward_mechs = run_reward_obs["mechanisms"]
+    assert "CARD.BURNING_PACT" not in {row["definition_id"] for row in run_reward_mechs}
+    assert "POWER.DARK_EMBRACE_POWER" not in {row["definition_id"] for row in run_reward_mechs}
+    assert "ACT.OVERGROWTH" in {row["definition_id"] for row in run_reward_mechs}
+
+    # Combat excludes act-scoped and event-scoped mechanisms on foreign Run observations
+    # while delivering owned card/relic rules, and delivers player power rules in Combat.
+    combat_on_event = Context(DecisionOwner.COMBAT)
+    combat_on_event.append_task(CombatActInput(), event_obs)
+    foreign_mechs = json.loads(combat_on_event.model_input()[-1].text)["observation"]["mechanisms"]
+    assert {row["definition_id"] for row in foreign_mechs} == {
+        "RELIC.JUZU_BRACELET",
+        "CARD.ONE",
+    }
+
+    combat_obs = combat_base.model_copy(
+        update={
+            "mechanisms": (
+                act_rule,
+                MechanismView(
+                    kind=MechanismKind.OTHER,
+                    definition_id="CARD.ONE",
+                    name="打击",
+                    text=deck_card_rule.text,
+                    owner="c1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.OTHER,
+                    definition_id="CARD.ONE",
+                    name="打击+",
+                    text=deck_card_rule.text,
+                    owner="c2",
+                ),
+                MechanismView(
+                    kind=MechanismKind.OTHER,
+                    definition_id="POWER.DARK_EMBRACE_POWER",
+                    name="黑暗之拥",
+                    text=reward_power_rule.text,
+                    owner="player",
+                ),
+            )
+        }
+    )
+    combat_ctx2 = Context(DecisionOwner.COMBAT)
+    combat_ctx2.append_task(CombatActInput(), combat_obs)
+    combat_mechs = json.loads(combat_ctx2.model_input()[-1].text)["observation"]["mechanisms"]
+    # Base and upgraded copies sharing definition_id and text deduplicate to one entry.
+    assert [row["definition_id"] for row in combat_mechs] == [
+        "CARD.ONE",
+        "POWER.DARK_EMBRACE_POWER",
+    ]
+
+    # Run-role view of an active Combat observation excludes player/creature power rules
+    # while keeping deck/relic/potion-owned rules.
+    run_during_combat = Context(DecisionOwner.RUN)
+    run_during_combat.append_task(RunActInput(), combat_obs)
+    run_combat_mechs = json.loads(run_during_combat.model_input()[-1].text)["observation"].get(
+        "mechanisms", []
+    )
+    assert "POWER.DARK_EMBRACE_POWER" not in {row["definition_id"] for row in run_combat_mechs}
+    assert {row["definition_id"] for row in run_combat_mechs} == {"CARD.ONE"}

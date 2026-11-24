@@ -69,9 +69,11 @@ def _slim(
 
 def mechanism_key(value: dict[str, JsonValue]) -> tuple[str, str, str | None]:
     kind, name, text = value.get("kind"), value.get("name"), value.get("text")
+    definition_id = value.get("definition_id")
     assert isinstance(kind, str) and isinstance(name, str)
     assert text is None or isinstance(text, str)
-    return kind, name, text
+    identity = definition_id if isinstance(definition_id, str) else name
+    return kind, identity, text
 
 
 def _key(obj: native.ObjectEntry) -> str | None:

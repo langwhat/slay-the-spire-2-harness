@@ -372,6 +372,9 @@ internal sealed class GameObserver(
     private readonly List<OfferView> _offers = [];
     private readonly HashSet<CardModel> _cards = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Creature, ImmutableArray<PublicPower>> _powers = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<string> _enemyCoveredPowerIds = new(StringComparer.Ordinal);
+    private readonly List<(string Owner, Type PowerType, string FallbackName)> _pendingPowerRules = [];
+    private readonly HashSet<(string Owner, string PowerId)> _emittedPowerRules = [];
 
     public ImmutableDictionary<string, UpgradePreview> InspectionUpgrades =>
         _inspectionUpgrades.ToImmutableDictionary(StringComparer.Ordinal);
@@ -390,7 +393,9 @@ internal sealed class GameObserver(
         var inactive = combat.Enemies.Where(creature => !creature.IsAlive).Select(ObserveEnemy).ToImmutableArray();
         foreach (var creature in combat.Enemies)
         {
-            if (EnemyMechanismReader.Read(creature, gameLanguage) is { } mechanics)
+            var (mechanics, coveredPowers) = EnemyMechanismReader.ReadWithCoveredPowers(creature, gameLanguage);
+            _enemyCoveredPowerIds.UnionWith(coveredPowers);
+            if (mechanics is not null)
                 _mechanisms.Add(new MechanismView(
                     MechanismKind.Other, creature.ModelId.ToString(), CreatureName(creature), mechanics,
                     registry.GetRef(creature)));
@@ -449,6 +454,7 @@ internal sealed class GameObserver(
             ArrowSlots = ObserveArrowSlots(pcs.Arrows, combat, actor),
         };
 
+        FlushPowerMechanisms();
         var encounter = combat.Encounter;
         return new NativeObservation(
             new ObservationStamp(gameId, sequence),
@@ -593,6 +599,15 @@ internal sealed class GameObserver(
             var upcomingBosses = RemainingBossEncounters(includeCurrentCombatBoss: false).ToArray();
             if (upcomingBosses.Length > 0)
             {
+                if (EventMechanismReader.ReadActTransition(run) is { } actRule)
+                {
+                    _mechanisms.Add(new MechanismView(
+                        MechanismKind.Other,
+                        run.Act.Id.ToString(),
+                        run.Act.Title.GetFormattedText(),
+                        actRule,
+                        ActMechanismOwner));
+                }
                 foreach (var encounter in upcomingBosses.Concat(run.Act.AllEliteEncounters))
                 {
                     if (EncounterMechanismReader.Read(encounter, run.AscensionLevel, run.GameMode, gameLanguage) is { } rules)
@@ -602,12 +617,13 @@ internal sealed class GameObserver(
                             encounter.Id.ToString(),
                             encounter.Title.GetFormattedText(),
                             rules,
-                            "act"));
+                            ActMechanismOwner));
                     }
                 }
             }
         }
 
+        FlushPowerMechanisms();
         return new NativeObservation(
             new ObservationStamp(gameId, sequence),
             new ObservationLocation(gameId, $"run-{runInstanceId}", registry.NodeId, ObservationOwner.Run),
@@ -744,6 +760,15 @@ internal sealed class GameObserver(
         _descriptions.Add(reference, rendered.Text);
         _modifiers.Add(reference, rendered.ModifierDescriptions);
         AddHoverTipMaterial(reference, rendered.Entry.Name, rendered.Entry.DefinitionId, card.HoverTips);
+        if (ItemMechanismReader.ReadCard(card, gameLanguage) is { } cardRule)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                rendered.Entry.DefinitionId,
+                rendered.Entry.Name,
+                cardRule,
+                reference));
+        }
 
         var upgradeReader = UpgradeReaders.GetValue(
             card,
@@ -777,6 +802,15 @@ internal sealed class GameObserver(
             potion.Usage.ToString().ToLowerInvariant());
         _descriptions[reference] = potion.DynamicDescription.GetFormattedText();
         AddHoverTipMaterial(reference, title, potion.Id.ToString(), potion.HoverTips);
+        if (ItemMechanismReader.ReadPotion(potion, gameLanguage) is { } potionRule)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                potion.Id.ToString(),
+                title,
+                potionRule,
+                reference));
+        }
     }
 
     private void AddRelic(RelicModel relic)
@@ -799,6 +833,15 @@ internal sealed class GameObserver(
         };
         _descriptions[reference] = relic.DynamicDescription.GetFormattedText();
         AddHoverTipMaterial(reference, title, relic.Id.ToString(), relic.HoverTips);
+        if (ItemMechanismReader.ReadRelic(relic, gameLanguage) is { } relicRule)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                relic.Id.ToString(),
+                title,
+                relicRule,
+                reference));
+        }
     }
 
     private ImmutableArray<ArrowSlotView>? ObserveArrowSlots(
@@ -954,12 +997,14 @@ internal sealed class GameObserver(
         if (_powers.TryGetValue(creature, out var existing))
             return existing;
 
+        var holderKey = CreatureHolderKey(creature);
         var result = creature.Powers
             .Where(power => power.IsVisible)
             .Select(power =>
             {
                 var title = power.Title.GetFormattedText();
-                AddHoverTipMaterial(CreatureHolderKey(creature), title, power.Id.ToString(), power.HoverTips);
+                _pendingPowerRules.Add((holderKey, power.GetType(), title));
+                AddHoverTipMaterial(holderKey, title, power.Id.ToString(), power.HoverTips);
                 return new PublicPower(
                     title,
                     power.Id.ToString(),
@@ -989,6 +1034,9 @@ internal sealed class GameObserver(
             if (tip is not HoverTip text || string.IsNullOrEmpty(text.Title))
                 continue;
 
+            if (text.CanonicalModel is PowerModel canonicalPower)
+                _pendingPowerRules.Add((owner, canonicalPower.GetType(), text.Title));
+
             var mechanismKind = text.CanonicalModel switch
             {
                 PowerModel => MechanismKind.Power,
@@ -1010,6 +1058,46 @@ internal sealed class GameObserver(
         _generated[owner] = _generated.TryGetValue(owner, out var previous)
             ? previous.AddRange(generated)
             : generated.ToImmutable();
+    }
+
+    internal const string ActMechanismOwner = "act";
+
+    private void FlushPowerMechanisms()
+    {
+        var includeMultiplayer = run.Players.Count > 1;
+        foreach (var (owner, powerType, fallbackName) in _pendingPowerRules)
+        {
+            string powerId;
+            try
+            {
+                powerId = ModelDb.GetId(powerType).ToString();
+            }
+            catch
+            {
+                continue;
+            }
+            if (_enemyCoveredPowerIds.Contains(powerId) || !_emittedPowerRules.Add((owner, powerId)))
+                continue;
+            if (PowerMechanismReader.Read(powerType, gameLanguage, includeMultiplayer) is not { } ruleText)
+                continue;
+
+            string canonicalTitle;
+            try
+            {
+                canonicalTitle = ModelDb.GetByIdOrNull<PowerModel>(ModelDb.GetId(powerType))?.Title.GetFormattedText() ?? fallbackName;
+            }
+            catch
+            {
+                canonicalTitle = fallbackName;
+            }
+
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                powerId,
+                canonicalTitle,
+                ruleText,
+                owner));
+        }
     }
 
     private bool IsEventSurfaceActive() =>
@@ -1401,6 +1489,7 @@ internal sealed class GameObserver(
         if (!publishControls)
             return view;
 
+        var visibleOptions = new List<(string Title, MegaCrit.Sts2.Core.Events.EventOption Option)>();
         if (NEventRoom.Instance?.Layout is { } layout)
         {
             foreach (var button in layout.OptionButtons)
@@ -1410,6 +1499,7 @@ internal sealed class GameObserver(
                 var option = button.Option;
                 var optionRef = registry.GetRef(option);
                 var title = option.Title.GetFormattedText();
+                visibleOptions.Add((title, option));
                 _objects[optionRef] = new OptionEntry(title);
                 _descriptions[optionRef] = option.Description.GetFormattedText();
                 AddHoverTipMaterial(optionRef, title, native.Id.ToString(), option.HoverTips);
@@ -1420,6 +1510,16 @@ internal sealed class GameObserver(
                     optionRef,
                     operation: native.IsFinished && option.IsProceed ? InteractionOperation.Proceed : null);
             }
+        }
+
+        if (EventMechanismReader.ReadEvent(native, visibleOptions, NEventRoom.Instance?.CustomEventNode is NFakeMerchant) is { } eventRule)
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                native.Id.ToString(),
+                name,
+                eventRule,
+                reference));
         }
 
         if (NEventRoom.Instance?.CustomEventNode is not NFakeMerchant
