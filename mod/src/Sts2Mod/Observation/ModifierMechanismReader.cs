@@ -320,21 +320,12 @@ internal static class ModifierMechanismReader
             {
                 gaps.Add("AfterCardDrawn");
             }
-            else if (drawBody.Calls.FirstOrDefault(s => s.Call.Method.Name is "SetThisTurn" or "SetThisCombat") is { } setCostStep)
+            else if (drawBody.Calls.FirstOrDefault(s =>
+                s.Call.Method.DeclaringType == typeof(MegaCrit.Sts2.Core.Entities.Cards.CardEnergyCost)
+                && s.Call.Method.Name is "SetThisTurn" or "SetThisCombat") is { } setCostStep
+                && IsRandomizedEnergyCostArg(type, setCostStep.Call.Arguments.ElementAtOrDefault(0))
+                && TryReadAfterCardDrawnConditions(setCostStep.Conditions, out var checksHand))
             {
-                var checksHand = setCostStep.Conditions.Any(c =>
-                {
-                    var expr = c.Value;
-                    var expected = c.Expected;
-                    while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
-                    {
-                        expr = inner;
-                        expected = !expected;
-                    }
-                    return expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Call { Method.Name: "get_Type" }, Right: Constant { Data: int rawPile } } op
-                        && (op.Operator == "bne.un" ? !expected : expected)
-                        && (PileType)rawPile == PileType.Hand;
-                });
                 var duration = setCostStep.Call.Method.Name == "SetThisCombat" ? " for this combat" : " this turn";
                 parts.Add(checksHand
                     ? $"If still in hand when drawn, randomizes this card's Energy cost{duration}."
@@ -344,6 +335,13 @@ internal static class ModifierMechanismReader
             {
                 gaps.Add("AfterCardDrawn");
             }
+        }
+
+        if (type.GetProperty("ShouldStartAtBottomOfDrawPile", DeclaredInstance)?.GetMethod is { } startBottom
+            && NativeRuleBody.Read(startBottom) is { Incomplete: false, Returns: [{ Conditions.Length: 0, Value: var sbVal }] }
+            && TryTruth(sbVal, out var startsAtBottom) && startsAtBottom)
+        {
+            parts.Add("Starts at the bottom of the initial draw pile (taking precedence over Innate, so it does not consume an opening-hand draw).");
         }
 
         if (type.GetMethod("ModifyShuffleOrder", DeclaredInstance) is { } shuffleOrder)
@@ -566,17 +564,21 @@ internal static class ModifierMechanismReader
     private static string? DescribeEnchantmentEligibility(Type type, HashSet<string> gaps)
     {
         var clauses = new List<string>();
-        if (type.GetMethod("CanEnchantCardType", DeclaredInstance) is { } byType
-            && NativeRuleBody.Read(byType) is { Incomplete: false } body)
+        if (type.GetMethod("CanEnchantCardType", DeclaredInstance) is { } byType)
         {
-            var types = body.Returns
-                .SelectMany(r => r.Value is Operation { Operator: "ceq", Right: Constant { Data: int ct } } && Enum.IsDefined(typeof(CardType), ct)
-                    ? [(CardType)ct]
-                    : Array.Empty<CardType>())
-                .Distinct()
-                .ToArray();
-            if (types.Length > 0)
+            var body = NativeRuleBody.Read(byType);
+            if (body.Incomplete)
+            {
+                gaps.Add("CanEnchantCardType");
+            }
+            else if (TryReadCanEnchantCardTypes(body) is { Length: > 0 } types)
+            {
                 clauses.Add($"Eligible cards: {string.Join("/", types)} only.");
+            }
+            else
+            {
+                gaps.Add("CanEnchantCardType");
+            }
         }
         if (type.GetMethod("CanEnchant", DeclaredInstance) is { } custom)
         {
@@ -603,6 +605,96 @@ internal static class ModifierMechanismReader
             }
         }
         return clauses.Count > 0 ? string.Join(" ", clauses) : null;
+    }
+
+    private static bool IsRandomizedEnergyCostArg(Type enchantmentType, Value? arg)
+    {
+        if (arg is Call { Method.Name: "NextInt" })
+            return true;
+        if (arg is Call { Method: MethodInfo helper } && helper.DeclaringType == enchantmentType
+            && NativeRuleBody.Read(helper) is { Incomplete: false } helperBody)
+            return helperBody.Calls.Any(c => c.Call.Method.Name == "NextInt");
+        return false;
+    }
+
+    private static bool TryReadAfterCardDrawnConditions(Test[] conditions, out bool checksHand)
+    {
+        checksHand = false;
+        foreach (var raw in conditions)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: var l, Right: var r } eqOp)
+            {
+                var isEq = eqOp.Operator == "bne.un" ? !expected : expected;
+                if (isEq && ((l is Input { Name: "card" } && r is Call { Method.Name: "get_Card" })
+                    || (r is Input { Name: "card" } && l is Call { Method.Name: "get_Card" })))
+                    continue;
+                if (isEq && l is Call { Method.Name: "get_Type", Method.DeclaringType: var pileDecl }
+                    && pileDecl == typeof(CardPile)
+                    && r is Constant { Data: int rawPile } && (PileType)rawPile == PileType.Hand)
+                {
+                    checksHand = true;
+                    continue;
+                }
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static CardType[]? TryReadCanEnchantCardTypes(NativeRuleBody body)
+    {
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length == 0)
+            return null;
+        var matched = new List<CardType>();
+        foreach (var ret in positive)
+        {
+            if (ret.Value is Operation { Operator: "ceq", Left: Input, Right: Constant { Data: int ct } }
+                && Enum.IsDefined(typeof(CardType), ct))
+            {
+                if (!matched.Contains((CardType)ct))
+                    matched.Add((CardType)ct);
+                continue;
+            }
+            if (TryTruth(ret.Value, out var rb) && rb)
+            {
+                var branchTypes = new List<CardType>();
+                foreach (var raw in ret.Conditions)
+                {
+                    var expr = raw.Value;
+                    var expected = raw.Expected;
+                    while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                    {
+                        expr = inner;
+                        expected = !expected;
+                    }
+                    if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Input, Right: Constant { Data: int cct } } op
+                        && Enum.IsDefined(typeof(CardType), cct))
+                    {
+                        var isEq = op.Operator == "bne.un" ? !expected : expected;
+                        if (isEq)
+                            branchTypes.Add((CardType)cct);
+                        continue;
+                    }
+                    return null;
+                }
+                if (branchTypes.Count == 0)
+                    return null;
+                foreach (var bt in branchTypes)
+                    if (!matched.Contains(bt))
+                        matched.Add(bt);
+                continue;
+            }
+            return null;
+        }
+        return matched.ToArray();
     }
 
     private static bool IsPositiveGainsBlockCanEnchant(NativeRuleBody body)

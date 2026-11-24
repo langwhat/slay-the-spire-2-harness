@@ -536,7 +536,7 @@ internal sealed partial class NativeRuleText
             }
             if (IsCountLessThanStacksCheck(cond, out var countPred)
                 && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes)
-                && (countedTypes.Count == 0 || countedTypes.Order().SequenceEqual(filteredTypes.Order())))
+                && countedTypes.Order().SequenceEqual(filteredTypes.Order()))
             {
                 firstPlaysPerTurn = true;
                 continue;

@@ -1101,8 +1101,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         return enumParamNames.Count > 0 && BodyReferencesAnyInput(helperBody, enumParamNames);
     }
 
-    private static bool BodyReferencesAnyInput(NativeRuleBody body, HashSet<string> paramNames)
-        => body.Calls.Any(s => ValueReferencesAnyInput(s.Call, paramNames) || s.Conditions.Any(c => ValueReferencesAnyInput(c.Value, paramNames)))
+    private bool BodyReferencesAnyInput(NativeRuleBody body, HashSet<string> paramNames)
+        => body.Calls.Any(s => !IsBenignReadOrPlumbingCall(s.Call.Method)
+                && (ValueReferencesAnyInput(s.Call, paramNames) || s.Conditions.Any(c => ValueReferencesAnyInput(c.Value, paramNames))))
             || body.FieldSteps.Any(f => ValueReferencesAnyInput(f.Assignment, paramNames) || f.Conditions.Any(c => ValueReferencesAnyInput(c.Value, paramNames)));
 
     private static bool ValueReferencesAnyInput(Value? value, HashSet<string> paramNames, int depth = 0)

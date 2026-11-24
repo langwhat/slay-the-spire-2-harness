@@ -120,6 +120,8 @@ internal sealed partial class NativeRuleText
             var active = group.Where(s => s.Conditions.All(IsCurrentRun)).ToArray();
             if (active.Length == 0)
                 continue;
+            if (active.Length > 1 && active.Select(s => Key(s.Call)).Distinct(StringComparer.Ordinal).Count() > 1)
+                return null;
 
             var call = active[0].Call;
             var declaring = call.Method.DeclaringType;

@@ -73,11 +73,11 @@ def _one_line(text: object) -> str:
 
 
 def _cache_path(session: str) -> Path:
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)[:80]
-    if safe != session:
-        digest = hashlib.sha256(session.encode("utf-8")).hexdigest()[:8]
-        safe = f"{safe}_{digest}"
-    return Path(tempfile.gettempdir()) / f"sts2_cli_session_{safe}.json"
+    if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", session):
+        return Path(tempfile.gettempdir()) / f"sts2_cli_session_raw_{session}.json"
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session)[:48]
+    digest = hashlib.sha256(session.encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / f"sts2_cli_session_enc_{safe}_{digest}.json"
 
 
 def _load_cache(session: str | None) -> JsonObj:
@@ -799,13 +799,16 @@ def _run_auto_advance(
         elif gkind == "card":
             opened_card_offers_list = _append_guard(opened_card_offers_list, gkey)
 
-    for step_idx in range(max_steps):
+    caller_outcome = _as_dict(payload.get("outcome"))
+    caller_completed_steps = caller_outcome.get("completed_steps")
+
+    for _step_idx in range(max_steps):
         nxt = _next_auto_step(
             current,
             opened_shops=set(opened_shops_list),
             opened_card_offers=set(opened_card_offers_list),
             allow_stateful_auto=allow_stateful_auto,
-            skip_card_open=skip_card_open and step_idx == 0,
+            skip_card_open=skip_card_open,
         )
         if nxt is None:
             break
@@ -814,6 +817,8 @@ def _run_auto_advance(
         code, text = _http_post(endpoint, body)
         if code != 200:
             _record_guard(guard)
+            if caller_outcome.get("status") == "completed" and caller_completed_steps is not None:
+                log.insert(0, f"caller_completed_steps={caller_completed_steps}")
             log.append(f"uncertain (HTTP {code}) during {desc}")
             current = _uncertain_auto_reply(
                 f"Auto-advance step '{desc}' got HTTP {code}; state is unconfirmed."
@@ -823,22 +828,31 @@ def _run_auto_advance(
             next_payload = _as_dict(json.loads(text))
         except json.JSONDecodeError:
             _record_guard(guard)
+            if caller_outcome.get("status") == "completed" and caller_completed_steps is not None:
+                log.insert(0, f"caller_completed_steps={caller_completed_steps}")
             log.append(f"uncertain (bad JSON) during {desc}")
             current = _uncertain_auto_reply(
                 f"Auto-advance step '{desc}' returned invalid JSON; state is unconfirmed."
             )
             break
-        out_status = _str(_as_dict(next_payload.get("outcome")).get("status"))
+        next_outcome = _as_dict(next_payload.get("outcome"))
+        out_status = _str(next_outcome.get("status"))
         if out_status != "completed":
-            # Only burn a one-shot guard if execution may have occurred; never on rejected.
-            if out_status != "rejected":
-                _record_guard(guard)
+            # On rejected auto-steps nothing executed: preserve the last completed payload
+            # (including caller_completed_steps) instead of masking it with an auto rejection.
+            if out_status == "rejected":
+                reason_code = _str(_as_dict(next_outcome.get("reason")).get("code"))
+                suffix = f" ({reason_code})" if reason_code else ""
+                log.append(f"auto paused on {desc}: rejected{suffix}")
+                break
+            _record_guard(guard)
+            if caller_outcome.get("status") == "completed" and caller_completed_steps is not None:
+                log.insert(0, f"caller_completed_steps={caller_completed_steps}")
             current = next_payload
-            log.append(f"stopped on {desc}")
+            log.append(f"stopped on {desc} ({out_status})")
             break
         _record_guard(guard)
         if next_payload.get("state") == current.get("state"):
-            current = next_payload
             log.append(f"no-progress on {desc}")
             break
         log.append(desc)
@@ -848,6 +862,14 @@ def _run_auto_advance(
             opened_shops_list = _append_guard(opened_shops_list, _str(x))
         for x in _as_list(cache.get("opened_card_offers")):
             opened_card_offers_list = _append_guard(opened_card_offers_list, _str(x))
+    if (
+        log
+        and current is not payload
+        and caller_outcome.get("status") == "completed"
+        and caller_completed_steps is not None
+        and not log[0].startswith("caller_completed_steps=")
+    ):
+        log.insert(0, f"caller_completed_steps={caller_completed_steps}")
     cache["opened_shops"] = opened_shops_list[-32:]
     cache["opened_card_offers"] = opened_card_offers_list[-32:]
     return current, log
@@ -1572,8 +1594,7 @@ def _parsed_arg_flags(tool_name: str, arg_text: str) -> tuple[bool, bool]:
     is_state = tool_name == "run_inspect" and parsed.get("area") == "state"
     steps = _as_list(parsed.get("steps"))
     has_empty_select = any(
-        _as_dict(s).get("kind") == "select" and not _as_list(_as_dict(s).get("refs"))
-        for s in steps
+        _as_dict(s).get("kind") == "select" and not _as_list(_as_dict(s).get("refs")) for s in steps
     )
     return is_state, has_empty_select
 

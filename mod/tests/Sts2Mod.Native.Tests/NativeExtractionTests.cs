@@ -1153,6 +1153,39 @@ public sealed class NativeExtractionTests
         var (multiBranchReplayText, multiBranchReplayGaps) = PowerMechanismReader.Describe(typeof(SyntheticMultiBranchReplayPower), true);
         Assert.Null(multiBranchReplayText);
         Assert.NotEmpty(multiBranchReplayGaps);
+
+        // 34. R7 soundness: Calamity full-hand overflow, Imbued bottom-of-draw-pile ahead of Innate,
+        // foreach helper doing benign read only, depth>2 cost helper, branch-varying Draw arg,
+        // Skill-vs-Hand enum-2 collision & fixed SetThisCombat(2), early-return CanEnchantCardType,
+        // and ModifyCardPlayResultLocation type/count mismatch.
+        var (calamityText, calamityGaps) = PowerMechanismReader.Describe(typeof(CalamityPower), true);
+        Assert.Empty(calamityGaps);
+        Assert.Contains("overflows to discard pile if hand is full", calamityText!, StringComparison.Ordinal);
+
+        var imbuedText = ModifierMechanismReader.ReadEnchantment(ModelDb.Enchantment<Imbued>(), "eng");
+        Assert.NotNull(imbuedText);
+        Assert.Contains("bottom of the initial draw pile (taking precedence over Innate", imbuedText!, StringComparison.Ordinal);
+
+        var (feBenignReadText, feBenignReadGaps) = PowerMechanismReader.Describe(typeof(SyntheticForeachBenignReadHelperPower), true);
+        Assert.Empty(feBenignReadGaps);
+        Assert.Contains("for each item in owner's hand: owner gains 1 Energy", feBenignReadText!, StringComparison.Ordinal);
+
+        var deepCostMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.SetFreeThenDeepHelperSetNine), BindingFlags.Static | BindingFlags.Public)!;
+        Assert.Null(describeCardCost.Invoke(null, [NativeRuleBody.Read(deepCostMethod)]));
+
+        var (branchArgCardText, _) = PowerMechanismReader.Describe(typeof(SyntheticBranchingDrawCardPower), true);
+        Assert.DoesNotContain("draw 1 card", branchArgCardText ?? "", StringComparison.Ordinal);
+
+        var tryReadCardTypes = typeof(ModifierMechanismReader).GetMethod("TryReadCanEnchantCardTypes", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var earlyTypeMethod = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.EarlyReturnAttackOrSkill), BindingFlags.Static | BindingFlags.Public)!;
+        var parsedTypes = (CardType[]?)tryReadCardTypes.Invoke(null, [NativeRuleBody.Read(earlyTypeMethod)]);
+        Assert.NotNull(parsedTypes);
+        Assert.Contains(CardType.Attack, parsedTypes!);
+        Assert.Contains(CardType.Skill, parsedTypes!);
+
+        var (mismatchedDestText, mismatchedDestGaps) = PowerMechanismReader.Describe(typeof(SyntheticMismatchedDestCountPower), true);
+        Assert.Null(mismatchedDestText);
+        Assert.NotEmpty(mismatchedDestGaps);
     }
 
     [Fact]
@@ -1375,6 +1408,23 @@ public sealed class NativeExtractionTests
         {
             card.SetToFreeThisTurn();
             HelperSetNine(card);
+        }
+
+        private static void DeepHelperC(CardModel card) => card.EnergyCost.SetThisTurn(9);
+        private static void DeepHelperB(CardModel card) => DeepHelperC(card);
+        private static void DeepHelperA(CardModel card) => DeepHelperB(card);
+
+        public static void SetFreeThenDeepHelperSetNine(CardModel card)
+        {
+            card.SetToFreeThisTurn();
+            DeepHelperA(card);
+        }
+
+        public static bool EarlyReturnAttackOrSkill(CardType type)
+        {
+            if (type == CardType.Attack)
+                return true;
+            return type == CardType.Skill;
         }
     }
 
@@ -1959,6 +2009,60 @@ public sealed class NativeExtractionTests
             if (card.Type == CardType.Attack)
                 return playCount + 1;
             return playCount + 2;
+        }
+    }
+
+    private sealed class SyntheticForeachBenignReadHelperPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        private Task PerCard(CardModel card)
+        {
+            _ = card.Type;
+            return PlayerCmd.GainEnergy(1m, Owner.Player!);
+        }
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            foreach (var c in PileType.Hand.GetPile(Owner.Player!).Cards)
+                await PerCard(c);
+        }
+    }
+
+    private sealed class SyntheticBranchingDrawCard : CardModel
+    {
+        public SyntheticBranchingDrawCard() : base(1, CardType.Skill, CardRarity.Token, TargetType.Self) { }
+        protected override Task OnPlay(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+            => CardPileCmd.Draw(choiceContext, IsUpgraded ? 3m : 1m, Owner);
+    }
+
+    private sealed class SyntheticBranchingDrawCardPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override async Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+        {
+            if (!participants.Contains(Owner))
+                return;
+            var card = combatState.CreateCard<SyntheticBranchingDrawCard>(Owner.Player!);
+            await CardPileCmd.AddGeneratedCardToCombat(card, PileType.Hand, Owner.Player!);
+        }
+    }
+
+    private sealed class SyntheticMismatchedDestCountPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override CardLocation ModifyCardPlayResultLocation(CardModel card, bool isAutoPlay, ResourceInfo resources, CardLocation location)
+        {
+            if (card.Owner.Creature != Owner || card.Type != CardType.Attack || location.pileType != PileType.Discard)
+                return location;
+            if (CombatManager.Instance.History.CardPlaysStarted.Count(e => e.Actor == Owner && e.HappenedThisTurn(CombatState)) >= Amount)
+                return location;
+            location.pileType = PileType.Draw;
+            location.position = CardPilePosition.Top;
+            return location;
         }
     }
 }

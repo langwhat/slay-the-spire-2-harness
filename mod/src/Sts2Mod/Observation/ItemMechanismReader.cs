@@ -238,15 +238,17 @@ internal static class ItemMechanismReader
                 && (m.Name.Contains("StarCost", StringComparison.Ordinal) || m.Name.Contains("EnergyCost", StringComparison.Ordinal))
                 && !m.Name.StartsWith("get_", StringComparison.Ordinal))
                 return true;
-            if (depth < 2 && m is MethodInfo mi && !mi.IsSpecialName && !mi.ContainsGenericParameters
+            if (m is MethodInfo mi && !mi.IsSpecialName && !mi.ContainsGenericParameters
                 && dt is not null && dt != typeof(CardModel)
                 && (typeof(CardModel).IsAssignableFrom(dt)
                     || dt.Namespace?.StartsWith("Sts2Mod", StringComparison.Ordinal) == true
                     || (dt.Namespace?.StartsWith("System", StringComparison.Ordinal) != true
                         && dt.Namespace?.StartsWith("Godot", StringComparison.Ordinal) != true
-                        && dt.Assembly != typeof(CardModel).Assembly))
-                && NativeRuleBody.Read(mi) is var helperBody)
+                        && dt.Assembly != typeof(CardModel).Assembly)))
             {
+                if (depth >= 2)
+                    return true;
+                var helperBody = NativeRuleBody.Read(mi);
                 if (helperBody.Incomplete || HasOtherCostMutation(helperBody, depth + 1))
                     return true;
             }

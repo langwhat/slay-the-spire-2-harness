@@ -75,9 +75,10 @@ internal sealed partial class NativeRuleText
             && (takesSingle ? "1" : ValueText(factoryCall.Arguments[2])) is { } factoryCount
             && DescribeCardFactoryPool(factoryCall.Arguments[1]) is { } poolDesc)
         {
+            var overflowNote = pile == PileType.Hand ? " (overflows to discard pile if hand is full)" : "";
             if (factoryCall.Method.Name == "GetDistinctForCombat")
-                return new Effect($"generate up to {factoryCount} distinct {poolDesc} card(s) into {Possessive(factoryRecipient)} {pileLabel}");
-            return new Effect($"generate {factoryCount} {poolDesc} card(s) (duplicates allowed) into {Possessive(factoryRecipient)} {pileLabel}");
+                return new Effect($"generate up to {factoryCount} distinct {poolDesc} card(s) into {Possessive(factoryRecipient)} {pileLabel}{overflowNote}");
+            return new Effect($"generate {factoryCount} {poolDesc} card(s) (duplicates allowed) into {Possessive(factoryRecipient)} {pileLabel}{overflowNote}");
         }
 
         return null;
