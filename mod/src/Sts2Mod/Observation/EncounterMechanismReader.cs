@@ -27,21 +27,28 @@ internal static class EncounterMechanismReader
         int MaxHp,
         string? RuleText);
 
-    private static readonly ConcurrentDictionary<CacheKey, string?> Cache = new();
+    private sealed record CachedEncounter(string? Text, IReadOnlyList<Type> HoistedPowers);
+    private static readonly IReadOnlyList<Type> EmptyHoistedPowers = [];
+    private static readonly ConcurrentDictionary<CacheKey, CachedEncounter> Cache = new();
     private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
 
     public static string? Read(EncounterModel encounter, int ascensionLevel, GameMode gameMode, string language)
+        => ReadWithHoistedPowers(encounter, ascensionLevel, gameMode, language).Text;
+
+    public static (string? Text, IReadOnlyList<Type> HoistedPowers) ReadWithHoistedPowers(
+        EncounterModel encounter, int ascensionLevel, GameMode gameMode, string language)
     {
         var id = encounter.Id.ToString();
         var key = new CacheKey(id, ascensionLevel, gameMode, language);
         if (Cache.TryGetValue(key, out var cached))
-            return cached;
+            return (cached.Text, cached.HoistedPowers);
 
         string? text = null;
+        IReadOnlyList<Type> hoistedPowers = EmptyHoistedPowers;
         try
         {
             // Unresolved native paths are extractor work items. They stay in the diagnostics log.
-            (text, var gaps) = Describe(encounter);
+            (text, var gaps, hoistedPowers) = DescribeWithHoistedPowers(encounter);
             if (gaps.Count > 0 && LoggedGaps.TryAdd(id, 0))
             {
                 GD.PushWarning(
@@ -54,44 +61,52 @@ internal static class EncounterMechanismReader
                 GD.PushWarning($"[sts2agent] Encounter mechanism unavailable for {id}: {error.Message}");
         }
 
-        Cache[key] = text;
-        return text;
+        Cache[key] = new CachedEncounter(text, hoistedPowers);
+        return (text, hoistedPowers);
     }
 
     internal static (string? Text, IReadOnlySet<string> Gaps) Describe(EncounterModel encounter)
     {
+        var (text, gaps, _) = DescribeWithHoistedPowers(encounter);
+        return (text, gaps);
+    }
+
+    internal static (string? Text, IReadOnlySet<string> Gaps, IReadOnlyList<Type> HoistedPowers) DescribeWithHoistedPowers(EncounterModel encounter)
+    {
         var gaps = new HashSet<string>(StringComparer.Ordinal);
+        var hoisted = new HashSet<Type>();
         var generate = encounter.GetType().GetMethod("GenerateMonsters", DeclaredInstance, Type.EmptyTypes);
         if (generate is null)
         {
             gaps.Add("GenerateMonsters");
-            return (null, gaps);
+            return (null, gaps, EmptyHoistedPowers);
         }
 
         var body = NativeRuleBody.Read(generate);
         if (body.Incomplete)
         {
             gaps.Add("GenerateMonsters");
-            return (null, gaps);
+            return (null, gaps, EmptyHoistedPowers);
         }
 
         var spawns = ExtractSpawns(body, gaps);
         if (spawns.Count == 0)
         {
             gaps.Add("GenerateMonsters/empty");
-            return (null, gaps);
+            return (null, gaps, EmptyHoistedPowers);
         }
         if (gaps.Count > 0)
-            return (null, gaps);
+            return (null, gaps, EmptyHoistedPowers);
 
         var sequentialRngGroups = FindSequentialRngGroups(spawns);
         var described = new List<SpawnDescribe>(spawns.Count);
         foreach (var spawn in spawns)
         {
             var monster = CreateConfiguredMonster(spawn.MonsterType, spawn.Setters);
-            var (ruleText, monsterGaps) = EnemyMechanismReader.Describe(monster);
+            var (ruleText, monsterGaps, _, monsterHoisted) = EnemyMechanismReader.DescribeWithPowers(monster);
             foreach (var gap in monsterGaps)
                 gaps.Add($"{spawn.MonsterType.Name}/{gap}");
+            hoisted.UnionWith(monsterHoisted);
 
             if (ruleText is not null && spawn.Setters.FirstOrDefault(setter => setter.ConstantValue is null) is { } rngSetter)
             {
@@ -107,12 +122,13 @@ internal static class EncounterMechanismReader
                 ruleText));
         }
 
+        var orderedHoisted = hoisted.OrderBy(t => ModelDb.GetId(t).ToString(), StringComparer.Ordinal).ToArray();
         var lineup = FormatLineup(described);
         var sections = FormatRuleSections(described);
         if (sections.Count == 0)
-            return ($"Monsters: {lineup}", gaps);
+            return ($"Monsters: {lineup}", gaps, orderedHoisted);
 
-        return ($"Monsters: {lineup}\n{string.Join("\n", sections)}", gaps);
+        return ($"Monsters: {lineup}\n{string.Join("\n", sections)}", gaps, orderedHoisted);
     }
 
     private static List<SpawnSpec> ExtractSpawns(NativeRuleBody body, HashSet<string> gaps)

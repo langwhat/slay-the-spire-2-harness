@@ -17,7 +17,46 @@ internal static class PowerMechanismReader
         bool IncludeMultiplayerScale);
 
     private static readonly ConcurrentDictionary<CacheKey, string?> Cache = new();
+    private static readonly ConcurrentDictionary<CacheKey, bool> StandaloneCache = new();
     private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
+
+    internal static bool IsStandaloneReadable(Type powerType, bool includeMultiplayerScale = false)
+    {
+        if (!typeof(PowerModel).IsAssignableFrom(powerType) || powerType.IsAbstract)
+            return false;
+
+        string id;
+        try
+        {
+            id = ModelDb.GetId(powerType).ToString();
+        }
+        catch
+        {
+            return false;
+        }
+
+        var runState = MegaCrit.Sts2.Core.Runs.RunManager.Instance.DebugOnlyGetState();
+        var ascension = runState?.AscensionLevel ?? 0;
+        var mode = runState?.GameMode ?? MegaCrit.Sts2.Core.Runs.GameMode.Standard;
+        var isDread = MegaCrit.Sts2.Core.Helpers.AscensionHelper.IsDread();
+        var key = new CacheKey(id, "", ascension, isDread, mode, includeMultiplayerScale);
+        if (StandaloneCache.TryGetValue(key, out var cached))
+            return cached;
+
+        var readable = false;
+        try
+        {
+            var (described, gaps) = Describe(powerType, includeMultiplayerScale);
+            readable = gaps.Count == 0 && !string.IsNullOrWhiteSpace(described);
+        }
+        catch
+        {
+            readable = false;
+        }
+
+        StandaloneCache[key] = readable;
+        return readable;
+    }
 
     public static string? Read(Type powerType, string language, bool includeMultiplayerScale = false)
     {

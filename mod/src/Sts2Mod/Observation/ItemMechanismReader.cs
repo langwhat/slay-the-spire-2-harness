@@ -241,7 +241,7 @@ internal static class ItemMechanismReader
                 : "Selects card(s) in hand to exhaust first; draws cards only if a card was selected and exhausted.";
         }
 
-        // Discard entire hand and draw equal count (e.g., CalculatedGamble).
+        // Discard entire hand and draw (either equal to discarded count as in CalculatedGamble, or a fixed count as in WheelOfFortune).
         var discardAndDrawIdx = FindStepIndex(ordered, c => c.Method.DeclaringType == typeof(CardCmd) && c.Method.Name == nameof(CardCmd.DiscardAndDraw));
         if (discardAndDrawIdx >= 0)
         {
@@ -249,7 +249,11 @@ internal static class ItemMechanismReader
             if (ddCall.Arguments.ElementAtOrDefault(1) is Call { Method.Name: "get_Cards", Receiver: Call { Method.Name: "GetPile", Arguments: [Constant { Data: (int)PileType.Hand }, ..] } })
             {
                 var noDrawLabel = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.NoDrawPower));
-                return $"Counts and discards all other cards currently in hand first, then draws that many cards (draw step is blocked by {noDrawLabel}).";
+                var drawCountArg = ddCall.Arguments.ElementAtOrDefault(2);
+                if (drawCountArg is Call { Method.Name: nameof(Enumerable.Count) or "get_Count" })
+                    return $"Counts and discards all other cards currently in hand first, then draws that many cards (draw step is blocked by {noDrawLabel}).";
+                if (drawCountArg is Call { Method.Name: "get_IntValue" or "get_BaseValue" })
+                    return $"Discards all other cards currently in hand first, then draws its fixed draw count even if no other cards were in hand (draw step is blocked by {noDrawLabel}).";
             }
         }
 

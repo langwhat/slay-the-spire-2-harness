@@ -167,13 +167,13 @@ internal sealed partial class NativeRuleText
         if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un", Left: Input { Name: "side" },
             Right: Call { Method.DeclaringType: var creature, Method.Name: "get_Side", Receiver: var holder } } comparison
             && creature == typeof(Creature) && IsOwner(holder))
-            return expected == (comparison.Operator != "bne.un") ? "turn side is holder's side" : "turn side is opposing side";
+            return expected == (comparison.Operator != "bne.un") ? "turn side is owner's side" : "turn side is opposing side";
 
         if (test.Value is Operation { Operator: "beq" or "ceq" or "bne.un",
             Left: Call { Method.Name: "get_CurrentSide" },
             Right: Call { Method.DeclaringType: var sideOwner, Method.Name: "get_Side", Receiver: var sideReceiver } } sideCheck
             && sideOwner == typeof(Creature) && IsOwner(sideReceiver))
-            return expected == (sideCheck.Operator != "bne.un") ? "acting side=holder's side" : "acting side≠holder's side";
+            return expected == (sideCheck.Operator != "bne.un") ? "acting side=owner's side" : "acting side≠owner's side";
 
         if (test.Value is Call { Method.Name: "CanAfflict", Receiver: Call { Method: { Name: "Affliction", IsGenericMethod: true } aff },
             Arguments: [var targetCard] } && ValueText(targetCard) is { } cardLabel)
@@ -212,7 +212,7 @@ internal sealed partial class NativeRuleText
                 filteredType = (CardType)(int)ct;
         }
         var noun = filteredType is { } kind ? $"{kind} play" : "card play";
-        return expected ? $"holder has started a {noun} this turn" : $"holder has not started a {noun} this turn";
+        return expected ? $"owner has started a {noun} this turn" : $"owner has not started a {noun} this turn";
     }
 
     private Type? TeammatePowerAllDeadType(MethodInfo method)
@@ -268,14 +268,14 @@ internal sealed partial class NativeRuleText
             => "this power's target and its pets",
         Call { Method.Name: "GetOpponentsOf", Arguments: [var selfCreature] }
             when selfCreature == Self || selfCreature is Call { Method.Name: "get_Creature", Receiver: Input { Name: "this" } }
-            => "player targets",
+            => PlayerTargetsLabel(),
         Call { Method.Name: "get_Monster", Method.DeclaringType: var type, Receiver: Input { Name: "dealer" } } when type == typeof(Creature)
-            => "damage dealer",
+            => "attacker",
         Call { Method.Name: "get_PetOwner", Method.DeclaringType: var type, Receiver: Input { Name: "dealer" } } when type == typeof(Creature)
-            => "damage dealer's owner",
+            => "attacker's owner",
         Call { Method.Name: "get_PetOwner", Method.DeclaringType: var type, Receiver: { } targetPet }
-            when type == typeof(Creature) && ValueText(targetPet) == "player targets"
-            => "player targets",
+            when type == typeof(Creature) && ValueText(targetPet) == PlayerTargetsLabel()
+            => PlayerTargetsLabel(),
         Call { Method.Name: "get_Player", Method.DeclaringType: var type, Receiver: Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_PetOwner" } pet } }
             when type == typeof(Creature) => ValueText(pet),
         Call { Method.Name: "get_UnblockedDamage" or "get_TotalDamage", Method.DeclaringType: var type, Receiver: { } hit } damage
@@ -291,7 +291,7 @@ internal sealed partial class NativeRuleText
             Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
                 Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo countPred }] }] }
                 when ofType.GetGenericArguments()[0].Name == "CardAfflictedEntry" && AfflictionFromPredicate(countPred) is { } affType
-                => $"holder's cards afflicted with {ModelLabel(affType)} this turn",
+                => $"owner's cards afflicted with {ModelLabel(affType)} this turn",
             _ => AttackHit(value),
         };
     }
@@ -315,7 +315,7 @@ internal sealed partial class NativeRuleText
             if (!IsGameplayField(backing))
                 return null;
             _trackedMonsterInts.Add((getter.Name[4..], backing));
-            return getter.Name[4..];
+            return HumanizeLower(getter.Name[4..]);
         }
         var body = Body(getter);
         if (body.Incomplete || (!isPropertyGetter && (body.Writes.Count > 0 || body.FieldSteps.Count > 0)))
@@ -332,7 +332,7 @@ internal sealed partial class NativeRuleText
                 ? setVal
                 : defaultVal;
             _trackedMonsterNullableDefaults.Add((getter.Name[4..], initial));
-            return getter.Name[4..];
+            return HumanizeLower(getter.Name[4..]);
         }
         var active = body.Returns.Where(r => r.Conditions.All(IsCurrentRun)).ToArray();
         return active is [var ret] && ret.Conditions.All(IsDreadTest) ? ValueText(ret.Value) : null;
@@ -371,6 +371,6 @@ internal sealed partial class NativeRuleText
                 Call { Method.Name: "get_Receiver", Method.DeclaringType: var result, Receiver: Input }, Right: var holder }, Conditions.Length: 0 }] }
             || result != typeof(DamageResult) || !IsOwner(holder))
             return null;
-        return "the first hit on the holder in this attack";
+        return "the first hit on owner in this attack";
     }
 }

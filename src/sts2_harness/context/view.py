@@ -13,6 +13,13 @@ from sts2_harness.context.models import (
 )
 
 ACT_MECHANISM_OWNER = "act"
+ACT_MECHANISM_OWNER_PREFIX = f"{ACT_MECHANISM_OWNER}:"
+
+
+def is_act_mechanism_owner(owner: object) -> bool:
+    return isinstance(owner, str) and (
+        owner == ACT_MECHANISM_OWNER or owner.startswith(ACT_MECHANISM_OWNER_PREFIX)
+    )
 
 
 def _run_player(player: native.CombatPlayer | native.Player) -> native.Player:
@@ -209,7 +216,7 @@ def visible_observation(
     mechanisms = tuple(
         entry
         for entry in observation.mechanisms
-        if not (entry.owner == ACT_MECHANISM_OWNER and role is not native.DecisionOwner.RUN)
+        if not (is_act_mechanism_owner(entry.owner) and role is not native.DecisionOwner.RUN)
         and (
             own_menu
             or (

@@ -37,7 +37,7 @@ internal sealed partial class NativeRuleText
         {
             handled.Add(drawHook.Name);
             if (PlayerSubtraction(type, drawHook.Name, "count", floorAtZero: true))
-                lines.Add($"{powerPrefix}Turn-start card draw: if player=holder: reduce by this power's current stacks (minimum 0)");
+                lines.Add($"{powerPrefix}Turn-start card draw: if player=owner: reduce by stacks (minimum 0)");
             else
                 Gap($"{type.Name}.{drawHook.Name}");
         }
@@ -45,7 +45,7 @@ internal sealed partial class NativeRuleText
         {
             handled.Add(energyHook.Name);
             if (PlayerSubtraction(type, energyHook.Name, "amount", floorAtZero: false))
-                lines.Add($"{powerPrefix}Maximum Energy: if player=holder: reduce by this power's current stacks");
+                lines.Add($"{powerPrefix}Maximum Energy: if player=owner: reduce by stacks");
             else
                 Gap($"{type.Name}.{energyHook.Name}");
         }
@@ -54,7 +54,7 @@ internal sealed partial class NativeRuleText
             handled.Add("BeforeCardPlayed");
             handled.Add("BeforeSideTurnStart");
             handled.Add("ShouldPlay");
-            lines.Add($"{powerPrefix}Card play limit: prevent holder from starting another card play once the turn's play count (including replays and autoplay) reaches this power's current stacks; resets before holder's turn starts");
+            lines.Add($"{powerPrefix}Card play limit: prevent owner from starting another card play once the turn's play count (including replays and autoplay) reaches stacks; resets before owner's turn starts");
         }
         foreach (var costHookName in new[] { "TryModifyEnergyCostInCombat", "TryModifyEnergyCostInCombatLate" })
         {
@@ -120,7 +120,7 @@ internal sealed partial class NativeRuleText
         if (store.Assigned is Call { Method.Name: "op_Addition", Arguments: [Input { Name: "originalCost" }, var delta] }
             && IsStackAmount(delta))
         {
-            return $"In-combat Energy cost: {subject} cost +this power's current stacks Energy";
+            return $"In-combat Energy cost: {subject} cost +stacks Energy";
         }
         return null;
     }
@@ -162,7 +162,7 @@ internal sealed partial class NativeRuleText
         }
 
         var subject = firstPlaysPerTurn
-            ? "each of holder's first N non-dupe card plays each turn (where N = this power's current stacks)"
+            ? "each of owner's first N non-dupe card plays each turn (where N = stacks)"
             : filteredType is { } kind
                 ? $"owned non-dupe {kind} cards"
                 : "owned non-dupe cards";
@@ -225,9 +225,9 @@ internal sealed partial class NativeRuleText
             if (decrement)
                 handled.Add("AfterModifyingPowerAmountReceived");
             var outcome = decrement
-                ? $"(reduce applied stacks to 0; attempt to subtract one {PowerLabel(type)} stack)"
+                ? $"(reduce applied stacks to 0; attempt to subtract 1 {PowerLabel(type)} stack)"
                 : "reduce applied stacks to 0";
-            lines.Add($"{powerPrefix}When a power would be applied to holder: if applied power is a visible Debuff: {outcome}");
+            lines.Add($"{powerPrefix}When a power would be applied to owner: if applied power is a visible Debuff: {outcome}");
         }
         else
             Gap($"{type.Name}.{modify.Name}");
@@ -285,7 +285,7 @@ internal sealed partial class NativeRuleText
             handled.Add("ModifyHpLostBeforeOstyLate");
             handled.Add("AfterDamageReceived");
             handled.Add("BeforeSideTurnStart");
-            lines.Add($"{powerPrefix}HP loss cap per side turn: total unblocked HP lost by holder during each side turn is capped at this power's current stacks (resets before every side turn starts)");
+            lines.Add($"{powerPrefix}HP loss cap per side turn: total unblocked HP lost by owner during each side turn is capped at stacks (resets before every side turn starts)");
         }
         if (FindOverride(type, "ModifyHpLostAfterOstyLate") is { } bufferHook)
         {
@@ -311,7 +311,7 @@ internal sealed partial class NativeRuleText
             handled.Add(afterHook.Name);
             consumeSuffix = $" and subtract 1 {PowerLabel(power)} stack";
         }
-        return $"Prevent next HP loss: when holder would lose nonzero HP (checked after Block and {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} redirection), reduce HP loss to 0{consumeSuffix}";
+        return $"Prevent next HP loss: when owner would lose nonzero HP (checked after Block and {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} redirection), reduce HP loss to 0{consumeSuffix}";
     }
 
     private List<string>? ReadDamageCap(MethodInfo hook)

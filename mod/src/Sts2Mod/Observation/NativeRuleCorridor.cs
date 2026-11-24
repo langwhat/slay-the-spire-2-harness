@@ -118,7 +118,7 @@ internal sealed partial class NativeRuleText
             if (addsSelfType)
             {
                 _summons.Add(ratType);
-                return [new Effect($"if an encounter slot is empty: increment shared CallForBackupCount across all {ModelLabel(ratType)} enemies and summon {ModelLabel(ratType)}")];
+                return [new Effect($"if an encounter slot is empty: increment shared call for backup count across all {ModelLabel(ratType)} enemies and summon {ModelLabel(ratType)}")];
             }
         }
 
@@ -169,7 +169,7 @@ internal sealed partial class NativeRuleText
             if (propName.Contains("Anim", StringComparison.Ordinal) || propName.Contains("Vfx", StringComparison.Ordinal))
                 continue;
             if (ValueText(rhs) is { } rhsText)
-                overrides.Add($"{propName}={rhsText}");
+                overrides.Add($"{HumanizeLower(propName)}={rhsText}");
         }
 
         return overrides.Count > 0 ? $" (with {string.Join(", ", overrides)})" : null;
@@ -238,8 +238,8 @@ internal sealed partial class NativeRuleText
             return null;
 
         return expected
-            ? $"TurnsUntilSummonable≤0 and CallForBackupCount<{maxBackups} and an encounter slot is empty and no ally already intends CALL_FOR_BACKUP_MOVE"
-            : $"TurnsUntilSummonable>0 or CallForBackupCount≥{maxBackups} or no encounter slot is empty or an ally already intends CALL_FOR_BACKUP_MOVE";
+            ? $"turns until summonable≤0 and call for backup count<{maxBackups} and an encounter slot is empty and no ally already intends CALL_FOR_BACKUP_MOVE"
+            : $"turns until summonable>0 or call for backup count≥{maxBackups} or no encounter slot is empty or an ally already intends CALL_FOR_BACKUP_MOVE";
     }
 
     private string? CorridorCombatValue(Value value)
@@ -376,8 +376,8 @@ internal sealed partial class NativeRuleText
             return false;
 
         _powers.Add(typeof(MinionPower));
-        lines.Add($"{prefix}After this power is applied: if holder lacks {PowerLabel(typeof(MinionPower))}: attempt to apply 1 {PowerLabel(typeof(MinionPower))} to holder");
-        lines.Add($"{prefix}On holder death: if death was not prevented: holder remains in combat, becomes untargetable while reviving, removes buffs and temporary debuffs (keeping permanent debuffs), and replaces its next move with reviving to full HP");
+        lines.Add($"{prefix}After this power is applied: if owner lacks {PowerLabel(typeof(MinionPower))}: attempt to apply 1 {PowerLabel(typeof(MinionPower))} to owner");
+        lines.Add($"{prefix}On owner death: if death was not prevented: owner remains in combat, becomes untargetable while reviving, removes buffs and temporary debuffs (keeping permanent debuffs), and replaces its next move with reviving to full HP");
         return true;
     }
 
@@ -407,9 +407,9 @@ internal sealed partial class NativeRuleText
             followUpClause = $", then → {nextMoveId}";
         }
 
-        lines.Add($"{prefix}Should clear block: if holder=event target: no");
-        lines.Add($"{prefix}After block is broken: if event target=holder: stun holder for one action{followUpClause} and remove {PowerLabel(power)}");
-        lines.Add($"{prefix}After this power is removed: remove all Block from former holder");
+        lines.Add($"{prefix}Block expires at turn start: if owner=event target: no");
+        lines.Add($"{prefix}After block is broken: if event target=owner: stun owner for one action{followUpClause} and remove {PowerLabel(power)}");
+        lines.Add($"{prefix}After this power is removed: remove all Block from former owner");
         return true;
     }
 
@@ -430,8 +430,8 @@ internal sealed partial class NativeRuleText
             return false;
 
         var factor = decreaseVar.BaseValue / 100m;
-        lines.Add($"{prefix}Damage multiplier per hit, after additions: if target=holder and hit has Move without Unpowered: ×{Number(factor)}");
-        lines.Add($"{prefix}After damage resolves: if target=holder and hit has Move without Unpowered and nonzero HP lost: subtract 1 {PowerLabel(power)} stack; if stacks reach 0, stun holder for one action");
+        lines.Add($"{prefix}Damage multiplier per hit, after additions: if target=owner and powered attack: ×{Number(factor)}");
+        lines.Add($"{prefix}After damage resolves: if target=owner and powered attack and nonzero HP lost: subtract 1 {PowerLabel(power)} stack; if stacks reach 0, stun owner for one action");
         return true;
     }
 
@@ -449,7 +449,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         _powers.Add(typeof(StrengthPower));
-        line = $"{prefix}Once after the entire attack resolves: if attacker=holder and attack has Move without Unpowered and deals nonzero unblocked damage to an opponent (counting a player and their pet once total): attempt to apply this power's current stacks {PowerLabel(typeof(StrengthPower))} to holder";
+        line = $"{prefix}Once after the entire attack resolves: if attacker=owner and attack is a powered attack and deals nonzero unblocked damage to an opponent (counting a player and their pet once total): attempt to apply stacks {PowerLabel(typeof(StrengthPower))} to owner";
         return true;
     }
 
@@ -476,8 +476,8 @@ internal sealed partial class NativeRuleText
         if (!losesStr || !losesDex || !restoresAtTurnEnd)
             return false;
 
-        lines.Add($"{prefix}After each card play resolves: if played card's owner=holder: apply −1 {PowerLabel(typeof(StrengthPower))} and −1 {PowerLabel(typeof(DexterityPower))} to holder for this turn");
-        lines.Add($"{prefix}After side turn ends: if holder participates this turn: restore the {PowerLabel(typeof(StrengthPower))} and {PowerLabel(typeof(DexterityPower))} lost from this power this turn");
+        lines.Add($"{prefix}After each card play resolves: if played card's player=owner: apply −1 {PowerLabel(typeof(StrengthPower))} and −1 {PowerLabel(typeof(DexterityPower))} to owner for this turn");
+        lines.Add($"{prefix}After side turn ends: if owner participates this turn: restore the {PowerLabel(typeof(StrengthPower))} and {PowerLabel(typeof(DexterityPower))} lost from this power this turn");
         return true;
     }
 
@@ -500,7 +500,7 @@ internal sealed partial class NativeRuleText
 
         var statType = applyBack.Call.Method.GetGenericArguments()[0];
         _powers.Add(statType);
-        lines.Add($"{prefix}Stat theft tracking: records negative {PowerLabel(statType)} applied by holder to each player; on holder death (if death was not prevented), restores the recorded {PowerLabel(statType)} to each player");
+        lines.Add($"{prefix}Stat theft tracking: records negative {PowerLabel(statType)} applied by owner to each player; on owner death (if death was not prevented), restores the recorded {PowerLabel(statType)} to each player");
         return true;
     }
 
@@ -516,7 +516,7 @@ internal sealed partial class NativeRuleText
         if (!returnsToDeck)
             return false;
 
-        line = $"{prefix}Before death: if event target=holder and a stolen card is stored: return that card to its owner's deck and combat rewards";
+        line = $"{prefix}Before death: if event target=owner and a stolen card is stored: return that card to its player's deck and combat rewards";
         return true;
     }
 
@@ -532,7 +532,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         _powers.Add(typeof(HeistPower));
-        line = $"{prefix}When triggered by holder's move: steals min(this power's current stacks, target player's Gold) Gold and stores it as {PowerLabel(typeof(HeistPower))} on holder";
+        line = $"{prefix}When triggered by owner's move: steals min(stacks, target player's Gold) Gold and stores it as {PowerLabel(typeof(HeistPower))} on owner";
         return true;
     }
 
@@ -547,7 +547,7 @@ internal sealed partial class NativeRuleText
         if (!addsGoldReward)
             return false;
 
-        line = $"{prefix}Before death: if event target=holder: add this power's current stacks Gold to combat rewards";
+        line = $"{prefix}Before death: if event target=owner: add stacks Gold to combat rewards";
         return true;
     }
 
@@ -576,7 +576,7 @@ internal sealed partial class NativeRuleText
         _summons.Add(firstSpawn);
         _summons.Add(secondSpawn);
         _powers.Add(typeof(HeistPower));
-        line = $"{prefix}On death event: if death was not prevented and holder=target: summon {ModelLabel(firstSpawn)} (transferring stolen Gold from holder's {PowerLabel(typeof(ThieveryPower))} into {PowerLabel(typeof(HeistPower))} on {ModelLabel(firstSpawn)}) and summon {ModelLabel(secondSpawn)}";
+        line = $"{prefix}On death event: if death was not prevented and owner=target: summon {ModelLabel(firstSpawn)} (transferring stolen Gold from owner's {PowerLabel(typeof(ThieveryPower))} into {PowerLabel(typeof(HeistPower))} on {ModelLabel(firstSpawn)}) and summon {ModelLabel(secondSpawn)}";
         return true;
     }
 }

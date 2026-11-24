@@ -913,3 +913,128 @@ def test_act_event_item_and_power_native_mechanisms_route_cleanly_across_roles()
     )
     assert "POWER.DARK_EMBRACE_POWER" not in {row["definition_id"] for row in run_combat_mechs}
     assert {row["definition_id"] for row in run_combat_mechs} == {"CARD.ONE"}
+
+
+def test_hoisted_encounter_and_enemy_power_routing_and_deduplication() -> None:
+    from sts2_harness.client.models import PublicMap
+    from sts2_harness.deck import deck_context, deck_observation
+    from sts2_harness.prompts import PackagedPrompts
+    from sts2_harness.run import run_observation
+
+    run_base = Observation.model_validate_json(RUN)
+    combat_base = Observation.model_validate_json(COMBAT)
+    public_map = PublicMap.model_validate_json(
+        '{"bosses":[{"name":"首领","definition_id":"ENCOUNTER.BOSS"}],'
+        '"elite_pool":[{"name":"精英甲","definition_id":"ENCOUNTER.ELITE_A"}],'
+        '"nodes":[{"position":"map:0:0","room_type":"monster","children":["map:1:0"]},'
+        '{"position":"map:1:0","room_type":"boss","children":[]}],'
+        '"legal_destinations":[]}'
+    )
+    boss_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="ENCOUNTER.BOSS",
+        name="首领",
+        text="Monsters: 1× 首领 (MONSTER.BOSS, 200 HP)",
+        owner="act",
+    )
+    boss_power = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="POWER.PLATING_POWER",
+        name="覆甲",
+        text=(
+            "At side turn end, early: if owner participates this turn: "
+            "owner gains unpowered stacks Block"
+        ),
+        owner="act:ENCOUNTER.BOSS",
+    )
+    elite_rule = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="ENCOUNTER.ELITE_A",
+        name="精英甲",
+        text="Monsters: 1× 精英甲 (MONSTER.ELITE_A, 120 HP)",
+        owner="act",
+    )
+    elite_shared_power = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="POWER.PLATING_POWER",
+        name="覆甲",
+        text=boss_power.text,
+        owner="act:ENCOUNTER.ELITE_A",
+    )
+    elite_only_power = MechanismView(
+        kind=MechanismKind.OTHER,
+        definition_id="POWER.HEX_POWER",
+        name="妖术",
+        text="After each card play resolves: add 1 晕眩 (CARD.DAZED) to discard pile",
+        owner="act:ENCOUNTER.ELITE_A",
+    )
+
+    run_obs = run_base.model_copy(
+        update={
+            "map": public_map,
+            "mechanisms": (
+                boss_rule,
+                boss_power,
+                elite_rule,
+                elite_shared_power,
+                elite_only_power,
+            ),
+        }
+    )
+
+    # Run receives Boss + Elite encounters and deduplicates hoisted shared powers to one entry.
+    run_ctx = Context(DecisionOwner.RUN)
+    run_ctx.append_task(RunActInput(), run_observation(run_obs))
+    run_mechs = json.loads(run_ctx.model_input()[-1].text)["observation"]["mechanisms"]
+    assert [row["definition_id"] for row in run_mechs] == [
+        "ENCOUNTER.BOSS",
+        "POWER.PLATING_POWER",
+        "ENCOUNTER.ELITE_A",
+        "POWER.HEX_POWER",
+    ]
+
+    # Deck receives Boss encounter + Boss-referenced hoisted powers, excluding Elite-only powers.
+    deck_view = deck_observation(run_obs, ())
+    deck_ctx = deck_context(PackagedPrompts(), (), deck_view, minimal=False)
+    deck_ctx.append_task(RunActInput(), deck_view)
+    deck_mechs = json.loads(deck_ctx.model_input()[-1].text)["observation"]["mechanisms"]
+    assert [row["definition_id"] for row in deck_mechs] == [
+        "ENCOUNTER.BOSS",
+        "POWER.PLATING_POWER",
+    ]
+
+    # Combat excludes all act:* hoisted encounter powers on foreign Run observations.
+    combat_foreign = Context(DecisionOwner.COMBAT)
+    combat_foreign.append_task(CombatActInput(), run_obs)
+    foreign_payload = json.loads(combat_foreign.model_input()[-1].text)["observation"]
+    assert "mechanisms" not in foreign_payload
+
+    # Combat deduplicates hoisted enemy powers shared across multiple enemies.
+    weak_text = (
+        "After enemy turn ends: subtract 1 虚弱 (POWER.WEAK_POWER) stack "
+        "(or clear its skip-next-tick flag)"
+    )
+    combat_obs = combat_base.model_copy(
+        update={
+            "mechanisms": (
+                MechanismView(
+                    kind=MechanismKind.OTHER,
+                    definition_id="POWER.WEAK_POWER",
+                    name="虚弱",
+                    text=weak_text,
+                    owner="e1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.OTHER,
+                    definition_id="POWER.WEAK_POWER",
+                    name="虚弱",
+                    text=weak_text,
+                    owner="e2",
+                ),
+            )
+        }
+    )
+    combat_ctx = Context(DecisionOwner.COMBAT)
+    combat_ctx.append_task(CombatActInput(), combat_obs)
+    combat_mechs = json.loads(combat_ctx.model_input()[-1].text)["observation"]["mechanisms"]
+    assert [row["definition_id"] for row in combat_mechs] == ["POWER.WEAK_POWER"]

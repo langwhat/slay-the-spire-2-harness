@@ -15,10 +15,11 @@ namespace Sts2Mod.Observation;
 internal static class EnemyMechanismReader
 {
     private const string UnsetMoveId = "UNSET_MOVE";
-    private sealed record Readout(string Language, string? Text, IReadOnlySet<string> CoveredPowerIds);
+    private sealed record Readout(string Language, string? Text, IReadOnlySet<string> InlinePowerIds, IReadOnlyList<Type> HoistedPowers);
     private static readonly ConditionalWeakTable<MonsterMoveStateMachine, Readout> Readouts = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> EmptyPowers = new HashSet<string>(StringComparer.Ordinal);
+    private static readonly IReadOnlyList<Type> EmptyHoistedPowers = [];
     private static readonly FieldInfo? InitialState = AccessTools.Field(typeof(MonsterMoveStateMachine), "_initialState");
     private static readonly FieldInfo? PerformMove = AccessTools.Field(typeof(MoveState), "_onPerform");
     private static readonly PropertyInfo? ConditionalStates = AccessTools.Property(typeof(ConditionalBranchState), "States");
@@ -29,56 +30,62 @@ internal static class EnemyMechanismReader
             && !move.Intents.Any(intent => intent.IntentType is IntentType.Hidden or IntentType.Unknown);
 
     public static string? Read(Creature creature, string language)
-        => ReadWithCoveredPowers(creature, language).Text;
+        => ReadWithPowers(creature, language).Text;
 
-    public static (string? Text, IReadOnlySet<string> CoveredPowerIds) ReadWithCoveredPowers(Creature creature, string language)
+    public static (string? Text, IReadOnlySet<string> InlinePowerIds, IReadOnlyList<Type> HoistedPowers) ReadWithPowers(Creature creature, string language)
     {
         MonsterMoveStateMachine? machine = null;
         string monsterId = "unknown";
         try
         {
             if (creature.Monster is not { MoveStateMachine: { } stateMachine } monster)
-                return (null, EmptyPowers);
+                return (null, EmptyPowers, EmptyHoistedPowers);
             machine = stateMachine;
             monsterId = monster.Id.ToString();
             if (monster.NextMove.StateId == UnsetMoveId)
-                return (null, EmptyPowers);
+                return (null, EmptyPowers, EmptyHoistedPowers);
 
             if (Readouts.TryGetValue(machine, out var cached) && cached.Language == language)
-                return (cached.Text, cached.CoveredPowerIds);
+                return (cached.Text, cached.InlinePowerIds, cached.HoistedPowers);
 
             // Unresolved native paths are extractor work items. They stay in the diagnostics log.
-            var (text, gaps, coveredPowerIds) = DescribeWithPowers(monster);
+            var (text, gaps, inlinePowerIds, hoistedPowers) = DescribeWithPowers(monster);
             if (gaps.Count > 0 && LoggedGaps.TryAdd(monsterId, 0))
                 GD.PushWarning($"[sts2agent] Unresolved native enemy rules for {monsterId}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
 
-            Readouts.AddOrUpdate(machine, new Readout(language, text, coveredPowerIds));
-            return (text, coveredPowerIds);
+            Readouts.AddOrUpdate(machine, new Readout(language, text, inlinePowerIds, hoistedPowers));
+            return (text, inlinePowerIds, hoistedPowers);
         }
         catch (Exception error)
         {
             if (LoggedGaps.TryAdd(monsterId, 0))
                 GD.PushWarning($"[sts2agent] Enemy mechanism unavailable for {monsterId}: {error.Message}");
             if (machine is not null)
-                Readouts.AddOrUpdate(machine, new Readout(language, null, EmptyPowers));
-            return (null, EmptyPowers);
+                Readouts.AddOrUpdate(machine, new Readout(language, null, EmptyPowers, EmptyHoistedPowers));
+            return (null, EmptyPowers, EmptyHoistedPowers);
         }
     }
 
     internal static (string? Text, IReadOnlySet<string> Gaps) Describe(MonsterModel monster)
     {
-        var (text, gaps, _) = DescribeWithPowers(monster);
+        var (text, gaps, _, _) = DescribeWithPowers(monster);
         return (text, gaps);
     }
 
-    internal static (string? Text, IReadOnlySet<string> Gaps, IReadOnlySet<string> CoveredPowerIds) DescribeWithPowers(MonsterModel monster)
+    internal static (string? Text, IReadOnlySet<string> Gaps, IReadOnlySet<string> InlinePowerIds, IReadOnlyList<Type> HoistedPowers) DescribeWithPowers(MonsterModel monster)
     {
-        var covered = new HashSet<string>(StringComparer.Ordinal);
-        var (text, gaps) = Describe(monster, [monster.GetType()], covered);
-        return (text, gaps, covered);
+        var inlinePowers = new HashSet<string>(StringComparer.Ordinal);
+        var hoisted = new HashSet<Type>();
+        var (text, gaps) = Describe(monster, [monster.GetType()], inlinePowers, hoisted);
+        var orderedHoisted = hoisted.OrderBy(t => ModelDb.GetId(t).ToString(), StringComparer.Ordinal).ToArray();
+        return (text, gaps, inlinePowers, orderedHoisted);
     }
 
-    private static (string? Text, IReadOnlySet<string> Gaps) Describe(MonsterModel monster, HashSet<Type> described, HashSet<string>? coveredPowers = null)
+    private static (string? Text, IReadOnlySet<string> Gaps) Describe(
+        MonsterModel monster,
+        HashSet<Type> described,
+        HashSet<string>? inlinePowers = null,
+        HashSet<Type>? hoistedPowers = null)
     {
         if (monster.MoveStateMachine is not { } machine)
             return (null, new HashSet<string>());
@@ -230,10 +237,10 @@ internal static class EnemyMechanismReader
 
         }
         lines.AddRange(powerLines);
-        if (coveredPowers is not null)
+        if (inlinePowers is not null)
         {
             foreach (var p in text.EmittedPowers)
-                coveredPowers.Add(ModelDb.GetId(p).ToString());
+                inlinePowers.Add(ModelDb.GetId(p).ToString());
         }
         text.ReadGeneratedCards(lines);
         var gaps = new HashSet<string>(text.Gaps);
@@ -247,7 +254,7 @@ internal static class EnemyMechanismReader
             }
             text.ConfigureSummon(copy);
             copy.SetUpForCombat();
-            var (nested, nestedGaps) = Describe(copy, described, coveredPowers);
+            var (nested, nestedGaps) = Describe(copy, described, inlinePowers, hoistedPowers);
             gaps.UnionWith(nestedGaps.Select(gap => $"{summon.Name}/{gap}"));
             if (nested is null)
                 continue;
@@ -258,7 +265,7 @@ internal static class EnemyMechanismReader
 
         bool EnqueueForcedMoves()
         {
-            text.ReadPowerHooks(powerLines);
+            text.ReadPowerHooks(powerLines, hoistedPowers);
             foreach (var forced in text.ForcedMoves)
                 if (!examined.Contains(forced) && machine.States.TryGetValue(forced, out var next))
                     pending.Enqueue(next);

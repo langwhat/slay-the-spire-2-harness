@@ -337,6 +337,11 @@ internal sealed partial class NativeRuleText
             || ns.StartsWith("MegaCrit.Sts2.Core.Assets", StringComparison.Ordinal)
             || ns.StartsWith("MegaCrit.Sts2.Core.Saves", StringComparison.Ordinal))
             return true;
+        if (method is MethodInfo setter && setter.IsSpecialName && setter.Name.StartsWith("set_", StringComparison.Ordinal)
+            && setter.GetParameters() is [{ ParameterType: var paramType }]
+            && (paramType.Namespace?.StartsWith("Godot", StringComparison.Ordinal) == true
+                || paramType.Namespace?.StartsWith("MegaCrit.Sts2.Core.Nodes", StringComparison.Ordinal) == true))
+            return true;
         return (type?.Name, method.Name) switch
         {
             ("SfxCmd" or "VfxCmd" or "TalkCmd" or "ThinkCmd" or "Cmd" or "LocalContext" or "NodeHelper" or "GodotTreeExtensions", _) => true,
@@ -572,7 +577,7 @@ internal sealed partial class NativeRuleText
             && InternalDataField(recorded)?.FieldType == typeof(int));
         if (!recordsCommand || !recordsAmount || !addsStacks || !subtractsRecorded)
             return false;
-        line = $"{prefix}Next powered attack bonus: adds +this power's current stacks damage per hit (before multipliers and block) to holder's first powered attack, then subtracts the stacks present when that attack started after the entire attack resolves";
+        line = $"{prefix}Next powered attack bonus: adds +stacks damage per hit (before multipliers and block) to owner's first powered attack, then subtracts the stacks present when that attack started after the entire attack resolves";
         return true;
     }
 
@@ -620,7 +625,7 @@ internal sealed partial class NativeRuleText
         var where = (PileType)pile == PileType.Draw && position != CardPilePosition.Bottom ? $" ({position.ToString().ToLowerInvariant()})" : "";
         var cardType = step.Call.Method.GetGenericArguments()[0];
         _generatedCards.Add(cardType);
-        line = $"{prefix}After an attack resolves: if attacker=holder and target side≠holder's side and attack has Move without Unpowered: for each player hit for nonzero unblocked damage, add (this power's current stacks × unblocked hits on that player) {ModelLabel(cardType)} to that player's {((PileType)pile).ToString().ToLowerInvariant()} pile{where}";
+        line = $"{prefix}After an attack resolves: if attacker=owner and target side≠owner's side and attack is a powered attack: for each player hit for nonzero unblocked damage, add (stacks × unblocked hits on that player) {ModelLabel(cardType)} to that player's {((PileType)pile).ToString().ToLowerInvariant()} pile{where}";
         return true;
     }
 
@@ -667,7 +672,7 @@ internal sealed partial class NativeRuleText
         if (pairs.Count != 2)
             return false;
 
-        var clauses = pairs.Select(p => $"(Facing={p.FacingName} and damage dealer has {PowerLabel(p.BackPower)})");
+        var clauses = pairs.Select(p => $"(Facing={p.FacingName} and attacker has {PowerLabel(p.BackPower)})");
         var updates = pairs.Select(p =>
         {
             var opposite = pairs.First(other => other.BackPower != p.BackPower).FacingName;
@@ -679,8 +684,8 @@ internal sealed partial class NativeRuleText
             return $"if all remaining hittable enemies have {PowerLabel(p.BackPower)} set Facing={opposite}";
         });
 
-        lines.Add($"{prefix}Damage multiplier per hit, after additions: if target=holder and ({string.Join(" or ", clauses)}): ×{Number(factor)} (initial Facing={initialFacing})");
-        lines.Add($"{prefix}Facing updates: before holder plays a targeted card or uses a targeted combat potion, face toward that target ({string.Join("; ", updates)}); on enemy death, {string.Join(", and ", deathUpdates)}");
+        lines.Add($"{prefix}Damage multiplier per hit, after additions: if target=owner and ({string.Join(" or ", clauses)}): ×{Number(factor)} (initial Facing={initialFacing})");
+        lines.Add($"{prefix}Facing updates: before owner plays a targeted card or uses a targeted combat potion, face toward that target ({string.Join("; ", updates)}); on enemy death, {string.Join(", and ", deathUpdates)}");
         return true;
     }
 
@@ -789,8 +794,8 @@ internal sealed partial class NativeRuleText
 
         var statLabel = PowerLabel(internalStat.GetType());
         line = sign > 0
-            ? $"{prefix}Temporary stat adjustment: applies +N {statLabel} when applied or increased; after holder's side turn ends, removes this power and applies −(this power's current stacks) {statLabel} to holder"
-            : $"{prefix}Temporary stat reduction: applies −N {statLabel} when applied or increased; after holder's side turn ends, removes this power and restores +(this power's current stacks) {statLabel} to holder";
+            ? $"{prefix}Temporary stat adjustment: applies +N {statLabel} when applied or increased; after owner's turn ends, removes this power and applies −stacks {statLabel} to owner"
+            : $"{prefix}Temporary stat reduction: applies −N {statLabel} when applied or increased; after owner's turn ends, removes this power and restores +stacks {statLabel} to owner";
         return true;
     }
 
@@ -811,7 +816,7 @@ internal sealed partial class NativeRuleText
         if (!snapshotsAmount || !gainsBlock)
             return false;
 
-        line = $"{prefix}Card-play Block timing: snapshots this power's stacks before each owned card play starts, then gains that much unpowered Block after that card play resolves (if holder is alive and combat continues)";
+        line = $"{prefix}Card-play Block timing: snapshots stacks before each owned card play starts, then gains that much unpowered Block after that card play resolves (if owner is alive and combat continues)";
         return true;
     }
 
@@ -836,7 +841,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var strLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.StrengthPower));
-        line = $"{prefix}Self-damage timing: whenever holder loses unblocked HP on holder's side turn, gains this power's current stacks {strLabel} (if caused by a card, {strLabel} gain is deferred until after that card play finishes resolving)";
+        line = $"{prefix}Self-damage timing: whenever owner loses unblocked HP on owner's turn, gains stacks {strLabel} (if caused by a card, {strLabel} gain is deferred until after that card play finishes resolving)";
         return true;
     }
 
@@ -857,7 +862,7 @@ internal sealed partial class NativeRuleText
         if (!drawsImmediate || !batchesEthereal)
             return false;
 
-        line = $"{prefix}Exhaust draw timing: when an owned card is exhausted without Ethereal, holder immediately draws this power's current stacks card(s); Ethereal turn-end exhausts batch together and draw (exhausted Ethereal count × this power's current stacks) card(s) after side turn ends";
+        line = $"{prefix}Exhaust draw timing: when an owned card is exhausted without Ethereal, owner immediately draws stacks card(s); Ethereal turn-end exhausts batch together and draw (exhausted Ethereal count × stacks) card(s) after owner's turn ends";
         return true;
     }
 
@@ -880,7 +885,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var threshold = Number(cardsVar.BaseValue);
-        line = $"{prefix}Card-count trigger: every {threshold} owned card plays in the same turn, deals this power's current stacks unpowered damage to all hittable enemies; counter resets to {threshold} after side turn ends";
+        line = $"{prefix}Card-count trigger: every {threshold} owned card plays in the same turn, deals stacks unpowered damage to all hittable enemies; counter resets to {threshold} after owner's turn ends";
         return true;
     }
 
@@ -896,7 +901,7 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        line = $"{prefix}End-of-turn execution check: if holder's current HP ≤ this power's current stacks before holder's side turn ends, kills holder after holder's side turn ends";
+        line = $"{prefix}End-of-turn execution check: if owner's current HP ≤ stacks before owner's turn ends, kills owner after owner's turn ends";
         return true;
     }
 
@@ -917,7 +922,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var accelLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.AccelerantPower));
-        line = $"{prefix}After holder's side turn starts: deals this power's current stacks unblockable unpowered damage to holder and subtracts 1 stack (repeated 1 + opposing {accelLabel} stacks times in sequence while holder stays alive)";
+        line = $"{prefix}After owner's turn starts: deals stacks unblockable unpowered damage to owner and subtracts 1 stack (repeated 1 + opposing {accelLabel} stacks times in sequence while owner stays alive)";
         return true;
     }
 }

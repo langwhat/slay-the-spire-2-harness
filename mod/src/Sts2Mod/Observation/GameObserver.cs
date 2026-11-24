@@ -372,7 +372,7 @@ internal sealed class GameObserver(
     private readonly List<OfferView> _offers = [];
     private readonly HashSet<CardModel> _cards = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<Creature, ImmutableArray<PublicPower>> _powers = new(ReferenceEqualityComparer.Instance);
-    private readonly HashSet<string> _enemyCoveredPowerIds = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _inlineEnemyPowerIds = new(StringComparer.Ordinal);
     private readonly List<(string Owner, Type PowerType, string FallbackName)> _pendingPowerRules = [];
     private readonly HashSet<(string Owner, string PowerId)> _emittedPowerRules = [];
 
@@ -393,12 +393,15 @@ internal sealed class GameObserver(
         var inactive = combat.Enemies.Where(creature => !creature.IsAlive).Select(ObserveEnemy).ToImmutableArray();
         foreach (var creature in combat.Enemies)
         {
-            var (mechanics, coveredPowers) = EnemyMechanismReader.ReadWithCoveredPowers(creature, gameLanguage);
-            _enemyCoveredPowerIds.UnionWith(coveredPowers);
+            var enemyRef = registry.GetRef(creature);
+            var (mechanics, inlinePowers, hoistedPowers) = EnemyMechanismReader.ReadWithPowers(creature, gameLanguage);
+            _inlineEnemyPowerIds.UnionWith(inlinePowers);
             if (mechanics is not null)
                 _mechanisms.Add(new MechanismView(
                     MechanismKind.Other, creature.ModelId.ToString(), CreatureName(creature), mechanics,
-                    registry.GetRef(creature)));
+                    enemyRef));
+            foreach (var powerType in hoistedPowers)
+                _pendingPowerRules.Add((enemyRef, powerType, powerType.Name));
         }
         var allies = combat.Allies
             .Where(creature => creature.Player is null || !LocalContext.IsMe(creature.Player))
@@ -610,15 +613,21 @@ internal sealed class GameObserver(
                 }
                 foreach (var encounter in upcomingBosses.Concat(run.Act.AllEliteEncounters))
                 {
-                    if (EncounterMechanismReader.Read(encounter, run.AscensionLevel, run.GameMode, gameLanguage) is { } rules)
+                    var encounterId = encounter.Id.ToString();
+                    var (rules, hoistedPowers) = EncounterMechanismReader.ReadWithHoistedPowers(
+                        encounter, run.AscensionLevel, run.GameMode, gameLanguage);
+                    if (rules is not null)
                     {
                         _mechanisms.Add(new MechanismView(
                             MechanismKind.Other,
-                            encounter.Id.ToString(),
+                            encounterId,
                             encounter.Title.GetFormattedText(),
                             rules,
                             ActMechanismOwner));
                     }
+                    var powerOwner = $"{ActMechanismOwner}:{encounterId}";
+                    foreach (var powerType in hoistedPowers)
+                        _pendingPowerRules.Add((powerOwner, powerType, powerType.Name));
                 }
             }
         }
@@ -1076,7 +1085,7 @@ internal sealed class GameObserver(
             {
                 continue;
             }
-            if (_enemyCoveredPowerIds.Contains(powerId) || !_emittedPowerRules.Add((owner, powerId)))
+            if (_inlineEnemyPowerIds.Contains(powerId) || !_emittedPowerRules.Add((owner, powerId)))
                 continue;
             if (PowerMechanismReader.Read(powerType, gameLanguage, includeMultiplayer) is not { } ruleText)
                 continue;
