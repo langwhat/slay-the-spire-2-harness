@@ -567,12 +567,13 @@ internal static class ModifierMechanismReader
             return null;
 
         var rarities = new List<CardRarity>();
-        var tags = new List<CardTag>();
+        var pathTagGroups = new List<List<CardTag>>();
         var excludesUnplayable = false;
         var excludesXCost = false;
 
         foreach (var ret in positive)
         {
+            var pathTags = new List<CardTag>();
             var tests = new List<Test>(ret.Conditions);
             if (!(TryTruth(ret.Value, out var rb) && rb))
                 tests.Add(new Test(ret.Value, true));
@@ -603,8 +604,8 @@ internal static class ModifierMechanismReader
                 {
                     if (expected)
                     {
-                        if (!tags.Contains((CardTag)rawTag))
-                            tags.Add((CardTag)rawTag);
+                        if (!pathTags.Contains((CardTag)rawTag))
+                            pathTags.Add((CardTag)rawTag);
                     }
                     // Allow short-circuit `!Contains(TagA)` on the second branch of `Contains(TagA) || Contains(TagB)`
                     // only when there are multiple positive returns covering the OR branches.
@@ -626,6 +627,8 @@ internal static class ModifierMechanismReader
                 }
                 return null;
             }
+            if (pathTags.Count > 0)
+                pathTagGroups.Add(pathTags);
         }
 
         var parts = new List<string>();
@@ -635,8 +638,14 @@ internal static class ModifierMechanismReader
             parts.Add("non-Energy-X-cost");
         if (rarities.Count > 0)
             parts.Add(string.Join("/", rarities));
-        if (tags.Count > 0)
-            parts.Add($"{string.Join(" or ", tags)}-tagged");
+        if (pathTagGroups.Count > 0)
+        {
+            var groupLabels = pathTagGroups
+                .Select(g => string.Join(" and ", g))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            parts.Add($"{string.Join(" or ", groupLabels)}-tagged");
+        }
         return parts.Count > 0 ? $"{string.Join(" ", parts)} cards" : null;
     }
 

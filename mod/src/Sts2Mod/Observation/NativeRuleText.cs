@@ -459,28 +459,59 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             }
             else
             {
-                var combinedGuard = CombineDisjunctiveGuards(pathGuards.Select(pg => pg.Guard).ToArray());
+                var combinedGuard = CombineDisjunctivePaths(pathGuards);
+                if (combinedGuard is null)
+                    return null;
                 rendered.Add(new([], combinedGuard, [new Effect(group.Key)]));
             }
         }
         return RenderBranches(rendered).Select(effect => effect.Text).Distinct().ToList();
     }
 
-    private static string CombineDisjunctiveGuards(string[] guards)
+    // Factor disjunctions at the Test[] level (never by splitting rendered strings, which can contain " and ").
+    private string? CombineDisjunctivePaths(List<(Test[] Path, string Guard)> pathGuards)
     {
-        var split = guards.Select(g => g.Split(" and ", StringSplitOptions.RemoveEmptyEntries)).ToArray();
-        var common = split[0].Where(part => split.Skip(1).All(other => other.Contains(part, StringComparer.Ordinal))).ToArray();
-        var remainders = split
-            .Select(parts => parts.Where(p => !common.Contains(p, StringComparer.Ordinal)).ToArray())
-            .Select(rem => rem.Length == 0 ? "" : rem.Length == 1 ? rem[0] : $"({string.Join(" and ", rem)})")
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-        if (remainders.Any(r => r.Length == 0))
-            return string.Join(" and ", common);
-        var disjunction = remainders.Length == 1 ? remainders[0] : $"({string.Join(" or ", remainders)})";
-        return common.Length == 0
+        var first = pathGuards[0].Path;
+        var commonKeys = new HashSet<(string Key, bool Expected)>();
+        var commonTests = new List<Test>();
+        foreach (var test in first)
+        {
+            var sig = (TestKey(test), test.Expected);
+            if (commonKeys.Contains(sig))
+                continue;
+            if (pathGuards.Skip(1).All(pg => pg.Path.Any(other => TestKey(other) == sig.Item1 && other.Expected == sig.Expected)))
+            {
+                commonKeys.Add(sig);
+                commonTests.Add(test);
+            }
+        }
+
+        var commonGuard = commonTests.Count > 0 ? Guard(commonTests.ToArray()) : "";
+        if (commonGuard is null || commonGuard == Never)
+            return null;
+
+        var remainders = new List<string>();
+        foreach (var (path, _) in pathGuards)
+        {
+            var remTests = path.Where(t => !commonKeys.Contains((TestKey(t), t.Expected))).ToArray();
+            var remGuard = Guard(remTests);
+            if (remGuard is null || remGuard == Never)
+                return null;
+            if (remGuard.Length == 0)
+                return commonGuard;
+            var wrapped = remTests.Length > 1 && remGuard.Contains(" and ", StringComparison.Ordinal)
+                ? $"({remGuard})"
+                : remGuard;
+            if (!remainders.Contains(wrapped, StringComparer.Ordinal))
+                remainders.Add(wrapped);
+        }
+
+        if (remainders.Count == 0)
+            return commonGuard;
+        var disjunction = remainders.Count == 1 ? remainders[0] : $"({string.Join(" or ", remainders)})";
+        return commonGuard.Length == 0
             ? string.Join(" or ", remainders)
-            : $"{string.Join(" and ", common)} and {disjunction}";
+            : $"{commonGuard} and {disjunction}";
     }
 
     // A relic or power that rewrites a number exposes its own rule; name it instead of restating it.
@@ -836,12 +867,33 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         foreach (var group in calls.GroupBy(step => (step.Epoch, step.Index))
             .OrderBy(group => (group.Key.Epoch, group.Max(s => s.Order), group.Key.Index)))
         {
-            var loop = stepLoop(body, group.Key.Index);
-            var repetitions = loop is null ? null : ValueText(loop.Count);
-            if (loop is not null && repetitions is null)
+            var enclosingLoopGroups = body.Loops.Where(l => group.Key.Index >= l.Start && group.Key.Index < l.End)
+                .GroupBy(l => (l.Start, l.End))
+                .OrderBy(g => g.Key.Start)
+                .ToArray();
+            var loop = enclosingLoopGroups.Length > 0 ? enclosingLoopGroups[^1].First() : null;
+            string? repetitions = null;
+            if (enclosingLoopGroups.Length > 0)
             {
-                MarkIncomplete($"{method.Name}/loop-count");
-                continue;
+                var counts = new List<string>(enclosingLoopGroups.Length);
+                var unreadableLoop = false;
+                foreach (var loopGroup in enclosingLoopGroups)
+                {
+                    var distinctTexts = loopGroup.Select(l => ValueText(l.Count)).Distinct(StringComparer.Ordinal).ToArray();
+                    if (distinctTexts is [{ } singleCount])
+                        counts.Add(singleCount);
+                    else
+                    {
+                        unreadableLoop = true;
+                        break;
+                    }
+                }
+                if (unreadableLoop)
+                {
+                    MarkIncomplete($"{method.Name}/loop-count");
+                    continue;
+                }
+                repetitions = counts.Count == 1 ? counts[0] : $"({string.Join(" × ", counts)})";
             }
             var rendered = new List<GuardedEffects>();
             var alternatives = group.GroupBy(step => Key(step.Action));
@@ -964,16 +1016,68 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             // Equivalent paths can reach one instruction. Separate instructions still run separately.
             effects.AddRange(rendered);
         }
-        return (RenderBranches(GroupGuardedChanges(CollapseRepeatedUnrolled(effects))).ToList(), incomplete);
-
-        static Loop? stepLoop(NativeRuleBody b, int idx)
-            => b.Loops.Where(l => idx >= l.Start && idx < l.End).MaxBy(l => l.Start);
+        return (RenderBranches(GroupGuardedChanges(CollapseSameEnumeratorTakenCards(CollapseRepeatedUnrolled(effects)), method)).ToList(), incomplete);
 
         void MarkIncomplete(string location)
         {
             incomplete = true;
             Gap(location);
         }
+    }
+
+    // When a foreach iterates once over a sampled slice (`each of up to ...`) and performs multiple actions
+    // on each element (e.g. AggressionPower: move into hand, then if upgradable upgrade it), bind the sample once.
+    private static List<GuardedEffects> CollapseSameEnumeratorTakenCards(List<GuardedEffects> input)
+    {
+        if (input.Count < 2)
+            return input;
+        const string marker = "each of up to ";
+        var result = new List<GuardedEffects>(input.Count);
+        for (var i = 0; i < input.Count;)
+        {
+            var first = input[i];
+            if (first.Repetitions is null && first.Effects.Length == 1
+                && first.Effects[0].Text.IndexOf(marker, StringComparison.Ordinal) is >= 0 and var startIdx)
+            {
+                var subject = ExtractEachOfSubject(first.Effects[0].Text, startIdx);
+                if (subject is not null && i + 1 < input.Count)
+                {
+                    var next = input[i + 1];
+                    if (next.Repetitions is null && next.Effects.Length == 1
+                        && next.Effects[0].Text.Contains(subject, StringComparison.Ordinal)
+                        && (next.Guard == first.Guard
+                            || (first.Guard.Length > 0 && next.Guard.StartsWith(first.Guard + " and ", StringComparison.Ordinal)
+                                && next.Guard.Contains(subject, StringComparison.Ordinal))))
+                    {
+                        var firstRewritten = first.Effects[0].Text.Replace(subject, "it", StringComparison.Ordinal);
+                        var secondRewritten = next.Effects[0].Text.Replace(subject, "it", StringComparison.Ordinal);
+                        var extraGuard = next.Guard.Length > first.Guard.Length
+                            ? next.Guard[(first.Guard.Length + " and ".Length)..].Replace(subject, "it", StringComparison.Ordinal)
+                            : "";
+                        var secondClause = extraGuard.Length > 0 ? $"if {extraGuard}: {secondRewritten}" : secondRewritten;
+                        var samplePhrase = subject["each of ".Length..];
+                        var combinedText = $"for each of {samplePhrase}: ({firstRewritten}; {secondClause})";
+                        result.Add(first with { Effects = [Combine([first.Effects[0], next.Effects[0]], combinedText)] });
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+            result.Add(first);
+            i++;
+        }
+        return result;
+    }
+
+    private static string? ExtractEachOfSubject(string text, int startIdx)
+    {
+        foreach (var stop in new[] { " into ", " to ", " is " })
+        {
+            var endIdx = text.IndexOf(stop, startIdx, StringComparison.Ordinal);
+            if (endIdx > startIdx)
+                return text[startIdx..endIdx];
+        }
+        return null;
     }
 
     private static List<GuardedEffects> CollapseRepeatedUnrolled(List<GuardedEffects> input)
@@ -2845,10 +2949,26 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             value = innerSelect;
         if (value is not Call { Method.DeclaringType: var decl, Method.Name: var name } selectCall || decl != typeof(CardSelectCmd))
             return null;
+        // Fail closed when a filter predicate is passed; this reader only summarizes unfiltered selections.
+        if (Argument(selectCall, "filter") is { } filterArg && filterArg is not Constant { Data: null })
+            return null;
         var prefsArg = Argument(selectCall, "prefs");
-        var countText = prefsArg is Call { Method: ConstructorInfo { DeclaringType.Name: "CardSelectorPrefs" }, Arguments: [_, var minCount, ..] }
-            ? ValueText(minCount)
-            : null;
+        string? countText = null;
+        if (prefsArg is Call { Method: ConstructorInfo { DeclaringType.Name: "CardSelectorPrefs" }, Arguments: var prefArgs })
+        {
+            if (prefArgs.Length == 2 && ValueText(prefArgs[1]) is { } exact)
+            {
+                countText = exact;
+            }
+            else if (prefArgs.Length >= 3 && ValueText(prefArgs[1]) is { } minText && ValueText(prefArgs[2]) is { } maxText)
+            {
+                countText = minText == maxText
+                    ? minText
+                    : minText == "0"
+                        ? $"up to {maxText}"
+                        : $"{minText}–{maxText}";
+            }
+        }
         if (countText is null)
             return null;
         var noun = countText == "1" ? "card" : "card(s)";

@@ -157,10 +157,17 @@ internal sealed partial class NativeRuleText
         if (active.Length == 0 || nonPassthroughStores.Length == 0)
             return null;
 
-        // Every non-passthrough store must agree on the same cost rewrite (0 or originalCost + stacks).
-        var setsZero = nonPassthroughStores.All(s => Numeric(s.Assigned) == 0m);
-        var addsStacks = !setsZero && nonPassthroughStores.All(s =>
-            s.Assigned is Call { Method.Name: "op_Addition", Arguments: [Input { Name: "originalCost" }, var delta] }
+        // Every reachable active return path must have an implied non-passthrough OutStore agreeing on the same cost rewrite.
+        var activeStores = active
+            .Where(r => !IsUnreachableNullablePath(r.Conditions))
+            .Select(r => nonPassthroughStores.LastOrDefault(s => s.Parameter.Name == "modifiedCost" && ConditionsImply(r.Conditions, s.Conditions)))
+            .ToArray();
+        if (activeStores.Length == 0 || activeStores.Any(s => s is null))
+            return null;
+
+        var setsZero = activeStores.All(s => Numeric(s!.Assigned) == 0m);
+        var addsStacks = !setsZero && activeStores.All(s =>
+            s!.Assigned is Call { Method.Name: "op_Addition", Arguments: [Input { Name: "originalCost" }, var delta] }
             && IsStackAmount(delta));
         if (!setsZero && !addsStacks)
             return null;
@@ -300,7 +307,7 @@ internal sealed partial class NativeRuleText
         var subject = string.Join(" ", subjectParts);
         var timingTag = hook.Name == "TryModifyEnergyCostInCombatLate" ? "In-combat Energy cost (late)" : "In-combat Energy cost";
         return setsZero
-            ? $"{timingTag}: {subject} cost 0 Energy (Energy X-cost cards still spend all Energy)"
+            ? $"{timingTag}: {subject} cost 0 Energy (manual plays of Energy X-cost cards still spend all Energy; auto-plays spend 0)"
             : $"{timingTag}: {subject} cost +stacks Energy";
     }
 

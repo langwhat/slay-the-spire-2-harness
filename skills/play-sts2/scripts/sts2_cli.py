@@ -542,12 +542,16 @@ def _next_auto_step(
     enabled_by_ref = {_str(a.get("ref")): a for a in enabled}
     offers = [_as_dict(o) for o in _as_list(state.get("offers"))]
 
-    # 1. Battle rewards: claim gold, fitting potions, relics (only when no card offer is
-    # pending), or open a sole card selection offer.
+    # 1. Battle rewards: claim gold (unless a relic is pending ahead of it), fitting
+    # potions, relics (only when no card offer is pending), or open sole card offer.
     if screen == "rewards" and room_type in ("monster", "elite", "boss") and offers:
         potion_offers = [of for of in offers if of.get("kind") == "potion"]
         has_card_offer = any(of.get("kind") == "card" for of in offers)
-        claim_kinds = ["gold"] if has_card_offer else ["relic", "gold"]
+        has_relic_offer = any(of.get("kind") == "relic" for of in offers)
+        if has_card_offer:
+            claim_kinds = [] if has_relic_offer else ["gold"]
+        else:
+            claim_kinds = ["relic", "gold"]
         if 0 < len(potion_offers) <= empty_potions:
             claim_kinds.append("potion")
         for kind in claim_kinds:
@@ -615,19 +619,24 @@ def _next_auto_step(
     if allow_stateful_auto and nkey not in opened_shops and is_shop_entrance:
         opening = next((a for a in enabled if a.get("operation") == "open_shop"), None)
         if opening is not None:
-            for pref_raw in _as_list(state.get("potions")):
-                pref = _str(pref_raw)
-                pot = _as_dict(objects.get(pref))
-                if (
-                    pot.get("kind") == "potion"
-                    and pot.get("definition_id") == "POTION.FOUL_POTION"
-                    and pot.get("usable") is True
-                    and pot.get("needs_target") is False
-                ):
-                    return (
-                        {"kind": "use_potion", "potion": pref},
-                        f"use merchant potion: {_str(pot.get('name'))}",
-                    )
+            has_ectoplasm = any(
+                _as_dict(objects.get(_str(rref))).get("definition_id") == "RELIC.ECTOPLASM"
+                for rref in _as_list(state.get("relics"))
+            )
+            if not has_ectoplasm:
+                for pref_raw in _as_list(state.get("potions")):
+                    pref = _str(pref_raw)
+                    pot = _as_dict(objects.get(pref))
+                    if (
+                        pot.get("kind") == "potion"
+                        and pot.get("definition_id") == "POTION.FOUL_POTION"
+                        and pot.get("usable") is True
+                        and pot.get("needs_target") is False
+                    ):
+                        return (
+                            {"kind": "use_potion", "potion": pref},
+                            f"use merchant potion: {_str(pot.get('name'))}",
+                        )
             opened_shops.add(nkey)
             return (
                 {"kind": "interact", "action": _str(opening.get("ref"))},

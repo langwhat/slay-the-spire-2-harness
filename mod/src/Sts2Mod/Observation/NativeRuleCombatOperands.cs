@@ -119,11 +119,11 @@ internal sealed partial class NativeRuleText
             : current is Call { Method.Name: "GetUnlockedCards", Receiver: Call { Method.Name: "get_CardPool" } }
                 ? "unlocked character"
                 : null;
-        var parts = new List<string>();
+        var parts = new List<string> { "combat-generatable" };
         if (poolName is not null)
             parts.Add(poolName);
         parts.AddRange(filters);
-        return parts.Count > 0 ? $"random {string.Join(" ", parts)}" : "random";
+        return $"random {string.Join(" ", parts)}";
     }
 
     private static string? CardSlot(Field field)
@@ -188,13 +188,14 @@ internal sealed partial class NativeRuleText
                 && (left == source && Key(right) == Key(assignment.Target) || right == source && Key(left) == Key(assignment.Target)));
 
     // Keep the original decision in scope when an effect writes to a value tested by it.
-    private List<GuardedEffects> GroupGuardedChanges(List<GuardedEffects> effects)
+    private List<GuardedEffects> GroupGuardedChanges(List<GuardedEffects> effects, MethodInfo? currentMethod = null)
     {
         var groups = new List<GuardedEffects>();
         for (var index = 0; index < effects.Count;)
         {
             var first = effects[index++];
-            if (first.Repetitions is not null || first.Guard.Length == 0 || !first.Effects.Any(effect => effect.ChangesGuard))
+            if (first.Repetitions is not null || first.Guard.Length == 0 || first.Path.Length == 0
+                || !first.Effects.Any(effect => effect.ChangesGuard))
             {
                 groups.Add(first);
                 continue;
@@ -218,13 +219,14 @@ internal sealed partial class NativeRuleText
             }
             var steps = RenderBranches(nested).ToList();
             // Fold pure self-reentrancy guards (`if ... and Flag=false: (flag = true; body; flag = false)`)
-            // into human-readable non-recursive wording instead of exposing internal C# guard names.
+            // only when no other method on the owning model writes that flag.
             if (steps.Count >= 3
                 && steps[0].Text.EndsWith(" = true", StringComparison.Ordinal)
                 && steps[^1].Text.EndsWith(" = false", StringComparison.Ordinal))
             {
                 var flagHuman = steps[0].Text[..^" = true".Length];
-                if (steps[^1].Text[..^" = false".Length] == flagHuman)
+                if (steps[^1].Text[..^" = false".Length] == flagHuman
+                    && (currentMethod is null || IsSingleMethodReentrancyFlag(currentMethod, flagHuman)))
                 {
                     var expectedGuardToken = flagHuman.Replace(" ", "", StringComparison.Ordinal) + "=false";
                     var matchingCond = first.Path.FirstOrDefault(t =>
@@ -253,6 +255,36 @@ internal sealed partial class NativeRuleText
             groups.Add(first with { Effects = [Combine(steps, $"({string.Join("; ", steps.Select(step => step.Text))})")] });
         }
         return groups;
+    }
+
+    private bool IsSingleMethodReentrancyFlag(MethodInfo currentMethod, string flagHuman)
+    {
+        if (currentMethod.DeclaringType is not { } ownerType)
+            return false;
+        var expectedName = flagHuman.Replace(" ", "", StringComparison.Ordinal);
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        var prop = ownerType.GetProperties(flags)
+            .FirstOrDefault(p => p.PropertyType == typeof(bool) && p.Name.Equals(expectedName, StringComparison.OrdinalIgnoreCase));
+        var backing = prop?.GetMethod is { } getter ? BackingField(ownerType, getter) : null;
+        var directField = backing ?? ownerType.GetFields(flags)
+            .FirstOrDefault(f => f.FieldType == typeof(bool) && f.Name.TrimStart('_').Equals(expectedName, StringComparison.OrdinalIgnoreCase));
+        if (directField is null && prop?.SetMethod is null)
+            return false;
+
+        foreach (var other in ownerType.GetMethods(flags))
+        {
+            if (other == currentMethod || other.IsSpecialName || other.ContainsGenericParameters || IsPurePresentationMember(other))
+                continue;
+            var otherBody = Body(other);
+            if (otherBody.Incomplete)
+                return false;
+            if (directField is not null && (otherBody.Writes.Contains(directField)
+                || otherBody.FieldSteps.Any(fs => fs.Assignment.Target.Member == directField)))
+                return false;
+            if (prop?.SetMethod is { } setter && otherBody.Calls.Any(s => s.Call.Method == setter))
+                return false;
+        }
+        return true;
     }
 
     private string? CombatCondition(Test test)
@@ -492,9 +524,47 @@ internal sealed partial class NativeRuleText
             || ofType.GetGenericArguments()[0].Name != "DamageReceivedEntry")
             return false;
         var pBody = Body(pred);
-        return !pBody.Incomplete
-            && pBody.Calls.Any(s => s.Call.Method.Name == "get_WasFullyBlocked")
-            && pBody.Calls.Any(s => s.Call.Method.Name == "HappenedLastPlayerTurn");
+        if (pBody.Incomplete || pBody.Returns.Count == 0)
+            return false;
+        var positive = pBody.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
+            return false;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var retBool) && retBool))
+            tests.Add(new Test(positive[0].Value, true));
+
+        var checksOwnerReceiver = false;
+        var checksNotFullyBlocked = false;
+        var checksLastPlayerTurn = false;
+        foreach (var raw in tests)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (IsEquality(new Test(expr, expected), true, out var l, out var r)
+                && ((l is Call { Method.Name: "get_Receiver" } && IsOwner(r))
+                    || (r is Call { Method.Name: "get_Receiver" } && IsOwner(l))))
+            {
+                checksOwnerReceiver = true;
+                continue;
+            }
+            if (!expected && expr is Call { Method.Name: "get_WasFullyBlocked" })
+            {
+                checksNotFullyBlocked = true;
+                continue;
+            }
+            if (expected && expr is Call { Method.Name: "HappenedLastPlayerTurn" })
+            {
+                checksLastPlayerTurn = true;
+                continue;
+            }
+            return false;
+        }
+        return checksOwnerReceiver && checksNotFullyBlocked && checksLastPlayerTurn;
     }
 
     private string? DescribePowerHistoryCountGetter(MethodInfo getter)
@@ -537,16 +607,61 @@ internal sealed partial class NativeRuleText
         var body = Body(pred);
         if (body.Incomplete || body.Returns.Count == 0)
             return false;
-        var hasTurnCheck = body.Calls.Any(s => s.Call.Method.Name == "HappenedThisTurn");
-        var hasMoveCheck = body.Calls.Any(s => s.Call.Method.Name == "IsCardOrMonsterMove");
-        var hasOwnerCheck = body.Calls.Any(s => s.Call.Method.Name == "get_Player");
-        var excludesCurrentCardPlay = body.Returns.Any(r =>
-            r.Value is Operation { Operator: "ceq", Left: Operation { Operator: "ceq", Left: Call { Method.Name: "get_CardPlay" }, Right: Field { Member.Name: "cardPlay" } }, Right: Constant { Data: 0 } }
-            || r.Value is Operation { Operator: "bne.un", Left: Call { Method.Name: "get_CardPlay" }, Right: Field { Member.Name: "cardPlay" } }
-            || r.Conditions.Any(c => IsEquality(c, false, out var l, out var rhs)
-                && l is Call { Method.Name: "get_CardPlay" } && rhs is Field { Member.Name: "cardPlay" }));
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length != 1)
+            return false;
+        var tests = new List<Test>(positive[0].Conditions);
+        if (!(TryTruth(positive[0].Value, out var retBool) && retBool))
+            tests.Add(new Test(positive[0].Value, true));
+
+        var hasTurnCheck = false;
+        var hasMoveCheck = false;
+        var hasOwnerCheck = false;
+        var excludesCurrentCardPlay = false;
+        foreach (var raw in tests)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expected && expr is Call { Method.Name: "HappenedThisTurn" })
+            {
+                hasTurnCheck = true;
+                continue;
+            }
+            if (expected && expr is Call { Method.Name: "get_CardPlay" })
+                continue;
+            if (expected && expr is Call { Method.Name: "IsCardOrMonsterMove" })
+            {
+                hasMoveCheck = true;
+                continue;
+            }
+            if (IsEquality(new Test(expr, expected), true, out var eqL, out var eqR)
+                && ((eqL is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Player" } } && IsOwnerOrClosureOwner(eqR))
+                    || (eqR is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Player" } } && IsOwnerOrClosureOwner(eqL))))
+            {
+                hasOwnerCheck = true;
+                continue;
+            }
+            if (IsEquality(new Test(expr, expected), false, out var neqL, out var neqR)
+                && ((neqL is Call { Method.Name: "get_CardPlay" } && neqR is Field { Member.Name: "cardPlay" })
+                    || (neqR is Call { Method.Name: "get_CardPlay" } && neqL is Field { Member.Name: "cardPlay" })))
+            {
+                excludesCurrentCardPlay = true;
+                continue;
+            }
+            return false;
+        }
         return hasTurnCheck && hasMoveCheck && hasOwnerCheck && excludesCurrentCardPlay;
     }
+
+    private static bool IsOwnerOrClosureOwner(Value? value)
+        => IsOwner(value)
+            || value is Call { Method.Name: "get_Owner" or "get_Creature", Receiver: Field { Member.Name: "<>4__this" } }
+            || value is Call { Method.Name: "get_Creature", Receiver: Call { Method.Name: "get_Owner", Receiver: Field { Member.Name: "<>4__this" } } };
 
     private Type? OrbTypeFromPredicate(MethodInfo predicate)
         => Body(predicate).Returns.SelectMany(r => FindOrbTypes(r.Value)).FirstOrDefault();

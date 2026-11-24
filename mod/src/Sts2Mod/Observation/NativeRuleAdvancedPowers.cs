@@ -981,7 +981,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var strLabel = PowerLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.StrengthPower));
-        line = $"{prefix}Self-damage timing: whenever owner loses unblocked HP on owner's turn, gains stacks {strLabel} (if caused by a card, {strLabel} gain is deferred until after that card play finishes resolving)";
+        line = $"{prefix}Self-damage timing: whenever owner loses unblocked HP on owner's turn, gains stacks {strLabel} (if caused by a currently resolving card play, {strLabel} gain is deferred until after that card play finishes resolving; otherwise immediate, including end-of-turn hand damage)";
         return true;
     }
 
@@ -1224,9 +1224,18 @@ internal sealed partial class NativeRuleText
 
         var locStep = locBody.FieldSteps.FirstOrDefault(f =>
             f.Assignment.Target.Receiver is Input { Name: "location" }
+            && f.Assignment.Target.Member.Name == "pileType"
             && f.Assignment.Assigned is Constant { Data: int fp } && Enum.IsDefined(typeof(PileType), fp));
         if (locStep is null || locStep.Assignment.Assigned is not Constant { Data: int rawPile })
             return false;
+
+        var posStep = locBody.FieldSteps.FirstOrDefault(f =>
+            f.Assignment.Target.Receiver is Input { Name: "location" }
+            && f.Assignment.Target.Member.Name == "position"
+            && f.Assignment.Assigned is Constant { Data: int posVal } && Enum.IsDefined(typeof(CardPilePosition), posVal));
+        var posSuffix = posStep is not null && posStep.Assignment.Assigned is Constant { Data: int rawPos }
+            ? $" ({((CardPilePosition)rawPos).ToString().ToLowerInvariant()})"
+            : "";
 
         var checksZeroEnergy = locStep.Conditions.Any(c =>
             c.Value is Operation { Left: Call { Method.Name: "get_EnergyValue" }, Right: Constant { Data: 0 } });
@@ -1245,7 +1254,7 @@ internal sealed partial class NativeRuleText
             return false;
 
         var destLabel = PileLocationLabel((PileType)rawPile);
-        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel} (top) instead of their normal destination (overriding Exhaust as well); counter resets after owner's turn starts";
+        line = $"{prefix}Card destination after play: owner's first N non-dupe 0-Energy {cardType.Value} plays each turn (where N = stacks, retroactively counting 0-Energy {cardType.Value} plays already started earlier this turn) return to {destLabel}{posSuffix} instead of their normal destination (overriding Exhaust as well); counter resets after owner's turn starts";
         return true;
     }
 
@@ -1314,12 +1323,14 @@ internal sealed partial class NativeRuleText
             return false;
         }
 
-        var energyActive = energyBody.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
-        var starActive = starBody.Returns.Where(r => TryTruth(r.Value, out var m) && m).ToArray();
+        var energyActive = energyBody.Returns.Where(r => TryTruth(r.Value, out var m) && m && !IsUnreachableNullablePath(r.Conditions)).ToArray();
+        var starActive = starBody.Returns.Where(r => TryTruth(r.Value, out var m) && m && !IsUnreachableNullablePath(r.Conditions)).ToArray();
         var energyStores = energyBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost" && s.Assigned is not Input).ToArray();
         var starStores = starBody.OutStores.Where(s => s.Parameter.Name == "modifiedCost" && s.Assigned is not Input).ToArray();
-        var energyZero = energyActive.Length > 0 && energyStores.Length > 0 && energyStores.All(s => Numeric(s.Assigned) == 0m);
-        var starZero = starActive.Length > 0 && starStores.Length > 0 && starStores.All(s => Numeric(s.Assigned) == 0m);
+        var energyZero = energyActive.Length > 0
+            && energyActive.All(r => energyStores.LastOrDefault(s => ConditionsImply(r.Conditions, s.Conditions)) is { } s && Numeric(s.Assigned) == 0m);
+        var starZero = starActive.Length > 0
+            && starActive.All(r => starStores.LastOrDefault(s => ConditionsImply(r.Conditions, s.Conditions)) is { } s && Numeric(s.Assigned) == 0m);
         var incrementsPlayed = afterBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
             && s.Assignment.Assigned is Operation { Operator: "add", Right: Constant { Data: 1 } });
         var resetsOnStart = startBody.FieldSteps.Any(s => InternalDataField(s.Assignment.Target)?.FieldType == typeof(int)
@@ -1327,7 +1338,7 @@ internal sealed partial class NativeRuleText
         if (!energyZero || !starZero || !incrementsPlayed || !resetsOnStart)
             return false;
 
-        lines.Add($"{prefix}In-combat Energy and Star cost (late): owner's first N non-autoplay card plays each turn (where N = stacks, for cards in Hand or Play) cost 0 Energy and 0 Stars (Energy X-cost and Star X-cost cards still spend all Energy/Stars); counter resets before owner's turn starts");
+        lines.Add($"{prefix}In-combat Energy and Star cost (late): owner's first N non-autoplay card plays each turn (where N = stacks, for cards in Hand or Play) cost 0 Energy and 0 Stars (manual plays of Energy X-cost and Star X-cost cards still spend all Energy/Stars; auto-plays spend 0); counter resets before owner's turn starts");
         if (FindOverride(power, "BeforeApplied") is not null || FindOverride(power, "BeforePowerAmountChanged") is not null)
             lines.Add($"{prefix}Application timing: applying or changing stacks of this power disables the free-cost effect for the remainder of the current turn until owner's next turn starts");
         return true;
@@ -1406,7 +1417,7 @@ internal sealed partial class NativeRuleText
 
         var kwLabel = KeywordLabel((CardKeyword)rawKw);
         var pileLabel = PileLocationLabel((PileType)(int)rawPile);
-        line = $"{prefix}Before turn-start hand draw: if player=owner: generate stacks random non-Basic non-Ancient character card(s) with {kwLabel} into owner's {pileLabel}";
+        line = $"{prefix}Before turn-start hand draw: if player=owner: generate stacks random combat-generatable non-Basic non-Ancient unlocked character card(s) with {kwLabel} into owner's {pileLabel}";
         return true;
     }
 

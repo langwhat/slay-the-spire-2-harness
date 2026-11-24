@@ -222,12 +222,15 @@ internal sealed partial class NativeRuleText
     private string? DescribeCardAttackCommand(CardModel card, Call receiver, bool requiresOsty)
     {
         Value? amount = null;
+        Value? hitCountArg = null;
         var fromOsty = false;
         string? targetText = null;
         for (var c = receiver; ; c = (Call)c.Receiver)
         {
             if (c.Method.DeclaringType == typeof(DamageCmd) && c.Method.Name == "Attack")
                 amount = c.Arguments.FirstOrDefault();
+            else if (c.Method.Name == "WithHitCount" && c.Arguments.Length != 0)
+                hitCountArg = c.Arguments[0];
             else if (c.Method.Name == "FromOsty")
                 fromOsty = true;
             else if (c.Method.Name == "TargetingRandomOpponents")
@@ -239,12 +242,20 @@ internal sealed partial class NativeRuleText
         }
         if (amount is null || targetText is null || CardNumeric(card, amount) is not { } dmg)
             return null;
+        decimal hits = 1m;
+        if (hitCountArg is not null)
+        {
+            if (CardNumeric(card, hitCountArg) is not { } parsedHits)
+                return null;
+            hits = parsedHits;
+        }
+        var dmgText = hits == 1m ? Number(dmg) : $"{Number(dmg)}×{Number(hits)}";
         var attackerPrefix = fromOsty
             ? $"if {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive: {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} deals "
             : requiresOsty
                 ? $"if {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive: deal "
                 : "deal ";
-        return $"{attackerPrefix}{Number(dmg)} damage to {targetText}";
+        return $"{attackerPrefix}{dmgText} damage to {targetText}";
     }
 
     private decimal? CardNumeric(CardModel card, Value value) => value switch

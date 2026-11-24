@@ -398,8 +398,9 @@ public sealed class NativeExtractionTests
 
         var bulletTimeRule = ItemMechanismReader.DescribeCard(ModelDb.Card<BulletTime>());
         Assert.NotNull(bulletTimeRule);
-        Assert.Contains("non-X Energy and Star costs to 0 until played or until the turn ends", bulletTimeRule!, StringComparison.Ordinal);
-        Assert.Contains("X-cost cards still spend all Energy/Stars", bulletTimeRule!, StringComparison.Ordinal);
+        Assert.Contains("local Energy and Star costs to 0 until played or until the turn ends", bulletTimeRule!, StringComparison.Ordinal);
+        Assert.Contains("global cost modifiers still apply", bulletTimeRule!, StringComparison.Ordinal);
+        Assert.Contains("manual plays of X-cost cards still spend all Energy/Stars while auto-plays spend 0", bulletTimeRule!, StringComparison.Ordinal);
 
         var arrowStabRule = ItemMechanismReader.DescribeCard(ModelDb.Card<ArrowStab>());
         Assert.NotNull(arrowStabRule);
@@ -409,8 +410,9 @@ public sealed class NativeExtractionTests
 
         var liquidRule = ItemMechanismReader.DescribePotion(ModelDb.Potion<LiquidMemories>());
         Assert.NotNull(liquidRule);
-        Assert.Contains("non-X Energy and Star costs to 0 until played or until the turn ends", liquidRule!, StringComparison.Ordinal);
-        Assert.Contains("X-cost cards still spend all Energy/Stars", liquidRule!, StringComparison.Ordinal);
+        Assert.Contains("local Energy and Star costs to 0 until played or until the turn ends", liquidRule!, StringComparison.Ordinal);
+        Assert.Contains("global cost modifiers still apply", liquidRule!, StringComparison.Ordinal);
+        Assert.Contains("manual plays of X-cost cards still spend all Energy/Stars while auto-plays spend 0", liquidRule!, StringComparison.Ordinal);
 
         var lizardRule = ItemMechanismReader.DescribeRelic(ModelDb.Relic<LizardTail>());
         Assert.NotNull(lizardRule);
@@ -439,20 +441,19 @@ public sealed class NativeExtractionTests
 
         var (freeAtkText, freeAtkGaps) = PowerMechanismReader.Describe(typeof(FreeAttackPower), true);
         Assert.Empty(freeAtkGaps);
-        Assert.Contains("In-combat Energy cost (late): owned Attack cards in Hand or Play cost 0 Energy (Energy X-cost cards still spend all Energy)", freeAtkText!, StringComparison.Ordinal);
+        Assert.Contains("In-combat Energy cost (late): owned Attack cards in Hand or Play cost 0 Energy (manual plays of Energy X-cost cards still spend all Energy; auto-plays spend 0)", freeAtkText!, StringComparison.Ordinal);
         Assert.Contains("Before card play:", freeAtkText!, StringComparison.Ordinal);
         Assert.Contains("subtract 1", freeAtkText!, StringComparison.Ordinal);
 
         var (veilText, veilGaps) = PowerMechanismReader.Describe(typeof(VeilpiercerPower), true);
         Assert.Empty(veilGaps);
         Assert.Contains("Ethereal", veilText!, StringComparison.Ordinal);
-        Assert.Contains("in Hand or Play cost 0 Energy (Energy X-cost cards still spend all Energy)", veilText!, StringComparison.Ordinal);
+        Assert.Contains("in Hand or Play cost 0 Energy (manual plays of Energy X-cost cards still spend all Energy; auto-plays spend 0)", veilText!, StringComparison.Ordinal);
 
         var (aggressionText, aggressionGaps) = PowerMechanismReader.Describe(typeof(AggressionPower), true);
         Assert.Empty(aggressionGaps);
         Assert.Contains("Before side turn starts:", aggressionText!, StringComparison.Ordinal);
-        Assert.Contains("Attack card(s) in owner's discard pile into hand", aggressionText!, StringComparison.Ordinal);
-        Assert.Contains("upgrade", aggressionText!, StringComparison.Ordinal);
+        Assert.Contains("for each of up to stacks random Attack card(s) in owner's discard pile: (move it into hand; if it is upgradable: upgrade it)", aggressionText!, StringComparison.Ordinal);
 
         var (wuppyText, wuppyGaps) = PowerMechanismReader.Describe(typeof(WuppysLoyaltyPower), true);
         Assert.Empty(wuppyGaps);
@@ -515,7 +516,7 @@ public sealed class NativeExtractionTests
 
         var (creativeText, creativeGaps) = PowerMechanismReader.Describe(typeof(CreativeAiPower), true);
         Assert.Empty(creativeGaps);
-        Assert.Contains("generate up to 1 distinct random unlocked character Power card(s)", creativeText!, StringComparison.Ordinal);
+        Assert.Contains("generate up to 1 distinct random combat-generatable unlocked character Power card(s)", creativeText!, StringComparison.Ordinal);
 
         var (feralText, feralGaps) = PowerMechanismReader.Describe(typeof(FeralPower), true);
         Assert.Empty(feralGaps);
@@ -567,7 +568,7 @@ public sealed class NativeExtractionTests
 
         var (voidFormText, voidFormGaps) = PowerMechanismReader.Describe(typeof(VoidFormPower), true);
         Assert.Empty(voidFormGaps);
-        Assert.Contains("cost 0 Energy and 0 Stars (Energy X-cost and Star X-cost cards still spend all Energy/Stars)", voidFormText!, StringComparison.Ordinal);
+        Assert.Contains("cost 0 Energy and 0 Stars (manual plays of Energy X-cost and Star X-cost cards still spend all Energy/Stars; auto-plays spend 0)", voidFormText!, StringComparison.Ordinal);
         Assert.Contains("Application timing:", voidFormText!, StringComparison.Ordinal);
 
         var (swordSageText, swordSageGaps) = PowerMechanismReader.Describe(typeof(SwordSagePower), true);
@@ -610,7 +611,7 @@ public sealed class NativeExtractionTests
 
         var (voidCallText, voidCallGaps) = PowerMechanismReader.Describe(typeof(CallOfTheVoidPower), true);
         Assert.Empty(voidCallGaps);
-        Assert.Contains("non-Basic non-Ancient character card(s)", voidCallText!, StringComparison.Ordinal);
+        Assert.Contains("combat-generatable non-Basic non-Ancient unlocked character card(s)", voidCallText!, StringComparison.Ordinal);
 
         var (grimoireText, grimoireGaps) = PowerMechanismReader.Describe(typeof(ForbiddenGrimoirePower), true);
         Assert.Empty(grimoireGaps);
@@ -646,7 +647,7 @@ public sealed class NativeExtractionTests
         var (calamityText, calamityGaps) = PowerMechanismReader.Describe(typeof(CalamityPower), true);
         Assert.Empty(calamityGaps);
         Assert.Contains("each owned Attack card play", calamityText!, StringComparison.Ordinal);
-        Assert.Contains("generate stacks random unlocked character Attack card(s) (duplicates allowed)", calamityText!, StringComparison.Ordinal);
+        Assert.Contains("generate stacks random combat-generatable unlocked character Attack card(s) (duplicates allowed)", calamityText!, StringComparison.Ordinal);
 
         var (entropyText, entropyGaps) = PowerMechanismReader.Describe(typeof(EntropyPower), true);
         Assert.Empty(entropyGaps);
@@ -661,10 +662,12 @@ public sealed class NativeExtractionTests
         Assert.Contains("After shuffling draw pile:", stratagemText!, StringComparison.Ordinal);
         Assert.Contains("move stacks chosen card(s) from owner's draw pile into hand", stratagemText!, StringComparison.Ordinal);
 
-        // RupturePower must not emit a duplicate generic card-play snapshot line.
+        // RupturePower must not emit a duplicate generic card-play snapshot line and must distinguish resolving card plays from Burn.
         var (ruptureText, ruptureGaps) = PowerMechanismReader.Describe(typeof(RupturePower), true);
         Assert.Empty(ruptureGaps);
         Assert.Contains("Self-damage timing:", ruptureText!, StringComparison.Ordinal);
+        Assert.Contains("currently resolving card play", ruptureText!, StringComparison.Ordinal);
+        Assert.Contains("otherwise immediate", ruptureText!, StringComparison.Ordinal);
         Assert.DoesNotContain("Card-play power timing:", ruptureText!, StringComparison.Ordinal);
     }
 
@@ -678,7 +681,7 @@ public sealed class NativeExtractionTests
             (typeof(SneckoSkull), "POWER.POISON_POWER"),
             (typeof(Tingsha), "deal 3 unpowered damage to a random hittable enemy"),
             (typeof(ToughBandages), "owner gains unpowered 3 Block"),
-            (typeof(BigHat), "generate up to 2 distinct random unlocked character"),
+            (typeof(BigHat), "generate up to 2 distinct random combat-generatable unlocked character"),
             (typeof(BoneFlute), "MONSTER.OSTY"),
             (typeof(Bookmark), "local Energy cost > 0"),
             (typeof(BoundPhylactery), "After turn-start Energy reset (late):"),
@@ -831,6 +834,34 @@ public sealed class NativeExtractionTests
         var loopBody = NativeRuleBody.Read(nonZeroDecLoop);
         Assert.True(loopBody.Incomplete);
         Assert.Empty(loopBody.Loops);
+
+        // 6. Struct .ctor with writable ref must not push a bogus return value on the stack.
+        var boolAfterCtor = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.ReturnFalseAfterStructCtor), BindingFlags.Static | BindingFlags.Public)!;
+        var boolCtorBody = NativeRuleBody.Read(boolAfterCtor);
+        Assert.All(boolCtorBody.Returns, r => Assert.Equal(0, (r.Value as NativeRuleBody.Constant)?.Data));
+
+        // 7. Nested Dictionary.Remove loop inside an outer unknown loop must still fail closed.
+        var (nestedLoopText, nestedLoopGaps) = PowerMechanismReader.Describe(typeof(SyntheticNestedDictLoopPower), true);
+        Assert.Null(nestedLoopText);
+        Assert.Contains("AfterCardPlayed/loop-count", nestedLoopGaps);
+
+        // 8. Do-while decimal loop and counter-dependent decimal loop must not collapse into fixed-count loops.
+        var doWhileDec = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.DoWhileDecimalLoop), BindingFlags.Static | BindingFlags.Public)!;
+        Assert.Empty(NativeRuleBody.Read(doWhileDec).Loops);
+        var counterDepDec = typeof(SyntheticIlCounterexamples).GetMethod(nameof(SyntheticIlCounterexamples.CounterDependentDecimalLoop), BindingFlags.Static | BindingFlags.Public)!;
+        Assert.Empty(NativeRuleBody.Read(counterDepDec).Loops);
+
+        // 9. Cross-hook boolean flag must not be folded as a pure single-method re-entrancy lock.
+        var crossHookText = new NativeRuleText();
+        var crossLines = new List<string>();
+        crossHookText.ReadHooks(typeof(SyntheticCrossHookGuardPower), crossLines);
+        Assert.DoesNotContain(crossLines, l => l.Contains("does not re-trigger itself", StringComparison.Ordinal));
+
+        // 10. PersonalHivePower (single loop reached via two Osty branches) must stay `stacks times:`, never `(stacks × stacks) times:`.
+        var (hiveText, hiveGaps) = PowerMechanismReader.Describe(typeof(PersonalHivePower), true);
+        Assert.Empty(hiveGaps);
+        Assert.Contains("stacks times:", hiveText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("stacks × stacks", hiveText!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -967,6 +998,80 @@ public sealed class NativeExtractionTests
             for (int i = 2; (decimal)i < dv.BaseValue; i++)
                 hits++;
             return hits;
+        }
+
+        public static bool ReturnFalseAfterStructCtor(out int x)
+        {
+            x = 7;
+            bool result = false;
+            var s = new MutatingStruct(ref x);
+            _ = s.Value;
+            return result;
+        }
+
+        public static int DoWhileDecimalLoop(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar dv)
+        {
+            int hits = 0;
+            int i = 0;
+            do
+            {
+                hits++;
+                i++;
+            } while ((decimal)i < dv.BaseValue);
+            return hits;
+        }
+
+        public static int CounterDependentDecimalLoop(MegaCrit.Sts2.Core.Localization.DynamicVars.DynamicVar dv)
+        {
+            int sum = 0;
+            for (int i = 0; (decimal)i < dv.BaseValue; i++)
+                sum += i + 1;
+            return sum;
+        }
+    }
+
+    private sealed class SyntheticNestedDictLoopPower : PowerModel
+    {
+        private sealed class Data { public readonly Dictionary<CardModel, int> map = []; }
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        protected override object InitInternalData() => new Data();
+        public override async Task AfterCardPlayed(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (GetInternalData<Data>().map.Remove(cardPlay.Card, out var n))
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    for (int j = 0; j < 3; j++)
+                        await PlayerCmd.GainEnergy(1m, Owner.Player!);
+                }
+            }
+        }
+    }
+
+    private sealed class SyntheticCrossHookGuardPower : PowerModel
+    {
+        private bool _guard;
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        private bool GuardFlag
+        {
+            get => _guard;
+            set => _guard = value;
+        }
+        public override Task AfterApplied(Creature? applier, CardModel? cardSource)
+        {
+            GuardFlag = true;
+            return Task.CompletedTask;
+        }
+        public override async Task AfterDamageReceived(PlayerChoiceContext choiceContext, Creature target, DamageResult result, ValueProp props, Creature? dealer, CardModel? cardSource)
+        {
+            if (target == Owner && !GuardFlag)
+            {
+                GuardFlag = true;
+                await PlayerCmd.GainEnergy(1m, Owner.Player!);
+                GuardFlag = false;
+            }
         }
     }
 

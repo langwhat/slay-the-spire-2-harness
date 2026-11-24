@@ -1007,7 +1007,7 @@ internal static class EventMechanismReader
             return false;
 
         var body = ReadBody(predMethod);
-        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: Call { Method.Name: "CanEnchant", Receiver: var rec } }])
+        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: Call { Method.Name: "CanEnchant", Receiver: var rec, Arguments: [Input] } }])
             return false;
         return ExtractEnchantmentType(rec) == targetEnchantment;
     }

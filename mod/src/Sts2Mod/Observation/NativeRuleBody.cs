@@ -18,6 +18,7 @@ internal sealed class NativeRuleBody
     internal sealed record Constant(object? Data) : Value;
     internal sealed record Input(string Name, Type? Type = null) : Value;
     internal sealed record LocalAddress(int Slot) : Value;
+    internal sealed record StateFieldAddress(FieldInfo Member) : Value;
     internal sealed record Field(FieldInfo Member, Value? Receiver) : Value;
     internal sealed record Call(MethodBase Method, Value? Receiver, Value[] Arguments) : Value;
     internal sealed record Operation(string Operator, Value Left, Value? Right = null) : Value;
@@ -91,6 +92,7 @@ internal sealed class NativeRuleBody
         {
             ArrayInit init => MaterializeArray(init, visiting, depth),
             LocalAddress addr => depth >= 4 ? Missing : Materialize(Locals.GetValueOrDefault(addr.Slot, Missing), visiting, depth + 1),
+            StateFieldAddress smAddr => depth >= 4 ? Missing : Materialize(StateFields.GetValueOrDefault(smAddr.Member, new Field(smAddr.Member, StateMachine)), visiting, depth + 1),
             _ => value,
         };
 
@@ -130,8 +132,12 @@ internal sealed class NativeRuleBody
             return value;
         }
 
-        public Value Deref(Value value)
-            => value is LocalAddress addr ? Locals.GetValueOrDefault(addr.Slot, Missing) : value;
+        public Value Deref(Value value) => value switch
+        {
+            LocalAddress addr => Locals.GetValueOrDefault(addr.Slot, Missing),
+            StateFieldAddress smAddr => StateFields.GetValueOrDefault(smAddr.Member, new Field(smAddr.Member, StateMachine)),
+            _ => value,
+        };
     }
 
     private static readonly Input Missing = new("?");
@@ -225,7 +231,7 @@ internal sealed class NativeRuleBody
                     var receiver = rawReceiver is not null ? path.Deref(rawReceiver) : null;
                     if (code == OpCodes.Call && target is ConstructorInfo && rawReceiver is LocalAddress ctorSlot)
                     {
-                        var hasWritableByRef = target.GetParameters().Any(p => p.ParameterType.IsByRef && !p.IsIn);
+                        var hasWritableByRef = target.GetParameters().Any(IsWritableByRef);
                         InvalidateByRefArguments(path, target, args, skipIndex: -1);
                         if (!hasWritableByRef)
                         {
@@ -243,6 +249,11 @@ internal sealed class NativeRuleBody
                         if (args[1] is LocalAddress removedValSlot)
                         {
                             path.Locals[removedValSlot.Slot] = new Operation("dict_removed_value", receiver);
+                            isDictRemoveOut = true;
+                        }
+                        else if (args[1] is StateFieldAddress { Member: var smAddrField })
+                        {
+                            path.StateFields[smAddrField] = new Operation("dict_removed_value", receiver);
                             isDictRemoveOut = true;
                         }
                         else if (args[1] is Field { Receiver: var smRec, Member: var smField } && smRec == StateMachine)
@@ -264,7 +275,8 @@ internal sealed class NativeRuleBody
                         args[i] = path.Materialize(path.Deref(args[i]));
                     var call = new Call(target, receiver is not null ? path.Materialize(receiver) : null, args);
                     Calls.Add(new Step(index, call, [.. path.Conditions], epoch, path.StepOrder++));
-                    if (target is MethodInfo { ReturnType: var type } && type == typeof(void))
+                    if ((code != OpCodes.Newobj && target is ConstructorInfo)
+                        || (target is MethodInfo { ReturnType: var type } && type == typeof(void)))
                         continue;
                     path.Stack.Add(IsAwaitCompletion(target) ? new Constant(true) : call);
                     continue;
@@ -348,16 +360,11 @@ internal sealed class NativeRuleBody
                                 && IsDecimalConstant(decAddL, 0) && IsDecimalConstant(decAddR, 1))
                             || (decLeft is Call { Method.Name: "op_Implicit", Arguments: [Operation { Operator: "add", Left: var addL, Right: Constant { Data: 1 } }] }
                                 && (addL as Constant ?? Fold(addL)) is { Data: 0 });
-                        if (visits == 0 && expected && isDecZero && IsCountedLoopBound(decRight))
+                        if (visits == 0 && expected && isDecZero && IsCountedLoopBound(decRight)
+                            && !LoopBodyReadsCounter(instructions, destination, index))
                         {
                             Loops.Add(new Loop(destination, index, decRight));
                             path.Index = destination;
-                            continue;
-                        }
-                        if (visits == 0 && expected && isDecIncrementedFromZero && IsCountedLoopBound(decRight))
-                        {
-                            // Bottom-tested decimal loop starting at 0 already ran its representative iteration.
-                            Loops.Add(new Loop(destination, index, decRight));
                             continue;
                         }
                         if (visits == 1 && Loops.Any(loop => loop.Start == destination && loop.End == index)
@@ -490,6 +497,8 @@ internal sealed class NativeRuleBody
                     var address = path.Pop();
                     if (address is LocalAddress loadSlot)
                         path.Stack.Add(path.Locals.GetValueOrDefault(loadSlot.Slot, Missing));
+                    else if (address is StateFieldAddress loadSmField)
+                        path.Stack.Add(path.StateFields.GetValueOrDefault(loadSmField.Member, Missing));
                     else if (address is Input loadParam)
                         path.Stack.Add(path.OutValues.GetValueOrDefault(loadParam.Name, loadParam));
                     else
@@ -501,6 +510,8 @@ internal sealed class NativeRuleBody
                     var address = path.Pop();
                     if (address is LocalAddress storeSlot)
                         path.Locals[storeSlot.Slot] = storedValue;
+                    else if (address is StateFieldAddress storeSmField)
+                        path.StateFields[storeSmField.Member] = storedValue;
                     else if (address is Input storeParam)
                     {
                         path.OutValues[storeParam.Name] = storedValue;
@@ -617,6 +628,10 @@ internal sealed class NativeRuleBody
         }
     }
 
+    private static bool IsWritableByRef(ParameterInfo param)
+        => param.ParameterType.IsByRef
+            && !param.IsDefined(typeof(System.Runtime.CompilerServices.IsReadOnlyAttribute), inherit: false);
+
     private static void InvalidateByRefArguments(Path path, MethodBase target, Value[] args, int skipIndex)
     {
         var parameters = target.GetParameters();
@@ -624,14 +639,68 @@ internal sealed class NativeRuleBody
         {
             if (i == skipIndex)
                 continue;
-            var param = parameters[i];
-            if (!param.ParameterType.IsByRef || param.IsIn)
+            if (!IsWritableByRef(parameters[i]))
                 continue;
             if (args[i] is Input byRefParam)
                 path.OutValues.Remove(byRefParam.Name);
             else if (args[i] is LocalAddress byRefLocal)
                 path.Locals.Remove(byRefLocal.Slot);
+            else if (args[i] is StateFieldAddress byRefSmField)
+                path.StateFields.Remove(byRefSmField.Member);
         }
+    }
+
+    private static bool LoopBodyReadsCounter(List<CodeInstruction> instructions, int start, int end)
+    {
+        // Identify the loop counter read in the back-branch condition (`(decimal)i < bound`) and its increment store right before it.
+        FieldInfo? counterField = null;
+        int? counterSlot = null;
+        var incCursor = -1;
+        for (var cursor = end - 1; cursor >= start; cursor--)
+        {
+            var code = instructions[cursor].opcode;
+            if (code == OpCodes.Stfld && instructions[cursor].operand is FieldInfo field
+                && field.FieldType == typeof(int))
+            {
+                counterField = field;
+                incCursor = cursor;
+                break;
+            }
+            if (code.Name?.StartsWith("stloc", StringComparison.Ordinal) == true)
+            {
+                counterSlot = Slot(code.Name, instructions[cursor].operand);
+                incCursor = cursor;
+                break;
+            }
+        }
+        if (incCursor < 0)
+            return true;
+        // Find the single load of that counter feeding the `i++` right before `incCursor` (in async state machines
+        // Roslyn compiles `i++` via a temp local: `ldfld i; stloc tmp; ldarg.0; ldloc tmp; ldc.i4.1; add; stfld i`).
+        var incLoadCursor = incCursor;
+        for (var cursor = incCursor - 1; cursor >= Math.Max(start, incCursor - 8); cursor--)
+        {
+            var code = instructions[cursor].opcode;
+            if ((counterField is not null && code == OpCodes.Ldfld && Equals(instructions[cursor].operand, counterField))
+                || (counterSlot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                    && !code.Name.StartsWith("ldloca", StringComparison.Ordinal)
+                    && Slot(code.Name, instructions[cursor].operand) == counterSlot.Value))
+            {
+                incLoadCursor = cursor;
+                break;
+            }
+        }
+        for (var cursor = start; cursor < incLoadCursor; cursor++)
+        {
+            var code = instructions[cursor].opcode;
+            if (counterField is not null && (code == OpCodes.Ldfld || code == OpCodes.Ldflda)
+                && Equals(instructions[cursor].operand, counterField))
+                return true;
+            if (counterSlot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                && Slot(code.Name, instructions[cursor].operand) == counterSlot.Value)
+                return true;
+        }
+        return false;
     }
 
     private static bool IsDecimalConstant(Value value, int expected)
@@ -745,7 +814,9 @@ internal sealed class NativeRuleBody
             Value value = new Field(field, receiver);
             if (receiver == StateMachine)
             {
-                if (field.Name == "<>4__this")
+                if (code == OpCodes.Ldflda && field.Name != "<>4__this")
+                    value = new StateFieldAddress(field);
+                else if (field.Name == "<>4__this")
                     value = Self;
                 else if (path.StateFields.TryGetValue(field, out var stored))
                     value = stored;
