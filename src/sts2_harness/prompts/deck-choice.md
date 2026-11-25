@@ -1,6 +1,6 @@
 ## Making the card choice
 
-Compare the available reward groups as one decision. A card in another group can complete a link if both can be taken. Compare the resulting deck with taking either card alone and with skipping both. Default to skipping additions that fail this comparison. Each added card costs a draw in every remaining fight.
+Compare all available reward groups as one decision. Cards across different groups can complete a link if they can be taken together. Compare the full feasible joint plan, its strongest useful subsets, and skipping all groups; evaluate links across every group rather than pairwise. Default to skipping additions that fail this comparison. Each added circulating card expands the draw pool and can delay key pieces in fights that draw far enough into it; judge the actual cost by what it replaces in ordinary hands and whether it exhausts or leaves the pile before later cycles.
 
 Before calling `run_deck_choice`, check in order:
 

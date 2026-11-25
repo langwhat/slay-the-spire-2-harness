@@ -32,7 +32,7 @@ Later acts' Bosses are stronger, and the final act may require two Bosses back t
 
 # Weighing choices
 
-- Distinguish when a benefit starts from how long it lasts. Healing and potions are spent once; upgrades, relics, removals, and good cards act in many fights, and an added card also costs a draw in each of them.
+- Distinguish when a benefit starts from how long it lasts. Healing and potions are spent once; upgrades, relics, removals, and good cards act in many fights, and an added card also takes a draw slot while it remains in the draw pool.
 - Favor lasting strength while HP and potions cover plausible play along the reachable route. Buy short-term safety for a concrete danger, or for a worthwhile route it opens, that outweighs the lasting gain it displaces.
 - Accept some weakness now for much greater attainable strength when the missing support is reasonably attainable, enough rewards remain, and the important fights before it works stay winnable.
 - Spend scarce gold, upgrades, and rests on the change that alters outcomes most. Skipping, buying nothing, and saving are valid when the alternatives offer less.

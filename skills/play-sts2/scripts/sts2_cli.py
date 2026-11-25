@@ -1655,7 +1655,7 @@ def render_reply(
     return "\n".join(lines)
 
 
-def cmd_tools(url: str) -> int:
+def cmd_tools(url: str, *, raw: bool = False) -> int:
     code, text = _http_get(url.rstrip("/") + "/tools")
     if code == 0:
         print(text, file=sys.stderr)
@@ -1663,6 +1663,9 @@ def cmd_tools(url: str) -> int:
     if code != 200:
         print(f"HTTP {code}: {text}", file=sys.stderr)
         return 1
+    if raw:
+        print(text)
+        return 0
     try:
         data = _as_dict(json.loads(text))
     except json.JSONDecodeError as err:
@@ -1883,7 +1886,7 @@ def main() -> int:
     cmd = _str(args.cmd)
 
     if cmd == "tools":
-        return cmd_tools(url)
+        return cmd_tools(url, raw=raw)
     if cmd == "call":
         return cmd_call(
             url,

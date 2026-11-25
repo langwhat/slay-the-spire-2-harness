@@ -38,6 +38,8 @@ _auto_advance = cast(
     _NS["_run_auto_advance"],
 )
 _cmd_call = cast(Callable[..., int], _NS["cmd_call"])
+_cmd_tools = cast(Callable[..., int], _NS["cmd_tools"])
+_cli_main = cast(Callable[[], int], _NS["main"])
 
 
 def _base_run_payload(
@@ -276,11 +278,24 @@ def _combat_payload(
 
 def _start_fake_server(
     replies: Sequence[JsonObj],
+    *,
+    get_replies: Sequence[JsonObj] = (),
 ) -> tuple[ThreadingHTTPServer, str, list[tuple[str, JsonObj]]]:
     requests_log: list[tuple[str, JsonObj]] = []
     queue = list(replies)
+    get_queue = list(get_replies)
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests_log.append((self.path, {}))
+            body: JsonObj = get_queue.pop(0) if get_queue else {"roles": {"run": [], "combat": []}}
+            encoded = json.dumps(body).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length).decode("utf-8") if length else "{}"
@@ -782,5 +797,54 @@ def test_cmd_call_new_run_after_raw_preserves_skipped_card_guard(
             "/tools/run_act",
             "/tools/run_inspect",
         ]
+    finally:
+        server.shutdown()
+
+
+def test_cmd_tools_raw_flag_outputs_raw_json(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools_reply: JsonObj = {
+        "roles": {
+            "run": [
+                {
+                    "name": "run_inspect",
+                    "description": "Inspect run state.",
+                    "input_schema": {"type": "object"},
+                }
+            ],
+            "combat": [
+                {
+                    "name": "combat_act",
+                    "description": "Execute combat steps.",
+                    "input_schema": {"type": "object"},
+                }
+            ],
+        }
+    }
+    server, url, requests_log = _start_fake_server(
+        [],
+        get_replies=[tools_reply, tools_reply, tools_reply],
+    )
+    try:
+        rc_compact = _cmd_tools(url)
+        assert rc_compact == 0
+        compact_out = capsys.readouterr().out
+        assert "[run]" in compact_out
+        assert "run_inspect: Inspect run state." in compact_out
+        assert "input_schema" not in compact_out
+
+        monkeypatch.setattr("sys.argv", ["sts2_cli.py", "--url", url, "tools", "--raw"])
+        assert _cli_main() == 0
+        raw_after_out = capsys.readouterr().out
+        assert json.loads(raw_after_out) == tools_reply
+
+        monkeypatch.setattr("sys.argv", ["sts2_cli.py", "--url", url, "--raw", "tools"])
+        assert _cli_main() == 0
+        raw_before_out = capsys.readouterr().out
+        assert json.loads(raw_before_out) == tools_reply
+
+        assert requests_log == [("/tools", {}), ("/tools", {}), ("/tools", {})]
     finally:
         server.shutdown()
