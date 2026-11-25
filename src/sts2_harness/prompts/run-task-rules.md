@@ -2,4 +2,4 @@ Several tools may be called in one response; they run in order and their results
 
 If a run_plan result reports that the interface was not confirmed restored, submit no game action and no run_plan until the program confirms it; reading remains allowed.
 
-An automatic-progress report describes operations the program already performed. Do not repeat them; continue from the state it returns.
+An automatic-progress report describes operations the program already performed. Do not repeat them; continue from the current state.

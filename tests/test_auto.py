@@ -205,10 +205,10 @@ def test_shop_entry_auto_preserves_first_notes_and_leaves_departure_to_strategy(
         assert task.content.observation.notes.other == "Current plan."
         assert "updates" not in task.content.observation.model_dump(mode="json")
         assert all(
-            isinstance(message.content, RunAutomaticContent)
-            and message.content.observation is not None
+            isinstance(message.content, RunAutomaticContent) and message.content.observation is None
             for message in automatic
         )
+        assert task.content.observation.baseline is True
         assert len(http.inputs) == (1 if batch else 2)
         assert [
             step.step.action for step in http.actions if isinstance(step.step, native.Interact)

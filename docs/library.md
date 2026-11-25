@@ -196,7 +196,7 @@ Automatic entry guidance is enabled separately from tool documents.
 
 The Run agent, its context, and its route plan last one act. Within an act, Run keeps one append-only conversation across map nodes so stable definitions, mechanisms, and prefix caches are reused, while changed state sections, notes, guidance, and battle evidence append incrementally. Combat's context lasts one battle. Capacity compaction handles long exchanges. Failed or uncertain actions keep the feedback needed to recover. Archives record this as `run_context_policy=act_local_v1` (older archives retain `node_local_v1`) and `state_format=sections_v2`.
 
-While a role is active, action receipts and query data arrive in tool results, and the next `act` task delivers fresh state once. Results keep their observation when control leaves the role. Messages are appended between compactions.
+While a role is active, action receipts, automatic-progress reports, and query data arrive without redundant state projections, and the next `act` task delivers fresh state once. `Run -> Combat` action results also defer observation until control returns to Run, while other role exits (such as `Combat -> Run`) keep their observation. Messages are appended between compactions.
 
 ## Roles and strategy notes
 

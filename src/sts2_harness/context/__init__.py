@@ -227,6 +227,7 @@ class Context:
         delivery = deepcopy(self._delivery)
         if not delivery.sections:
             delivery.project(visible_observation(observation, self._role), observation)
+            self._delivery.inline_card_ids.update(delivery.inline_card_ids)
         self._active_group = _Group(
             self._group_number,
             len(self._history),
@@ -533,21 +534,12 @@ class Context:
     def append_automatic(
         self, progress: AutomaticProgress, result: ActionToolResult, *, invalidated: bool = False
     ) -> None:
-        delivery = (
-            self._run_delivery if self._role is native.DecisionOwner.RUN else self._combat_delivery
-        )
-        observation = (
-            delivery.project(
-                visible_observation(result.observation, self._role), result.observation
-            )
-            if result.observation is not None
-            else None
-        )
+        # Defer state projection until the next role task renders the settled state once.
         content = RunAutomaticContent(
             automatic_progress=progress,
             route_plan_status=MovementStatus.INVALIDATED if invalidated else MISSING,
             outcome=result.outcome,
-            observation=observation,
+            observation=None,
         )
         self._history.append(
             RunAutomaticMessage(
@@ -564,12 +556,21 @@ class Context:
         delivery = (
             self._run_delivery if self._role is native.DecisionOwner.RUN else self._combat_delivery
         )
+        defer = defer_observation and (
+            result.observation is not None
+            and (
+                result.observation.location.owner is self._role
+                or (
+                    self._role is native.DecisionOwner.RUN
+                    and result.observation.location.owner is native.DecisionOwner.COMBAT
+                )
+            )
+        )
         observation = (
             delivery.project(
                 visible_observation(result.observation, self._role), result.observation
             )
-            if result.observation is not None
-            and not (defer_observation and result.observation.location.owner is self._role)
+            if result.observation is not None and not defer
             else None
         )
         content = RunProjectedResult(

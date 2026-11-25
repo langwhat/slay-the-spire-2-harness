@@ -525,7 +525,7 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 "Measured regular",
                 "Measured guaranteed",
             ]
-            assert all(report.content.observation is None for report in reports[:-1])
+            assert all(report.content.observation is None for report in reports)
             observations = [
                 json.loads(text).get("observation")
                 for text in texts

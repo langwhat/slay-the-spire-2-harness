@@ -158,3 +158,93 @@ def test_act_local_run_context_compacts_cleanly_across_nodes() -> None:
     retained = json.loads(messages[-1].text)["observation"]
     assert retained["location"]["node_id"] == "node-3"
     assert retained["notes"]["plan"] == "Node 3 plan"
+
+
+def test_run_defers_combat_entry_observation_on_tool_result() -> None:
+    from test_context import COMBAT, RUN
+
+    from sts2_harness.context import Context
+    from sts2_harness.context.models import CombatActInput, RunActInput, RunResultMessage
+    from sts2_harness.llm.messages import ToolCall
+    from sts2_harness.note_values import NotesView
+    from sts2_harness.results import ActionCompleted, ActionToolResult
+
+    run_obs = native.Observation.model_validate_json(RUN)
+    combat_obs = native.Observation.model_validate_json(COMBAT)
+    ctx = Context(native.DecisionOwner.RUN)
+    ctx.begin_group(run_obs, NotesView())
+    ctx.append_task(RunActInput(NotesView()), run_obs)
+    ctx.append_tool_result(
+        ToolCall("enter-fight", "run_next", "{}"),
+        ActionToolResult(ActionCompleted(completed_steps=1), combat_obs),
+        defer_observation=True,
+    )
+    ctx.finish_group()
+
+    result_msg = ctx.model_input()[-1]
+    assert isinstance(result_msg, RunResultMessage)
+    assert result_msg.content.observation is None
+
+    # Returning to the same Run state after combat does not re-emit unchanged sections.
+    ctx.begin_group(run_obs, NotesView())
+    ctx.append_task(RunActInput(), run_obs)
+    after = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert "encounter" not in after
+    assert "card_rarity_offset" not in after
+    assert "relics" not in after
+    assert "potions" not in after
+
+    # Combat exiting to Run still retains its observation on the final combat tool result.
+    combat_ctx = Context(native.DecisionOwner.COMBAT)
+    combat_ctx.begin_group(combat_obs, NotesView())
+    combat_ctx.append_task(CombatActInput(), combat_obs)
+    combat_ctx.append_tool_result(
+        ToolCall("finish-fight", "combat_act", "{}"),
+        ActionToolResult(ActionCompleted(completed_steps=1), run_obs),
+        defer_observation=True,
+    )
+    combat_result = combat_ctx.model_input()[-1]
+    assert isinstance(combat_result, RunResultMessage)
+    assert combat_result.content.observation is not None
+
+
+def test_act_start_auto_before_card_change_compacts_cleanly() -> None:
+    from test_context import COMBAT, RUN
+
+    from sts2_harness.context import Context
+    from sts2_harness.context.models import AutomaticProgress, RunActInput
+    from sts2_harness.note_values import NotesView
+    from sts2_harness.results import ActionCompleted, ActionToolResult
+
+    opening = native.Observation.model_validate_json(RUN)
+    combat = native.Observation.model_validate_json(COMBAT)
+    assert isinstance(opening.state, native.RunState)
+    card = combat.objects["c1"]
+    with_card = opening.model_copy(
+        update={
+            "state": opening.state.model_copy(update={"deck": ("c1",)}),
+            "objects": {**opening.objects, "c1": card},
+            "descriptions": {**opening.descriptions, "c1": "Deal 6 damage."},
+        }
+    )
+    after_removal = opening.model_copy(
+        update={
+            "location": opening.location.model_copy(update={"node_id": "node-2"}),
+            "state": opening.state.model_copy(update={"deck": ()}),
+        }
+    )
+
+    ctx = Context(native.DecisionOwner.RUN)
+    ctx.begin_group(with_card, NotesView())
+    ctx.append_automatic(
+        AutomaticProgress(label="Continue", reason="Single choice."),
+        ActionToolResult(ActionCompleted(completed_steps=1), after_removal),
+    )
+    ctx.finish_group()
+    ctx.begin_group(after_removal, NotesView())
+    ctx.append_task(RunActInput(NotesView()), after_removal)
+    ctx.finish_group()
+
+    candidate = ctx.compaction_candidate()
+    ctx.validate_compaction(candidate)
+    ctx.install_compaction(candidate)

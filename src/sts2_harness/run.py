@@ -639,10 +639,8 @@ class RunAgent(Agent):
         else:
             context = await super()._prepare(observation)
         await self._enrich(context, observation)
-        for index, (progress, result) in enumerate(self._card_reports, start=1):
-            # Run needs each outcome and only the state at the handoff.
-            current = self._reward_view(observation) if index == len(self._card_reports) else None
-            context.append_automatic(progress, replace(result, observation=current))
+        for progress, result in self._card_reports:
+            context.append_automatic(progress, result)
         self._card_reports.clear()
         return context
 
