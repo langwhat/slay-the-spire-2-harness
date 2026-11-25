@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Commands.Builders;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.Powers;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Rooms;
@@ -573,25 +574,97 @@ internal sealed partial class NativeRuleText
     private bool ReadIllusionPowerHooks(Type power, string prefix, out List<string> lines)
     {
         lines = [];
-        if (FindOverride(power, "AfterDeath") is not { } death
+        if (FindOverride(power, "AfterApplied") is not { } afterApplied
+            || FindOverride(power, "AfterDeath") is not { } death
             || FindOverride(power, "ShouldAllowHitting") is not { } allowHit
             || FindOverride(power, "ShouldCreatureBeRemovedFromCombatAfterDeath") is not { } keepBody
+            || FindOverride(power, "ShouldPowerBeRemovedOnDeath") is not { } removePower
             || power.GetMethod("ReviveMove", Declared) is not { } revive
+            || Body(afterApplied) is not { Incomplete: false } afterAppliedBody
             || Body(death) is not { Incomplete: false } deathBody
             || Body(allowHit) is not { Incomplete: false }
             || Body(keepBody) is not { Incomplete: false }
+            || Body(removePower) is not { Incomplete: false } removePowerBody
             || Body(revive) is not { Incomplete: false } reviveBody)
             return false;
 
+        var checksMinion = afterAppliedBody.Calls.Any(s => s.Call.Method.Name == "HasPower"
+            && s.Call.Method.IsGenericMethod
+            && s.Call.Method.GetGenericArguments() is [var checkedPower] && checkedPower == typeof(MinionPower));
+        var appliesMinion = afterAppliedBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd)
+            && s.Call.Method.Name == nameof(PowerCmd.Apply)
+            && s.Call.Method.IsGenericMethod
+            && s.Call.Method.GetGenericArguments() is [var appliedPower] && appliedPower == typeof(MinionPower));
         var setsRevive = deathBody.Calls.Any(s => s.Call.Method.Name == "SetMoveImmediate");
         var healsFull = reviveBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CreatureCmd) && s.Call.Method.Name == nameof(CreatureCmd.Heal));
-        if (!setsRevive || !healsFull)
+        if (!checksMinion || !appliesMinion || !setsRevive || !healsFull || !MatchesIllusionPowerRemovalOnDeath(removePowerBody))
             return false;
 
         _powers.Add(typeof(MinionPower));
         lines.Add($"{prefix}After this power is applied: if owner lacks {PowerLabel(typeof(MinionPower))}: attempt to apply 1 {PowerLabel(typeof(MinionPower))} to owner");
-        lines.Add($"{prefix}On owner death: if death was not prevented: owner remains in combat, becomes untargetable while reviving, removes buffs and temporary debuffs (keeping permanent debuffs), and replaces its next move with reviving to full HP");
+        lines.Add($"{prefix}On owner death: if death was not prevented: owner remains in combat, becomes untargetable while reviving, removes permanent debuffs (keeping buffs and temporary powers), and replaces its next move with reviving to full HP");
         return true;
+    }
+
+    private static bool MatchesIllusionPowerRemovalOnDeath(NativeRuleBody body)
+    {
+        if (body.Returns.Count != 2 || body.Terminals.Any(t => !t.Returned))
+            return false;
+
+        var hasDebuffBranch = false;
+        var hasOtherFalseBranch = false;
+        foreach (var ret in body.Returns)
+        {
+            if (ret.Conditions.Length != 1)
+                return false;
+            var cond = ret.Conditions[0];
+            if (IsPowerTypeCheck(cond, PowerType.Debuff, wantEqual: true) && IsNotTemporaryPowerCheck(ret.Value))
+                hasDebuffBranch = true;
+            else if (IsPowerTypeCheck(cond, PowerType.Debuff, wantEqual: false) && ret.Value is Constant { Data: 0 })
+                hasOtherFalseBranch = true;
+            else
+                return false;
+        }
+        return hasDebuffBranch && hasOtherFalseBranch;
+
+        static bool IsPowerTypeCheck(Test test, PowerType expectedType, bool wantEqual)
+        {
+            if (test.Value is not Operation
+                {
+                    Operator: var op,
+                    Left: Call { Method.Name: "get_Type", Receiver: Input { Name: "power" } },
+                    Right: Constant { Data: int rawType }
+                } || rawType != (int)expectedType)
+                return false;
+            return op switch
+            {
+                "bne.un" => test.Expected != wantEqual,
+                "beq" or "ceq" => test.Expected == wantEqual,
+                _ => false,
+            };
+        }
+
+        static bool IsNotTemporaryPowerCheck(Value value) => value switch
+        {
+            Operation
+            {
+                Operator: "ceq",
+                Left: Operation
+                {
+                    Operator: "cgt.un",
+                    Left: Operation { Operator: "isinst", Left: Input { Name: "power" }, Right: Constant { Data: Type tempType } },
+                    Right: Constant { Data: null or 0 }
+                },
+                Right: Constant { Data: 0 }
+            } => tempType == typeof(ITemporaryPower),
+            Operation
+            {
+                Operator: "ceq",
+                Left: Operation { Operator: "isinst", Left: Input { Name: "power" }, Right: Constant { Data: Type tempType } },
+                Right: Constant { Data: null or 0 }
+            } => tempType == typeof(ITemporaryPower),
+            _ => false,
+        };
     }
 
     private bool ReadBurrowedPowerHooks(Type power, string prefix, out List<string> lines)

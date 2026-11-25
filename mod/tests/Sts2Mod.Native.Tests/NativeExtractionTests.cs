@@ -1198,6 +1198,25 @@ public sealed class NativeExtractionTests
         var (mismatchedDestText, mismatchedDestGaps) = PowerMechanismReader.Describe(typeof(SyntheticMismatchedDestCountPower), true);
         Assert.Null(mismatchedDestText);
         Assert.NotEmpty(mismatchedDestGaps);
+
+        // IllusionPower removes permanent debuffs (keeping buffs and temporary powers); reversed removal hook must fail closed.
+        var (illusionText, illusionGaps) = PowerMechanismReader.Describe(typeof(IllusionPower), true);
+        Assert.Empty(illusionGaps);
+        Assert.NotNull(illusionText);
+        Assert.Contains("removes permanent debuffs (keeping buffs and temporary powers)", illusionText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("removes buffs", illusionText!, StringComparison.Ordinal);
+
+        var (reversedIllusionText, reversedIllusionGaps) = PowerMechanismReader.Describe(typeof(SyntheticReversedIllusionPower), true);
+        Assert.NotEmpty(reversedIllusionGaps);
+        Assert.True(reversedIllusionText is null || !reversedIllusionText.Contains("removes permanent debuffs", StringComparison.Ordinal));
+
+        // MinionPower marks its owner as a secondary enemy alongside non-fatal and death-persistence rules.
+        var (minionText, minionGaps) = PowerMechanismReader.Describe(typeof(MinionPower), true);
+        Assert.Empty(minionGaps);
+        Assert.NotNull(minionText);
+        Assert.Contains("Secondary enemy (removed when all primary enemies die; not required to win combat): yes", minionText!, StringComparison.Ordinal);
+        Assert.Contains("Owner death triggers Fatal: no", minionText!, StringComparison.Ordinal);
+        Assert.Contains("Removed on owner death: no", minionText!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2076,5 +2095,25 @@ public sealed class NativeExtractionTests
             location.position = CardPilePosition.Top;
             return location;
         }
+    }
+
+    private sealed class SyntheticReversedIllusionPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override bool ShouldPowerBeRemovedOnDeath(PowerModel power) => power.Type == PowerType.Buff;
+        public override Task AfterApplied(Creature? applier, CardModel? cardSource)
+            => Owner.HasPower<MinionPower>()
+                ? Task.CompletedTask
+                : PowerCmd.Apply<MinionPower>(new ThrowingPlayerChoiceContext(), Owner, 1m, null, null);
+        public override Task AfterDeath(PlayerChoiceContext choiceContext, Creature creature, CardModel? source, bool wasRemovalPrevented, float deathAnimLength)
+        {
+            if (!wasRemovalPrevented && creature == Owner)
+                Owner.Monster!.SetMoveImmediate(new MoveState("REVIVE_MOVE", ReviveMove, new HealIntent()));
+            return Task.CompletedTask;
+        }
+        public override bool ShouldAllowHitting(Creature creature) => creature != Owner;
+        public override bool ShouldCreatureBeRemovedFromCombatAfterDeath(Creature creature) => creature != Owner;
+        private Task ReviveMove(IReadOnlyList<Creature> targets) => CreatureCmd.Heal(Owner, Owner.MaxHp);
     }
 }

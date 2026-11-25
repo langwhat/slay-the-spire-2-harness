@@ -308,7 +308,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         // Combat queries are asked outside the shared dispatchers too, so read every override.
         // Monster-level queries only drive presentation such as the bestiary.
         foreach (var query in type.GetMethods(Declared).Where(method => method.ReturnType == typeof(bool)
-            && method.Name.StartsWith("Should", StringComparison.Ordinal) && IsHookOverride(method)
+            && (method.Name.StartsWith("Should", StringComparison.Ordinal) || method.Name == "get_OwnerIsSecondaryEnemy")
+            && IsHookOverride(method)
             && method.GetBaseDefinition().DeclaringType != typeof(MonsterModel)
             && !preHandled.Contains(method.Name)))
         {
@@ -563,6 +564,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         "ShouldGainGold" => "Can gain Gold",
         "ShouldTakeExtraTurn" => "Takes an extra turn",
         "ShouldGenerateTreasure" => "Generates treasure",
+        "get_OwnerIsSecondaryEnemy" => "Secondary enemy (removed when all primary enemies die; not required to win combat)",
         _ => Humanize(methodName),
     };
 
