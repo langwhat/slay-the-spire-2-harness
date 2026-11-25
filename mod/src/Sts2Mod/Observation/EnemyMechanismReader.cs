@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -9,13 +10,19 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.MonsterMoves;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
+using Sts2Mod.Core.Observation;
 
 namespace Sts2Mod.Observation;
 
 internal static class EnemyMechanismReader
 {
     private const string UnsetMoveId = "UNSET_MOVE";
-    private sealed record Readout(string Language, string? Text, IReadOnlySet<string> InlinePowerIds, IReadOnlyList<Type> HoistedPowers);
+    private sealed record Readout(
+        string Language,
+        string? Text,
+        IReadOnlySet<string> InlinePowerIds,
+        IReadOnlyList<Type> HoistedPowers,
+        MechanismCompleteness Completeness);
     private static readonly ConditionalWeakTable<MonsterMoveStateMachine, Readout> Readouts = new();
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
     private static readonly IReadOnlySet<string> EmptyPowers = new HashSet<string>(StringComparer.Ordinal);
@@ -23,6 +30,32 @@ internal static class EnemyMechanismReader
     private static readonly FieldInfo? InitialState = AccessTools.Field(typeof(MonsterMoveStateMachine), "_initialState");
     private static readonly FieldInfo? PerformMove = AccessTools.Field(typeof(MoveState), "_onPerform");
     private static readonly PropertyInfo? ConditionalStates = AccessTools.Property(typeof(ConditionalBranchState), "States");
+    private static long _coldExtractionCount;
+    private static long _coldExtractionTicks;
+    private static long _cachedExtractionCount;
+    private static long _cachedExtractionTicks;
+
+    internal static (long ColdCount, double ColdMs, long CachedCount, double CachedMs) ReadLatencyMetrics() =>
+        (
+            System.Threading.Interlocked.Read(ref _coldExtractionCount),
+            System.Threading.Interlocked.Read(ref _coldExtractionTicks) * 1000.0 / Stopwatch.Frequency,
+            System.Threading.Interlocked.Read(ref _cachedExtractionCount),
+            System.Threading.Interlocked.Read(ref _cachedExtractionTicks) * 1000.0 / Stopwatch.Frequency);
+
+    private static void PushWarning(string message)
+    {
+        if (MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)
+            GD.PushWarning(message);
+    }
+
+    internal static MechanismCompleteness ClassifyCompleteness(string? text, int gapCount, bool failed = false)
+    {
+        if (failed)
+            return MechanismCompleteness.Unavailable;
+        if (gapCount > 0)
+            return text is not null ? MechanismCompleteness.Partial : MechanismCompleteness.Unavailable;
+        return MechanismCompleteness.Complete;
+    }
 
     internal static bool IsPublicMove(MoveState move)
         => move.StateId != UnsetMoveId
@@ -32,37 +65,48 @@ internal static class EnemyMechanismReader
     public static string? Read(Creature creature, string language)
         => ReadWithPowers(creature, language).Text;
 
-    public static (string? Text, IReadOnlySet<string> InlinePowerIds, IReadOnlyList<Type> HoistedPowers) ReadWithPowers(Creature creature, string language)
+    public static (string? Text, IReadOnlySet<string> InlinePowerIds, IReadOnlyList<Type> HoistedPowers, MechanismCompleteness Completeness) ReadWithPowers(Creature creature, string language)
     {
+        var started = Stopwatch.GetTimestamp();
         MonsterMoveStateMachine? machine = null;
         string monsterId = "unknown";
         try
         {
             if (creature.Monster is not { MoveStateMachine: { } stateMachine } monster)
-                return (null, EmptyPowers, EmptyHoistedPowers);
+                return (null, EmptyPowers, EmptyHoistedPowers, MechanismCompleteness.Complete);
             machine = stateMachine;
             monsterId = monster.Id.ToString();
             if (monster.NextMove.StateId == UnsetMoveId)
-                return (null, EmptyPowers, EmptyHoistedPowers);
+                return (null, EmptyPowers, EmptyHoistedPowers, MechanismCompleteness.Complete);
 
             if (Readouts.TryGetValue(machine, out var cached) && cached.Language == language)
-                return (cached.Text, cached.InlinePowerIds, cached.HoistedPowers);
+            {
+                System.Threading.Interlocked.Increment(ref _cachedExtractionCount);
+                System.Threading.Interlocked.Add(ref _cachedExtractionTicks, Stopwatch.GetTimestamp() - started);
+                return (cached.Text, cached.InlinePowerIds, cached.HoistedPowers, cached.Completeness);
+            }
 
-            // Unresolved native paths are extractor work items. They stay in the diagnostics log.
+            // Unresolved native paths are extractor work items. They stay in the diagnostics log;
+            // completeness tells the consumer when a readout omits unresolved paths.
             var (text, gaps, inlinePowerIds, hoistedPowers) = DescribeWithPowers(monster);
+            var completeness = ClassifyCompleteness(text, gaps.Count);
             if (gaps.Count > 0 && LoggedGaps.TryAdd(monsterId, 0))
-                GD.PushWarning($"[sts2agent] Unresolved native enemy rules for {monsterId}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
+                PushWarning($"[sts2agent] Unresolved native enemy rules for {monsterId}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
 
-            Readouts.AddOrUpdate(machine, new Readout(language, text, inlinePowerIds, hoistedPowers));
-            return (text, inlinePowerIds, hoistedPowers);
+            System.Threading.Interlocked.Increment(ref _coldExtractionCount);
+            System.Threading.Interlocked.Add(ref _coldExtractionTicks, Stopwatch.GetTimestamp() - started);
+            Readouts.AddOrUpdate(machine, new Readout(language, text, inlinePowerIds, hoistedPowers, completeness));
+            return (text, inlinePowerIds, hoistedPowers, completeness);
         }
         catch (Exception error)
         {
             if (LoggedGaps.TryAdd(monsterId, 0))
-                GD.PushWarning($"[sts2agent] Enemy mechanism unavailable for {monsterId}: {error.Message}");
+                PushWarning($"[sts2agent] Enemy mechanism unavailable for {monsterId}: {error.Message}");
+            System.Threading.Interlocked.Increment(ref _coldExtractionCount);
+            System.Threading.Interlocked.Add(ref _coldExtractionTicks, Stopwatch.GetTimestamp() - started);
             if (machine is not null)
-                Readouts.AddOrUpdate(machine, new Readout(language, null, EmptyPowers, EmptyHoistedPowers));
-            return (null, EmptyPowers, EmptyHoistedPowers);
+                Readouts.AddOrUpdate(machine, new Readout(language, null, EmptyPowers, EmptyHoistedPowers, MechanismCompleteness.Unavailable));
+            return (null, EmptyPowers, EmptyHoistedPowers, MechanismCompleteness.Unavailable);
         }
     }
 

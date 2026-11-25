@@ -401,3 +401,48 @@ def upcoming_act_bosses(
     if isinstance(progress.bosses_left, int) and progress.bosses_left > 0:
         return public_map.bosses[-progress.bosses_left :]
     return public_map.bosses
+
+
+def upcoming_act_elites(
+    public_map: native.PublicMap | MISSING,
+    progress: native.Progress,
+    plan: RoutePlan | None = None,
+) -> tuple[native.NamedDefinition, ...]:
+    if (
+        public_map is MISSING
+        or public_map.elite_pool is MISSING
+        or not public_map.elite_pool
+        or is_post_boss(progress, public_map)
+        or progress.bosses_left == 0
+    ):
+        return ()
+    nodes = {node.position: node for node in public_map.nodes}
+    position = progress.position
+    route = _route_nodes(plan, position)
+    if route is not None and all(pos in nodes for pos in route):
+        if any(nodes[pos].room_type == MapRoom.ELITE for pos in route):
+            return public_map.elite_pool
+        # A partial plan may stop before the Boss; check rooms reachable after its tail.
+        roots = list(nodes[route[-1]].children)
+    else:
+        children = {child for node in public_map.nodes for child in node.children}
+        roots = (
+            list(nodes[position].children)
+            if position is not None and position in nodes
+            else [node.position for node in public_map.nodes if node.position not in children]
+            if position is None
+            else []
+        )
+        if public_map.legal_destinations is not None:
+            roots.extend(public_map.legal_destinations)
+    reached: set[str] = set()
+    pending = roots
+    while pending:
+        pos = pending.pop()
+        if pos in reached or pos not in nodes:
+            continue
+        reached.add(pos)
+        if nodes[pos].room_type == MapRoom.ELITE:
+            return public_map.elite_pool
+        pending.extend(nodes[pos].children)
+    return ()

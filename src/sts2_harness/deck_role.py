@@ -134,12 +134,17 @@ def validate_deck_choice(
     *,
     offer_ref: str | None = None,
     filter_view: bool = True,
+    route_plan: RoutePlan | None = None,
 ) -> tuple[CardRewardPlan, tuple[TakeCard | SkipCard, ...]] | QueryToolResult:
     resolved = task.resolved_card_rewards if isinstance(task, ActTask) else _EMPTY_RESOLVED
     if raw is None:
         return _deck_rejected(ReasonCode.QUERY_FAILED, "The current rewards are unavailable.", None)
     current = (
-        deck_observation(raw, deck_offers(raw, resolved, offer_ref=offer_ref))
+        deck_observation(
+            raw,
+            deck_offers(raw, resolved, offer_ref=offer_ref),
+            route_plan=reconcile_plan(route_plan, raw.state.progress.position).plan,
+        )
         if filter_view and isinstance(raw.state, native.RunState)
         else raw
     )
@@ -288,8 +293,11 @@ class DeckAgent(Agent):
     ) -> native.Observation:
         if not isinstance(observation.state, native.RunState):
             return observation
+        active_plan = reconcile_plan(self._plan, observation.state.progress.position).plan
         return deck_observation(
-            observation, deck_offers(observation, resolved, offer_ref=self._offer_ref)
+            observation,
+            deck_offers(observation, resolved, offer_ref=self._offer_ref),
+            route_plan=active_plan,
         )
 
     def set_route_plan(self, plan: RoutePlan | None) -> None:
@@ -451,6 +459,7 @@ class DeckAgent(Agent):
             delivered,
             raw,
             offer_ref=self._offer_ref,
+            route_plan=self._plan,
         )
         if isinstance(validated, QueryToolResult):
             return validated

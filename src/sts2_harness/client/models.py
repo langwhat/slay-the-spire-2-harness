@@ -160,6 +160,12 @@ class MechanismKind(StrEnum):
     OTHER = "other"
 
 
+class MechanismCompleteness(StrEnum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    UNAVAILABLE = "unavailable"
+
+
 class HpDisplay(StrEnum):
     NUMERIC = "numeric"
     INFINITE = "infinite"
@@ -678,6 +684,7 @@ class MechanismView(WireModel):
     name: Nonempty
     text: str | None
     owner: Nonempty | MISSING = MISSING
+    completeness: MechanismCompleteness | MISSING = MISSING
 
 
 class MapOdds(WireModel):

@@ -8,6 +8,7 @@ from sts2_harness.results import Outcome, QueryData, QueryToolResult, SemanticVa
 
 class RawResult(SemanticValue):
     outcome: Outcome
+    location: native.Location | MISSING = MISSING
     state: native.State | None
     objects: native.Directory[native.ObjectEntry] | MISSING = MISSING
     descriptions: native.Directory[str | None] | MISSING = MISSING
@@ -26,6 +27,7 @@ def render(result: ToolResult) -> RawResult:
         return RawResult(outcome=result.outcome, state=None, data=data)
     return RawResult(
         outcome=result.outcome,
+        location=observation.location,
         state=observation.state,
         objects=observation.objects,
         descriptions=observation.descriptions,

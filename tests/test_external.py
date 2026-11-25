@@ -83,9 +83,8 @@ def test_http_state_reads_are_complete_while_paused_without_model() -> None:
                         value["descriptions"]
                         == mod.observation.model_dump(mode="json")["descriptions"]
                     )
-                    assert {"stamp", "location", "game_language", "updates", "data"}.isdisjoint(
-                        value
-                    )
+                    assert value["location"] == mod.observation.location.model_dump(mode="json")
+                    assert {"stamp", "game_language", "updates", "data"}.isdisjoint(value)
                 assert mod.control is native.ControlIntent.PAUSED
                 assert mod.actions == []
 

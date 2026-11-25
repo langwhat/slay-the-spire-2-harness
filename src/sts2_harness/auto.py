@@ -227,19 +227,28 @@ def _candidate(
         )
         if opening is None:
             return None
-        for ref in state.potions:
-            potion = observation.objects[ref]
-            if (
-                isinstance(potion, native.PotionEntry)
-                and potion.definition_id == "POTION.FOUL_POTION"
-                and potion.usable is True
-                and potion.needs_target is False
-            ):
-                return (
-                    ActionStep(ActionKind.USE_POTION, ref),
-                    f"{potion.name} ({potion.definition_id})",
-                    _Reason.POTION,
-                )
+        has_ectoplasm = any(
+            isinstance(relic := observation.objects.get(ref), native.RelicEntry)
+            and relic.definition_id == "RELIC.ECTOPLASM"
+            for ref in state.relics
+        )
+        is_fake_merchant = (
+            state.event is not None and state.event.definition_id == "EVENT.FAKE_MERCHANT"
+        )
+        if not has_ectoplasm and not is_fake_merchant:
+            for ref in state.potions:
+                potion = observation.objects[ref]
+                if (
+                    isinstance(potion, native.PotionEntry)
+                    and potion.definition_id == "POTION.FOUL_POTION"
+                    and potion.usable is True
+                    and potion.needs_target is False
+                ):
+                    return (
+                        ActionStep(ActionKind.USE_POTION, ref),
+                        f"{potion.name} ({potion.definition_id})",
+                        _Reason.POTION,
+                    )
         return ActionStep(ActionKind.INTERACT, opening.ref), opening.label, _Reason.SHOP
     if state.screen is native.RunScreen.MAP:
         destinations = tuple(action for action in enabled if action.destination is not MISSING)
@@ -323,6 +332,17 @@ _REWARD_REASONS = {
 }
 
 
+def _sole_claim_action(
+    offer: native.Offer, enabled: dict[str, native.Action]
+) -> native.Action | None:
+    if offer.requires_selection is True or len(offer.actions) != 1:
+        return None
+    action = enabled.get(offer.actions[0])
+    if action is None or (action.subject is not MISSING and action.subject != offer.ref):
+        return None
+    return action
+
+
 def battle_reward(observation: native.Observation) -> native.Action | None:
     state = observation.state
     if (
@@ -335,15 +355,14 @@ def battle_reward(observation: native.Observation) -> native.Action | None:
     ):
         return None
     enabled = {action.ref: action for action in state.actions if action.enabled}
-    kinds = (native.OfferKind.RELIC, native.OfferKind.GOLD)
-    if state.player.empty_potion_slot_count > 0:
+    potion_offers = tuple(offer for offer in state.offers if offer.kind is native.OfferKind.POTION)
+    kinds: tuple[native.OfferKind, ...] = (native.OfferKind.RELIC, native.OfferKind.GOLD)
+    if 0 < len(potion_offers) <= state.player.empty_potion_slot_count:
         kinds = (*kinds, native.OfferKind.POTION)
     for kind in kinds:
         for offer in state.offers:
-            if offer.kind is kind:
-                for reference in offer.actions:
-                    if reference in enabled:
-                        return enabled[reference]
+            if offer.kind is kind and (action := _sole_claim_action(offer, enabled)) is not None:
+                return action
     return None
 
 

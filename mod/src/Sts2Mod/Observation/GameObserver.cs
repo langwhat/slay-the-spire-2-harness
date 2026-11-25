@@ -394,12 +394,15 @@ internal sealed class GameObserver(
         foreach (var creature in combat.Enemies)
         {
             var enemyRef = registry.GetRef(creature);
-            var (mechanics, inlinePowers, hoistedPowers) = EnemyMechanismReader.ReadWithPowers(creature, gameLanguage);
+            var (mechanics, inlinePowers, hoistedPowers, completeness) = EnemyMechanismReader.ReadWithPowers(creature, gameLanguage);
             _inlineEnemyPowerIds.UnionWith(inlinePowers);
-            if (mechanics is not null)
+            if (mechanics is not null || completeness == MechanismCompleteness.Unavailable)
                 _mechanisms.Add(new MechanismView(
                     MechanismKind.Other, creature.ModelId.ToString(), CreatureName(creature), mechanics,
-                    enemyRef));
+                    enemyRef)
+                {
+                    Completeness = completeness == MechanismCompleteness.Complete ? null : completeness,
+                });
             foreach (var powerType in hoistedPowers)
                 _pendingPowerRules.Add((enemyRef, powerType, powerType.Name));
         }
@@ -623,16 +626,19 @@ internal sealed class GameObserver(
                 foreach (var encounter in upcomingBosses.Concat(run.Act.AllEliteEncounters))
                 {
                     var encounterId = encounter.Id.ToString();
-                    var (rules, hoistedPowers) = EncounterMechanismReader.ReadWithHoistedPowers(
+                    var (rules, hoistedPowers, completeness) = EncounterMechanismReader.ReadWithHoistedPowers(
                         encounter, run.AscensionLevel, run.GameMode, gameLanguage);
-                    if (rules is not null)
+                    if (rules is not null || completeness == MechanismCompleteness.Unavailable)
                     {
                         _mechanisms.Add(new MechanismView(
                             MechanismKind.Other,
                             encounterId,
                             encounter.Title.GetFormattedText(),
                             rules,
-                            ActMechanismOwner));
+                            ActMechanismOwner)
+                        {
+                            Completeness = completeness == MechanismCompleteness.Complete ? null : completeness,
+                        });
                     }
                     var powerOwner = $"{ActMechanismOwner}:{encounterId}";
                     foreach (var powerType in hoistedPowers)
@@ -1652,14 +1658,19 @@ internal sealed class GameObserver(
             }
         }
 
-        if (EventMechanismReader.ReadEvent(native, visibleOptions, NEventRoom.Instance?.CustomEventNode is NFakeMerchant) is { } eventRule)
+        var (eventRule, eventCompleteness) = EventMechanismReader.ReadEventWithCompleteness(
+            native, visibleOptions, NEventRoom.Instance?.CustomEventNode is NFakeMerchant);
+        if (eventRule is not null || eventCompleteness == MechanismCompleteness.Unavailable)
         {
             _mechanisms.Add(new MechanismView(
                 MechanismKind.Other,
                 native.Id.ToString(),
                 name,
                 eventRule,
-                reference));
+                reference)
+            {
+                Completeness = eventCompleteness == MechanismCompleteness.Complete ? null : eventCompleteness,
+            });
         }
 
         if (NEventRoom.Instance?.CustomEventNode is not NFakeMerchant

@@ -7,13 +7,14 @@ from pydantic import MISSING
 
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
-from sts2_harness.context.map_projection import upcoming_act_bosses
+from sts2_harness.context.map_projection import upcoming_act_bosses, upcoming_act_elites
 from sts2_harness.context.view import ACT_MECHANISM_OWNER_PREFIX
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.prompts import PromptReader, deck_act_prompt
 from sts2_harness.results import Outcome
+from sts2_harness.route_plan import RoutePlan
 
 
 class CardChoiceKind(StrEnum):
@@ -128,6 +129,8 @@ def same_card_options(
 def deck_observation(
     observation: native.Observation,
     offers: native.Offer | tuple[native.Offer, ...] | None,
+    *,
+    route_plan: RoutePlan | None = None,
 ) -> native.Observation:
     state = observation.state
     assert isinstance(state, native.RunState)
@@ -171,6 +174,11 @@ def deck_observation(
         boss.definition_id
         for boss in upcoming_act_bosses(observation.map, state.progress)
         if isinstance(boss.definition_id, str)
+    )
+    identities.update(
+        elite.definition_id
+        for elite in upcoming_act_elites(observation.map, state.progress, route_plan)
+        if isinstance(elite.definition_id, str)
     )
     return observation.model_copy(
         update={

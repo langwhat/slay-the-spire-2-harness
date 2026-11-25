@@ -11,6 +11,7 @@ using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.ValueProps;
+using Sts2Mod.Core.Observation;
 using static Sts2Mod.Observation.NativeRuleBody;
 
 namespace Sts2Mod.Observation;
@@ -138,6 +139,12 @@ internal static class EventMechanismReader
         EventModel activeEvent,
         IReadOnlyList<(string Title, EventOption Option)> visibleOptions,
         bool isFakeMerchant)
+        => ReadEventWithCompleteness(activeEvent, visibleOptions, isFakeMerchant).Text;
+
+    public static (string? Text, MechanismCompleteness Completeness) ReadEventWithCompleteness(
+        EventModel activeEvent,
+        IReadOnlyList<(string Title, EventOption Option)> visibleOptions,
+        bool isFakeMerchant)
     {
         var eventId = activeEvent.Id.ToString();
         try
@@ -145,6 +152,7 @@ internal static class EventMechanismReader
             // Method IL bodies are cached by MethodInfo; dynamic option values are always rendered
             // against the live activeEvent instance so stateful events (e.g. AbyssalBaths) stay fresh.
             var lines = new List<string>();
+            var gapCount = 0;
             if (isFakeMerchant && DescribeFakeMerchant(activeEvent.GetType()) is { } merchantLine)
                 lines.Add(merchantLine);
 
@@ -160,6 +168,7 @@ internal static class EventMechanismReader
                     var (summary, gap) = DescribeOption(activeEvent, option, onChosen.Method);
                     if (gap is not null)
                     {
+                        gapCount++;
                         var gapKey = $"{eventId}:{onChosen.Method.Name}:{gap}";
                         if (LoggedGaps.TryAdd(gapKey, 0))
                             PushWarning($"[sts2agent] Unresolved native event option rule for {gapKey}");
@@ -171,13 +180,14 @@ internal static class EventMechanismReader
                 }
             }
 
-            return lines.Count > 0 ? string.Join("\n", lines) : null;
+            var text = lines.Count > 0 ? string.Join("\n", lines) : null;
+            return (text, EnemyMechanismReader.ClassifyCompleteness(text, gapCount));
         }
         catch (Exception error)
         {
             if (LoggedGaps.TryAdd(eventId, 0))
                 PushWarning($"[sts2agent] Event mechanism unavailable for {eventId}: {error.Message}");
-            return null;
+            return (null, MechanismCompleteness.Unavailable);
         }
     }
 

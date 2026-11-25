@@ -95,6 +95,13 @@ public enum MechanismKind
     Other,
 }
 
+public enum MechanismCompleteness
+{
+    Complete,
+    Partial,
+    Unavailable,
+}
+
 public enum InteractionOperation
 {
     OpenShop,
@@ -578,7 +585,10 @@ public sealed record MechanismView(
     string? DefinitionId,
     string Name,
     string? Text,
-    string Owner);
+    string Owner)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public MechanismCompleteness? Completeness { get; init; }
+}
 
 public sealed record MapOdds(
     decimal Monster,

@@ -137,6 +137,8 @@ Each agent owns one `Context`. It is the only record of that agent's current mod
 - Each role sees the relevant parts of the current public game state, including available actions, HP, cards, and visible map or combat information.
 - Run observations include the game's current card rarity offset from `PlayerOdds.CardRarity`. They also include question-mark room probabilities when available. [The Mod](../mod/src/Sts2Mod/Observation/MapObserver.cs) calculates the odds from current weights and room rules without advancing the game's RNG.
 - Combat observations keep hand order and sort the other card piles by card reference. The actual draw order stays hidden. The Mod reports both `Hidden` and `Unknown` enemy intents as `unknown`. The same move visibility policy governs `next_move_id` and move IDs in native rule descriptions.
+- The Mod extracts native game mechanisms directly from game code across active enemies, pre-combat act Bosses and Elites, powers, cards, relics, potions, modifiers (enchantments and afflictions), events, and act-level macro rules, publishing them as `mechanisms` entries alongside keywords. Unresolved native paths are logged as Mod diagnostics; when an enemy, encounter, or event readout omits unresolved moves, branches, or options, its `MechanismView` carries `completeness="partial"` (or `completeness="unavailable"` with `text=null` when no reliable summary could be produced), while omitted `completeness` means complete.
+- Deck receives upcoming Boss mechanisms and, whenever an Elite room remains reachable ahead on the active route or map, the act's `elite_pool` mechanisms and matching encounter guidance.
 - The catalog comes from the running game's definitions via the Mod. Any extra card knowledge or guidance comes from the configured [document provider](../EXTENSIONS.md).
 
 This excerpt is from a recorded Fool run. It shows selected fields from the task message. Prompts, knowledge documents, and other fields are omitted.
@@ -171,7 +173,7 @@ Each role's tool set is fixed when the role is created. The model-visible rules 
 - **`run_act` / `combat_act`** submit ordered steps. Combat has `play_card`, `use_potion`, `discard_potion`, `end_turn`, and `select`. Run uses `interact` for listed operations, plus potion and selection steps. A selection can be planned before its screen opens (an anticipated choice). If the actual options do not allow it, the batch stops there.
 - **`run_plan` / `run_next`** set a partial route plan through the current act and travel to the next planned node. Plans are drawn on the in-game map.
 - **`run_deck_choice`** resolves the current card reward groups together (or a standalone card-adding selection). It is only available to Deck.
-- **`run_notes`** reads or writes the strategy notes. `write` replaces only the fields supplied: `core` (up to five distinct entries), `plan` (up to 300 characters), and `other`. Notes can also be written through `run_act` and `run_next`.
+- **`run_notes`** reads or writes the strategy notes. `write` replaces only the fields supplied: `core` (up to five distinct entries), `plan` (up to 300 characters), and `other` (soft budget of 500 characters; handoff `summary` has a soft budget of 400 characters and never rejects gameplay). Notes can also be written through `run_act` and `run_next`.
 - **`*_inspect`** reads public information missing from the current view: `state` and `map`, plus `combat_history` in Combat.
 - **`*_knowledge`** queries the native game catalog with `catalog`, `search`, and `lookup` modes, with any configured supplements attached to native matches.
 - **`*_skill`** lists and reads configured guidance documents.
@@ -200,7 +202,8 @@ The Mod resolves references against live objects, checks legality, and runs nati
 
 Native game information (names, descriptions, catalog entries) comes from the Mod in the current game language, alongside stable game IDs. Supplementary documents come from a `Documents` provider:
 
-- **Run.** When Run builds a context, it receives the configured act guidance and documents matched to the act's Boss encounters.
+- **Run.** When Run builds a context, it receives the configured act guidance and documents matched to the act's Boss and reachable Elite encounters.
+- **Deck.** When Deck builds a context, it receives documents matched to the act's Bosses, reachable Elites (when any Elite remains ahead), and current deck/relic/potion/candidate objects.
 - **Combat.** At the start of a battle, Combat receives battle guidance and documents matched to the encounter, cards, relics, potions, enemies, and powers in that fight.
 - **Later reads.** Explicit reads and newly relevant material are appended later.
 
@@ -211,7 +214,7 @@ Each context tracks delivery on its own, so unchanged material is not sent twice
 With `STS2_DRIVER=external`, the backend runs no built-in agents or automatic progression and needs no model. Outside agents call a local HTTP tool service:
 
 - `GET /tools` returns the role-grouped tool definitions.
-- `POST /tools/{name}` returns the complete raw result.
+- `POST /tools/{name}` returns the complete raw result, including `location` (`game_instance_id`, `run_id`, `node_id`, `owner`) whenever `state` is non-null so external clients can track run and node lifetimes without heuristics.
 
 The service allows one call at a time, keeps run-scoped notes, and follows the same pause rules. The [play-sts2](../skills/play-sts2/SKILL.md) skill explains the tools to an outside agent. See [running.md](running.md#external-gameplay-tools).
 

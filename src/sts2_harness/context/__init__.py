@@ -246,7 +246,7 @@ class Context:
         # A currently visible rule may have last appeared before the retained baseline.
         rules = observation.get("mechanisms", [])
         assert isinstance(rules, list)
-        mechanisms: dict[tuple[str, str, str | None], JsonValue] = {}
+        mechanisms: dict[tuple[str, str, str | None, str | None], JsonValue] = {}
         for rule in (*rules, *self._delivery.mechanisms):
             assert isinstance(rule, dict)
             mechanisms[mechanism_key(rule)] = rule
@@ -331,7 +331,7 @@ class Context:
         RunObservation.model_validate_json(json.dumps(initial, ensure_ascii=False))
         definitions: dict[str, dict[str, JsonValue]] = {}
         sections: dict[str, JsonValue] = {}
-        mechanisms: set[tuple[str, str, str | None]] = set()
+        mechanisms: set[tuple[str, str, str | None, str | None]] = set()
 
         def apply(observation: dict[str, JsonValue]) -> None:
             if observation.get("baseline") is True:

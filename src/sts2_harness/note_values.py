@@ -6,6 +6,9 @@ from pydantic import Field, field_validator
 
 from sts2_harness.client import models as native
 
+OTHER_SOFT_LIMIT = 500
+SUMMARY_SOFT_LIMIT = 400
+
 
 class NotesState(native.WireModel):
     core: Annotated[tuple[native.Nonempty, ...], Field(max_length=5)] = ()

@@ -491,7 +491,13 @@ def _fmt_map(m: JsonObj) -> list[str]:
     return lines
 
 
-def _node_key(state: JsonObj) -> str:
+def _node_key(state: JsonObj, payload: JsonObj | None = None) -> str:
+    loc = _as_dict(payload.get("location")) if payload is not None else {}
+    gid = _str(loc.get("game_instance_id"))
+    rid = _str(loc.get("run_id"))
+    nid = _str(loc.get("node_id"))
+    if gid and rid and nid:
+        return f"{gid}:{rid}:{nid}"
     prog = _as_dict(state.get("progress"))
     return f"{prog.get('act')}:{prog.get('floor')}:{prog.get('position')}"
 
@@ -503,10 +509,16 @@ def _append_guard(items: list[str], key: str, *, limit: int = 32) -> list[str]:
 
 
 def _reset_session_if_new_run(payload: JsonObj, cache: JsonObj) -> bool:
-    """Reset cache when a new run begins (act/floor drop, character change, or post-terminal)."""
+    """Reset cache when a new run begins (location change, or heuristic fallback)."""
     state = _as_dict(payload.get("state"))
     if not state:
         return False
+    loc = _as_dict(payload.get("location"))
+    loc_gid = _str(loc.get("game_instance_id"))
+    loc_rid = _str(loc.get("run_id"))
+    last_gid = _str(cache.get("game_instance_id"))
+    last_rid = _str(cache.get("run_id"))
+
     phase = _str(state.get("phase"))
     prog = _as_dict(state.get("progress"))
     act = _int(prog.get("act"), -1)
@@ -519,15 +531,24 @@ def _reset_session_if_new_run(payload: JsonObj, cache: JsonObj) -> bool:
     last_player = _str(cache.get("player_definition_id"))
     was_terminal = cache.get("was_terminal") is True
 
-    is_new_run = (
-        (was_terminal and phase != "terminal")
-        or (bool(last_player) and bool(player_did) and player_did != last_player)
-        or (act >= 0 and last_act >= 0 and act < last_act)
-        or (floor >= 0 and last_floor >= 0 and floor < last_floor)
-    )
+    if loc_gid and loc_rid and last_gid and last_rid:
+        is_new_run = (loc_gid, loc_rid) != (last_gid, last_rid) or (
+            was_terminal and phase != "terminal"
+        )
+    else:
+        is_new_run = (
+            (was_terminal and phase != "terminal")
+            or (bool(last_player) and bool(player_did) and player_did != last_player)
+            or (act >= 0 and last_act >= 0 and act < last_act)
+            or (floor >= 0 and last_floor >= 0 and floor < last_floor)
+        )
     if is_new_run:
         cache.clear()
 
+    if loc_gid:
+        cache["game_instance_id"] = loc_gid
+    if loc_rid:
+        cache["run_id"] = loc_rid
     if act >= 0:
         cache["last_act"] = act
     if floor >= 0:
@@ -557,7 +578,7 @@ def _record_observed_auto_guards(
         cache.pop("pending_skipped_card_actions", None)
         return
 
-    nkey = _node_key(state)
+    nkey = _node_key(state, payload)
     actions = [_as_dict(a) for a in _as_list(state.get("actions"))]
     enabled = [a for a in actions if a.get("enabled", True)]
     enabled_ops = {_str(a.get("operation")) for a in enabled if a.get("operation") is not None}
@@ -577,30 +598,63 @@ def _record_observed_auto_guards(
                 continue
             of_acts = {_str(a) for a in _as_list(of.get("actions")) if a is not None}
             if of_acts & pending_skipped:
-                opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
+                logical_ref = _str(of.get("parent_offer_ref")) or _str(of.get("ref"))
+                opened_cards = _append_guard(opened_cards, f"{nkey}:{logical_ref}")
         cache["opened_card_offers"] = opened_cards
         cache.pop("pending_skipped_card_actions", None)
     elif state.get("screen") != "rewards":
         cache.pop("pending_skipped_card_actions", None)
 
-    # If a rewards selection is currently open, mark only card offers matching the active
-    # selection's candidate refs so unopened Prayer Wheel card offers (whose contents are
-    # pre-populated before opening) stay auto-openable.
+    # If a rewards selection is currently open, prefer explicit selection.offer_ref and
+    # offer.parent_offer_ref to identify the logical reward group; fall back to strict
+    # candidate set equality only when offer_ref is absent.
     selection = _as_dict(state.get("selection"))
     if state.get("screen") == "rewards" and selection:
         opened_cards = [_str(x) for x in _as_list(cache.get("opened_card_offers"))]
         card_offers = [of for of in offers if of.get("kind") == "card"]
-        cand_set = {_str(c) for c in _as_list(selection.get("candidates")) if c is not None}
+        sel_offer_ref = _str(selection.get("offer_ref"))
         matched = False
-        if cand_set:
+        if sel_offer_ref:
             for of in card_offers:
-                of_contents = {_str(c) for c in _as_list(of.get("contents")) if c is not None}
-                if of_contents and (of_contents == cand_set or bool(of_contents & cand_set)):
-                    opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(of.get('ref'))}")
+                of_ref = _str(of.get("ref"))
+                parent_ref = _str(of.get("parent_offer_ref"))
+                if sel_offer_ref in (of_ref, parent_ref):
+                    logical_ref = parent_ref or of_ref
+                    opened_cards = _append_guard(opened_cards, f"{nkey}:{logical_ref}")
                     matched = True
+            if not matched:
+                opened_cards = _append_guard(opened_cards, f"{nkey}:{sel_offer_ref}")
+                matched = True
+        else:
+            cand_set = {_str(c) for c in _as_list(selection.get("candidates")) if c is not None}
+            if cand_set:
+                for of in card_offers:
+                    of_contents = {_str(c) for c in _as_list(of.get("contents")) if c is not None}
+                    if of_contents and of_contents == cand_set:
+                        logical_ref = _str(of.get("parent_offer_ref")) or _str(of.get("ref"))
+                        opened_cards = _append_guard(opened_cards, f"{nkey}:{logical_ref}")
+                        matched = True
         if not matched and len(card_offers) == 1:
-            opened_cards = _append_guard(opened_cards, f"{nkey}:{_str(card_offers[0].get('ref'))}")
+            logical_ref = _str(card_offers[0].get("parent_offer_ref")) or _str(
+                card_offers[0].get("ref")
+            )
+            opened_cards = _append_guard(opened_cards, f"{nkey}:{logical_ref}")
         cache["opened_card_offers"] = opened_cards
+
+
+def _sole_claim_action(of: JsonObj, enabled_by_ref: dict[str, JsonObj]) -> JsonObj | None:
+    if of.get("requires_selection") is True:
+        return None
+    of_actions = _as_list(of.get("actions"))
+    if len(of_actions) != 1:
+        return None
+    act = enabled_by_ref.get(_str(of_actions[0]))
+    if act is None:
+        return None
+    subject = act.get("subject")
+    if subject is not None and subject != of.get("ref"):
+        return None
+    return act
 
 
 def _next_auto_step(
@@ -625,7 +679,7 @@ def _next_auto_step(
     screen = _str(state.get("screen"))
     prog = _as_dict(state.get("progress"))
     room_type = _str(prog.get("room_type"))
-    nkey = _node_key(state)
+    nkey = _node_key(state, payload)
     player = _as_dict(state.get("player"))
     empty_potions = _int(player.get("empty_potion_slot_count"))
     objects = _as_dict(payload.get("objects"))
@@ -634,29 +688,23 @@ def _next_auto_step(
     enabled_by_ref = {_str(a.get("ref")): a for a in enabled}
     offers = [_as_dict(o) for o in _as_list(state.get("offers"))]
 
-    # 1. Battle rewards: claim gold (unless a relic is pending ahead of it), fitting
-    # potions, relics (only when no card offer is pending), or open sole card offer.
+    # 1. Battle rewards: claim unambiguous relics, gold, and fitting potions before card choice,
+    # or open the sole card offer once those rewards are settled.
     if screen == "rewards" and room_type in ("monster", "elite", "boss") and offers:
         potion_offers = [of for of in offers if of.get("kind") == "potion"]
-        has_card_offer = any(of.get("kind") == "card" for of in offers)
-        has_relic_offer = any(of.get("kind") == "relic" for of in offers)
-        if has_card_offer:
-            claim_kinds = [] if has_relic_offer else ["gold"]
-        else:
-            claim_kinds = ["relic", "gold"]
+        claim_kinds = ["relic", "gold"]
         if 0 < len(potion_offers) <= empty_potions:
             claim_kinds.append("potion")
         for kind in claim_kinds:
             for of in offers:
                 if of.get("kind") == kind:
-                    for aref in _as_list(of.get("actions")):
-                        act = enabled_by_ref.get(_str(aref))
-                        if act is not None:
-                            return (
-                                {"kind": "interact", "action": _str(act.get("ref"))},
-                                f"claim {kind}: {_str(act.get('label'))}",
-                                None,
-                            )
+                    act = _sole_claim_action(of, enabled_by_ref)
+                    if act is not None:
+                        return (
+                            {"kind": "interact", "action": _str(act.get("ref"))},
+                            f"claim {kind}: {_str(act.get('label'))}",
+                            None,
+                        )
         if (
             allow_stateful_auto
             and not skip_card_open
@@ -666,7 +714,8 @@ def _next_auto_step(
         ):
             of = offers[0]
             of_actions = _as_list(of.get("actions"))
-            oref = f"{nkey}:{_str(of.get('ref'))}"
+            logical_ref = _str(of.get("parent_offer_ref")) or _str(of.get("ref"))
+            oref = f"{nkey}:{logical_ref}"
             if len(of_actions) == 1 and oref not in opened_card_offers:
                 act = enabled_by_ref.get(_str(of_actions[0]))
                 if act is not None and act.get("subject") == of.get("ref"):
@@ -971,7 +1020,7 @@ def render_reply(
     mechanisms = _as_list(payload.get("mechanisms"))
     top_map = _as_dict(payload.get("map"))
 
-    nkey = _node_key(state)
+    nkey = _node_key(state, payload)
     if full:
         seen_defs: JsonObj = {}
         seen_mechs: set[str] = set()
@@ -1540,6 +1589,7 @@ def render_reply(
                     "kind": m.get("kind"),
                     "identity": identity,
                     "text": m.get("text"),
+                    "completeness": m.get("completeness"),
                 }
             )
             if msig in seen_mechs:
@@ -1559,9 +1609,11 @@ def render_reply(
             seen_mechs.add(msig)
             owner_s = f" owner={','.join(owners)}" if owners and m.get("kind") != "keyword" else ""
             did = f"({m.get('definition_id')})" if m.get("definition_id") else ""
-            new_mechs.append(
-                f'  [{m.get("kind")}] {m.get("name")}{did}{owner_s}: "{_one_line(m.get("text"))}"'
-            )
+            comp = m.get("completeness")
+            comp_s = f" [{comp}]" if isinstance(comp, str) and comp != "complete" else ""
+            text_val = m.get("text")
+            body_s = f'"{_one_line(text_val)}"' if text_val is not None else "(rules unavailable)"
+            new_mechs.append(f"  [{m.get('kind')}] {m.get('name')}{did}{owner_s}{comp_s}: {body_s}")
         if new_mechs:
             lines.append("MECHANISMS (new):")
             lines.extend(new_mechs)

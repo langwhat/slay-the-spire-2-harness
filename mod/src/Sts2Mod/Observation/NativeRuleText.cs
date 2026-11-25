@@ -211,7 +211,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         return (effects.Select(effect => effect.Text).ToList(), false, effects.Any(effect => effect.KillsSelf));
     }
 
-    internal void ReadHooks(Type type, List<string> lines)
+    internal void ReadHooks(Type type, List<string> lines, IEnumerable<MethodInfo>? dispatchedOverrides = null)
     {
         var power = typeof(PowerModel).IsAssignableFrom(type);
         var modelWithHooks = power || typeof(RelicModel).IsAssignableFrom(type) || typeof(AfflictionModel).IsAssignableFrom(type);
@@ -219,7 +219,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         _hookOwner = modelWithHooks ? type : null;
         try
         {
-            ReadHooks(type, power, lines);
+            ReadHooks(type, power, lines, dispatchedOverrides);
         }
         finally
         {
@@ -227,13 +227,18 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         }
     }
 
-    private void ReadHooks(Type type, bool power, List<string> lines)
+    internal static IEnumerable<MethodInfo> UnhandledHookOverrides(
+        IEnumerable<MethodInfo> dispatchedOverrides,
+        IReadOnlySet<MethodInfo> handledSlots)
+        => dispatchedOverrides.Where(method => !handledSlots.Contains(method.GetBaseDefinition()));
+
+    private void ReadHooks(Type type, bool power, List<string> lines, IEnumerable<MethodInfo>? dispatchedOverrides = null)
     {
         var isRelic = typeof(RelicModel).IsAssignableFrom(type);
         var gapsBefore = _gaps.Count;
         var targetLines = (power || isRelic) ? new List<string>() : lines;
         var powerPrefix = power ? PowerLabel(type) + " · " : "";
-        var handled = new HashSet<string>(Hooks.Select(hook => hook.Method), StringComparer.Ordinal);
+        var handledSlots = new HashSet<MethodInfo>();
         var preHandled = new HashSet<string>(StringComparer.Ordinal);
         if (power || isRelic)
         {
@@ -244,7 +249,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             }
             ReadPlayerResourceHooks(type, powerPrefix, preHandled, targetLines);
             ReadPowerReceptionHooks(type, powerPrefix, preHandled, targetLines);
-            handled.UnionWith(preHandled);
+            foreach (var name in preHandled)
+            {
+                if (FindOverride(type, name) is { } preMethod)
+                    handledSlots.Add(preMethod.GetBaseDefinition());
+            }
         }
 
         if (power && MutableDynamicKeys(type) is { Count: > 0 } mutableKeys
@@ -260,7 +269,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
         foreach (var (name, rawTiming) in Hooks)
         {
-            if (preHandled.Contains(name) || FindOverride(type, name) is not { } method)
+            if (FindOverride(type, name) is not { } method || !handledSlots.Add(method.GetBaseDefinition()))
                 continue;
             var timing = name == "AfterOstyRevived"
                 ? $"After {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} revives"
@@ -278,9 +287,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         var includeMultiplayer = IsMultiplayer();
         foreach (var (name, neutral, timing, format) in ValueHooks)
         {
-            if (preHandled.Contains(name) || FindOverride(type, name) is not { } hook)
+            if (FindOverride(type, name) is not { } hook || !handledSlots.Add(hook.GetBaseDefinition()))
                 continue;
-            handled.Add(name);
             if (name == "GetScaledAmountForMultiplayer" && !includeMultiplayer)
                 continue;
             var rendered = ReadValueHook(hook, neutral, format, out var adjusters);
@@ -295,9 +303,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             targetLines.Add($"{powerPrefix}{timing}: {string.Join("; ", rendered)}{adjusted}");
         }
 
-        if (FindOverride(type, "TryModifyKeywordsInCombat") is { } keywordHook)
+        if (FindOverride(type, "TryModifyKeywordsInCombat") is { } keywordHook
+            && handledSlots.Add(keywordHook.GetBaseDefinition()))
         {
-            handled.Add(keywordHook.Name);
             var rendered = ReadKeywordHook(keywordHook);
             if (rendered is null)
                 Gap($"{type.Name}.{keywordHook.Name}");
@@ -310,10 +318,10 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         foreach (var query in type.GetMethods(Declared).Where(method => method.ReturnType == typeof(bool)
             && (method.Name.StartsWith("Should", StringComparison.Ordinal) || method.Name == "get_OwnerIsSecondaryEnemy")
             && IsHookOverride(method)
-            && method.GetBaseDefinition().DeclaringType != typeof(MonsterModel)
-            && !preHandled.Contains(method.Name)))
+            && method.GetBaseDefinition().DeclaringType != typeof(MonsterModel)))
         {
-            handled.Add(query.Name);
+            if (!handledSlots.Add(query.GetBaseDefinition()))
+                continue;
             var rendered = ReadQuery(query);
             if (rendered is null)
                 Gap($"{type.Name}.{query.Name}");
@@ -321,9 +329,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 targetLines.Add($"{powerPrefix}{QueryLabel(query.Name)}: {string.Join("; ", rendered)}");
         }
 
-        foreach (var unhandled in NativeHookDispatch.Overrides(type))
-            if (!handled.Contains(unhandled.Name))
-                Gap($"{unhandled.DeclaringType?.Name}.{unhandled.Name}");
+        foreach (var unhandled in UnhandledHookOverrides(dispatchedOverrides ?? NativeHookDispatch.Overrides(type), handledSlots))
+            Gap($"{unhandled.DeclaringType?.Name}.{unhandled.Name}");
         foreach (var unread in NativeHookDispatch.Unread)
             Gap(unread);
 

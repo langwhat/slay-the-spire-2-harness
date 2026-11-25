@@ -28,7 +28,7 @@ from sts2_harness.note_values import NotesView
 from sts2_harness.notes import Notes
 from sts2_harness.prompts import PromptReader
 from sts2_harness.results import ActionToolResult, QueryToolResult
-from sts2_harness.route_plan import RoutePlan
+from sts2_harness.route_plan import RoutePlan, reconcile_plan
 from sts2_harness.run import RunAgent, RunRole
 from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input_values import UserInputSource
@@ -87,6 +87,7 @@ class RunSession:
         self._deck_stream = 0
         self._document_order: dict[str, int] = {}
         self._card_reports: list[tuple[AutomaticProgress, ActionToolResult]] = []
+        self._current_run: RunRole | None = None
         self._flow: RunFlow | None = None
 
     def _recovery_exhausted(self, failures: int) -> None:
@@ -121,7 +122,7 @@ class RunSession:
         return self
 
     def _new_run(self) -> RunRole:
-        return (
+        run = (
             self._run_factory(self.execution, self.notes, self.recovery)
             if self._run_factory is not None
             else RunAgent(
@@ -135,6 +136,8 @@ class RunSession:
                 card_reports=self._card_reports,
             )
         )
+        self._current_run = run
+        return run
 
     async def __aexit__(
         self,
@@ -170,6 +173,7 @@ class RunSession:
             deck_stats=self.deck_stats,
             focused_deck=focused_deck,
             fights=self.execution.fights if role is native.DecisionOwner.RUN else None,
+            diagnostics=self._diagnostics,
         )
 
     async def _notes_write_guard(
@@ -223,6 +227,13 @@ class RunSession:
                     if observation.state.progress.act is not None
                     else ()
                 )
+            active_plan = (
+                reconcile_plan(
+                    self._current_run.route_plan, observation.state.progress.position
+                ).plan
+                if role in (MaterialRole.RUN, MaterialRole.DECK) and self._current_run is not None
+                else None
+            )
             return await entry_materials(
                 self.execution,
                 self._dependencies.documents,
@@ -230,6 +241,7 @@ class RunSession:
                 observation,
                 configured,
                 document_order=self._document_order,
+                route_plan=active_plan,
             )
 
         return read

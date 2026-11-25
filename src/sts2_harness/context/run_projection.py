@@ -15,6 +15,7 @@ from sts2_harness.context.map_projection import (
     planned_route,
     project_map,
     upcoming_act_bosses,
+    upcoming_act_elites,
 )
 from sts2_harness.context.models import FinishedState, RunFinishedState, VisibleObservation
 from sts2_harness.context.run_models import RunObservation
@@ -67,13 +68,15 @@ def _slim(
     return result
 
 
-def mechanism_key(value: dict[str, JsonValue]) -> tuple[str, str, str | None]:
+def mechanism_key(value: dict[str, JsonValue]) -> tuple[str, str, str | None, str | None]:
     kind, name, text = value.get("kind"), value.get("name"), value.get("text")
     definition_id = value.get("definition_id")
+    completeness = value.get("completeness")
     assert isinstance(kind, str) and isinstance(name, str)
     assert text is None or isinstance(text, str)
+    assert completeness is None or isinstance(completeness, str)
     identity = definition_id if isinstance(definition_id, str) else name
-    return kind, identity, text
+    return kind, identity, text, completeness
 
 
 def _key(obj: native.ObjectEntry) -> str | None:
@@ -113,8 +116,8 @@ class RunDelivery:
     sections: dict[str, JsonValue] = field(default_factory=lambda: dict[str, JsonValue]())
 
     mechanisms: list[JsonValue] = field(default_factory=lambda: list[JsonValue]())
-    delivered_mechanisms: set[tuple[str, str, str | None]] = field(
-        default_factory=lambda: set[tuple[str, str, str | None]]()
+    delivered_mechanisms: set[tuple[str, str, str | None, str | None]] = field(
+        default_factory=lambda: set[tuple[str, str, str | None, str | None]]()
     )
     inline_card_ids: set[str] = field(default_factory=lambda: set[str]())
 
@@ -333,6 +336,11 @@ class RunDelivery:
                     progress = sections["progress"]
                     assert isinstance(progress, dict)
                     progress["boss"] = [_json(boss) for boss in upcoming]
+                elites = upcoming_act_elites(source.map, state.progress, self.route_plan)
+                if elites:
+                    progress = sections["progress"]
+                    assert isinstance(progress, dict)
+                    progress["elite_pool"] = [_json(elite) for elite in elites]
         if self.role is native.DecisionOwner.COMBAT:
             player = sections["player"]
             assert isinstance(player, dict)
@@ -451,7 +459,7 @@ class RunDelivery:
             for ref, cards in observation.generated.items()
             if cards
         ]
-        mechanisms: dict[tuple[str, str, str | None], dict[str, JsonValue]] = {}
+        mechanisms: dict[tuple[str, str, str | None, str | None], dict[str, JsonValue]] = {}
         for mechanism in observation.mechanisms:
             body: dict[str, JsonValue] = {
                 name: value

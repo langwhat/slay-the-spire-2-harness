@@ -4,6 +4,7 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import MISSING, BaseModel, ValidationError
 
@@ -34,8 +35,11 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.llm.messages import ToolCall, ToolDefinition
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
-from sts2_harness.note_values import NotesState
+from sts2_harness.note_values import OTHER_SOFT_LIMIT, SUMMARY_SOFT_LIMIT, NotesState
 from sts2_harness.notes import Notes
+
+if TYPE_CHECKING:
+    from sts2_harness.diagnostics import Diagnostics, NoteBudgetField
 from sts2_harness.results import (
     Failed,
     NotesText,
@@ -142,6 +146,7 @@ class ToolCatalog:
         deck_stats: DeckStatistics | None = None,
         focused_deck: bool = False,
         fights: FightHistory | None = None,
+        diagnostics: "Diagnostics | None" = None,
     ) -> None:
         if role is native.DecisionOwner.RUN and notes is None:
             raise ValueError("Run tools require the run's notes owner.")
@@ -149,6 +154,7 @@ class ToolCatalog:
         self.minimal = minimal
         self.deck_stats = deck_stats
         self.fights = fights
+        self._diagnostics = diagnostics
         self._query_view = query_view
         self._notes_write_guard = notes_write_guard
         self.action_name = (
@@ -319,8 +325,28 @@ class ToolCatalog:
             )
         result = await self.write_notes(query, observation)
         if isinstance(result.data, NotesUpdated) and query.summary is not MISSING:
+            if len(query.summary) > SUMMARY_SOFT_LIMIT:
+                from sts2_harness.diagnostics import NoteBudgetField
+
+                self._emit_note_budget(
+                    NoteBudgetField.SUMMARY, len(query.summary), SUMMARY_SOFT_LIMIT
+                )
             return replace(result, data=NotesUpdated(summary=query.summary))
         return result
+
+    def _emit_note_budget(self, field: "NoteBudgetField", length: int, soft_limit: int) -> None:
+        if self._diagnostics is None:
+            return
+        from sts2_harness.diagnostics import NoteBudgetExceeded
+
+        self._diagnostics.emit(
+            NoteBudgetExceeded(
+                role=self._role,
+                field=field,
+                length=length,
+                soft_limit=soft_limit,
+            )
+        )
 
     async def write_notes(
         self, query: NotesPatch, observation: native.Observation | None
@@ -337,6 +363,10 @@ class ToolCatalog:
         note_fields = {"core", "plan", "other"}
         fields = NotesState.model_validate_json(query.model_dump_json(include=note_fields))
         self.notes.write(fields, query.model_fields_set & note_fields)
+        if query.other is not MISSING and len(query.other) > OTHER_SOFT_LIMIT:
+            from sts2_harness.diagnostics import NoteBudgetField
+
+            self._emit_note_budget(NoteBudgetField.OTHER, len(query.other), OTHER_SOFT_LIMIT)
         return QueryToolResult(ReadCompleted(), observation, NotesUpdated())
 
     async def _read_skill(self, call: ToolCall) -> QueryToolResult:

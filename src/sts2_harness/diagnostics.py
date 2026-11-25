@@ -9,13 +9,14 @@ import sys
 import time
 import traceback
 from collections import deque
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, TextIO
 
-from pydantic import AfterValidator, Field
+from pydantic import AfterValidator, Field, JsonValue
 
 from sts2_harness.client import models as native
 from sts2_harness.config import AuthKind, Configuration, Driver, Protocol
@@ -75,6 +76,8 @@ class EventKind(StrEnum):
     ROLE_CHANGED = "role_changed"
     BATTLE_STARTED = "battle_started"
     BATTLE_FINISHED = "battle_finished"
+    NOTE_BUDGET_EXCEEDED = "note_budget_exceeded"
+    MECHANISM_METRICS = "mechanism_metrics"
 
 
 class Event(native.WireModel):
@@ -98,6 +101,70 @@ class RecoveryExhausted(Event):
 class EncodingMetadata(Event):
     event: EventKind = EventKind.MODEL_ENCODING
     digest: DiagnosticText
+
+
+class NoteBudgetField(StrEnum):
+    OTHER = "other"
+    SUMMARY = "summary"
+
+
+class NoteBudgetExceeded(Event):
+    event: EventKind = EventKind.NOTE_BUDGET_EXCEEDED
+    field: NoteBudgetField
+    length: int
+    soft_limit: int
+
+
+class MechanismMetrics(Event):
+    event: EventKind = EventKind.MECHANISM_METRICS
+    mechanism_count: int
+    mechanism_characters: int
+    mechanism_tokens: int
+    repeated_mechanism_count: int
+    repeated_mechanism_tokens: int
+
+
+def measure_mechanisms(
+    mechanisms: Sequence[Mapping[str, JsonValue]],
+    *,
+    seen_keys: set[tuple[str, str, str | None, str | None]] | None = None,
+    role: native.DecisionOwner | None = None,
+) -> MechanismMetrics:
+    total_chars = 0
+    total_bytes = 0
+    repeated_count = 0
+    repeated_bytes = 0
+    for item in mechanisms:
+        encoded_text = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        encoded_bytes = len(encoded_text.encode("utf-8"))
+        total_chars += len(encoded_text)
+        total_bytes += encoded_bytes
+        if seen_keys is not None:
+            kind = item.get("kind")
+            name = item.get("name")
+            text = item.get("text")
+            definition_id = item.get("definition_id")
+            completeness = item.get("completeness")
+            identity = definition_id if isinstance(definition_id, str) else str(name)
+            key = (
+                str(kind),
+                identity,
+                text if isinstance(text, str) else None,
+                completeness if isinstance(completeness, str) else None,
+            )
+            if key in seen_keys:
+                repeated_count += 1
+                repeated_bytes += encoded_bytes
+            else:
+                seen_keys.add(key)
+    return MechanismMetrics(
+        role=role,
+        mechanism_count=len(mechanisms),
+        mechanism_characters=total_chars,
+        mechanism_tokens=(total_bytes + 3) // 4 if total_bytes else 0,
+        repeated_mechanism_count=repeated_count,
+        repeated_mechanism_tokens=(repeated_bytes + 3) // 4 if repeated_bytes else 0,
+    )
 
 
 class ResultEvent(Event):
@@ -292,7 +359,7 @@ _SEVERE_ERRORS = (
 
 
 def _event_level(event: Event) -> Level:
-    if isinstance(event, EncodingMetadata):
+    if isinstance(event, (EncodingMetadata, NoteBudgetExceeded, MechanismMetrics)):
         return Level.DEBUG
     ordinary = (
         isinstance(event, ResultEvent) and event.outcome is OutcomeStatus.REJECTED
@@ -322,8 +389,10 @@ def _event_level(event: Event) -> Level:
 
 
 def _event_component(event: Event) -> Literal["game_control", "model", "session"]:
-    if isinstance(event, EncodingMetadata):
+    if isinstance(event, (EncodingMetadata, MechanismMetrics)):
         return "model"
+    if isinstance(event, NoteBudgetExceeded):
+        return "session"
     if event.event in (
         EventKind.LIFECYCLE_CHANGED,
         EventKind.CONTROL_CHANGED,

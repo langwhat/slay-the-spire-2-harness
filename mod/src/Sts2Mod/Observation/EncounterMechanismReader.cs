@@ -1,9 +1,11 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Godot;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Runs;
+using Sts2Mod.Core.Observation;
 using static Sts2Mod.Observation.NativeRuleBody;
 
 namespace Sts2Mod.Observation;
@@ -28,42 +30,72 @@ internal static class EncounterMechanismReader
         int MaxHp,
         string? RuleText);
 
-    private sealed record CachedEncounter(string? Text, IReadOnlyList<Type> HoistedPowers);
+    private sealed record CachedEncounter(string? Text, IReadOnlyList<Type> HoistedPowers, MechanismCompleteness Completeness);
     private static readonly IReadOnlyList<Type> EmptyHoistedPowers = [];
     private static readonly ConcurrentDictionary<CacheKey, CachedEncounter> Cache = new();
     private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
+    private static long _coldExtractionCount;
+    private static long _coldExtractionTicks;
+    private static long _cachedExtractionCount;
+    private static long _cachedExtractionTicks;
+
+    internal static (long ColdCount, double ColdMs, long CachedCount, double CachedMs) ReadLatencyMetrics() =>
+        (
+            System.Threading.Interlocked.Read(ref _coldExtractionCount),
+            System.Threading.Interlocked.Read(ref _coldExtractionTicks) * 1000.0 / Stopwatch.Frequency,
+            System.Threading.Interlocked.Read(ref _cachedExtractionCount),
+            System.Threading.Interlocked.Read(ref _cachedExtractionTicks) * 1000.0 / Stopwatch.Frequency);
+
+    private static void PushWarning(string message)
+    {
+        if (MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)
+            GD.PushWarning(message);
+    }
 
     public static string? Read(EncounterModel encounter, int ascensionLevel, GameMode gameMode, string language)
         => ReadWithHoistedPowers(encounter, ascensionLevel, gameMode, language).Text;
 
-    public static (string? Text, IReadOnlyList<Type> HoistedPowers) ReadWithHoistedPowers(
+    public static (string? Text, IReadOnlyList<Type> HoistedPowers, MechanismCompleteness Completeness) ReadWithHoistedPowers(
         EncounterModel encounter, int ascensionLevel, GameMode gameMode, string language)
     {
+        var started = Stopwatch.GetTimestamp();
         var id = encounter.Id.ToString();
         var key = new CacheKey(id, ascensionLevel, gameMode, language);
         if (Cache.TryGetValue(key, out var cached))
-            return (cached.Text, cached.HoistedPowers);
+        {
+            System.Threading.Interlocked.Increment(ref _cachedExtractionCount);
+            System.Threading.Interlocked.Add(ref _cachedExtractionTicks, Stopwatch.GetTimestamp() - started);
+            return (cached.Text, cached.HoistedPowers, cached.Completeness);
+        }
 
         string? text = null;
         IReadOnlyList<Type> hoistedPowers = EmptyHoistedPowers;
+        var completeness = MechanismCompleteness.Complete;
         try
         {
-            // Unresolved native paths are extractor work items. They stay in the diagnostics log.
+            // Unresolved native paths are extractor work items. They stay in the diagnostics log;
+            // completeness tells the consumer when an encounter omits unresolved paths.
             (text, var gaps, hoistedPowers) = DescribeWithHoistedPowers(encounter);
+            completeness = EnemyMechanismReader.ClassifyCompleteness(text, gaps.Count);
             if (gaps.Count > 0 && LoggedGaps.TryAdd(id, 0))
             {
-                GD.PushWarning(
+                PushWarning(
                     $"[sts2agent] Unresolved native encounter rules for {id}: {string.Join(", ", gaps.Order(StringComparer.Ordinal))}");
             }
         }
         catch (Exception error)
         {
+            text = null;
+            hoistedPowers = EmptyHoistedPowers;
+            completeness = MechanismCompleteness.Unavailable;
             if (LoggedGaps.TryAdd(id, 0))
-                GD.PushWarning($"[sts2agent] Encounter mechanism unavailable for {id}: {error.Message}");
+                PushWarning($"[sts2agent] Encounter mechanism unavailable for {id}: {error.Message}");
         }
 
-        Cache[key] = new CachedEncounter(text, hoistedPowers);
-        return (text, hoistedPowers);
+        System.Threading.Interlocked.Increment(ref _coldExtractionCount);
+        System.Threading.Interlocked.Add(ref _coldExtractionTicks, Stopwatch.GetTimestamp() - started);
+        Cache[key] = new CachedEncounter(text, hoistedPowers, completeness);
+        return (text, hoistedPowers, completeness);
     }
 
     internal static (string? Text, IReadOnlySet<string> Gaps) Describe(EncounterModel encounter)

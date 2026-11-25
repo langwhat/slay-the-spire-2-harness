@@ -889,7 +889,7 @@
   },
   {
     "name": "run_notes",
-    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each note field it supplies and keeps the others. core: native definition IDs of the cards and relics the deck is built around. plan: how the core's turn goes and what it still lacks. other: resource reservations and one-time facts needed later that no current state shows. Name objects by native definition ID, never by refs. Delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
+    "description": "Read or rewrite the run's strategy notes, which Combat receives at the start of each battle. mode=write replaces each note field it supplies and keeps the others. core: native definition IDs of the cards and relics the deck is built around. plan: how the core's turn goes and what it still lacks. other: resource reservations and one-time facts needed later that no current state shows (keep concise, aiming for at most 500 characters). Name objects by native definition ID, never by refs. Delete what is obsolete, do not restate current state, and write nothing when no decision changes.",
     "input_schema": {
       "oneOf": [
         {
@@ -921,7 +921,7 @@
               "type": "string",
               "minLength": 1,
               "pattern": "\\S",
-              "description": "Short assessment for a handoff only. Submit this notes write as the only call in the response to finish the handoff on success."
+              "description": "Short assessment for a handoff only (keep concise, aiming for at most 400 characters). Submit this notes write as the only call in the response to finish the handoff on success."
             },
             "core": {
               "type": "array",

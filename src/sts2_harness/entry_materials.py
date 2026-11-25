@@ -8,6 +8,7 @@ from pydantic import MISSING
 
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
+from sts2_harness.context.map_projection import upcoming_act_elites
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import DecisionInterrupted
 from sts2_harness.game import GameLifetimeEnded, GameReadError
@@ -23,6 +24,7 @@ from sts2_harness.knowledge import (
 )
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import Reason, ReasonCode
+from sts2_harness.route_plan import RoutePlan
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +83,7 @@ async def entry_materials(
     configured: tuple[str, ...],
     *,
     document_order: dict[str, int] | None = None,
+    route_plan: RoutePlan | None = None,
 ) -> tuple[DocumentView, ...]:
     """Select current guidance, retaining run-wide order when history is supplied."""
     selected: dict[str, DocumentView] = {}
@@ -133,6 +136,13 @@ async def entry_materials(
                 )
                 for boss in map_.bosses
                 if isinstance(boss.definition_id, str)
+            )
+            subjects.extend(
+                SubjectId(
+                    category=native.NativeCategory.ENCOUNTER, definition_id=elite.definition_id
+                )
+                for elite in upcoming_act_elites(map_, progress, route_plan)
+                if isinstance(elite.definition_id, str)
             )
             act_subjects = tuple(subjects)
             if role is MaterialRole.RUN:

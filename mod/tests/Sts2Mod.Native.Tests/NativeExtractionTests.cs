@@ -28,6 +28,7 @@ using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.MonsterMoves.MonsterMoveStateMachine;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.ValueProps;
+using Sts2Mod.Core.Observation;
 using Sts2Mod.Observation;
 using Xunit;
 
@@ -2115,5 +2116,97 @@ public sealed class NativeExtractionTests
         public override bool ShouldAllowHitting(Creature creature) => creature != Owner;
         public override bool ShouldCreatureBeRemovedFromCombatAfterDeath(Creature creature) => creature != Owner;
         private Task ReviveMove(IReadOnlyList<Creature> targets) => CreatureCmd.Heal(Owner, Owner.MaxHp);
+    }
+
+    [Fact]
+    public void NativeHookCoverage_UsesMethodIdentityRatherThanMethodName()
+    {
+        var reader = new NativeRuleText();
+        var lines = new List<string>();
+        var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        var extraOverload = typeof(SyntheticOverloadedHookPower).GetMethod(
+            nameof(SyntheticOverloadedHookPower.AfterSideTurnStart),
+            flags,
+            binder: null,
+            types: [typeof(int)],
+            modifiers: null)!;
+        var engineOverload = typeof(SyntheticOverloadedHookPower).GetMethod(
+            nameof(SyntheticOverloadedHookPower.AfterSideTurnStart),
+            flags,
+            binder: null,
+            types: [typeof(CombatSide), typeof(IReadOnlyList<Creature>), typeof(ICombatState)],
+            modifiers: null)!;
+
+        reader.ReadHooks(typeof(SyntheticOverloadedHookPower), lines, [engineOverload, extraOverload]);
+
+        Assert.Contains($"{nameof(SyntheticOverloadedHookPower)}.{nameof(SyntheticOverloadedHookPower.AfterSideTurnStart)}", reader.Gaps);
+        var handledOnlyEngine = new HashSet<MethodInfo> { engineOverload.GetBaseDefinition() };
+        var unhandled = NativeRuleText.UnhandledHookOverrides([engineOverload, extraOverload], handledOnlyEngine).ToArray();
+        Assert.Single(unhandled);
+        Assert.Equal(extraOverload, unhandled[0]);
+    }
+
+    [Fact]
+    public void EnemyMechanismCompleteness_DistinguishesPartialAndUnavailable()
+    {
+        var partialMonster = (SyntheticPartialMoveMonster)new SyntheticPartialMoveMonster(includeKnownMove: true).ToMutable();
+        partialMonster.SetUpForCombat();
+        var (partialText, partialGaps) = EnemyMechanismReader.Describe(partialMonster);
+        Assert.NotNull(partialText);
+        Assert.NotEmpty(partialGaps);
+        Assert.Equal(MechanismCompleteness.Partial, EnemyMechanismReader.ClassifyCompleteness(partialText, partialGaps.Count));
+
+        var unavailableMonster = (SyntheticPartialMoveMonster)new SyntheticPartialMoveMonster(includeKnownMove: false).ToMutable();
+        unavailableMonster.SetUpForCombat();
+        var (unavailableText, unavailableGaps) = EnemyMechanismReader.Describe(unavailableMonster);
+        Assert.Null(unavailableText);
+        Assert.NotEmpty(unavailableGaps);
+        Assert.Equal(MechanismCompleteness.Unavailable, EnemyMechanismReader.ClassifyCompleteness(unavailableText, unavailableGaps.Count));
+    }
+
+    private abstract class SyntheticOverloadedHookBase : PowerModel
+    {
+        public virtual Task AfterSideTurnStart(int extraPhase) => Task.CompletedTask;
+    }
+
+    private sealed class SyntheticOverloadedHookPower : SyntheticOverloadedHookBase
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override Task AfterSideTurnStart(CombatSide side, IReadOnlyList<Creature> participants, ICombatState combatState)
+            => Task.CompletedTask;
+        public override Task AfterSideTurnStart(int extraPhase)
+            => Task.CompletedTask;
+    }
+
+    private sealed class SyntheticPartialMoveMonster(bool includeKnownMove) : MonsterModel
+    {
+        public override int MinInitialHp => 40;
+        public override int MaxInitialHp => 40;
+
+        private static void UnknownSideEffect() => _ = Environment.TickCount64;
+
+        private Task KnownMove(IReadOnlyList<Creature> targets)
+            => CreatureCmd.GainBlock(Creature, 5m, ValueProp.Move, null);
+
+        private Task BrokenMove(IReadOnlyList<Creature> targets)
+        {
+            UnknownSideEffect();
+            return Task.CompletedTask;
+        }
+
+        protected override MonsterMoveStateMachine GenerateMoveStateMachine()
+        {
+            var broken = new MoveState("BROKEN_MOVE", BrokenMove, new BuffIntent());
+            if (!includeKnownMove)
+            {
+                broken.FollowUpState = broken;
+                return new MonsterMoveStateMachine([broken], broken);
+            }
+            var known = new MoveState("KNOWN_MOVE", KnownMove, new DefendIntent());
+            known.FollowUpState = broken;
+            broken.FollowUpState = known;
+            return new MonsterMoveStateMachine([known, broken], known);
+        }
     }
 }

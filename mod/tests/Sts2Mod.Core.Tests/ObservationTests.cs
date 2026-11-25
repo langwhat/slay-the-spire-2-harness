@@ -380,4 +380,28 @@ public sealed class ObservationTests
         Assert.False(root.GetProperty("plain_selection").TryGetProperty("offer_ref", out _));
         Assert.False(root.GetProperty("plain_offer").TryGetProperty("parent_offer_ref", out _));
     }
+
+    [Fact]
+    public void MechanismView_SerializesCompletenessOnlyWhenPresent()
+    {
+        var payload = new
+        {
+            Complete = new MechanismView(MechanismKind.Other, "MONSTER.A", "A", "First move: BITE", "enemy:1:1"),
+            Partial = new MechanismView(MechanismKind.Other, "MONSTER.B", "B", "First move: BITE", "enemy:1:2")
+            {
+                Completeness = MechanismCompleteness.Partial,
+            },
+            Unavailable = new MechanismView(MechanismKind.Other, "MONSTER.C", "C", null, "enemy:1:3")
+            {
+                Completeness = MechanismCompleteness.Unavailable,
+            },
+        };
+
+        using var doc = JsonDocument.Parse(JsonContract.Serialize(payload));
+        var root = doc.RootElement;
+        Assert.False(root.GetProperty("complete").TryGetProperty("completeness", out _));
+        Assert.Equal("partial", root.GetProperty("partial").GetProperty("completeness").GetString());
+        Assert.Equal("unavailable", root.GetProperty("unavailable").GetProperty("completeness").GetString());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("unavailable").GetProperty("text").ValueKind);
+    }
 }
