@@ -185,6 +185,9 @@ class SampleHost:
             def card_reward_preview_enabled(self) -> bool:
                 return recorded.card_reward_preview_enabled
 
+            def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None:
+                return recorded.pending_card_reward_open()
+
             def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
                 host._require_armed()
                 recorded.start_open_card_reward(route, offer)

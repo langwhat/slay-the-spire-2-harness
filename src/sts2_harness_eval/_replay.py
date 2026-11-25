@@ -374,6 +374,9 @@ class ReplayGame:
             for record in self._timeline.records
         )
 
+    def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None:
+        return None
+
     def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
         return None
 

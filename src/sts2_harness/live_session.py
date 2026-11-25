@@ -70,6 +70,7 @@ async def live_session(
             for purpose in ModelPurpose:
                 models[purpose] = model.for_purpose(purpose, recording_id=manifest.recording_id)
         journal = Journal.create(archive_path, manifest, diagnostics=diagnostics)
+        journal.diagnostics.set_native_card_preview(present_card_rewards)
 
         def close_recording() -> None:
             # Journal reports sealing failures; ordinary gameplay and cancellation still finish.
@@ -105,6 +106,7 @@ async def live_session(
             model_client,
             journal.record_card_choice,
             display=client.display if display_reasons else None,
+            viewer_reason=journal.record_viewer_reason,
         )
         async with RunSession(
             manifest,

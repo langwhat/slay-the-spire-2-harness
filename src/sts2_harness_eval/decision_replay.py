@@ -155,6 +155,9 @@ class CaseGame:
     def card_reward_preview_enabled(self) -> bool:
         return False
 
+    def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None:
+        return None
+
     def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
         return None
 

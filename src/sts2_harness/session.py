@@ -17,6 +17,7 @@ from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.diagnostics import Diagnostics, MechanismTracker, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
+from sts2_harness.execution.reason_display import ViewerReason
 from sts2_harness.execution.recovery import ToolRecoveryBudget
 from sts2_harness.game import GameIO, GameLifetimeEnded, RunEnded
 from sts2_harness.journal import Manifest
@@ -54,6 +55,7 @@ class SessionDependencies:
     model: ModelFactory
     card_completion: Callable[[CardChoiceCompletion], None] | None = None
     display: Callable[[str], Awaitable[DisplayResult]] | None = None
+    viewer_reason: Callable[[ViewerReason], None] | None = None
 
 
 class RunSession:
@@ -109,6 +111,7 @@ class RunSession:
             recovery=self.recovery,
             diagnostics=self._diagnostics,
             display=self._dependencies.display,
+            on_viewer_reason=self._dependencies.viewer_reason,
         )
         run = self._new_run()
         self._flow = (
@@ -178,7 +181,9 @@ class RunSession:
             inspect=self.execution.inspect,
             catalog=self.execution.catalog,
             present=self.execution.present if role is native.DecisionOwner.RUN else None,
-            display=self.execution.display_reason if role is native.DecisionOwner.RUN else None,
+            display=(
+                self.execution.display_route_reason if role is native.DecisionOwner.RUN else None
+            ),
             notes=self.notes if role is native.DecisionOwner.RUN else None,
             notes_write_guard=self._notes_write_guard,
             skills=self._dependencies.documents,

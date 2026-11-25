@@ -1,5 +1,6 @@
 """One dependency sequence with compressed content-addressed game and model evidence."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -7,7 +8,7 @@ import sqlite3
 import subprocess
 import zlib
 from collections.abc import Awaitable, Callable, Generator
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from importlib import metadata
@@ -34,6 +35,7 @@ from sts2_harness.diagnostics import (
     RecordingGap,
     RecordingSealFailed,
 )
+from sts2_harness.execution.reason_display import ViewerReason
 from sts2_harness.game import (
     Admit,
     Admitted,
@@ -350,6 +352,12 @@ class StoredReply(native.WireModel):
     observations: tuple[str, ...]
 
 
+class RecordedViewerReason(ViewerReason):
+    id: int
+    sequence: int
+    cursor: int
+
+
 class ArchiveError(Exception):
     """An invalid configuration, unsupported archive, or corrupt recorded evidence."""
 
@@ -376,6 +384,9 @@ CREATE TABLE IF NOT EXISTS model_recoveries (sequence INTEGER PRIMARY KEY, value
 CREATE TABLE IF NOT EXISTS handoff_completions (sequence INTEGER PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS card_choices (stream TEXT NOT NULL, call_id TEXT NOT NULL,
     value TEXT NOT NULL, PRIMARY KEY(stream,call_id));
+-- Optional presentation table in schema 22; sanitized viewer captions separate from raw model args.
+CREATE TABLE IF NOT EXISTS viewer_reasons (id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sequence INTEGER NOT NULL, cursor INTEGER NOT NULL, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS variant_preparations (timeline_index INTEGER PRIMARY KEY,
     source_model_sequence INTEGER UNIQUE NOT NULL, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS materials (sequence INTEGER PRIMARY KEY, cursor INTEGER NOT NULL,
@@ -1017,6 +1028,39 @@ class Journal:
                 return tuple(result)
         except (OSError, sqlite3.Error, ValidationError):
             raise ArchiveError("Cannot decode the card choice evidence.") from None
+
+    def record_viewer_reason(self, reason: ViewerReason) -> None:
+        if self._read_only:
+            raise ArchiveError("An evidence reader cannot record a viewer reason.")
+        with self._storage() as connection:
+            if connection is not None:
+                connection.execute(
+                    "INSERT INTO viewer_reasons(sequence,cursor,value) VALUES (?,?,?)",
+                    (self._sequence, self._cursor, reason.model_dump_json()),
+                )
+
+    def viewer_reasons(self) -> tuple[RecordedViewerReason, ...]:
+        try:
+            with closing(self._read_connection(self.path)) as connection:
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_reasons'"
+                ).fetchone()
+                if exists is None:
+                    return ()
+                rows = connection.execute(
+                    "SELECT id,sequence,cursor,value FROM viewer_reasons ORDER BY id"
+                ).fetchall()
+                return tuple(
+                    RecordedViewerReason(
+                        id=row_id,
+                        sequence=sequence,
+                        cursor=cursor,
+                        **ViewerReason.model_validate_json(raw).model_dump(),
+                    )
+                    for row_id, sequence, cursor, raw in rows
+                )
+        except (OSError, sqlite3.Error, ValidationError):
+            raise ArchiveError("Cannot decode the viewer reason presentation records.") from None
 
     def record_model_recovery(
         self,
@@ -2128,11 +2172,31 @@ class RecordedGame:
     def card_reward_preview_enabled(self) -> bool:
         return self._live.card_reward_preview_enabled
 
+    def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None:
+        return self._live.pending_card_reward_open()
+
     def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
         self._live.start_open_card_reward(route, offer)
 
     async def cancel_open_card_reward(self) -> None:
-        await self._live.cancel_open_card_reward()
+        pending = self._live.pending_card_reward_open()
+        if pending is None:
+            await self._live.cancel_open_card_reward()
+            return
+        route, offer = pending
+        recording = asyncio.create_task(
+            self._record(
+                OpenCardReward(route=route, offer=offer),
+                lambda: self._live.open_card_reward(route, offer),
+            )
+        )
+        while not recording.done():
+            try:
+                await asyncio.shield(recording)
+            except asyncio.CancelledError:
+                continue
+        with suppress(asyncio.CancelledError):
+            await recording
 
     async def _record[T: GameSuccess](
         self, request: GameRequest, operation: Callable[[], Awaitable[GameReply[T]]]

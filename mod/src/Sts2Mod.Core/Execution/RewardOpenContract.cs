@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Sts2Mod.Core.Observation;
 using Sts2Mod.Core.Transport;
@@ -23,6 +24,101 @@ public sealed record RewardOpenRequest(StepRoute ExpectedRoute, string Offer);
 public sealed record RewardOpenReply(RewardOpenStatus Status);
 
 public sealed record RewardCloseReply(RewardCloseStatus Status);
+
+public readonly record struct CardRewardAlternativeDescriptor(
+    string OptionId,
+    bool EndsSelectionWithoutCompletingReward,
+    bool HasCustomOnSelect);
+
+/// <summary>
+/// Pure reversibility policy for automatic viewer card-reward previews.
+/// </summary>
+public static class RewardPreviewPolicy
+{
+    public static bool IsNonClaimingCloseAlternative(CardRewardAlternativeDescriptor alternative) =>
+        string.Equals(alternative.OptionId, "SKIP", StringComparison.OrdinalIgnoreCase)
+        && alternative.EndsSelectionWithoutCompletingReward
+        && !alternative.HasCustomOnSelect;
+
+    public static bool CanAutoPreview(
+        int cardOfferCount,
+        bool isStandardCardReward,
+        bool canSkip,
+        IReadOnlyList<CardRewardAlternativeDescriptor>? preflightAlternatives)
+    {
+        if (!isStandardCardReward)
+            return false;
+        if (cardOfferCount <= 1)
+            return true;
+        if (!canSkip || preflightAlternatives is null)
+            return false;
+        for (var i = 0; i < preflightAlternatives.Count; i++)
+        {
+            if (IsNonClaimingCloseAlternative(preflightAlternatives[i]))
+                return true;
+        }
+        return false;
+    }
+}
+
+public sealed record PendingRewardRequest(
+    RewardOpenRequest Request,
+    bool Close,
+    long EnqueuedAt,
+    TaskCompletionSource<HttpReply> Reply);
+
+/// <summary>
+/// Deadline-bounded queue for viewer card reward open/close requests so stale requests never mutate UI.
+/// </summary>
+public sealed class RewardOpenQueue(TimeProvider? timeProvider = null, TimeSpan? queueLimit = null)
+{
+    private static readonly TimeSpan DefaultQueueLimit = TimeSpan.FromSeconds(2);
+
+    private readonly TimeProvider _clock = timeProvider ?? TimeProvider.System;
+    private readonly TimeSpan _queueLimit = queueLimit ?? DefaultQueueLimit;
+    private readonly ConcurrentQueue<PendingRewardRequest> _items = new();
+
+    public Task<HttpReply> Enqueue(RewardOpenRequest request, bool close)
+    {
+        var reply = new TaskCompletionSource<HttpReply>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _items.Enqueue(new(request, close, _clock.GetTimestamp(), reply));
+        return reply.Task;
+    }
+
+    public bool TryDequeueValid(out PendingRewardRequest item)
+    {
+        while (_items.TryDequeue(out var candidate))
+        {
+            if (_clock.GetElapsedTime(candidate.EnqueuedAt) >= _queueLimit)
+            {
+                candidate.Reply.TrySetResult(candidate.Close
+                    ? CloseReplyJson(RewardCloseStatus.Skipped)
+                    : OpenReplyJson(RewardOpenStatus.Skipped));
+                continue;
+            }
+            item = candidate;
+            return true;
+        }
+        item = null!;
+        return false;
+    }
+
+    public void DrainAll()
+    {
+        while (_items.TryDequeue(out var pending))
+        {
+            pending.Reply.TrySetResult(pending.Close
+                ? CloseReplyJson(RewardCloseStatus.Skipped)
+                : OpenReplyJson(RewardOpenStatus.Skipped));
+        }
+    }
+
+    public static HttpReply OpenReplyJson(RewardOpenStatus status) =>
+        new(200, JsonContract.Serialize(new RewardOpenReply(status)));
+
+    public static HttpReply CloseReplyJson(RewardCloseStatus status) =>
+        new(200, JsonContract.Serialize(new RewardCloseReply(status)));
+}
 
 public sealed class RewardOpenTransport(
     Func<RewardOpenRequest, Task<HttpReply>> open,
@@ -86,35 +182,37 @@ public sealed class RewardOpenTracker(TimeProvider? timeProvider = null, TimeSpa
         }
     }
 
-    public bool TryBegin(RewardOpenRequest request, out Task<RewardOpenStatus> completion)
+    public bool TryBegin(RewardOpenRequest request, out Task<RewardOpenStatus> completion, long? startedAt = null)
     {
         lock (_sync)
         {
-            if (_activeOpen is not null || _activeClose is not null)
+            var origin = startedAt ?? _clock.GetTimestamp();
+            if (_activeOpen is not null || _activeClose is not null || _clock.GetElapsedTime(origin) >= _settleLimit)
             {
                 completion = Task.FromResult(RewardOpenStatus.Skipped);
                 return false;
             }
 
             var source = new TaskCompletionSource<RewardOpenStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _activeOpen = new(request, _clock.GetTimestamp(), source);
+            _activeOpen = new(request, origin, source);
             completion = source.Task;
             return true;
         }
     }
 
-    public bool TryBeginClose(RewardOpenRequest request, out Task<RewardCloseStatus> completion)
+    public bool TryBeginClose(RewardOpenRequest request, out Task<RewardCloseStatus> completion, long? startedAt = null)
     {
         lock (_sync)
         {
-            if (_activeOpen is not null || _activeClose is not null)
+            var origin = startedAt ?? _clock.GetTimestamp();
+            if (_activeOpen is not null || _activeClose is not null || _clock.GetElapsedTime(origin) >= _settleLimit)
             {
                 completion = Task.FromResult(RewardCloseStatus.Skipped);
                 return false;
             }
 
             var source = new TaskCompletionSource<RewardCloseStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _activeClose = new(request, _clock.GetTimestamp(), source);
+            _activeClose = new(request, origin, source);
             completion = source.Task;
             return true;
         }

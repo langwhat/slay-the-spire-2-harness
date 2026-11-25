@@ -624,4 +624,79 @@ public sealed class StepGatewayAndRulesTests
         Assert.Equal(RewardCloseStatus.Closed, await closing);
         Assert.False(tracker.IsBusy);
     }
+
+    [Fact]
+    public async Task RewardOpenQueue_ExpiresStaleRequestsWithoutDispatchOnSameRoute()
+    {
+        var clock = new ManualClock();
+        var queue = new RewardOpenQueue(clock, TimeSpan.FromSeconds(2));
+        var tracker = new RewardOpenTracker(clock, TimeSpan.FromSeconds(3));
+        var request = new RewardOpenRequest(RunRoute, "offer:1:2");
+
+        // Enqueue both an open and a close request, then stall the game thread past the queue deadline.
+        var staleOpen = queue.Enqueue(request, close: false);
+        var staleClose = queue.Enqueue(request, close: true);
+        clock.Seconds = 2;
+
+        // Even on the exact same route, stale queued requests expire to Skipped without ever dispatching.
+        Assert.False(queue.TryDequeueValid(out _));
+        var openReply = await staleOpen;
+        var closeReply = await staleClose;
+        Assert.Equal(200, openReply.StatusCode);
+        Assert.Equal(200, closeReply.StatusCode);
+        using (var openDoc = JsonDocument.Parse(openReply.Json))
+        {
+            Assert.Equal("skipped", openDoc.RootElement.GetProperty("status").GetString());
+        }
+        using (var closeDoc = JsonDocument.Parse(closeReply.Json))
+        {
+            Assert.Equal("skipped", closeDoc.RootElement.GetProperty("status").GetString());
+        }
+
+        // A request dequeued within queueLimit still shares its original EnqueuedAt deadline with RewardOpenTracker.
+        var fresh = queue.Enqueue(request, close: false);
+        clock.Seconds = 3; // 1s in queue (< 2s queueLimit)
+        Assert.True(queue.TryDequeueValid(out var dequeued));
+        Assert.True(tracker.TryBegin(dequeued.Request, out var completion, dequeued.EnqueuedAt));
+        clock.Seconds = 5; // 3s total since enqueue (2s after dequeue) reaches the 3s settle limit.
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: true, activeSelectionOfferRef: null);
+        Assert.Equal(RewardOpenStatus.Skipped, await completion);
+        Assert.False(tracker.IsBusy);
+        dequeued.Reply.TrySetResult(RewardOpenQueue.OpenReplyJson(RewardOpenStatus.Skipped));
+        Assert.Equal(200, (await fresh).StatusCode);
+    }
+
+    [Fact]
+    public void RewardPreviewPolicy_RequiresProvableNonClaimingCloseForMultiGroup()
+    {
+        var safeSkip = new CardRewardAlternativeDescriptor(
+            OptionId: "Skip",
+            EndsSelectionWithoutCompletingReward: true,
+            HasCustomOnSelect: false);
+        var claimingSkip = new CardRewardAlternativeDescriptor(
+            OptionId: "Skip",
+            EndsSelectionWithoutCompletingReward: false,
+            HasCustomOnSelect: false);
+        var customCallbackSkip = new CardRewardAlternativeDescriptor(
+            OptionId: "Skip",
+            EndsSelectionWithoutCompletingReward: true,
+            HasCustomOnSelect: true);
+        var singingBowl = new CardRewardAlternativeDescriptor(
+            OptionId: "SINGING_BOWL",
+            EndsSelectionWithoutCompletingReward: false,
+            HasCustomOnSelect: true);
+
+        // Single-group: standard CardReward is allowed; custom subclass is rejected.
+        Assert.True(RewardPreviewPolicy.CanAutoPreview(1, isStandardCardReward: true, canSkip: false, preflightAlternatives: null));
+        Assert.False(RewardPreviewPolicy.CanAutoPreview(1, isStandardCardReward: false, canSkip: true, preflightAlternatives: [safeSkip]));
+
+        // Multi-group: CanSkip alone is insufficient; preflight must prove a non-claiming SKIP alternative.
+        Assert.True(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: true, canSkip: true, preflightAlternatives: [safeSkip, singingBowl]));
+        Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: true, canSkip: true, preflightAlternatives: [singingBowl]));
+        Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: true, canSkip: true, preflightAlternatives: [claimingSkip]));
+        Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: true, canSkip: true, preflightAlternatives: [customCallbackSkip]));
+        Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: true, canSkip: true, preflightAlternatives: null));
+        Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: false, canSkip: true, preflightAlternatives: [safeSkip]));
+        Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: true, canSkip: false, preflightAlternatives: [safeSkip]));
+    }
 }

@@ -263,6 +263,7 @@ class NativeAudit(Protocol):
 class GameIO(Protocol):
     @property
     def card_reward_preview_enabled(self) -> bool: ...
+    def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None: ...
     def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None: ...
     async def cancel_open_card_reward(self) -> None: ...
     async def admit(self) -> GameReply[Admitted]: ...
@@ -350,7 +351,7 @@ class LiveGame:
         self._on_status = on_status
         self._present_card_rewards = present_card_rewards
         self._prefetched_reward_open: (
-            tuple[native.RouteKey, str, asyncio.Task[RewardOpenResult]] | None
+            tuple[native.RouteKey, str, list[bool], asyncio.Task[RewardOpenResult]] | None
         ) = None
         self._settle_confirmation_seconds = (
             _SETTLE_CONFIRMATION_SECONDS
@@ -366,26 +367,50 @@ class LiveGame:
     def card_reward_preview_enabled(self) -> bool:
         return self._present_card_rewards
 
+    def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None:
+        prefetched = self._prefetched_reward_open
+        if prefetched is None:
+            return None
+        route, offer, started, task = prefetched
+        if started[0] or task.done():
+            return route, offer
+        return None
+
     def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
         if not self._present_card_rewards:
             return
         previous = self._prefetched_reward_open
-        if previous is not None:
-            previous[2].cancel()
-        task: asyncio.Task[RewardOpenResult] = asyncio.create_task(
-            self._client.open_card_reward(route, offer)
-        )
+        if previous is not None and not previous[2][0] and not previous[3].done():
+            previous[3].cancel()
+        started = [False]
+
+        async def dispatch() -> RewardOpenResult:
+            started[0] = True
+            return await self._client.open_card_reward(route, offer)
+
+        task: asyncio.Task[RewardOpenResult] = asyncio.create_task(dispatch())
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
-        self._prefetched_reward_open = (route, offer, task)
+        self._prefetched_reward_open = (route, offer, started, task)
 
     async def cancel_open_card_reward(self) -> None:
         prefetched = self._prefetched_reward_open
         self._prefetched_reward_open = None
         if prefetched is None:
             return
-        task = prefetched[2]
-        if not task.done():
+        _, _, started, task = prefetched
+        if not started[0] and not task.done():
             task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            return
+        # Once HTTP dispatch began, wait for it to finish rather than leaving an orphan mutation.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except ClientUnavailable:
+                return
         with suppress(asyncio.CancelledError, ClientUnavailable):
             await task
 
@@ -460,13 +485,13 @@ class LiveGame:
         prefetched = self._prefetched_reward_open
         self._prefetched_reward_open = None
         if prefetched is not None and prefetched[0] == route and prefetched[1] == offer:
-            pending: Awaitable[RewardOpenResult] = prefetched[2]
+            pending: Awaitable[RewardOpenResult] = prefetched[3]
         else:
             if prefetched is not None:
-                if not prefetched[2].done():
-                    prefetched[2].cancel()
+                if not prefetched[2][0] and not prefetched[3].done():
+                    prefetched[3].cancel()
                 with suppress(asyncio.CancelledError, ClientUnavailable):
-                    await prefetched[2]
+                    await prefetched[3]
             pending = self._client.open_card_reward(route, offer)
         result = await self._attempt(Endpoint.OPEN_CARD_REWARD, pending)
         return CardRewardOpened(result=result)

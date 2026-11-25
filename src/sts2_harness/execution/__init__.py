@@ -30,7 +30,11 @@ from sts2_harness.decisions import (
     TaskComplete,
 )
 from sts2_harness.diagnostics import BatchSettled, BatchStatus, BatchSubmitted, Diagnostics
-from sts2_harness.execution.reason_display import ReasonDisplaySanitizer
+from sts2_harness.execution.reason_display import (
+    ReasonDisplaySanitizer,
+    ViewerReason,
+    ViewerReasonKind,
+)
 from sts2_harness.execution.recovery import DecisionInterrupted, Interrupted, ToolRecoveryBudget
 from sts2_harness.execution.rewards import reward_batch_stopped, reward_steps, reward_stopped
 from sts2_harness.fights import FightHistory
@@ -106,6 +110,7 @@ class Execution:
         recovery: ToolRecoveryBudget | None = None,
         diagnostics: Diagnostics | None = None,
         display: Callable[[str], Awaitable[DisplayResult]] | None = None,
+        on_viewer_reason: Callable[[ViewerReason], None] | None = None,
     ) -> None:
         self._diagnostics = diagnostics
         self._game = game
@@ -113,10 +118,22 @@ class Execution:
         self._game_instance_id = game_instance_id
         self._run_id = run_id
         self._display = display
+        self._on_viewer_reason = on_viewer_reason
         self._last_displayed_reason: str | None = None
+        self._last_recorded_reason: str | None = None
+        self._last_observation: native.Observation | None = None
         self._reason_display = ReasonDisplaySanitizer()
         self.fights = FightHistory()
         self._observed: Callable[[native.Observation], None] | None = None
+
+    def sanitize_reason(self, reason: str, *, observation: native.Observation | None = None) -> str:
+        if observation is not None:
+            self._last_observation = observation
+            self._reason_display.observe(observation)
+        return self._reason_display.sanitize(reason)
+
+    async def display_route_reason(self, reason: str | None) -> None:
+        await self.display_reason(reason, kind=ViewerReasonKind.ROUTE)
 
     async def display_reason(
         self,
@@ -124,13 +141,40 @@ class Execution:
         *,
         repeat: bool = False,
         observation: native.Observation | None = None,
+        kind: ViewerReasonKind = ViewerReasonKind.ACTION,
+        offer_ref: str | None = None,
+        call_id: str | None = None,
+        batch_index: int | None = None,
     ) -> None:
         if observation is not None:
+            self._last_observation = observation
             self._reason_display.observe(observation)
-        if self._display is None or reason is None:
+        if reason is None:
             return
         text = self._reason_display.sanitize(reason)
-        if not text or (not repeat and text == self._last_displayed_reason):
+        if not text:
+            return
+        if self._on_viewer_reason is not None and (repeat or text != self._last_recorded_reason):
+            current = observation if observation is not None else self._last_observation
+            self._on_viewer_reason(
+                ViewerReason(
+                    kind=kind,
+                    display_reason=text,
+                    game_language=(
+                        current.game_language
+                        if current is not None
+                        else self._reason_display.language
+                    ),
+                    role=current.location.owner if current is not None else None,
+                    node_id=current.location.node_id if current is not None else None,
+                    offer_ref=offer_ref,
+                    call_id=call_id,
+                    batch_index=batch_index,
+                    native_card_preview=self.card_reward_preview_enabled,
+                )
+            )
+            self._last_recorded_reason = text
+        if self._display is None or (not repeat and text == self._last_displayed_reason):
             return
         try:
             reply = await self._display(text)
@@ -207,6 +251,7 @@ class Execution:
             self._recovery.reset()
 
     def _record_observation(self, observation: native.Observation) -> None:
+        self._last_observation = observation
         self._reason_display.observe(observation)
         self.fights.observe(observation)
         if self._observed is not None:
@@ -360,15 +405,27 @@ class Execution:
             if steps is None:
                 break
             offer_ref = choice.offer.ref if choice.offer is not None else None
+            sanitized_reason = self.sanitize_reason(choice.reason, observation=before) or None
             if not steps:
-                await self.display_reason(choice.reason, repeat=True, observation=before)
+                await self.display_reason(
+                    choice.reason,
+                    repeat=True,
+                    observation=before,
+                    kind=ViewerReasonKind.CARD_CHOICE,
+                    offer_ref=offer_ref,
+                    batch_index=index + 1,
+                )
                 reports.append(
                     CardRewardResult(
-                        offer_ref, before, before, ActionCompleted(completed_steps=0), True
+                        offer_ref,
+                        before,
+                        before,
+                        ActionCompleted(completed_steps=0),
+                        True,
+                        sanitized_reason,
                     )
                 )
                 continue
-            self._reason_display.observe(before)
             result, read_failed, ended = await self._execute_plan(
                 ActionProposal(steps, choice.reason, allow_map_travel=False),
                 route,
@@ -376,7 +433,9 @@ class Execution:
             )
             current = result.observation
             outcome = result.outcome
-            reports.append(CardRewardResult(offer_ref, before, current, outcome))
+            reports.append(
+                CardRewardResult(offer_ref, before, current, outcome, False, sanitized_reason)
+            )
             if isinstance(outcome, ActionCompleted):
                 if ended is not None or index + 1 == len(plan.choices):
                     completed = RewardBatchCompleted(completed_groups=index + 1)
@@ -521,9 +580,21 @@ class Execution:
                         uncertain_step = None
                         break
                 if index == 0:
-                    await self.display_reason(proposal.reason, repeat=reward is not None)
+                    if reward is not None:
+                        plan, group = reward
+                        offer = plan.choices[group].offer
+                        await self.display_reason(
+                            proposal.reason,
+                            repeat=True,
+                            kind=ViewerReasonKind.CARD_CHOICE,
+                            offer_ref=offer.ref if offer is not None else None,
+                            batch_index=group + 1,
+                        )
+                    else:
+                        await self.display_reason(proposal.reason, repeat=False)
                 settlement = await self._game.settle(route, step)
                 for observation in settlement.observations:
+                    self._last_observation = observation
                     self._reason_display.observe(observation)
                     self.fights.observe(observation)
                 settled = unwrap(settlement)

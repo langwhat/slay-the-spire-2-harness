@@ -2,11 +2,31 @@
 
 import re
 from collections.abc import Callable, Mapping
+from enum import StrEnum
 
 from pydantic import MISSING
 
 from sts2_harness.client import models as native
 from sts2_harness.client.http import CatalogResult, InspectResult
+
+
+class ViewerReasonKind(StrEnum):
+    ACTION = "action"
+    ROUTE = "route"
+    CARD_CHOICE = "card_choice"
+
+
+class ViewerReason(native.WireModel):
+    kind: ViewerReasonKind
+    display_reason: str
+    game_language: str
+    role: native.DecisionOwner | None = None
+    node_id: str | None = None
+    offer_ref: str | None = None
+    call_id: str | None = None
+    batch_index: int | None = None
+    native_card_preview: bool = False
+
 
 _DEF_ID = (
     r"(?:CARD|RELIC|POTION|POWER|ENCHANTMENT|AFFLICTION|EVENT|ENCOUNTER|"
@@ -70,6 +90,10 @@ class ReasonDisplaySanitizer:
         self._language: str | None = None
         self._definition_names: dict[str, str] = {}
         self._ref_names: dict[str, str] = {}
+
+    @property
+    def language(self) -> str:
+        return self._language or ""
 
     def _record_definition(
         self, definition_id: str | None | MISSING, name: str | None | MISSING

@@ -3,6 +3,7 @@ using System.Collections.Immutable;
 using System.Reflection;
 using Godot;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
@@ -51,7 +52,7 @@ internal sealed class GameStepDispatcher
     private readonly StepGateway _gateway;
     private readonly MapInkPresenter _mapPresenter;
     private readonly RewardOpenTracker _rewardOpen = new();
-    private readonly ConcurrentQueue<(RewardOpenRequest Request, bool Close, TaskCompletionSource<HttpReply> Reply)> _rewardOpenRequests = new();
+    private readonly RewardOpenQueue _rewardOpenQueue = new();
     private (StepRequest Request, Task Cue)? _visualPresentation;
     private object? _submittedChoice;
     private StepRequest? _selectionRequest;
@@ -1061,29 +1062,14 @@ internal sealed class GameStepDispatcher
                 StepErrorCode.ExecutionUncertain,
                 "The native step may have affected the game. Read the current state before making a new decision."));
 
-    private Task<HttpReply> SubmitRewardOpenAsync(RewardOpenRequest request)
-    {
-        var reply = new TaskCompletionSource<HttpReply>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _rewardOpenRequests.Enqueue((request, false, reply));
-        return reply.Task;
-    }
+    private Task<HttpReply> SubmitRewardOpenAsync(RewardOpenRequest request) =>
+        _rewardOpenQueue.Enqueue(request, close: false);
 
-    private Task<HttpReply> SubmitRewardCloseAsync(RewardOpenRequest request)
-    {
-        var reply = new TaskCompletionSource<HttpReply>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _rewardOpenRequests.Enqueue((request, true, reply));
-        return reply.Task;
-    }
+    private Task<HttpReply> SubmitRewardCloseAsync(RewardOpenRequest request) =>
+        _rewardOpenQueue.Enqueue(request, close: true);
 
-    private void DrainRewardOpenRequests()
-    {
-        while (_rewardOpenRequests.TryDequeue(out var pending))
-        {
-            pending.Reply.TrySetResult(pending.Close
-                ? RewardCloseReplyJson(RewardCloseStatus.Skipped)
-                : RewardOpenReplyJson(RewardOpenStatus.Skipped));
-        }
-    }
+    private void DrainRewardOpenRequests() =>
+        _rewardOpenQueue.DrainAll();
 
     private void ObserveRewardOpen(StepLocation location, NativeInputReadiness readiness)
     {
@@ -1104,12 +1090,12 @@ internal sealed class GameStepDispatcher
 
     private void ProcessRewardOpenRequests(StepLocation location, NativeInputReadiness readiness)
     {
-        while (_rewardOpenRequests.TryDequeue(out var item))
+        while (_rewardOpenQueue.TryDequeueValid(out var item))
         {
-            var (request, close, reply) = item;
+            var (request, close, enqueuedAt, reply) = item;
             if (close)
             {
-                ProcessRewardCloseRequest(request, reply, location, readiness);
+                ProcessRewardCloseRequest(request, enqueuedAt, reply, location, readiness);
                 continue;
             }
             try
@@ -1187,7 +1173,15 @@ internal sealed class GameStepDispatcher
                     .ToArray();
                 var cardOfferCount = rewardButtons.Count(candidate =>
                     candidate.Reward is CardReward or SpecialCardReward);
-                if (cardOfferCount > 1 && !cardReward.CanSkip)
+                var isStandardCardReward = cardReward.GetType() == typeof(CardReward);
+                var preflightAlternatives = cardOfferCount > 1 && isStandardCardReward && cardReward.CanSkip
+                    ? TryDescribePreflightAlternatives(cardReward)
+                    : null;
+                if (!RewardPreviewPolicy.CanAutoPreview(
+                        cardOfferCount,
+                        isStandardCardReward,
+                        cardReward.CanSkip,
+                        preflightAlternatives))
                 {
                     reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
                     continue;
@@ -1195,7 +1189,7 @@ internal sealed class GameStepDispatcher
 
                 var button = rewardButtons.FirstOrDefault(candidate =>
                     ReferenceEquals(candidate.Reward, cardReward));
-                if (button is null || !_rewardOpen.TryBegin(request, out var completion))
+                if (button is null || !_rewardOpen.TryBegin(request, out var completion, enqueuedAt))
                 {
                     reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
                     continue;
@@ -1223,6 +1217,7 @@ internal sealed class GameStepDispatcher
 
     private void ProcessRewardCloseRequest(
         RewardOpenRequest request,
+        long enqueuedAt,
         TaskCompletionSource<HttpReply> reply,
         StepLocation location,
         NativeInputReadiness readiness)
@@ -1274,7 +1269,7 @@ internal sealed class GameStepDispatcher
             }
 
             var skipButton = FindNonClaimingCloseButton(screen);
-            if (skipButton is null || !_rewardOpen.TryBeginClose(request, out var completion))
+            if (skipButton is null || !_rewardOpen.TryBeginClose(request, out var completion, enqueuedAt))
             {
                 reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
                 return;
@@ -1299,6 +1294,29 @@ internal sealed class GameStepDispatcher
         }
     }
 
+    private static IReadOnlyList<CardRewardAlternativeDescriptor>? TryDescribePreflightAlternatives(CardReward cardReward)
+    {
+        try
+        {
+            var alternatives = CardRewardAlternative.Generate(cardReward);
+            var descriptors = new CardRewardAlternativeDescriptor[alternatives.Count];
+            for (var index = 0; index < alternatives.Count; index++)
+                descriptors[index] = DescribeAlternative(alternatives[index]);
+            return descriptors;
+        }
+        catch (Exception error)
+        {
+            GD.PrintErr($"[sts2agent] Viewer card reward preflight failed: {error}");
+            return null;
+        }
+    }
+
+    private static CardRewardAlternativeDescriptor DescribeAlternative(CardRewardAlternative alternative) =>
+        new(
+            alternative.OptionId,
+            alternative.AfterSelected == PostAlternateCardRewardAction.EndSelectionAndDoNotCompleteReward,
+            alternative.OnSelect is not null);
+
     private static NClickableControl? FindNonClaimingCloseButton(NCardRewardSelectionScreen screen)
     {
         var alternatives = RunSurfaceLifecycle.GetCardRewardAlternatives(screen);
@@ -1308,10 +1326,7 @@ internal sealed class GameStepDispatcher
             .ToArray();
         for (var index = 0; index < Math.Min(alternatives.Count, buttons.Length); index++)
         {
-            var alternative = alternatives[index];
-            if (string.Equals(alternative.OptionId, "SKIP", StringComparison.OrdinalIgnoreCase)
-                && alternative.AfterSelected == PostAlternateCardRewardAction.EndSelectionAndDoNotCompleteReward
-                && alternative.OnSelect is null
+            if (RewardPreviewPolicy.IsNonClaimingCloseAlternative(DescribeAlternative(alternatives[index]))
                 && IsControlUsable(buttons[index]))
             {
                 return buttons[index];

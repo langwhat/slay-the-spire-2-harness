@@ -21,8 +21,9 @@ from sts2_harness.decisions import ActTask
 from sts2_harness.deck import deck_observation
 from sts2_harness.deck_role import DeckAgent, deck_offers, validate_deck_choice
 from sts2_harness.execution import Execution
+from sts2_harness.execution.reason_display import ViewerReasonKind
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
-from sts2_harness.game import LiveGame, OperationKind, RunEndReason
+from sts2_harness.game import CardRewardOpened, LiveGame, OperationKind, RunEndReason
 from sts2_harness.interactive import InteractiveOptions, run_interactive
 from sts2_harness.journal import Journal, Manifest, SessionMaterials
 from sts2_harness.live_session import live_session
@@ -1797,5 +1798,815 @@ def test_display_reason_sanitizes_internal_ids_and_refs_while_preserving_raw_jou
             choices_raw = parsed["choices"]
             assert isinstance(choices_raw, list) and isinstance(choices_raw[0], dict)
             assert choices_raw[0]["reason"] == raw_reason
+
+    asyncio.run(scenario())
+
+
+def test_model_failure_and_cancellation_after_preview_post_record_and_replay_cleanly(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        # 1. Model failure after POST /rewards/open still records OpenCardReward in Journal
+        #    and replays deterministically across pause/resume to the next decision anchor.
+        obs = _multi_group_reward_observation()
+        st = obs.state
+        assert isinstance(st, native.RunState)
+        current = obs.model_copy(
+            update={
+                "state": st.model_copy(
+                    update={
+                        "offers": st.offers[:1],
+                        "actions": tuple(a for a in st.actions if a.ref != "open-b"),
+                    }
+                )
+            }
+        )
+        control_mode = "running"
+        open_calls: list[str] = []
+        open_started = asyncio.Event()
+        release_open = asyncio.Event()
+
+        async def mod_failure_case(request: httpx.Request) -> httpx.Response:
+            nonlocal current, control_mode
+            if request.url.path == "/control":
+                control_mode = json.loads(request.content)["mode"]
+                return httpx.Response(200, json={"mode": control_mode})
+            if request.url.path == "/rewards/open":
+                body = native.RewardOpenRequest.model_validate_json(request.content)
+                open_calls.append(body.offer)
+                open_started.set()
+                await release_open.wait()
+                current = _open_reward_overlay(current, body.offer)
+                return httpx.Response(200, json={"status": "opened"})
+            if request.url.path == "/status":
+                # Auto-resume immediately after pause is confirmed.
+                if control_mode == "paused":
+                    control_mode = "running"
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": current.location.model_dump(mode="json"),
+                        "presentation": None,
+                        "control_intent": control_mode,
+                        "receipt": None,
+                        "input_readiness": current.input_readiness.value,
+                    },
+                )
+            if request.url.path == "/state":
+                current = current.model_copy(
+                    update={
+                        "stamp": current.stamp.model_copy(
+                            update={"observation_sequence": current.stamp.observation_sequence + 1}
+                        )
+                    }
+                )
+                return httpx.Response(
+                    200,
+                    content=native.StateCompleted(
+                        status=native.ResultStatus.COMPLETED, observation=current
+                    ).to_json(),
+                )
+            assert request.url.path == "/action"
+            wire = native.StepRequest.model_validate_json(request.content)
+            if isinstance(wire.step, native.Select):
+                current = _close_reward_overlay(current)
+                st2 = current.state
+                assert isinstance(st2, native.RunState)
+                current = current.model_copy(
+                    update={
+                        "state": st2.model_copy(
+                            update={
+                                "deck": (*st2.deck, *wire.step.refs),
+                                "offers": (),
+                                "actions": tuple(a for a in st2.actions if a.ref == "proceed"),
+                            }
+                        )
+                    }
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "operation_id": wire.operation_id,
+                        "status": "completed",
+                        "boundary": "ready",
+                    },
+                )
+            current = terminal(current)
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": wire.operation_id,
+                    "status": "completed",
+                    "boundary": "terminal",
+                },
+            )
+
+        model_attempt = 0
+
+        async def model_failure_then_recover(request: httpx.Request) -> httpx.Response:
+            nonlocal model_attempt
+            model_attempt += 1
+            if model_attempt == 1:
+                await open_started.wait()
+                release_open.set()
+                return httpx.Response(413, json={"error": {"message": "oversized"}})
+            return httpx.Response(
+                200,
+                content=reply(
+                    (
+                        "c-recover",
+                        "run_deck_choice",
+                        json.dumps(
+                            {
+                                "choices": [
+                                    {
+                                        "offer": "reward-a",
+                                        "choice": "take",
+                                        "card": "card-a",
+                                        "reason": "拿猛击。",
+                                    }
+                                ]
+                            }
+                        ),
+                    )
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async def immediate(_seconds: float) -> None:
+            return None
+
+        archive_fail = tmp_path / "fail-after-post.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=AsyncTransport(mod_failure_case)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="fail-after-post",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=True,
+            ),
+            archive_fail,
+            model=Llm(
+                configuration(tmp_path), transport=AsyncTransport(model_failure_then_recover)
+            ),
+            wait=immediate,
+            present_card_rewards=True,
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+
+        assert open_calls == ["reward-a"]
+        with closing(Journal.open(archive_fail)) as journal:
+            open_ops = [
+                op
+                for op in journal.operations()
+                if op.request.kind is OperationKind.OPEN_CARD_REWARD
+            ]
+            assert len(open_ops) == 1
+            assert open_ops[0].reply is not None
+            assert isinstance(open_ops[0].reply.outcome, CardRewardOpened)
+            assert open_ops[0].reply.outcome.result == native.RewardOpenReply(
+                status=native.RewardOpenStatus.OPENED
+            )
+            requests = journal.requests()
+            assert len(requests) == 2
+            failed_req, recovered_req = requests
+            assert failed_req.sequence < open_ops[0].sequence < recovered_req.sequence
+
+        anchor = ModelAnchor("fail-after-post", recovered_req.sequence)
+        async with reach(archive_fail, anchor) as reached:
+            assert reached == Reached(
+                anchor, recovered_req.confirmed_operation_cursor, recovered_req.semantic_digest
+            )
+
+        # 2. Task cancellation AFTER POST /rewards/open still settles and records OpenCardReward
+        #    in the archive so disposal never leaves an unrecorded orphan UI mutation.
+        cancel_current = obs.model_copy(
+            update={
+                "state": st.model_copy(
+                    update={
+                        "offers": st.offers[:1],
+                        "actions": tuple(a for a in st.actions if a.ref != "open-b"),
+                    }
+                )
+            }
+        )
+        cancel_open_started = asyncio.Event()
+        cancel_release_open = asyncio.Event()
+        model_waiting = asyncio.Event()
+
+        async def mod_cancel_case(request: httpx.Request) -> httpx.Response:
+            nonlocal cancel_current
+            if request.url.path == "/rewards/open":
+                body = native.RewardOpenRequest.model_validate_json(request.content)
+                cancel_open_started.set()
+                await cancel_release_open.wait()
+                cancel_current = _open_reward_overlay(cancel_current, body.offer)
+                return httpx.Response(200, json={"status": "opened"})
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": cancel_current.location.model_dump(mode="json"),
+                        "presentation": None,
+                        "control_intent": "running",
+                        "receipt": None,
+                        "input_readiness": cancel_current.input_readiness.value,
+                    },
+                )
+            assert request.url.path == "/state"
+            cancel_current = cancel_current.model_copy(
+                update={
+                    "stamp": cancel_current.stamp.model_copy(
+                        update={
+                            "observation_sequence": cancel_current.stamp.observation_sequence + 1
+                        }
+                    )
+                }
+            )
+            return httpx.Response(
+                200,
+                content=native.StateCompleted(
+                    status=native.ResultStatus.COMPLETED, observation=cancel_current
+                ).to_json(),
+            )
+
+        async def blocking_model(request: httpx.Request) -> httpx.Response:
+            model_waiting.set()
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+        archive_cancel = tmp_path / "cancel-after-post.sqlite"
+
+        async def run_and_cancel() -> None:
+            async with live_session(
+                ModClient("http://mod", transport=AsyncTransport(mod_cancel_case)),
+                Manifest(
+                    materials=SessionMaterials(
+                        entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                    ),
+                    recording_id="cancel-after-post",
+                    core_version="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    initial_notes=NotesState(),
+                    minimal=True,
+                ),
+                archive_cancel,
+                model=Llm(configuration(tmp_path), transport=AsyncTransport(blocking_model)),
+                present_card_rewards=True,
+            ) as session:
+                await session.run()
+
+        task = asyncio.create_task(run_and_cancel())
+        await cancel_open_started.wait()
+        await model_waiting.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        cancel_release_open.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        with closing(Journal.open(archive_cancel)) as journal:
+            open_ops = [
+                op
+                for op in journal.operations()
+                if op.request.kind is OperationKind.OPEN_CARD_REWARD
+            ]
+            assert len(open_ops) == 1
+            assert open_ops[0].reply is not None
+            assert isinstance(open_ops[0].reply.outcome, CardRewardOpened)
+            assert open_ops[0].reply.outcome.result == native.RewardOpenReply(
+                status=native.RewardOpenStatus.OPENED
+            )
+
+    asyncio.run(scenario())
+
+
+def test_multi_group_custom_reward_preflight_skip_and_close_failure_behavior(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        # 1. Multi-group custom reward where Mod preflight proves no safe close -> returns Skipped
+        #    without mutating UI; B-first succeeds immediately with zero /rewards/close calls.
+        current = _multi_group_reward_observation()
+        open_calls: list[str] = []
+        close_calls: list[str] = []
+        steps: list[native.NativeStep] = []
+
+        def mod_preflight_skip(request: httpx.Request) -> httpx.Response:
+            nonlocal current
+            if request.url.path == "/rewards/open":
+                body = native.RewardOpenRequest.model_validate_json(request.content)
+                open_calls.append(body.offer)
+                return httpx.Response(200, json={"status": "skipped"})
+            if request.url.path == "/rewards/close":
+                body = native.RewardOpenRequest.model_validate_json(request.content)
+                close_calls.append(body.offer)
+                return httpx.Response(200, json={"status": "skipped"})
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": current.location.model_dump(mode="json"),
+                        "presentation": None,
+                        "control_intent": "running",
+                        "receipt": None,
+                        "input_readiness": current.input_readiness.value,
+                    },
+                )
+            if request.url.path == "/state":
+                current = current.model_copy(
+                    update={
+                        "stamp": current.stamp.model_copy(
+                            update={"observation_sequence": current.stamp.observation_sequence + 1}
+                        )
+                    }
+                )
+                return httpx.Response(
+                    200,
+                    content=native.StateCompleted(
+                        status=native.ResultStatus.COMPLETED, observation=current
+                    ).to_json(),
+                )
+            assert request.url.path == "/action"
+            wire = native.StepRequest.model_validate_json(request.content)
+            steps.append(wire.step)
+            st = current.state
+            assert isinstance(st, native.RunState)
+            if isinstance(wire.step, native.Interact):
+                if wire.step.action == "open-a":
+                    current = _open_reward_overlay(current, "reward-a")
+                    boundary = "selection"
+                elif wire.step.action == "open-b":
+                    current = _open_reward_overlay(current, "reward-b")
+                    boundary = "selection"
+                else:
+                    current = terminal(current)
+                    boundary = "terminal"
+                return httpx.Response(
+                    200,
+                    json={
+                        "operation_id": wire.operation_id,
+                        "status": "completed",
+                        "boundary": boundary,
+                    },
+                )
+            assert isinstance(wire.step, native.Select)
+            assert st.selection is not None and st.selection.offer_ref is not MISSING
+            active_ref = st.selection.offer_ref
+            current = _close_reward_overlay(current)
+            st2 = current.state
+            assert isinstance(st2, native.RunState)
+            if wire.step.refs:
+                drop_action = "open-a" if active_ref == "reward-a" else "open-b"
+                current = current.model_copy(
+                    update={
+                        "state": st2.model_copy(
+                            update={
+                                "deck": (*st2.deck, *wire.step.refs),
+                                "offers": tuple(o for o in st2.offers if o.ref != active_ref),
+                                "actions": tuple(a for a in st2.actions if a.ref != drop_action),
+                            }
+                        )
+                    }
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": wire.operation_id,
+                    "status": "completed",
+                    "boundary": "ready",
+                },
+            )
+
+        b_first_choices = [
+            {"offer": "reward-b", "choice": "take", "card": "card-b", "reason": "先拿顺劈斩。"},
+            {"offer": "reward-a", "choice": "skip", "reason": "跳过猛击。"},
+        ]
+
+        def model_b_first(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=reply(("c-b", "run_deck_choice", json.dumps({"choices": b_first_choices}))),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        archive_skip = tmp_path / "custom-preflight-skip.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod_preflight_skip)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="custom-preflight-skip",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=True,
+            ),
+            archive_skip,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model_b_first)),
+            present_card_rewards=True,
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+
+        assert open_calls == ["reward-a"]
+        assert close_calls == []
+        assert steps == [
+            native.Interact(kind=native.StepKind.INTERACT, action="open-b"),
+            native.Select(kind=native.StepKind.SELECT, refs=("card-b",)),
+            native.Interact(kind=native.StepKind.INTERACT, action="open-a"),
+            native.Select(kind=native.StepKind.SELECT, refs=()),
+            native.Interact(kind=native.StepKind.INTERACT, action="proceed"),
+        ]
+
+        # 2. Custom close failure: previewed A opened, model picks B first, /rewards/close returns
+        #    Skipped leaving A open -> DeckAgent respects Skipped, returns PENDING_CHOICE without
+        #    sending Interact(open-b) or reordering choices, then accepts A-first on retry.
+        current2 = _multi_group_reward_observation()
+        close_calls2: list[str] = []
+        steps2: list[native.NativeStep] = []
+
+        def mod_close_fails(request: httpx.Request) -> httpx.Response:
+            nonlocal current2
+            if request.url.path == "/rewards/open":
+                body = native.RewardOpenRequest.model_validate_json(request.content)
+                current2 = _open_reward_overlay(current2, body.offer)
+                return httpx.Response(200, json={"status": "opened"})
+            if request.url.path == "/rewards/close":
+                body = native.RewardOpenRequest.model_validate_json(request.content)
+                close_calls2.append(body.offer)
+                # Custom screen refuses non-claiming close; overlay stays open on reward-a.
+                return httpx.Response(200, json={"status": "skipped"})
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": current2.location.model_dump(mode="json"),
+                        "presentation": None,
+                        "control_intent": "running",
+                        "receipt": None,
+                        "input_readiness": current2.input_readiness.value,
+                    },
+                )
+            if request.url.path == "/state":
+                current2 = current2.model_copy(
+                    update={
+                        "stamp": current2.stamp.model_copy(
+                            update={"observation_sequence": current2.stamp.observation_sequence + 1}
+                        )
+                    }
+                )
+                return httpx.Response(
+                    200,
+                    content=native.StateCompleted(
+                        status=native.ResultStatus.COMPLETED, observation=current2
+                    ).to_json(),
+                )
+            assert request.url.path == "/action"
+            wire = native.StepRequest.model_validate_json(request.content)
+            steps2.append(wire.step)
+            st = current2.state
+            assert isinstance(st, native.RunState)
+            if isinstance(wire.step, native.Interact):
+                if wire.step.action == "open-b":
+                    current2 = _open_reward_overlay(current2, "reward-b")
+                    boundary = "selection"
+                else:
+                    current2 = terminal(current2)
+                    boundary = "terminal"
+                return httpx.Response(
+                    200,
+                    json={
+                        "operation_id": wire.operation_id,
+                        "status": "completed",
+                        "boundary": boundary,
+                    },
+                )
+            assert isinstance(wire.step, native.Select)
+            assert st.selection is not None and st.selection.offer_ref is not MISSING
+            active_ref = st.selection.offer_ref
+            current2 = _close_reward_overlay(current2)
+            st2 = current2.state
+            assert isinstance(st2, native.RunState)
+            if wire.step.refs:
+                drop_action = "open-a" if active_ref == "reward-a" else "open-b"
+                current2 = current2.model_copy(
+                    update={
+                        "state": st2.model_copy(
+                            update={
+                                "deck": (*st2.deck, *wire.step.refs),
+                                "offers": tuple(o for o in st2.offers if o.ref != active_ref),
+                                "actions": tuple(a for a in st2.actions if a.ref != drop_action),
+                            }
+                        )
+                    }
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": wire.operation_id,
+                    "status": "completed",
+                    "boundary": "ready",
+                },
+            )
+
+        a_first_choices = [
+            {"offer": "reward-a", "choice": "skip", "reason": "先跳过已打开的猛击。"},
+            {"offer": "reward-b", "choice": "take", "card": "card-b", "reason": "再拿顺劈斩。"},
+        ]
+        seen_tool_feedback: list[str] = []
+        round_replies = iter(
+            (
+                reply(("c-1", "run_deck_choice", json.dumps({"choices": b_first_choices}))),
+                reply(("c-2", "run_deck_choice", json.dumps({"choices": a_first_choices}))),
+            )
+        )
+
+        def model_recover_pending(request: httpx.Request) -> httpx.Response:
+            seen_tool_feedback.append(request.content.decode())
+            return httpx.Response(
+                200, content=next(round_replies), headers={"Content-Type": "text/event-stream"}
+            )
+
+        archive_close_fail = tmp_path / "custom-close-fail.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod_close_fails)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="custom-close-fail",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=True,
+            ),
+            archive_close_fail,
+            model=Llm(
+                configuration(tmp_path), transport=httpx.MockTransport(model_recover_pending)
+            ),
+            present_card_rewards=True,
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+
+        assert close_calls2 == ["reward-a"]
+        assert len(seen_tool_feedback) == 2
+        assert "pending_choice" in seen_tool_feedback[1]
+        assert steps2 == [
+            native.Select(kind=native.StepKind.SELECT, refs=()),
+            native.Interact(kind=native.StepKind.INTERACT, action="open-b"),
+            native.Select(kind=native.StepKind.SELECT, refs=("card-b",)),
+            native.Interact(kind=native.StepKind.INTERACT, action="proceed"),
+        ]
+        with closing(Journal.open(archive_close_fail)) as journal:
+            completions = journal.card_choices()
+            assert [(c.batch_index, c.offer_ref, c.choice.value) for c in completions] == [
+                (1, "reward-a", "skip"),
+                (2, "reward-b", "take"),
+            ]
+
+    asyncio.run(scenario())
+
+
+def test_canonical_viewer_reasons_and_card_choice_display_reason_contract(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        base = _multi_group_reward_observation(game_language="zhs")
+        base_state = base.state
+        assert isinstance(base_state, native.RunState)
+        card = native.CardEntry.model_validate_json(CARD)
+        jest_zhs = card.model_copy(update={"definition_id": "CARD.JEST", "name": "戏法"})
+        current = base.model_copy(
+            update={
+                "objects": {
+                    **base.objects,
+                    "card:13:323": jest_zhs,
+                },
+                "descriptions": {
+                    **base.descriptions,
+                    "card:13:323": "抽1张牌。",
+                },
+                "state": base_state.model_copy(
+                    update={
+                        "offers": (
+                            native.Offer(
+                                ref="offer:1:1",
+                                kind=native.OfferKind.CARD,
+                                contents=("card:13:323",),
+                                actions=("open-a",),
+                                requires_selection=True,
+                            ),
+                        ),
+                        "actions": tuple(a for a in base_state.actions if a.ref != "open-b"),
+                    }
+                ),
+            }
+        )
+        next_node_base = native.Observation.model_validate_json(RUN)
+        assert isinstance(next_node_base.state, native.RunState)
+        next_node = next_node_base.model_copy(
+            update={
+                "game_language": "zhs",
+                "objects": {**next_node_base.objects, "card:13:323": jest_zhs},
+                "descriptions": {**next_node_base.descriptions, "card:13:323": "抽1张牌。"},
+                "location": next_node_base.location.model_copy(update={"node_id": "node-event"}),
+                "state": next_node_base.state.model_copy(
+                    update={
+                        "screen": native.RunScreen.EVENT,
+                        "actions": (native.Action(ref="event-leave", label="Leave", enabled=True),),
+                    }
+                ),
+            }
+        )
+
+        displayed_mod: list[str] = []
+
+        def mod(request: httpx.Request) -> httpx.Response:
+            nonlocal current
+            if request.url.path == "/display":
+                payload = TypeAdapter(dict[str, JsonValue]).validate_json(request.content)
+                assert isinstance(payload["reason"], str)
+                displayed_mod.append(payload["reason"])
+                return httpx.Response(200, json={"status": "shown"})
+            if request.url.path == "/rewards/open":
+                body = native.RewardOpenRequest.model_validate_json(request.content)
+                current = _open_reward_overlay(current, body.offer)
+                return httpx.Response(200, json={"status": "opened"})
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": current.location.model_dump(mode="json"),
+                        "presentation": None,
+                        "control_intent": "running",
+                        "receipt": None,
+                        "input_readiness": current.input_readiness.value,
+                    },
+                )
+            if request.url.path == "/state":
+                current = current.model_copy(
+                    update={
+                        "stamp": current.stamp.model_copy(
+                            update={"observation_sequence": current.stamp.observation_sequence + 1}
+                        )
+                    }
+                )
+                return httpx.Response(
+                    200,
+                    content=native.StateCompleted(
+                        status=native.ResultStatus.COMPLETED, observation=current
+                    ).to_json(),
+                )
+            assert request.url.path == "/action"
+            wire = native.StepRequest.model_validate_json(request.content)
+            if isinstance(wire.step, native.Select):
+                current = _close_reward_overlay(current)
+                st2 = current.state
+                assert isinstance(st2, native.RunState)
+                current = current.model_copy(
+                    update={
+                        "state": st2.model_copy(
+                            update={
+                                "deck": (*st2.deck, *wire.step.refs),
+                                "offers": (),
+                                "actions": tuple(a for a in st2.actions if a.ref == "proceed"),
+                            }
+                        )
+                    }
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "operation_id": wire.operation_id,
+                        "status": "completed",
+                        "boundary": "ready",
+                    },
+                )
+            assert isinstance(wire.step, native.Interact)
+            if wire.step.action == "proceed":
+                current = next_node
+                boundary = "ready"
+            else:
+                current = terminal(current)
+                boundary = "terminal"
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": wire.operation_id,
+                    "status": "completed",
+                    "boundary": boundary,
+                },
+            )
+
+        raw_card_reason = "拿 [[CARD.JEST]] (card:13:323) 补过牌。"
+        raw_action_reason = "已有 [[CARD.JEST]] (card:13:323)，直接离开事件。"
+        replies = iter(
+            (
+                reply(
+                    (
+                        "c-card",
+                        "run_deck_choice",
+                        json.dumps(
+                            {
+                                "choices": [
+                                    {
+                                        "offer": "offer:1:1",
+                                        "choice": "take",
+                                        "card": "card:13:323",
+                                        "reason": raw_card_reason,
+                                    }
+                                ]
+                            }
+                        ),
+                    )
+                ),
+                reply(
+                    (
+                        "c-event",
+                        "run_act",
+                        json.dumps(
+                            {
+                                "steps": [{"kind": "interact", "action": "event-leave"}],
+                                "reason": raw_action_reason,
+                            }
+                        ),
+                    )
+                ),
+            )
+        )
+
+        def model(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=next(replies), headers={"Content-Type": "text/event-stream"}
+            )
+
+        archive = tmp_path / "canonical-viewer.sqlite"
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="canonical-viewer",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                minimal=True,
+            ),
+            archive,
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+            display_reasons=True,
+            present_card_rewards=True,
+        ) as session:
+            assert (await session.run()).reason is RunEndReason.TERMINAL
+
+        with closing(Journal.open(archive)) as journal:
+            # 1. Canonical SQLite viewer_reasons matches native /display verbatim.
+            viewer_rows = journal.viewer_reasons()
+            assert [row.display_reason for row in viewer_rows] == displayed_mod
+            assert viewer_rows[0].kind is ViewerReasonKind.CARD_CHOICE
+            assert viewer_rows[0].display_reason == "拿 戏法 补过牌。"
+            assert viewer_rows[0].offer_ref == "offer:1:1"
+            assert viewer_rows[0].batch_index == 1
+            assert viewer_rows[0].game_language == "zhs"
+            assert viewer_rows[0].native_card_preview is True
+            assert viewer_rows[-1].kind is ViewerReasonKind.ACTION
+            assert viewer_rows[-1].display_reason == "已有 戏法，直接离开事件。"
+            assert viewer_rows[-1].node_id == "node-event"
+
+            # 2. Completed card_choices carries the same canonical presentation-safe display_reason.
+            completions = journal.card_choices()
+            assert len(completions) == 1
+            assert completions[0].display_reason == "拿 戏法 补过牌。"
+
+            # 3. Raw model tool arguments remain verbatim in Journal for Eval.
+            raw_reqs = journal.requests()
+            assert len(raw_reqs) == 2
+            card_reply = raw_reqs[0].attempts[-1].reply
+            act_reply = raw_reqs[1].attempts[-1].reply
+            assert card_reply is not None and act_reply is not None
+            card_args = TypeAdapter(dict[str, JsonValue]).validate_json(
+                AssistantMessage(card_reply.native_reply).tool_calls[0].arguments
+            )
+            act_args = TypeAdapter(dict[str, JsonValue]).validate_json(
+                AssistantMessage(act_reply.native_reply).tool_calls[0].arguments
+            )
+            raw_choices = card_args["choices"]
+            assert isinstance(raw_choices, list) and isinstance(raw_choices[0], dict)
+            assert raw_choices[0]["reason"] == raw_card_reason
+            assert act_args["reason"] == raw_action_reason
+
+        status_file = tmp_path / "status.json"
+        assert status_file.exists()
+        status_data = TypeAdapter(dict[str, JsonValue]).validate_json(status_file.read_text())
+        assert status_data["native_card_preview"] is True
 
     asyncio.run(scenario())

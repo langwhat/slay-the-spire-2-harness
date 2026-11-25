@@ -33,6 +33,7 @@ class CardChoiceCompletion(native.WireModel):
     after: native.Observation | None
     outcome: Outcome
     local_decline: bool = False
+    display_reason: str | None = None
 
 
 def deck_context(

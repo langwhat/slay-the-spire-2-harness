@@ -1,5 +1,6 @@
 """Joint card reward decisions, with per-group native completion evidence."""
 
+import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -464,11 +465,19 @@ class DeckAgent(Agent):
         self._preview_pending = None
         self._previewed_offer_ref = None
         view = self._reward_view(observation, resolved)
+        cancelled = False
         try:
             return await super().decide(task, view)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
             if self._reward_preview is not None:
-                await self._reward_preview.cancel_open_card_reward()
+                if cancelled:
+                    await self._reward_preview.cancel_open_card_reward()
+                else:
+                    await self._settle_preview()
+                    await self._reward_preview.cancel_open_card_reward()
             self._preview_target = None
             self._preview_pending = None
             self._previewed_offer_ref = None
@@ -501,6 +510,7 @@ class DeckAgent(Agent):
                     after=result.after,
                     outcome=ReadCompleted() if result.local_decline else result.outcome,
                     local_decline=result.local_decline,
+                    display_reason=result.display_reason,
                 )
             )
         completed = isinstance(result.outcome, ActionCompleted)
@@ -545,13 +555,15 @@ class DeckAgent(Agent):
                 )
         await super().accept(outcome)
 
-    async def _run_close_preview(self, route: native.RouteKey, offer_ref: str) -> None:
+    async def _run_close_preview(
+        self, route: native.RouteKey, offer_ref: str
+    ) -> RewardCloseResult | None:
         if self._reward_preview is None:
-            return
+            return None
         try:
-            await self._reward_preview.close_card_reward(route, offer_ref)
+            return await self._reward_preview.close_card_reward(route, offer_ref)
         except ClientUnavailable:
-            return
+            return None
 
     def _first_chosen_offer(self, call: ToolCall) -> str | None:
         try:
@@ -589,8 +601,21 @@ class DeckAgent(Agent):
                 and first_offer is not None
                 and first_offer != active.ref
             ):
-                await self._run_close_preview(task.expected_route, active.ref)
-                raw = await self._tools.current()
+                close_result = await self._run_close_preview(task.expected_route, active.ref)
+                if isinstance(close_result, native.RewardCloseReply) and close_result.status in (
+                    native.RewardCloseStatus.CLOSED,
+                    native.RewardCloseStatus.ALREADY_CLOSED,
+                ):
+                    self._previewed_offer_ref = None
+                    raw = await self._tools.current()
+                elif close_result is None:
+                    raw = await self._tools.current()
+                    if (
+                        raw is not None
+                        and isinstance(raw.state, native.RunState)
+                        and raw.state.selection is None
+                    ):
+                        self._previewed_offer_ref = None
         validated = validate_deck_choice(
             call,
             task,

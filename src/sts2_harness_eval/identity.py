@@ -354,6 +354,27 @@ class IdentityGame:
     def card_reward_preview_enabled(self) -> bool:
         return self._game.card_reward_preview_enabled
 
+    def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None:
+        pending = self._game.pending_card_reward_open()
+        if pending is None:
+            return None
+        route, offer = pending
+        location = self._location(native.Location.model_validate(route.model_dump()))
+        assert (
+            location.run_id is not None
+            and location.node_id is not None
+            and location.owner is not None
+        )
+        return (
+            native.RouteKey(
+                game_instance_id=location.game_instance_id,
+                run_id=location.run_id,
+                node_id=location.node_id,
+                owner=location.owner,
+            ),
+            self._in_ref(offer),
+        )
+
     def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
         self._game.start_open_card_reward(self._route(route), self._out_ref(offer))
 

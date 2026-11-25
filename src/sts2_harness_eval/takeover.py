@@ -199,6 +199,9 @@ class _GameProxy:
     def card_reward_preview_enabled(self) -> bool:
         return self._switch.current.game.card_reward_preview_enabled
 
+    def pending_card_reward_open(self) -> tuple[native.RouteKey, str] | None:
+        return self._switch.current.game.pending_card_reward_open()
+
     def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
         self._switch.current.game.start_open_card_reward(route, offer)
 

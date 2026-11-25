@@ -415,6 +415,7 @@ class Status(native.WireModel):
     model_request: int | None = None
     started_at: str | None = None
     sequence: int | None = None
+    native_card_preview: bool | None = None
 
 
 _ORDINARY_RESULTS = ("rejected", "paused", "stopped")
@@ -776,6 +777,9 @@ class Diagnostics:
                 }
             )
         )
+
+    def set_native_card_preview(self, enabled: bool) -> None:
+        self._write_status(self._status.model_copy(update={"native_card_preview": enabled}))
 
     def lifecycle(self, stage: Lifecycle) -> None:
         if self._status.lifecycle is stage:
