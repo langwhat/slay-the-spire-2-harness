@@ -79,6 +79,29 @@ def mechanism_key(value: dict[str, JsonValue]) -> tuple[str, str, str | None, st
     return kind, identity, text, completeness
 
 
+def _duplicates_definition(
+    mechanism: native.MechanismView,
+    definitions: dict[str, dict[str, JsonValue]],
+    referenced: set[str],
+) -> bool:
+    if (
+        mechanism.kind not in (native.MechanismKind.RELIC, native.MechanismKind.POTION)
+        or mechanism.definition_id is None
+        or mechanism.text is None
+        or mechanism.definition_id not in referenced
+        or mechanism.completeness is not MISSING
+    ):
+        return False
+    definition = definitions.get(mechanism.definition_id)
+    if definition is None:
+        return False
+    return (
+        definition.get("type") == mechanism.kind
+        and definition.get("name") == mechanism.name
+        and definition.get("text") == mechanism.text
+    )
+
+
 def _key(obj: native.ObjectEntry) -> str | None:
     if obj.definition_id is MISSING:
         return None
@@ -461,6 +484,8 @@ class RunDelivery:
         ]
         mechanisms: dict[tuple[str, str, str | None, str | None], dict[str, JsonValue]] = {}
         for mechanism in observation.mechanisms:
+            if _duplicates_definition(mechanism, self.definitions, referenced):
+                continue
             body: dict[str, JsonValue] = {
                 name: value
                 for name, value in _json(mechanism).items()

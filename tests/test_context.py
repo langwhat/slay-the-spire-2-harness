@@ -1178,3 +1178,225 @@ def test_card_rewards_prefers_explicit_offer_refs_and_hides_them_from_model_inpu
     deck_choice = json.loads(deck_ctx.model_input()[-1].text)["observation"]["choice"]
     assert "selection" in deck_choice and "offer_ref" not in deck_choice["selection"]
     assert all("parent_offer_ref" not in row for row in deck_choice["offers"])
+
+
+def test_mechanisms_omit_exact_relic_and_potion_definition_duplicates() -> None:
+    from sts2_harness.client.models import ObjectKind, PotionEntry, RelicEntry
+
+    base = Observation.model_validate_json(COMBAT)
+    assert isinstance(base.state, CombatState)
+    obs = base.model_copy(
+        update={
+            "state": base.state.model_copy(update={"relics": ("r1",), "potions": ("p1",)}),
+            "objects": {
+                **base.objects,
+                "r1": RelicEntry(
+                    kind=ObjectKind.RELIC,
+                    definition_id="RELIC.BURNING_BLOOD",
+                    name="燃烧之血",
+                    status="normal",
+                    is_used_up=False,
+                    is_melted=False,
+                    stack_count=1,
+                ),
+                "p1": PotionEntry(
+                    kind=ObjectKind.POTION,
+                    definition_id="POTION.FIRE_POTION",
+                    name="火焰药水",
+                    usable=True,
+                    needs_target=True,
+                    target_type="any_enemy",
+                    usage="combat_only",
+                ),
+            },
+            "descriptions": {
+                **base.descriptions,
+                "r1": "在战斗结束时，回复6点生命。",
+                "p1": "造成20点伤害。",
+            },
+            "mechanisms": (
+                MechanismView(
+                    kind=MechanismKind.RELIC,
+                    definition_id="RELIC.BURNING_BLOOD",
+                    name="燃烧之血",
+                    text="在战斗结束时，回复6点生命。",
+                    owner="r1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.OTHER,
+                    definition_id="RELIC.BURNING_BLOOD",
+                    name="燃烧之血",
+                    text="After combat victory: if owner is alive: owner heals 6 HP",
+                    owner="r1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.POTION,
+                    definition_id="POTION.FIRE_POTION",
+                    name="火焰药水",
+                    text="造成20点伤害。",
+                    owner="p1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.RELIC,
+                    definition_id="RELIC.UNOWNED_TIP",
+                    name="未持有遗物",
+                    text="仅在悬浮提示中出现的遗物说明。",
+                    owner="c1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.POTION,
+                    definition_id="POTION.FIRE_POTION",
+                    name="火焰药水",
+                    text="不同的补充说明。",
+                    owner="p1",
+                ),
+            ),
+        }
+    )
+
+    combat_ctx = Context(DecisionOwner.COMBAT)
+    combat_ctx.begin_group(obs, NotesView())
+    combat_ctx.append_task(CombatActInput(), obs)
+    combat_ctx.finish_group()
+    payload = json.loads(combat_ctx.model_input()[-1].text)["observation"]
+    def_ids = {row["id"] for row in payload["defs"]}
+    assert {"RELIC.BURNING_BLOOD", "POTION.FIRE_POTION"} <= def_ids
+    assert [(row["kind"], row["definition_id"], row["text"]) for row in payload["mechanisms"]] == [
+        (
+            "other",
+            "RELIC.BURNING_BLOOD",
+            "After combat victory: if owner is alive: owner heals 6 HP",
+        ),
+        ("relic", "RELIC.UNOWNED_TIP", "仅在悬浮提示中出现的遗物说明。"),
+        ("potion", "POTION.FIRE_POTION", "不同的补充说明。"),
+    ]
+
+    candidate = combat_ctx.compaction_candidate()
+    combat_ctx.validate_compaction(candidate)
+    combat_ctx.install_compaction(candidate)
+    baseline = json.loads(combat_ctx.model_input()[0].text)["context_baseline"]["observation"]
+    assert {"RELIC.BURNING_BLOOD", "POTION.FIRE_POTION"} <= {row["id"] for row in baseline["defs"]}
+    assert [row["definition_id"] for row in baseline["mechanisms"]] == [
+        "RELIC.BURNING_BLOOD",
+        "RELIC.UNOWNED_TIP",
+        "POTION.FIRE_POTION",
+    ]
+
+
+def test_mechanisms_dedup_preserves_incomplete_null_renamed_and_unreferenced_entries() -> None:
+    from sts2_harness.client.models import (
+        MechanismCompleteness,
+        ObjectKind,
+        PotionEntry,
+        RelicEntry,
+    )
+
+    base = Observation.model_validate_json(RUN)
+    assert isinstance(base.state, RunState)
+    obs = base.model_copy(
+        update={
+            "state": base.state.model_copy(update={"relics": ("r1",), "potions": ("p1",)}),
+            "objects": {
+                **base.objects,
+                "r1": RelicEntry(
+                    kind=ObjectKind.RELIC,
+                    definition_id="RELIC.VAJRA",
+                    name="金刚杵",
+                    status="normal",
+                    is_used_up=False,
+                    is_melted=False,
+                    stack_count=1,
+                ),
+                "p1": PotionEntry(
+                    kind=ObjectKind.POTION,
+                    definition_id="POTION.BLOCK_POTION",
+                    name="格挡药水",
+                    usable=False,
+                    needs_target=False,
+                    target_type="none",
+                    usage="combat_only",
+                ),
+            },
+            "descriptions": {
+                **base.descriptions,
+                "r1": "在每场战斗开始时获得1点力量。",
+                "p1": "获得12点格挡。",
+            },
+            "mechanisms": (
+                MechanismView(
+                    kind=MechanismKind.RELIC,
+                    definition_id="RELIC.VAJRA",
+                    name="金刚杵",
+                    text="在每场战斗开始时获得1点力量。",
+                    owner="r1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.RELIC,
+                    definition_id="RELIC.VAJRA",
+                    name="金刚杵",
+                    text="在每场战斗开始时获得1点力量。",
+                    completeness=MechanismCompleteness.PARTIAL,
+                    owner="r1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.RELIC,
+                    definition_id="RELIC.VAJRA",
+                    name="金刚杵（别名）",
+                    text="在每场战斗开始时获得1点力量。",
+                    owner="r1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.POTION,
+                    definition_id="POTION.BLOCK_POTION",
+                    name="格挡药水",
+                    text=None,
+                    owner="p1",
+                ),
+                MechanismView(
+                    kind=MechanismKind.POTION,
+                    definition_id="POTION.BLOCK_POTION",
+                    name="格挡药水",
+                    text="获得12点格挡。",
+                    owner="p1",
+                ),
+            ),
+        }
+    )
+
+    run_ctx = Context(DecisionOwner.RUN)
+    run_ctx.begin_group(obs, NotesView())
+    run_ctx.append_task(RunActInput(), obs)
+    run_ctx.finish_group()
+    first = json.loads(run_ctx.model_input()[-1].text)["observation"]
+    assert {"RELIC.VAJRA", "POTION.BLOCK_POTION"} <= {row["id"] for row in first["defs"]}
+    assert [
+        (row["kind"], row["definition_id"], row["name"], row.get("text"), row.get("completeness"))
+        for row in first["mechanisms"]
+    ] == [
+        ("relic", "RELIC.VAJRA", "金刚杵", "在每场战斗开始时获得1点力量。", "partial"),
+        ("relic", "RELIC.VAJRA", "金刚杵（别名）", "在每场战斗开始时获得1点力量。", None),
+        ("potion", "POTION.BLOCK_POTION", "格挡药水", None, None),
+    ]
+
+    # Once a potion leaves referenced objects, its mechanism entry is no longer suppressed.
+    later = obs.model_copy(
+        update={
+            "state": obs.state.model_copy(update={"potions": ()}),
+            "mechanisms": (
+                MechanismView(
+                    kind=MechanismKind.POTION,
+                    definition_id="POTION.BLOCK_POTION",
+                    name="格挡药水",
+                    text="获得12点格挡。",
+                    owner="r1",
+                ),
+            ),
+        }
+    )
+    run_ctx.begin_group(later, NotesView())
+    run_ctx.append_task(RunActInput(), later)
+    run_ctx.finish_group()
+    second = json.loads(run_ctx.model_input()[-1].text)["observation"]
+    assert [(row["kind"], row["definition_id"], row["text"]) for row in second["mechanisms"]] == [
+        ("potion", "POTION.BLOCK_POTION", "获得12点格挡。")
+    ]
