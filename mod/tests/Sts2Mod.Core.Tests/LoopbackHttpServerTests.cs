@@ -23,6 +23,8 @@ public sealed class LoopbackHttpServerTests
         public HttpReply SubmitAction(string body) => new(200, "{\"route\":\"action\"}");
         public HttpReply SetControl(string body) => new(200, "{\"route\":\"set_control\"}");
         public HttpReply SubmitDisplay(string body) => new(200, "{\"route\":\"display\"}");
+        public Task<HttpReply> OpenCardReward(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"rewards_open\"}"));
+        public Task<HttpReply> CloseCardReward(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"rewards_close\"}"));
         public Task<HttpReply> PresentMap(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"present\"}"));
         public Task<HttpReply> VerifyMapRestoration(string body) => Task.FromResult(new HttpReply(200, "{\"route\":\"verify\"}"));
         public HttpReply GetCheckpointIdentity() => new(200, "{\"route\":\"checkpoint_identity\"}");
@@ -61,6 +63,8 @@ public sealed class LoopbackHttpServerTests
                      ("/action", "action"),
                      ("/control", "set_control"),
                      ("/display", "display"),
+                     ("/rewards/open", "rewards_open"),
+                     ("/rewards/close", "rewards_close"),
                      ("/map/present", "present"),
                      ("/map/restore/verify", "verify"),
                      ("/operator/checkpoint", "checkpoint"),

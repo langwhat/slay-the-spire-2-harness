@@ -629,9 +629,11 @@ class RunAgent(Agent):
         client = self._client()
         self._llm = client
         self._context = context
+        self._game_language = start.observation.game_language
         self._notes_delivered = False
 
     async def _prepare(self, observation: native.Observation) -> Context:
+        self._game_language = observation.game_language
         if self._context is None:
             await self.enter_act(ActStart(observation))
             assert self._context is not None

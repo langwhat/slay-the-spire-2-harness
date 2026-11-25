@@ -218,7 +218,7 @@ class ChatCompletionsAdapter:
                         "function": {
                             "name": tool.name,
                             "description": tool.description.body,
-                            "parameters": tool.parameters.model_json_schema(),
+                            "parameters": tool.input_schema(),
                             "strict": False,
                         },
                     }

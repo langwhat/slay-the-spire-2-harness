@@ -8,7 +8,13 @@ from pydantic import MISSING, ValidationError
 
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
-from sts2_harness.client.http import CatalogResult, DisplayResult, InspectResult
+from sts2_harness.client.http import (
+    CatalogResult,
+    DisplayResult,
+    InspectResult,
+    RewardCloseResult,
+    RewardOpenResult,
+)
 from sts2_harness.decisions import (
     ActionDecision,
     ActionKind,
@@ -24,6 +30,7 @@ from sts2_harness.decisions import (
     TaskComplete,
 )
 from sts2_harness.diagnostics import BatchSettled, BatchStatus, BatchSubmitted, Diagnostics
+from sts2_harness.execution.reason_display import ReasonDisplaySanitizer
 from sts2_harness.execution.recovery import DecisionInterrupted, Interrupted, ToolRecoveryBudget
 from sts2_harness.execution.rewards import reward_batch_stopped, reward_steps, reward_stopped
 from sts2_harness.fights import FightHistory
@@ -107,13 +114,22 @@ class Execution:
         self._run_id = run_id
         self._display = display
         self._last_displayed_reason: str | None = None
+        self._reason_display = ReasonDisplaySanitizer()
         self.fights = FightHistory()
         self._observed: Callable[[native.Observation], None] | None = None
 
-    async def display_reason(self, reason: str | None, *, repeat: bool = False) -> None:
+    async def display_reason(
+        self,
+        reason: str | None,
+        *,
+        repeat: bool = False,
+        observation: native.Observation | None = None,
+    ) -> None:
+        if observation is not None:
+            self._reason_display.observe(observation)
         if self._display is None or reason is None:
             return
-        text = reason.strip()
+        text = self._reason_display.sanitize(reason)
         if not text or (not repeat and text == self._last_displayed_reason):
             return
         try:
@@ -146,10 +162,14 @@ class Execution:
         reply = await self._game.inspect(query)
         for observation in reply.observations:
             self._record_observation(observation)
-        return unwrap(reply).result
+        result = unwrap(reply).result
+        self._reason_display.observe_inspect(result)
+        return result
 
     async def catalog(self, request: native.CatalogRequest) -> CatalogResult:
-        return unwrap(await self._game.catalog(request)).result
+        result = unwrap(await self._game.catalog(request)).result
+        self._reason_display.observe_catalog(result)
+        return result
 
     async def present(
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
@@ -159,12 +179,35 @@ class Execution:
             self._record_observation(observation)
         return unwrap(reply)
 
+    @property
+    def card_reward_preview_enabled(self) -> bool:
+        return self._game.card_reward_preview_enabled
+
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+        self._game.start_open_card_reward(route, offer)
+
+    async def cancel_open_card_reward(self) -> None:
+        await self._game.cancel_open_card_reward()
+
+    async def open_card_reward(self, route: native.RouteKey, offer: str) -> RewardOpenResult:
+        reply = await self._game.open_card_reward(route, offer)
+        for observation in reply.observations:
+            self._record_observation(observation)
+        return unwrap(reply).result
+
+    async def close_card_reward(self, route: native.RouteKey, offer: str) -> RewardCloseResult:
+        reply = await self._game.close_card_reward(route, offer)
+        for observation in reply.observations:
+            self._record_observation(observation)
+        return unwrap(reply).result
+
     async def pause_until_resumed(self, reason: Reason | None) -> None:
         unwrap(await self._game.pause_until_resumed(reason))
         if self._recovery is not None:
             self._recovery.reset()
 
     def _record_observation(self, observation: native.Observation) -> None:
+        self._reason_display.observe(observation)
         self.fights.observe(observation)
         if self._observed is not None:
             self._observed(observation)
@@ -318,13 +361,14 @@ class Execution:
                 break
             offer_ref = choice.offer.ref if choice.offer is not None else None
             if not steps:
-                await self.display_reason(choice.reason, repeat=True)
+                await self.display_reason(choice.reason, repeat=True, observation=before)
                 reports.append(
                     CardRewardResult(
                         offer_ref, before, before, ActionCompleted(completed_steps=0), True
                     )
                 )
                 continue
+            self._reason_display.observe(before)
             result, read_failed, ended = await self._execute_plan(
                 ActionProposal(steps, choice.reason, allow_map_travel=False),
                 route,
@@ -480,6 +524,7 @@ class Execution:
                     await self.display_reason(proposal.reason, repeat=reward is not None)
                 settlement = await self._game.settle(route, step)
                 for observation in settlement.observations:
+                    self._reason_display.observe(observation)
                     self.fights.observe(observation)
                 settled = unwrap(settlement)
                 receipt = settled.receipt

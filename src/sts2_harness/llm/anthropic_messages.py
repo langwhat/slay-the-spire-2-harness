@@ -66,7 +66,7 @@ def _object_input(schema: dict[str, JsonValue], definitions: dict[str, JsonValue
 
 
 def _input_schema(tool: ToolDefinition) -> dict[str, JsonValue]:
-    schema = _OBJECT.validate_python(tool.parameters.model_json_schema(), strict=True)
+    schema = tool.input_schema()
     definitions = schema.get("$defs", {})
     if not isinstance(definitions, dict) or not _object_input(schema, definitions):
         raise ModelUnavailable(FailureKind.CONFIGURATION)

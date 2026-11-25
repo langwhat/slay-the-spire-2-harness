@@ -38,6 +38,10 @@ from sts2_harness.client.models import (
     PresentReply,
     PresentRequest,
     ResultStatus,
+    RewardCloseReply,
+    RewardOpenReply,
+    RewardOpenRequest,
+    RouteKey,
     SearchData,
     StateReply,
     Status,
@@ -54,6 +58,8 @@ type PresentResult = PresentReply | InvalidRequestReply | TechnicalError
 type VerifyPresentationResult = VerifyPresentationReply | InvalidRequestReply | TechnicalError
 type ControlResult = ControlReply | ControlFailed | InvalidRequestReply | TechnicalError
 type DisplayResult = DisplayReply | InvalidRequestReply | TechnicalError
+type RewardOpenResult = RewardOpenReply | InvalidRequestReply | TechnicalError
+type RewardCloseResult = RewardCloseReply | InvalidRequestReply | TechnicalError
 
 type StatusResult = Status | InvalidRequestReply | TechnicalError
 type StateResult = StateReply | InvalidRequestReply | TechnicalError
@@ -66,6 +72,8 @@ _PRESENT = TypeAdapter(PresentReply)
 _VERIFY_PRESENTATION = TypeAdapter(VerifyPresentationReply)
 _CONTROL = TypeAdapter(ControlReply | ControlFailed)
 _DISPLAY = TypeAdapter(DisplayReply)
+_REWARD_OPEN = TypeAdapter(RewardOpenReply)
+_REWARD_CLOSE = TypeAdapter(RewardCloseReply)
 _STATUS = TypeAdapter(Status)
 _STATE = TypeAdapter(StateReply)
 _INSPECT = TypeAdapter(InspectReply)
@@ -148,6 +156,28 @@ class ModClient:
             "/display",
             _DISPLAY,
             DisplayRequest(reason=reason),
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def open_card_reward(
+        self, route: RouteKey, offer: str, *, timeout_seconds: float = 4.0
+    ) -> RewardOpenResult:
+        return await self._request(
+            "POST",
+            "/rewards/open",
+            _REWARD_OPEN,
+            RewardOpenRequest(expected_route=route, offer=offer),
+            timeout_seconds=timeout_seconds,
+        )
+
+    async def close_card_reward(
+        self, route: RouteKey, offer: str, *, timeout_seconds: float = 4.0
+    ) -> RewardCloseResult:
+        return await self._request(
+            "POST",
+            "/rewards/close",
+            _REWARD_CLOSE,
+            RewardOpenRequest(expected_route=route, offer=offer),
             timeout_seconds=timeout_seconds,
         )
 

@@ -71,6 +71,7 @@ from sts2_harness.tools.inputs import (
     SkillInput,
     SkillListInput,
     StateQuery,
+    tool_schema,
 )
 
 
@@ -182,7 +183,7 @@ class ToolCatalog:
             ToolName.RUN_KNOWLEDGE: KnowledgeInput,
             ToolName.COMBAT_KNOWLEDGE: KnowledgeInput,
         }
-        self.definitions = tuple(
+        self._base_definitions = tuple(
             ToolDefinition(
                 item.name,
                 MaterialText.create(
@@ -212,7 +213,29 @@ class ToolCatalog:
                 }
             )
         )
+        self._definitions_by_language: dict[str | None, tuple[ToolDefinition, ...]] = {}
+        self.definitions = self.definitions_for(None)
         self._names = frozenset(item.name for item in self.definitions)
+
+    def definitions_for(self, game_language: str | None) -> tuple[ToolDefinition, ...]:
+        cached = self._definitions_by_language.get(game_language)
+        if cached is not None:
+            return cached
+        resolved = tuple(
+            ToolDefinition(
+                item.name,
+                item.description,
+                item.parameters,
+                json.dumps(
+                    tool_schema(item.name, minimal=self.minimal, game_language=game_language),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+            for item in self._base_definitions
+        )
+        self._definitions_by_language[game_language] = resolved
+        return resolved
 
     @property
     def notes(self) -> Notes | None:

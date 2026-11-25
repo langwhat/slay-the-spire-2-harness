@@ -19,6 +19,7 @@ from pydantic_core import CoreSchema
 
 from sts2_harness.client import models as native
 from sts2_harness.note_values import NotesState
+from sts2_harness.tools.reason_language import resolve_schema
 
 
 class Definition(native.WireModel):
@@ -31,6 +32,20 @@ class Definition(native.WireModel):
 DEFINITIONS = TypeAdapter(tuple[Definition, ...]).validate_json(
     files(__package__).joinpath("definitions.json").read_text(encoding="utf-8"), strict=True
 )
+_DEFINITIONS_BY_NAME = {item.name: item for item in DEFINITIONS}
+
+
+def tool_schema(
+    name: str, *, minimal: bool = False, game_language: str | None = None
+) -> dict[str, JsonValue]:
+    schema = resolve_schema(_DEFINITIONS_BY_NAME[name].input_schema, game_language)
+    if minimal and name in {"run_act", "run_next"}:
+        properties = schema["properties"]
+        assert isinstance(properties, dict)
+        return schema | {
+            "properties": {key: value for key, value in properties.items() if key != "notes"}
+        }
+    return schema
 
 
 class StateQuery(native.WireModel):
@@ -114,7 +129,7 @@ class CombatActInput(RootModel[CombatAct]):
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
-        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "combat_act"))
+        return dict(tool_schema("combat_act"))
 
 
 class NotesPatch(native.WireModel):
@@ -149,7 +164,7 @@ class RunActInput(RootModel[RunAct]):
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
-        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_act"))
+        return dict(tool_schema("run_act"))
 
 
 class MinimalRunActInput(RunActInput):
@@ -195,9 +210,7 @@ class RunDeckChoice(native.WireModel):
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
-        return dict(
-            next(item.input_schema for item in DEFINITIONS if item.name == "run_deck_choice")
-        )
+        return dict(tool_schema("run_deck_choice"))
 
 
 class RunPlan(native.WireModel):
@@ -208,7 +221,7 @@ class RunPlan(native.WireModel):
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
-        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_plan"))
+        return dict(tool_schema("run_plan"))
 
 
 class RunNext(native.WireModel):
@@ -220,7 +233,7 @@ class RunNext(native.WireModel):
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
-        return dict(next(item.input_schema for item in DEFINITIONS if item.name == "run_next"))
+        return dict(tool_schema("run_next"))
 
 
 class MinimalRunNext(RunNext):

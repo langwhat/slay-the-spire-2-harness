@@ -9,6 +9,8 @@ from sts2_harness.capacity import CapacityPolicy, ModelAttemptReference
 from sts2_harness.client import models as native
 from sts2_harness.game import (
     Admitted,
+    CardRewardClosed,
+    CardRewardOpened,
     Cataloged,
     GameIO,
     GameReply,
@@ -179,6 +181,17 @@ class SampleHost:
                 host._remember(reply.observations)
                 return reply
 
+            @property
+            def card_reward_preview_enabled(self) -> bool:
+                return recorded.card_reward_preview_enabled
+
+            def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+                host._require_armed()
+                recorded.start_open_card_reward(route, offer)
+
+            async def cancel_open_card_reward(self) -> None:
+                await recorded.cancel_open_card_reward()
+
             async def present(
                 self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
             ) -> GameReply[Presented]:
@@ -187,6 +200,22 @@ class SampleHost:
                 host._remember(reply.observations)
                 if isinstance(reply.outcome, Presented) and reply.outcome.receipt is None:
                     host._native_unconfirmed = True
+                return reply
+
+            async def open_card_reward(
+                self, route: native.RouteKey, offer: str
+            ) -> GameReply[CardRewardOpened]:
+                host._require_armed()
+                reply = await recorded.open_card_reward(route, offer)
+                host._remember(reply.observations)
+                return reply
+
+            async def close_card_reward(
+                self, route: native.RouteKey, offer: str
+            ) -> GameReply[CardRewardClosed]:
+                host._require_armed()
+                reply = await recorded.close_card_reward(route, offer)
+                host._remember(reply.observations)
                 return reply
 
             async def settle(

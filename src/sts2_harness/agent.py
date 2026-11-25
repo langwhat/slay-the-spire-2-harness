@@ -40,6 +40,7 @@ from sts2_harness.llm.messages import (
     PreparedRequest,
     RequestPreparation,
     ToolCall,
+    ToolDefinition,
 )
 from sts2_harness.material_text import MaterialUnavailable
 from sts2_harness.results import (
@@ -97,6 +98,7 @@ class Agent(ABC):
         )
         self._measured_context: Context | None = None
         self._measured_history_len = 0
+        self._game_language: str | None = None
 
     @abstractmethod
     def _initial_context(
@@ -109,6 +111,7 @@ class Agent(ABC):
     ) -> None: ...
 
     async def _prepare(self, observation: native.Observation) -> Context:
+        self._game_language = observation.game_language
         initializing = self._context is None
         try:
             documents = await self._materials(observation) if self._materials is not None else ()
@@ -152,6 +155,10 @@ class Agent(ABC):
                 mechanisms, role=context.role, diagnostics=self._diagnostics
             )
 
+    def _tool_definitions(self, context: Context) -> tuple[ToolDefinition, ...]:
+        language = self._game_language if self._game_language is not None else context.game_language
+        return self._tools.definitions_for(language)
+
     async def _request(self, context: Context) -> ModelReply:
         assert self._llm is not None
         prepared, evidence = await self.compact(context)
@@ -166,7 +173,7 @@ class Agent(ABC):
             candidate, baseline = context.compaction_input()
             try:
                 context.validate_compaction(candidate)
-                compacted = self._llm.prepare(candidate, self._tools.definitions)
+                compacted = self._llm.prepare(candidate, self._tool_definitions(context))
             except ValueError:
                 await self._llm.record_recovery(
                     CapacityRecovery(
@@ -214,7 +221,7 @@ class Agent(ABC):
     async def compact(self, context: Context) -> tuple[PreparedRequest, RequestPreparation]:
         assert self._llm is not None
         client = self._llm
-        tools = self._tools.definitions
+        tools = self._tool_definitions(context)
         before = context.model_input()
         prepared = client.prepare(before, tools, usage_anchor=self._usage_anchor)
         estimate = prepared.measurement.estimated_input_tokens

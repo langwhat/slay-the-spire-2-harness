@@ -48,6 +48,7 @@ async def live_session(
     stop_requested: Callable[[], bool] | None = None,
     user_input: UserInputSource | None = None,
     display_reasons: bool = False,
+    present_card_rewards: bool = False,
 ) -> AsyncGenerator[RunSession]:
     if model is None and (
         run_factory is None
@@ -87,6 +88,7 @@ async def live_session(
                 wait=wait,
                 stop_requested=stop_requested,
                 on_status=diagnostics.native_status if diagnostics is not None else None,
+                present_card_rewards=present_card_rewards,
             ),
             journal,
         )

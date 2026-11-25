@@ -194,7 +194,9 @@ class Materials:
 
     def tools(self, source: tuple[ToolDefinition, ...]) -> tuple[ToolDefinition, ...]:
         return tuple(
-            ToolDefinition(item.name, self.text(item.description), item.parameters)
+            ToolDefinition(
+                item.name, self.text(item.description), item.parameters, item.parameters_schema
+            )
             for item in source
         )
 

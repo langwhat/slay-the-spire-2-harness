@@ -214,6 +214,7 @@ class RunSession:
             prompts=self._dependencies.prompts,
             materials=self._materials(MaterialRole.DECK),
             completion=self._dependencies.card_completion,
+            reward_preview=self.execution,
             diagnostics=self._diagnostics,
             user_input=self._user_input,
             mechanism_tracker=self._mechanism_tracker,

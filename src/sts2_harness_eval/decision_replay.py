@@ -34,6 +34,8 @@ from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.game import (
     Admitted,
+    CardRewardClosed,
+    CardRewardOpened,
     Catalog,
     Cataloged,
     GameReply,
@@ -149,10 +151,30 @@ class CaseGame:
                 return GameReply(outcome=Cataloged(result=read.result), observations=())
         raise ExtractionError("The case has no raw native reply for this catalog request.")
 
+    @property
+    def card_reward_preview_enabled(self) -> bool:
+        return False
+
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+        return None
+
+    async def cancel_open_card_reward(self) -> None:
+        return None
+
     async def present(
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
     ) -> GameReply[Presented]:
         raise ExtractionError("Decision replay cannot present a route in a game.")
+
+    async def open_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardOpened]:
+        raise ExtractionError("Decision replay cannot present card rewards in a game.")
+
+    async def close_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardClosed]:
+        raise ExtractionError("Decision replay cannot present card rewards in a game.")
 
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep
@@ -475,6 +497,7 @@ class DecisionRun(RunAgent):
         if not anchored:
             raise ExtractionError("The recorded decision has no current native anchor.")
         self._resuming = True
+        self._game_language = current.game_language
         return task, current
 
 
@@ -758,7 +781,7 @@ def request_size(prepared: PreparedRequest) -> RequestSize:
             {
                 "name": tool.name,
                 "description": tool.description.body,
-                "parameters": tool.parameters.model_json_schema(),
+                "parameters": tool.input_schema(),
             }
             for tool in prepared.tools
         ],

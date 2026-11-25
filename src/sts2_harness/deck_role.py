@@ -8,6 +8,7 @@ from typing import Protocol
 from pydantic import MISSING, ValidationError
 
 from sts2_harness.agent import Agent, MaterialReader
+from sts2_harness.client import ClientUnavailable, RewardCloseResult, RewardOpenResult
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.models import AutomaticProgress, RunActInput
@@ -32,7 +33,7 @@ from sts2_harness.deck import (
 from sts2_harness.diagnostics import Diagnostics, MechanismTracker
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.knowledge import DocumentView
-from sts2_harness.llm.messages import ModelClient, ToolCall
+from sts2_harness.llm.messages import ModelClient, ModelReply, ToolCall
 from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import (
     ActionCompleted,
@@ -126,6 +127,47 @@ def _deck_rejected(
 _EMPTY_RESOLVED: frozenset[str] = frozenset()
 
 
+class CardRewardPreview(Protocol):
+    @property
+    def card_reward_preview_enabled(self) -> bool: ...
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None: ...
+    async def cancel_open_card_reward(self) -> None: ...
+    async def open_card_reward(self, route: native.RouteKey, offer: str) -> RewardOpenResult: ...
+    async def close_card_reward(self, route: native.RouteKey, offer: str) -> RewardCloseResult: ...
+
+
+def _preview_candidate(
+    observation: native.Observation,
+    resolved: frozenset[str] = _EMPTY_RESOLVED,
+    *,
+    offer_ref: str | None = None,
+) -> tuple[native.RouteKey, str] | None:
+    state = observation.state
+    if (
+        not isinstance(state, native.RunState)
+        or state.screen is not native.RunScreen.REWARDS
+        or state.selection is not None
+        or observation.input_readiness is not native.InputReadiness.READY
+        or observation.location.owner is not native.DecisionOwner.RUN
+        or observation.location.run_id is None
+        or observation.location.node_id is None
+    ):
+        return None
+    enabled_actions = {action.ref for action in state.actions if action.enabled}
+    for offer in deck_offers(observation, resolved, offer_ref=offer_ref):
+        if offer.requires_selection is True and any(
+            action_ref in enabled_actions for action_ref in offer.actions
+        ):
+            route = native.RouteKey(
+                game_instance_id=observation.location.game_instance_id,
+                run_id=observation.location.run_id,
+                node_id=observation.location.node_id,
+                owner=native.DecisionOwner.RUN,
+            )
+            return route, offer.ref
+    return None
+
+
 def validate_deck_choice(
     call: ToolCall,
     task: DecisionTask,
@@ -135,6 +177,7 @@ def validate_deck_choice(
     offer_ref: str | None = None,
     filter_view: bool = True,
     route_plan: RoutePlan | None = None,
+    previewed_offer_ref: str | None = None,
 ) -> tuple[CardRewardPlan, tuple[TakeCard | SkipCard, ...]] | QueryToolResult:
     resolved = task.resolved_card_rewards if isinstance(task, ActTask) else _EMPTY_RESOLVED
     if raw is None:
@@ -183,17 +226,27 @@ def validate_deck_choice(
             )
         )
     )
+    offers = {offer.ref: offer for offer in deck_offers(raw, resolved, offer_ref=offer_ref)}
+    _, active = card_rewards(raw)
+    selection = adding_selection(raw)
+    preview_opened = (
+        previewed_offer_ref is not None
+        and selection is None
+        and delivered_state.selection is None
+        and current_state.selection is not None
+        and active is not None
+        and active.ref == previewed_offer_ref
+        and active.ref in offers
+        and set(current_state.selection.candidates) == set(active.contents)
+    )
     if (
         delivered_state.offers != current_state.offers
-        or delivered_state.selection != current_state.selection
+        or (delivered_state.selection != current_state.selection and not preview_opened)
         or not same_card_options(delivered, current, refs)
     ):
         return _deck_rejected(
             ReasonCode.REFERENCE_EXPIRED, "Review the updated card reward groups.", current
         )
-    offers = {offer.ref: offer for offer in deck_offers(raw, resolved, offer_ref=offer_ref)}
-    _, active = card_rewards(raw)
-    selection = adding_selection(raw)
     if selection is None and (
         set(item.offer for item in query.choices) != set(offers)
         or len(query.choices) != len(offers)
@@ -259,6 +312,7 @@ class DeckAgent(Agent):
         prompts: PromptReader | None = None,
         materials: MaterialReader | None = None,
         completion: Callable[[CardChoiceCompletion], None] | None = None,
+        reward_preview: CardRewardPreview | None = None,
         user_input: UserInputSource | None = None,
         diagnostics: Diagnostics | None = None,
         mechanism_tracker: MechanismTracker | None = None,
@@ -283,6 +337,10 @@ class DeckAgent(Agent):
         self._offer_ref = offer_ref
         self._stream = stream
         self._completion = completion
+        self._reward_preview = reward_preview
+        self._preview_target: tuple[native.RouteKey, str] | None = None
+        self._preview_pending: tuple[native.RouteKey, str] | None = None
+        self._previewed_offer_ref: str | None = None
         self._choice: PendingCardChoice | None = None
         self._resolutions: list[CardResolution] = []
         self._notes_delivered = False
@@ -366,6 +424,31 @@ class DeckAgent(Agent):
             context.set_route_plan(reconcile_plan(self._plan, current.state.progress.position).plan)
         return super()._close_query(context, task, bound, call, result)
 
+    async def _settle_preview(self) -> None:
+        pending = self._preview_pending
+        if pending is None or self._reward_preview is None:
+            return
+        self._preview_pending = None
+        route, offer_ref = pending
+        try:
+            result = await self._reward_preview.open_card_reward(route, offer_ref)
+        except ClientUnavailable:
+            # An unconfirmed open may still have opened the native screen; let raw state decide.
+            self._previewed_offer_ref = offer_ref
+            return
+        if isinstance(result, native.RewardOpenReply) and (
+            result.status is native.RewardOpenStatus.OPENED
+        ):
+            self._previewed_offer_ref = offer_ref
+
+    async def _request(self, context: Context) -> ModelReply:
+        if self._preview_target is not None and self._reward_preview is not None:
+            route, offer_ref = self._preview_target
+            self._preview_target = None
+            self._preview_pending = (route, offer_ref)
+            self._reward_preview.start_open_card_reward(route, offer_ref)
+        return await super()._request(context)
+
     async def decide(self, task: DecisionTask, observation: native.Observation) -> Decision:
         resolved = task.resolved_card_rewards if isinstance(task, ActTask) else _EMPTY_RESOLVED
         if not self.offered(observation, resolved):
@@ -373,8 +456,22 @@ class DeckAgent(Agent):
                 Reason(code=ReasonCode.ROLE_CHANGED, message="The card reward groups changed."),
                 False,
             )
-        observation = self._reward_view(observation, resolved)
-        return await super().decide(task, observation)
+        self._preview_target = (
+            _preview_candidate(observation, resolved, offer_ref=self._offer_ref)
+            if self._reward_preview is not None and self._reward_preview.card_reward_preview_enabled
+            else None
+        )
+        self._preview_pending = None
+        self._previewed_offer_ref = None
+        view = self._reward_view(observation, resolved)
+        try:
+            return await super().decide(task, view)
+        finally:
+            if self._reward_preview is not None:
+                await self._reward_preview.cancel_open_card_reward()
+            self._preview_target = None
+            self._preview_pending = None
+            self._previewed_offer_ref = None
 
     async def _dispatch(
         self,
@@ -448,13 +545,52 @@ class DeckAgent(Agent):
                 )
         await super().accept(outcome)
 
+    async def _run_close_preview(self, route: native.RouteKey, offer_ref: str) -> None:
+        if self._reward_preview is None:
+            return
+        try:
+            await self._reward_preview.close_card_reward(route, offer_ref)
+        except ClientUnavailable:
+            return
+
+    def _first_chosen_offer(self, call: ToolCall) -> str | None:
+        try:
+            json.loads(call.arguments, object_pairs_hook=unique_fields)
+            query = RunDeckChoice.model_validate_json(call.arguments, strict=True)
+        except (ValueError, ValidationError):
+            return None
+        first = query.choices[0].offer
+        return None if first is MISSING else first
+
     async def _deck_choice(
         self,
         call: ToolCall,
         task: DecisionTask,
         delivered: native.Observation,
     ) -> CardRewardPlan | QueryToolResult:
+        await self._settle_preview()
         raw = await self._tools.current()
+        if (
+            self._previewed_offer_ref is not None
+            and self._reward_preview is not None
+            and isinstance(task, ActTask)
+            and raw is not None
+            and isinstance(delivered.state, native.RunState)
+            and delivered.state.selection is None
+            and isinstance(raw.state, native.RunState)
+            and raw.state.selection is not None
+            and raw.location == native.Location.model_validate(task.expected_route.model_dump())
+        ):
+            _, active = card_rewards(raw)
+            first_offer = self._first_chosen_offer(call)
+            if (
+                active is not None
+                and active.ref == self._previewed_offer_ref
+                and first_offer is not None
+                and first_offer != active.ref
+            ):
+                await self._run_close_preview(task.expected_route, active.ref)
+                raw = await self._tools.current()
         validated = validate_deck_choice(
             call,
             task,
@@ -462,6 +598,7 @@ class DeckAgent(Agent):
             raw,
             offer_ref=self._offer_ref,
             route_plan=self._plan,
+            previewed_offer_ref=self._previewed_offer_ref,
         )
         if isinstance(validated, QueryToolResult):
             return validated

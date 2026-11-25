@@ -122,7 +122,7 @@ def _tools(tools: tuple[ToolDefinition, ...]) -> list[ToolParam]:
                     "type": "function",
                     "name": tool.name,
                     "description": tool.description.body,
-                    "parameters": tool.parameters.model_json_schema(),
+                    "parameters": tool.input_schema(),
                     # Preserve optional fields; tools own strict local argument decoding.
                     "strict": False,
                 }

@@ -11,6 +11,8 @@ from sts2_harness.client import models as native
 from sts2_harness.client.http import InspectResult
 from sts2_harness.game import (
     Admitted,
+    CardRewardClosed,
+    CardRewardOpened,
     Cataloged,
     GameFailure,
     GameIO,
@@ -348,6 +350,16 @@ class IdentityGame:
             outcome=outcome, observations=tuple(map(self.observation, reply.observations))
         )
 
+    @property
+    def card_reward_preview_enabled(self) -> bool:
+        return self._game.card_reward_preview_enabled
+
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+        self._game.start_open_card_reward(self._route(route), self._out_ref(offer))
+
+    async def cancel_open_card_reward(self) -> None:
+        await self._game.cancel_open_card_reward()
+
     async def admit(self) -> GameReply[Admitted]:
         reply = await self._game.admit()
         return self._reply(reply, reply.outcome)
@@ -396,6 +408,18 @@ class IdentityGame:
                 receipt=receipt,
             )
         return self._reply(reply, outcome)
+
+    async def open_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardOpened]:
+        reply = await self._game.open_card_reward(self._route(route), self._out_ref(offer))
+        return self._reply(reply, reply.outcome)
+
+    async def close_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardClosed]:
+        reply = await self._game.close_card_reward(self._route(route), self._out_ref(offer))
+        return self._reply(reply, reply.outcome)
 
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep

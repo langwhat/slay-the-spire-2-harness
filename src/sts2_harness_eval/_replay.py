@@ -13,8 +13,11 @@ from sts2_harness.client import models as native
 from sts2_harness.game import (
     Admit,
     Admitted,
+    CardRewardClosed,
+    CardRewardOpened,
     Catalog,
     Cataloged,
+    CloseCardReward,
     GameReply,
     GameRequest,
     GameSuccess,
@@ -22,6 +25,7 @@ from sts2_harness.game import (
     Inspected,
     Observe,
     Observed,
+    OpenCardReward,
     OperationKind,
     Pause,
     Present,
@@ -345,12 +349,36 @@ class ReplayGame:
                     self._timeline.cursor += 1
         self._timeline.check_cursor(record)
         if isinstance(
-            outcome, (Admitted, Observed, Inspected, Cataloged, Settlement, Resumed, Presented)
+            outcome,
+            (
+                Admitted,
+                Observed,
+                Inspected,
+                Cataloged,
+                Settlement,
+                Resumed,
+                Presented,
+                CardRewardOpened,
+                CardRewardClosed,
+            ),
         ):
             if not isinstance(outcome, success):
                 _different(record.sequence, InputComponent.REQUEST)
             return GameReply[T](outcome=outcome, observations=reply.observations)
         return GameReply[T](outcome=outcome, observations=reply.observations)
+
+    @property
+    def card_reward_preview_enabled(self) -> bool:
+        return any(
+            isinstance(record, Record) and isinstance(record.request, OpenCardReward)
+            for record in self._timeline.records
+        )
+
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+        return None
+
+    async def cancel_open_card_reward(self) -> None:
+        return None
 
     async def admit(self) -> GameReply[Admitted]:
         return self._reply(Admit(), Admitted)
@@ -368,6 +396,16 @@ class ReplayGame:
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
     ) -> GameReply[Presented]:
         return self._reply(Present(route=route, edges=edges), Presented)
+
+    async def open_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardOpened]:
+        return self._reply(OpenCardReward(route=route, offer=offer), CardRewardOpened)
+
+    async def close_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardClosed]:
+        return self._reply(CloseCardReward(route=route, offer=offer), CardRewardClosed)
 
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep

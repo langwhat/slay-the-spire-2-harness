@@ -544,9 +544,7 @@ class ToolSnapshot(native.WireModel):
         return cls(
             name=tool.name,
             description=MaterialSnapshot.of(tool.description),
-            parameters=TypeAdapter(dict[str, JsonValue]).validate_python(
-                tool.parameters.model_json_schema(), strict=True
-            ),
+            parameters=tool.input_schema(),
         )
 
 

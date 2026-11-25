@@ -213,6 +213,7 @@ async def run_interactive(
                         wait=wait,
                         user_input=user_input,
                         display_reasons=True,
+                        present_card_rewards=True,
                     )
                 )
                 async with session_resource as session:

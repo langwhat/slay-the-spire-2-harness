@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Reflection;
 using Godot;
@@ -5,6 +6,7 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.Rewards;
 using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Map;
@@ -24,6 +26,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Nodes.Screens.Shops;
+using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Runs;
 using Sts2Mod.Core.Control;
 using Sts2Mod.Core.Developer;
@@ -47,6 +50,8 @@ internal sealed class GameStepDispatcher
     private readonly AgentControlState _control;
     private readonly StepGateway _gateway;
     private readonly MapInkPresenter _mapPresenter;
+    private readonly RewardOpenTracker _rewardOpen = new();
+    private readonly ConcurrentQueue<(RewardOpenRequest Request, bool Close, TaskCompletionSource<HttpReply> Reply)> _rewardOpenRequests = new();
     private (StepRequest Request, Task Cue)? _visualPresentation;
     private object? _submittedChoice;
     private StepRequest? _selectionRequest;
@@ -65,11 +70,14 @@ internal sealed class GameStepDispatcher
     {
         _control = control;
         _gateway = new StepGateway(control, ObservationHub.GameInstanceId, inputAdmission);
-        _gateway.SetExternalInputBusyCheck(externalInputBusy);
+        _gateway.SetExternalInputBusyCheck(() => externalInputBusy() || _rewardOpen.IsBusy);
         _mapPresenter = new MapInkPresenter(_gateway);
+        RewardOpen = new RewardOpenTransport(SubmitRewardOpenAsync, SubmitRewardCloseAsync);
     }
 
     public MapPresentationTransport MapPresentation => _mapPresenter.Transport;
+
+    public RewardOpenTransport RewardOpen { get; }
 
     public NativeReadPublication Project(NativeReadPublication publication) => _gateway.Project(publication);
 
@@ -80,11 +88,17 @@ internal sealed class GameStepDispatcher
     public HttpReply StatusJson() =>
         new(200, JsonContract.Serialize(_gateway.Status()));
 
-    public void ClearOnRunReset() => _gateway.ClearReceiptOnRunReset();
+    public void ClearOnRunReset()
+    {
+        _rewardOpen.Reset();
+        DrainRewardOpenRequests();
+        _gateway.ClearReceiptOnRunReset();
+    }
 
     public void Advance(long runInstanceId, MainMenuReadinessObservation menuReadiness)
     {
         var (location, readiness, sequence) = CurrentBoundary(runInstanceId, menuReadiness);
+        ObserveRewardOpen(location, readiness);
 
         if (_selectionOrigin is { } origin
             && (location != new StepLocation(
@@ -155,6 +169,7 @@ internal sealed class GameStepDispatcher
                     ? currentChoice
                     : null);
         _mapPresenter.Advance();
+        ProcessRewardOpenRequests(location, readiness);
 
         if (_selectionOrigin is { } selectionOrigin
             && _gateway.Status().Receipt is { } receipt
@@ -1045,4 +1060,299 @@ internal sealed class GameStepDispatcher
             new StepCause(
                 StepErrorCode.ExecutionUncertain,
                 "The native step may have affected the game. Read the current state before making a new decision."));
+
+    private Task<HttpReply> SubmitRewardOpenAsync(RewardOpenRequest request)
+    {
+        var reply = new TaskCompletionSource<HttpReply>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _rewardOpenRequests.Enqueue((request, false, reply));
+        return reply.Task;
+    }
+
+    private Task<HttpReply> SubmitRewardCloseAsync(RewardOpenRequest request)
+    {
+        var reply = new TaskCompletionSource<HttpReply>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _rewardOpenRequests.Enqueue((request, true, reply));
+        return reply.Task;
+    }
+
+    private void DrainRewardOpenRequests()
+    {
+        while (_rewardOpenRequests.TryDequeue(out var pending))
+        {
+            pending.Reply.TrySetResult(pending.Close
+                ? RewardCloseReplyJson(RewardCloseStatus.Skipped)
+                : RewardOpenReplyJson(RewardOpenStatus.Skipped));
+        }
+    }
+
+    private void ObserveRewardOpen(StepLocation location, NativeInputReadiness readiness)
+    {
+        if (!_rewardOpen.IsBusy)
+            return;
+
+        string? activeOfferRef = null;
+        var hasSelection = false;
+        if (ObservationHub.Current.Reply is CompletedStateRead completed
+            && completed.Observation.State is RunStateView { Screen: RunScreen.Rewards, Selection: var selection })
+        {
+            hasSelection = selection is not null;
+            activeOfferRef = selection?.OfferRef;
+        }
+
+        _rewardOpen.ObserveFrame(location, readiness, _control.IsRunning, activeOfferRef, hasSelection);
+    }
+
+    private void ProcessRewardOpenRequests(StepLocation location, NativeInputReadiness readiness)
+    {
+        while (_rewardOpenRequests.TryDequeue(out var item))
+        {
+            var (request, close, reply) = item;
+            if (close)
+            {
+                ProcessRewardCloseRequest(request, reply, location, readiness);
+                continue;
+            }
+            try
+            {
+                if (!ViewerPacing.IsInteractiveGui || !_control.IsRunning)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+                    continue;
+                }
+
+                var expected = request.ExpectedRoute;
+                var expectedLocation = new StepLocation(
+                    expected.GameInstanceId,
+                    expected.RunId,
+                    expected.NodeId,
+                    expected.Owner);
+                if (expected.Owner != ObservationOwner.Run || location != expectedLocation)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+                    continue;
+                }
+
+                if (CardSelectionInterceptor.GetPending() is not null)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.AlreadyOpen));
+                    continue;
+                }
+
+                var overlay = NOverlayStack.Instance?.Peek();
+                if (overlay is NCardRewardSelectionScreen
+                    or NChooseACardSelectionScreen
+                    or NChooseABundleSelectionScreen
+                    or NCardGridSelectionScreen)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.AlreadyOpen));
+                    continue;
+                }
+
+                if (_rewardOpen.IsBusy
+                    || readiness != NativeInputReadiness.Ready
+                    || _gateway.Status().InputReadiness != NativeInputReadiness.Ready
+                    || NMapScreen.Instance is { IsOpen: true }
+                    || !CombatInputProbe.IsRunInputActionIdle()
+                    || RunManager.Instance.IsChangingRooms
+                    || overlay is not NRewardsScreen rewardsScreen)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+                    continue;
+                }
+
+                var registry = ObservationHub.Identities?.Registry;
+                if (registry is null
+                    || !registry.TryResolve<CardReward>(request.Offer, out var cardReward)
+                    || cardReward is null)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+                    continue;
+                }
+
+                if (RunSurfaceLifecycle.GetCardRewardScreen(cardReward) is not null)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.AlreadyOpen));
+                    continue;
+                }
+
+                if (!cardReward.IsPopulated || cardReward.SuccessfullySelected)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+                    continue;
+                }
+
+                var rewardButtons = NodeHierarchy.Descendants(rewardsScreen.GetNode<Control>("%RewardsContainer"))
+                    .OfType<NRewardButton>()
+                    .Where(IsControlUsable)
+                    .ToArray();
+                var cardOfferCount = rewardButtons.Count(candidate =>
+                    candidate.Reward is CardReward or SpecialCardReward);
+                if (cardOfferCount > 1 && !cardReward.CanSkip)
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+                    continue;
+                }
+
+                var button = rewardButtons.FirstOrDefault(candidate =>
+                    ReferenceEquals(candidate.Reward, cardReward));
+                if (button is null || !_rewardOpen.TryBegin(request, out var completion))
+                {
+                    reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+                    continue;
+                }
+
+                try
+                {
+                    button.Call(NRewardButton.MethodName.OnRelease);
+                }
+                catch (Exception error)
+                {
+                    GD.PrintErr($"[sts2agent] Viewer card reward open failed: {error}");
+                    _rewardOpen.Complete(RewardOpenStatus.Skipped);
+                }
+
+                _ = CompleteRewardOpenReplyAsync(completion, reply);
+            }
+            catch (Exception error)
+            {
+                GD.PrintErr($"[sts2agent] Viewer card reward request failed: {error}");
+                reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+            }
+        }
+    }
+
+    private void ProcessRewardCloseRequest(
+        RewardOpenRequest request,
+        TaskCompletionSource<HttpReply> reply,
+        StepLocation location,
+        NativeInputReadiness readiness)
+    {
+        try
+        {
+            if (!ViewerPacing.IsInteractiveGui || !_control.IsRunning)
+            {
+                reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+                return;
+            }
+
+            var expected = request.ExpectedRoute;
+            var expectedLocation = new StepLocation(
+                expected.GameInstanceId,
+                expected.RunId,
+                expected.NodeId,
+                expected.Owner);
+            if (expected.Owner != ObservationOwner.Run || location != expectedLocation)
+            {
+                reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+                return;
+            }
+
+            var overlay = NOverlayStack.Instance?.Peek();
+            if (overlay is NRewardsScreen)
+            {
+                reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.AlreadyClosed));
+                return;
+            }
+
+            if (_rewardOpen.IsBusy
+                || readiness != NativeInputReadiness.Selection
+                || _gateway.Status().InputReadiness != NativeInputReadiness.Selection
+                || overlay is not NCardRewardSelectionScreen screen)
+            {
+                reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+                return;
+            }
+
+            var registry = ObservationHub.Identities?.Registry;
+            if (registry is null
+                || !registry.TryResolve<CardReward>(request.Offer, out var cardReward)
+                || cardReward is null
+                || !ReferenceEquals(RunSurfaceLifecycle.GetCardRewardScreen(cardReward), screen))
+            {
+                reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+                return;
+            }
+
+            var skipButton = FindNonClaimingCloseButton(screen);
+            if (skipButton is null || !_rewardOpen.TryBeginClose(request, out var completion))
+            {
+                reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+                return;
+            }
+
+            try
+            {
+                skipButton.EmitSignal(NClickableControl.SignalName.Released, skipButton);
+            }
+            catch (Exception error)
+            {
+                GD.PrintErr($"[sts2agent] Viewer card reward close failed: {error}");
+                _rewardOpen.CompleteClose(RewardCloseStatus.Skipped);
+            }
+
+            _ = CompleteRewardCloseReplyAsync(completion, reply);
+        }
+        catch (Exception error)
+        {
+            GD.PrintErr($"[sts2agent] Viewer card reward close request failed: {error}");
+            reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+        }
+    }
+
+    private static NClickableControl? FindNonClaimingCloseButton(NCardRewardSelectionScreen screen)
+    {
+        var alternatives = RunSurfaceLifecycle.GetCardRewardAlternatives(screen);
+        var buttons = screen.GetNode<Control>("UI/RewardAlternatives").GetChildren()
+            .OfType<NCardRewardAlternativeButton>()
+            .Where(button => !button.IsQueuedForDeletion())
+            .ToArray();
+        for (var index = 0; index < Math.Min(alternatives.Count, buttons.Length); index++)
+        {
+            var alternative = alternatives[index];
+            if (string.Equals(alternative.OptionId, "SKIP", StringComparison.OrdinalIgnoreCase)
+                && alternative.AfterSelected == PostAlternateCardRewardAction.EndSelectionAndDoNotCompleteReward
+                && alternative.OnSelect is null
+                && IsControlUsable(buttons[index]))
+            {
+                return buttons[index];
+            }
+        }
+        return null;
+    }
+
+    private static async Task CompleteRewardOpenReplyAsync(
+        Task<RewardOpenStatus> completion,
+        TaskCompletionSource<HttpReply> reply)
+    {
+        try
+        {
+            var status = await completion.ConfigureAwait(false);
+            reply.TrySetResult(RewardOpenReplyJson(status));
+        }
+        catch
+        {
+            reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+        }
+    }
+
+    private static async Task CompleteRewardCloseReplyAsync(
+        Task<RewardCloseStatus> completion,
+        TaskCompletionSource<HttpReply> reply)
+    {
+        try
+        {
+            var status = await completion.ConfigureAwait(false);
+            reply.TrySetResult(RewardCloseReplyJson(status));
+        }
+        catch
+        {
+            reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+        }
+    }
+
+    private static HttpReply RewardOpenReplyJson(RewardOpenStatus status) =>
+        new(200, JsonContract.Serialize(new RewardOpenReply(status)));
+
+    private static HttpReply RewardCloseReplyJson(RewardCloseStatus status) =>
+        new(200, JsonContract.Serialize(new RewardCloseReply(status)));
 }

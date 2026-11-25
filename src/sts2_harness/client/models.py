@@ -1625,3 +1625,28 @@ class DisplayRequest(WireModel):
 
 class DisplayReply(WireModel):
     status: Literal[DisplayStatus.SHOWN]
+
+
+class RewardOpenStatus(StrEnum):
+    OPENED = "opened"
+    ALREADY_OPEN = "already_open"
+    SKIPPED = "skipped"
+
+
+class RewardOpenRequest(WireModel):
+    expected_route: RouteKey
+    offer: Nonempty
+
+
+class RewardOpenReply(WireModel):
+    status: RewardOpenStatus
+
+
+class RewardCloseStatus(StrEnum):
+    CLOSED = "closed"
+    ALREADY_CLOSED = "already_closed"
+    SKIPPED = "skipped"
+
+
+class RewardCloseReply(WireModel):
+    status: RewardCloseStatus

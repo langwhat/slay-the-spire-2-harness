@@ -204,6 +204,12 @@ public static class ModEntry
         public HttpReply SubmitDisplay(string body) =>
             ReasonFeed.WriteJson(body);
 
+        public Task<HttpReply> OpenCardReward(string body) =>
+            steps.RewardOpen.Open(body);
+
+        public Task<HttpReply> CloseCardReward(string body) =>
+            steps.RewardOpen.Close(body);
+
         public Task<HttpReply> PresentMap(string body) =>
             steps.MapPresentation.Present(body);
 

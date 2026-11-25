@@ -10,6 +10,8 @@ from sts2_harness.client.http import (
     InspectResult,
     ModClient,
     QueryResult,
+    RewardCloseResult,
+    RewardOpenResult,
     StateResult,
     StatusResult,
 )
@@ -24,6 +26,8 @@ __all__ = [
     "InspectResult",
     "ModClient",
     "QueryResult",
+    "RewardCloseResult",
+    "RewardOpenResult",
     "StateResult",
     "StatusResult",
 ]

@@ -494,4 +494,134 @@ public sealed class StepGatewayAndRulesTests
             throw new InvalidOperationException("The external input owner must prevent dispatch."));
         Assert.Equal(StepErrorCode.NativeBusy, Assert.IsType<RejectedStep>(gateway.Status().Receipt).Error.Code);
     }
+
+    [Fact]
+    public async Task RewardOpenTransport_ValidatesRouteOfferAndDuplicateKeys()
+    {
+        RewardOpenRequest? captured = null;
+        RewardOpenRequest? capturedClose = null;
+        var transport = new RewardOpenTransport(
+            request =>
+            {
+                captured = request;
+                return Task.FromResult(new HttpReply(200, JsonContract.Serialize(new RewardOpenReply(RewardOpenStatus.Opened))));
+            },
+            request =>
+            {
+                capturedClose = request;
+                return Task.FromResult(new HttpReply(200, JsonContract.Serialize(new RewardCloseReply(RewardCloseStatus.Closed))));
+            });
+
+        var valid = """
+            {
+              "expected_route": {
+                "game_instance_id": "game-1",
+                "run_id": "run-1",
+                "node_id": "node-1",
+                "owner": "run"
+              },
+              "offer": "offer:1:2"
+            }
+            """;
+        var ok = await transport.Open(valid);
+        Assert.Equal(200, ok.StatusCode);
+        Assert.Equal(RunRoute, captured!.ExpectedRoute);
+        Assert.Equal("offer:1:2", captured.Offer);
+        using (var doc = JsonDocument.Parse(ok.Json))
+        {
+            Assert.Equal("opened", doc.RootElement.GetProperty("status").GetString());
+        }
+
+        var closed = await transport.Close(valid);
+        Assert.Equal(200, closed.StatusCode);
+        Assert.Equal(RunRoute, capturedClose!.ExpectedRoute);
+        Assert.Equal("offer:1:2", capturedClose.Offer);
+        using (var doc = JsonDocument.Parse(closed.Json))
+        {
+            Assert.Equal("closed", doc.RootElement.GetProperty("status").GetString());
+        }
+
+        foreach (var bad in new[]
+                 {
+                     "{}",
+                     """{"expected_route":{"game_instance_id":"game-1","run_id":"run-1","node_id":"node-1","owner":"run"}}""",
+                     """{"expected_route":{"game_instance_id":"game-1","run_id":"run-1","node_id":"node-1","owner":"run"},"offer":""}""",
+                     """{"expected_route":{"game_instance_id":"game-1","run_id":"run-1","node_id":"node-1","owner":"run"},"offer":"offer:1:2","extra":1}""",
+                     """{"expected_route":{"game_instance_id":"game-1","run_id":"run-1","node_id":"node-1","owner":"run"},"offer":"offer:1:2","offer":"offer:1:2"}""",
+                 })
+        {
+            var rejected = await transport.Open(bad);
+            Assert.Equal(400, rejected.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task RewardOpenTracker_GatesStepGatewayUntilSelectionSettlesAndHandlesAbort()
+    {
+        var clock = new ManualClock();
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var tracker = new RewardOpenTracker(clock, TimeSpan.FromSeconds(3));
+        var gateway = new StepGateway(control, "game-1", timeProvider: clock);
+        gateway.SetExternalInputBusyCheck(() => tracker.IsBusy);
+        gateway.Advance(RunLocation, NativeInputReadiness.Ready, sequence: 1, _ => null);
+
+        var request = new RewardOpenRequest(RunRoute, "offer:1:2");
+        Assert.True(tracker.TryBegin(request, out var opening));
+        Assert.True(tracker.IsBusy);
+        Assert.Equal(NativeInputReadiness.Busy, gateway.Status().InputReadiness);
+
+        // Concurrent open and concurrent gameplay step are both rejected while opening settles.
+        Assert.False(tracker.TryBegin(new RewardOpenRequest(RunRoute, "offer:1:3"), out var duplicate));
+        Assert.Equal(RewardOpenStatus.Skipped, await duplicate);
+        var (_, busyJson) = gateway.Submit(ActionJson("op-race", RunRoute, "{\"kind\":\"select\",\"refs\":[\"card:1:1\"]}"));
+        using (var busyDoc = JsonDocument.Parse(busyJson))
+        {
+            Assert.Equal("native_busy", busyDoc.RootElement.GetProperty("error").GetProperty("code").GetString());
+        }
+
+        // Another group's selection does not settle this opening.
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Selection, isRunning: true, activeSelectionOfferRef: "offer:1:9");
+        Assert.True(tracker.IsBusy);
+        Assert.False(opening.IsCompleted);
+
+        // Matching group with Selection readiness settles Opened and releases StepGateway.
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Selection, isRunning: true, activeSelectionOfferRef: "offer:1:2");
+        Assert.Equal(RewardOpenStatus.Opened, await opening);
+        Assert.False(tracker.IsBusy);
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 2, _ => null);
+        Assert.Equal(NativeInputReadiness.Selection, gateway.Status().InputReadiness);
+
+        // Pause aborts cleanly.
+        Assert.True(tracker.TryBegin(request, out var pausedOpen));
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: false, activeSelectionOfferRef: null);
+        Assert.Equal(RewardOpenStatus.Skipped, await pausedOpen);
+        Assert.False(tracker.IsBusy);
+
+        // Timeout aborts cleanly.
+        Assert.True(tracker.TryBegin(request, out var timedOut));
+        clock.Seconds = 2;
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: true, activeSelectionOfferRef: null);
+        Assert.True(tracker.IsBusy);
+        clock.Seconds = 3;
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: true, activeSelectionOfferRef: null);
+        Assert.Equal(RewardOpenStatus.Skipped, await timedOut);
+        Assert.False(tracker.IsBusy);
+
+        // Route change aborts cleanly.
+        Assert.True(tracker.TryBegin(request, out var routeChanged));
+        tracker.ObserveFrame(RunLocation with { NodeId = "node-2" }, NativeInputReadiness.Ready, isRunning: true, activeSelectionOfferRef: null);
+        Assert.Equal(RewardOpenStatus.Skipped, await routeChanged);
+        Assert.False(tracker.IsBusy);
+
+        // Close transition gates StepGateway until Ready with no selection settles.
+        Assert.True(tracker.TryBeginClose(request, out var closing));
+        Assert.True(tracker.IsBusy);
+        Assert.Equal(NativeInputReadiness.Busy, gateway.Status().InputReadiness);
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Selection, isRunning: true, activeSelectionOfferRef: "offer:1:2", hasSelection: true);
+        Assert.True(tracker.IsBusy);
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Ready, isRunning: true, activeSelectionOfferRef: null, hasSelection: false);
+        Assert.Equal(RewardCloseStatus.Closed, await closing);
+        Assert.False(tracker.IsBusy);
+    }
 }

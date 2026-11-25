@@ -643,7 +643,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "Briefly explain the one tactical point that decides this play. Use names, not refs. Write it in the game's displayed language (Simplified Chinese when the game displays Chinese). In a Chinese game, use a short, conversational Simplified Chinese line, as if speaking while clicking. Name the decisive draw, purpose, or tradeoff using the game's names. A quick call is enough for routine choices; an unexpected draw can sound surprised. Include a number only if it changes this choice. Keep step lists, leftover resources, and hypothetical plans out of this field. Use your own on-stream identity. This guidance changes the wording only; keep the gameplay decision independent."
+          "description": "Briefly explain the one tactical point that decides this play. {reason_language_guidance}"
         }
       },
       "required": [
@@ -749,7 +749,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "One short line: what was chosen and why, using names, not refs. Write it in the game's displayed language (Simplified Chinese when the game displays Chinese). In a Chinese game, use a short, conversational Simplified Chinese line, as if speaking while clicking. Name the decisive draw, purpose, or tradeoff using the game's names. A quick call is enough for routine choices; an unexpected draw can sound surprised. Include a number only if it changes this choice. Keep step lists, leftover resources, and hypothetical plans out of this field. Use your own on-stream identity. This guidance changes the wording only; keep the gameplay decision independent."
+          "description": "One short line: what was chosen and why. {reason_language_guidance}"
         },
         "notes": {
           "type": "object",
@@ -841,7 +841,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "description": "One short reason for this group. Write it in the game's displayed language (Simplified Chinese when the game displays Chinese). In a Chinese game, use a short, conversational Simplified Chinese line, as if speaking while clicking. Name the decisive draw, purpose, or tradeoff using the game's names. A quick call is enough for routine choices; an unexpected draw can sound surprised. Include a number only if it changes this choice. Keep step lists, leftover resources, and hypothetical plans out of this field. Use your own on-stream identity. This guidance changes the wording only; keep the gameplay decision independent.",
+                    "description": "One short reason for this group. {reason_language_guidance}",
                     "minLength": 1,
                     "pattern": "\\S"
                   }
@@ -866,7 +866,7 @@
                   },
                   "reason": {
                     "type": "string",
-                    "description": "One short reason for this group. Write it in the game's displayed language (Simplified Chinese when the game displays Chinese). In a Chinese game, use a short, conversational Simplified Chinese line, as if speaking while clicking. Name the decisive draw, purpose, or tradeoff using the game's names. A quick call is enough for routine choices; an unexpected draw can sound surprised. Include a number only if it changes this choice. Keep step lists, leftover resources, and hypothetical plans out of this field. Use your own on-stream identity. This guidance changes the wording only; keep the gameplay decision independent.",
+                    "description": "One short reason for this group. {reason_language_guidance}",
                     "minLength": 1,
                     "pattern": "\\S"
                   }
@@ -968,7 +968,7 @@
         "reason": {
           "type": "string",
           "minLength": 1,
-          "description": "One short line: what this route is for. Write it in the game's displayed language (Simplified Chinese when the game displays Chinese). In a Chinese game, use a short, conversational Simplified Chinese line, as if speaking while clicking. Name the decisive draw, purpose, or tradeoff using the game's names. A quick call is enough for routine choices; an unexpected draw can sound surprised. Include a number only if it changes this choice. Keep step lists, leftover resources, and hypothetical plans out of this field. Use your own on-stream identity. This guidance changes the wording only; keep the gameplay decision independent."
+          "description": "One short line: what this route is for. {reason_language_guidance}"
         },
         "stretches": {
           "type": "array",
@@ -995,7 +995,7 @@
         "reason": {
           "type": "string",
           "minLength": 1,
-          "description": "One short line. Write it in the game's displayed language (Simplified Chinese when the game displays Chinese). In a Chinese game, use a short, conversational Simplified Chinese line, as if speaking while clicking. Name the decisive draw, purpose, or tradeoff using the game's names. A quick call is enough for routine choices; an unexpected draw can sound surprised. Include a number only if it changes this choice. Keep step lists, leftover resources, and hypothetical plans out of this field. Use your own on-stream identity. This guidance changes the wording only; keep the gameplay decision independent."
+          "description": "One short line. {reason_language_guidance}"
         },
         "notes": {
           "type": "object",

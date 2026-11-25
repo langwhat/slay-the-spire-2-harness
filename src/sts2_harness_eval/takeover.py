@@ -18,6 +18,8 @@ from sts2_harness.config import Protocol
 from sts2_harness.game import (
     Admit,
     Admitted,
+    CardRewardClosed,
+    CardRewardOpened,
     Cataloged,
     ControlWriteError,
     GameLifetimeEnded,
@@ -193,6 +195,16 @@ class _GameProxy:
     def __init__(self, switch: _Switch) -> None:
         self._switch = switch
 
+    @property
+    def card_reward_preview_enabled(self) -> bool:
+        return self._switch.current.game.card_reward_preview_enabled
+
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+        self._switch.current.game.start_open_card_reward(route, offer)
+
+    async def cancel_open_card_reward(self) -> None:
+        await self._switch.current.game.cancel_open_card_reward()
+
     async def admit(self) -> GameReply[Admitted]:
         return await self._switch.current.game.admit()
 
@@ -209,6 +221,16 @@ class _GameProxy:
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
     ) -> GameReply[Presented]:
         return await self._switch.current.game.present(route, edges)
+
+    async def open_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardOpened]:
+        return await self._switch.current.game.open_card_reward(route, offer)
+
+    async def close_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardClosed]:
+        return await self._switch.current.game.close_card_reward(route, offer)
 
     async def settle(
         self, route: native.RouteKey, step: native.NativeStep

@@ -37,8 +37,11 @@ from sts2_harness.diagnostics import (
 from sts2_harness.game import (
     Admit,
     Admitted,
+    CardRewardClosed,
+    CardRewardOpened,
     Catalog,
     Cataloged,
+    CloseCardReward,
     ControlFailure,
     Endpoint,
     GameFailure,
@@ -54,6 +57,7 @@ from sts2_harness.game import (
     NativeReply,
     Observe,
     Observed,
+    OpenCardReward,
     OperationKind,
     Pause,
     Present,
@@ -1462,7 +1466,7 @@ class Journal:
             raise RuntimeError("A recording operation is already active.")
         self._allocate()
         self._active_request = request
-        if isinstance(request, (Settle, Pause, Present)):
+        if isinstance(request, (Settle, Pause, Present, OpenCardReward, CloseCardReward)):
             self._boundary = None
         self._active_attempt = 0
         opened = False
@@ -1491,10 +1495,14 @@ class Journal:
                             physical_attempts=0,
                             observations=0,
                             role=request.route.owner
-                            if isinstance(request, (Settle, Present))
+                            if isinstance(
+                                request, (Settle, Present, OpenCardReward, CloseCardReward)
+                            )
                             else None,
                             node_id=request.route.node_id
-                            if isinstance(request, (Settle, Present))
+                            if isinstance(
+                                request, (Settle, Present, OpenCardReward, CloseCardReward)
+                            )
                             else None,
                         ),
                     )
@@ -2116,6 +2124,16 @@ class RecordedGame:
         self._live = live
         self._journal = journal
 
+    @property
+    def card_reward_preview_enabled(self) -> bool:
+        return self._live.card_reward_preview_enabled
+
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+        self._live.start_open_card_reward(route, offer)
+
+    async def cancel_open_card_reward(self) -> None:
+        await self._live.cancel_open_card_reward()
+
     async def _record[T: GameSuccess](
         self, request: GameRequest, operation: Callable[[], Awaitable[GameReply[T]]]
     ) -> GameReply[T]:
@@ -2144,6 +2162,22 @@ class RecordedGame:
     ) -> GameReply[Presented]:
         return await self._record(
             Present(route=route, edges=edges), lambda: self._live.present(route, edges)
+        )
+
+    async def open_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardOpened]:
+        return await self._record(
+            OpenCardReward(route=route, offer=offer),
+            lambda: self._live.open_card_reward(route, offer),
+        )
+
+    async def close_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardClosed]:
+        return await self._record(
+            CloseCardReward(route=route, offer=offer),
+            lambda: self._live.close_card_reward(route, offer),
         )
 
     async def settle(
@@ -2194,6 +2228,13 @@ def _result(outcome: GameSuccess | GameFailure) -> tuple[ResultKind, str | None]
         if outcome.receipt is None:
             return ResultKind.UNKNOWN, "presentation_unconfirmed"
         return ResultKind(outcome.receipt.status.value), None
+    if isinstance(outcome, (CardRewardOpened, CardRewardClosed)):
+        result = outcome.result
+        if isinstance(result, native.InvalidRequestReply):
+            return ResultKind.REJECTED, None
+        if isinstance(result, native.TechnicalError):
+            return ResultKind.FAILED, result.error.code.value
+        return ResultKind.COMPLETED, None
     if isinstance(outcome, (Inspected, Cataloged)):
         result = outcome.result
         return ResultKind(result.status.value), result.error.code.value if isinstance(

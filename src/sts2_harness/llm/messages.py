@@ -27,6 +27,7 @@ from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.results import HandoffCompletion
 
 _NATIVE_OUTPUT = TypeAdapter(tuple[ResponseOutputItem, ...])
+_SCHEMA_OBJECT = TypeAdapter(dict[str, JsonValue])
 
 
 class TextRole(StrEnum):
@@ -60,6 +61,12 @@ class ToolDefinition:
     name: str
     description: MaterialText
     parameters: type[BaseModel]
+    parameters_schema: str | None = None
+
+    def input_schema(self) -> dict[str, JsonValue]:
+        if self.parameters_schema is not None:
+            return _SCHEMA_OBJECT.validate_json(self.parameters_schema, strict=True)
+        return _SCHEMA_OBJECT.validate_python(self.parameters.model_json_schema(), strict=True)
 
 
 @dataclass(frozen=True, slots=True)

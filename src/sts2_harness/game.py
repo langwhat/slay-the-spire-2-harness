@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
@@ -10,7 +11,13 @@ from pydantic import Field
 
 from sts2_harness.client import ClientUnavailable, ModClient
 from sts2_harness.client import models as native
-from sts2_harness.client.http import CatalogResult, ClientFailureKind, InspectResult
+from sts2_harness.client.http import (
+    CatalogResult,
+    ClientFailureKind,
+    InspectResult,
+    RewardCloseResult,
+    RewardOpenResult,
+)
 from sts2_harness.results import Reason, ReasonCode
 
 _INPUT_READINESS_SECONDS = 10.0
@@ -37,6 +44,8 @@ class OperationKind(StrEnum):
     SETTLE = "settle"
     PAUSE = "pause"
     PRESENT = "present"
+    OPEN_CARD_REWARD = "open_card_reward"
+    CLOSE_CARD_REWARD = "close_card_reward"
 
 
 class Admit(native.WireModel):
@@ -74,8 +83,29 @@ class Present(native.WireModel):
     edges: tuple[native.PresentationEdge, ...]
 
 
+class OpenCardReward(native.WireModel):
+    kind: Literal[OperationKind.OPEN_CARD_REWARD] = OperationKind.OPEN_CARD_REWARD
+    route: native.RouteKey
+    offer: str
+
+
+class CloseCardReward(native.WireModel):
+    kind: Literal[OperationKind.CLOSE_CARD_REWARD] = OperationKind.CLOSE_CARD_REWARD
+    route: native.RouteKey
+    offer: str
+
+
 type GameRequest = Annotated[
-    Admit | Observe | Inspect | Catalog | Settle | Pause | Present, Field(discriminator="kind")
+    Admit
+    | Observe
+    | Inspect
+    | Catalog
+    | Settle
+    | Pause
+    | Present
+    | OpenCardReward
+    | CloseCardReward,
+    Field(discriminator="kind"),
 ]
 type SettledReceipt = (
     native.ReceiptCompleted | native.ReceiptRejected | native.ReceiptFailed | native.ReceiptUnknown
@@ -124,6 +154,16 @@ class Presented(native.WireModel):
     )
 
 
+class CardRewardOpened(native.WireModel):
+    kind: Literal[OperationKind.OPEN_CARD_REWARD] = OperationKind.OPEN_CARD_REWARD
+    result: RewardOpenResult
+
+
+class CardRewardClosed(native.WireModel):
+    kind: Literal[OperationKind.CLOSE_CARD_REWARD] = OperationKind.CLOSE_CARD_REWARD
+    result: RewardCloseResult
+
+
 class FailureKind(StrEnum):
     IO = "io"
     READ = "read"
@@ -157,7 +197,15 @@ class Stopped(native.WireModel):
 
 
 type GameSuccess = Annotated[
-    Admitted | Observed | Inspected | Cataloged | Settlement | Resumed | Presented,
+    Admitted
+    | Observed
+    | Inspected
+    | Cataloged
+    | Settlement
+    | Resumed
+    | Presented
+    | CardRewardOpened
+    | CardRewardClosed,
     Field(discriminator="kind"),
 ]
 type GameFailure = Annotated[
@@ -174,6 +222,8 @@ class Endpoint(StrEnum):
     CONTROL = "control"
     VERIFY_PRESENTATION = "verify_presentation"
     PRESENT = "present"
+    OPEN_CARD_REWARD = "open_card_reward"
+    CLOSE_CARD_REWARD = "close_card_reward"
 
 
 type NativeReply = (
@@ -189,6 +239,8 @@ type NativeReply = (
     | native.PresentationRejected
     | native.PresentationVerificationCompleted
     | native.PresentationCompleted
+    | RewardOpenResult
+    | RewardCloseResult
     | IOFailure
 )
 
@@ -209,6 +261,10 @@ class NativeAudit(Protocol):
 
 
 class GameIO(Protocol):
+    @property
+    def card_reward_preview_enabled(self) -> bool: ...
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None: ...
+    async def cancel_open_card_reward(self) -> None: ...
     async def admit(self) -> GameReply[Admitted]: ...
     async def observe(self) -> GameReply[Observed]: ...
     async def inspect(self, query: native.InspectQuery) -> GameReply[Inspected]: ...
@@ -220,6 +276,12 @@ class GameIO(Protocol):
     async def present(
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
     ) -> GameReply[Presented]: ...
+    async def open_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardOpened]: ...
+    async def close_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardClosed]: ...
 
 
 class SessionStopped(Exception):
@@ -271,6 +333,7 @@ class LiveGame:
         stop_requested: Callable[[], bool] | None = None,
         on_status: Callable[[native.Status, bool], None] | None = None,
         settle_confirmation_seconds: float | None = None,
+        present_card_rewards: bool = False,
     ) -> None:
         if not namespace:
             raise ValueError("A game session namespace is required.")
@@ -285,6 +348,10 @@ class LiveGame:
         self._wait = wait
         self._stop_requested = stop_requested
         self._on_status = on_status
+        self._present_card_rewards = present_card_rewards
+        self._prefetched_reward_open: (
+            tuple[native.RouteKey, str, asyncio.Task[RewardOpenResult]] | None
+        ) = None
         self._settle_confirmation_seconds = (
             _SETTLE_CONFIRMATION_SECONDS
             if settle_confirmation_seconds is None
@@ -294,6 +361,33 @@ class LiveGame:
         self._inflight = False
         self._presentation_verifications: set[str] = set()
         self._unresolved_presentation: str | None = None
+
+    @property
+    def card_reward_preview_enabled(self) -> bool:
+        return self._present_card_rewards
+
+    def start_open_card_reward(self, route: native.RouteKey, offer: str) -> None:
+        if not self._present_card_rewards:
+            return
+        previous = self._prefetched_reward_open
+        if previous is not None:
+            previous[2].cancel()
+        task: asyncio.Task[RewardOpenResult] = asyncio.create_task(
+            self._client.open_card_reward(route, offer)
+        )
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        self._prefetched_reward_open = (route, offer, task)
+
+    async def cancel_open_card_reward(self) -> None:
+        prefetched = self._prefetched_reward_open
+        self._prefetched_reward_open = None
+        if prefetched is None:
+            return
+        task = prefetched[2]
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError, ClientUnavailable):
+            await task
 
     async def admit(self) -> GameReply[Admitted]:
         return await self._run(self._admission_result)
@@ -349,6 +443,41 @@ class LiveGame:
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]
     ) -> GameReply[Presented]:
         return await self._run(lambda: self._presentation_result(route, edges))
+
+    async def open_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardOpened]:
+        return await self._run(lambda: self._open_card_reward_result(route, offer))
+
+    async def close_card_reward(
+        self, route: native.RouteKey, offer: str
+    ) -> GameReply[CardRewardClosed]:
+        return await self._run(lambda: self._close_card_reward_result(route, offer))
+
+    async def _open_card_reward_result(
+        self, route: native.RouteKey, offer: str
+    ) -> CardRewardOpened:
+        prefetched = self._prefetched_reward_open
+        self._prefetched_reward_open = None
+        if prefetched is not None and prefetched[0] == route and prefetched[1] == offer:
+            pending: Awaitable[RewardOpenResult] = prefetched[2]
+        else:
+            if prefetched is not None:
+                if not prefetched[2].done():
+                    prefetched[2].cancel()
+                with suppress(asyncio.CancelledError, ClientUnavailable):
+                    await prefetched[2]
+            pending = self._client.open_card_reward(route, offer)
+        result = await self._attempt(Endpoint.OPEN_CARD_REWARD, pending)
+        return CardRewardOpened(result=result)
+
+    async def _close_card_reward_result(
+        self, route: native.RouteKey, offer: str
+    ) -> CardRewardClosed:
+        result = await self._attempt(
+            Endpoint.CLOSE_CARD_REWARD, self._client.close_card_reward(route, offer)
+        )
+        return CardRewardClosed(result=result)
 
     async def _presentation_result(
         self, route: native.RouteKey, edges: tuple[native.PresentationEdge, ...]

@@ -142,6 +142,7 @@ class Context:
         self._active_group: _Group | None = None
         self._group_number = 0
         self._previous_battle: CombatHandoff | None = None
+        self._game_language: str | None = None
         for message in system:
             if isinstance(message.value, GuidanceContent):
                 self._record_documents(message.value.guidance)
@@ -175,6 +176,10 @@ class Context:
     @property
     def role(self) -> native.DecisionOwner:
         return self._role
+
+    @property
+    def game_language(self) -> str | None:
+        return self._game_language
 
     @property
     def _delivery(self) -> RunDelivery:
@@ -221,6 +226,7 @@ class Context:
     def begin_group(
         self, observation: native.Observation, notes: NotesView, route_plan: JsonValue = None
     ) -> None:
+        self._game_language = observation.game_language
         if self._active_group is not None:
             return
         self._group_number += 1
@@ -476,6 +482,7 @@ class Context:
             return
         if observation is None:
             raise TypeError("An act task requires a current observation.")
+        self._game_language = observation.game_language
         if (last := self._last_entry()) is not None:
             if isinstance(last, TaskMessage) and last.task == task and last.observation is not None:
                 if same_observation(self._role, last.observation, observation):

@@ -16,6 +16,8 @@ public interface IModHttpHandlers
     HttpReply SubmitAction(string body);
     HttpReply SetControl(string body);
     HttpReply SubmitDisplay(string body);
+    Task<HttpReply> OpenCardReward(string body);
+    Task<HttpReply> CloseCardReward(string body);
     Task<HttpReply> PresentMap(string body);
     Task<HttpReply> VerifyMapRestoration(string body);
     HttpReply GetCheckpointIdentity();
@@ -157,6 +159,8 @@ public sealed class LoopbackHttpServer : IDisposable
                 ("POST", "/action") => _handlers.SubmitAction(body),
                 ("POST", "/control") => _handlers.SetControl(body),
                 ("POST", "/display") => _handlers.SubmitDisplay(body),
+                ("POST", "/rewards/open") => await _handlers.OpenCardReward(body).ConfigureAwait(false),
+                ("POST", "/rewards/close") => await _handlers.CloseCardReward(body).ConfigureAwait(false),
                 ("POST", "/map/present") => await _handlers.PresentMap(body).ConfigureAwait(false),
                 ("POST", "/map/restore/verify") => await _handlers.VerifyMapRestoration(body).ConfigureAwait(false),
                 ("GET", "/operator/checkpoint/identity") => _handlers.GetCheckpointIdentity(),
