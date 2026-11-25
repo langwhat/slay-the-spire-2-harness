@@ -407,7 +407,6 @@ class Orb(WireModel):
 class ArrowSlotStatus(StrEnum):
     RETRIEVED = "retrieved"
     AWAY = "away"
-    DESTROYED = "destroyed"
 
 
 class ArrowSlot(WireModel):

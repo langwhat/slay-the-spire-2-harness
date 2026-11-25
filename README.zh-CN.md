@@ -16,7 +16,7 @@
 ## 环境要求
 
 - Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。
-- Steam `public-beta` 分支上的杀戮尖塔 2 v0.113.1，并装好 [`sts2agent` Mod](mod/README.md)。构建 Mod 需要 .NET 9 SDK 和本机的游戏程序集。
+- Steam `public-beta` 分支上的杀戮尖塔 2 v0.114.0，并装好 [`sts2agent` Mod](mod/README.md)。构建 Mod 需要 .NET 9 SDK 和本机的游戏程序集。
 - 一个使用 OpenAI Responses、Chat Completions 或 Anthropic Messages 协议的模型接口。外部驱动不需要模型。
 - 开发用的 headless 模式只支持 macOS。
 

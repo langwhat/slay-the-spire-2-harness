@@ -753,15 +753,16 @@ internal sealed partial class NativeRuleText
             || Body(death) is not { Incomplete: false } deathBody
             || Body(removed) is not { Incomplete: false } removedBody)
             return false;
-        var downgrades = appliedBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name == nameof(CardCmd.Downgrade));
+        var removesAllUpgrades = appliedBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardCmd)
+            && s.Call.Method.Name == nameof(CardCmd.RemoveAllUpgrades));
         var removesCaster = deathBody.Calls.Any(s => s.Call.Method.Name == "Remove" && s.Call.Receiver is Field f && InternalDataField(f) is not null)
             && deathBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(PowerCmd) && s.Call.Method.Name == nameof(PowerCmd.Remove));
         var restoresUpgrades = removedBody.Calls.Any(s => s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name == nameof(CardCmd.Upgrade));
-        if (!downgrades || !removesCaster || !restoresUpgrades)
+        if (!removesAllUpgrades || !removesCaster || !restoresUpgrades)
             return false;
-        lines.Add($"{prefix}After this power is applied: record the upgrade level of each upgraded combat card and downgrade it");
+        lines.Add($"{prefix}After this power is applied: record the upgrade level of each upgraded combat card and remove all upgrades from it");
         lines.Add($"{prefix}On death event: if death was not prevented and event target is a registered caster of this power: unregister event target; if no registered casters remain: remove {PowerLabel(power)}");
-        lines.Add($"{prefix}After this power is removed: restore the recorded upgrade levels on those downgraded combat cards");
+        lines.Add($"{prefix}After this power is removed: restore the recorded upgrade levels on those combat cards");
         return true;
     }
 

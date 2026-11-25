@@ -16,7 +16,7 @@ You can also plug in your own fixed-code strategy, or drive the game from an out
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/).
-- Slay the Spire 2 v0.113.1 on Steam's `public-beta` branch with the
+- Slay the Spire 2 v0.114.0 on Steam's `public-beta` branch with the
   [`sts2agent` Mod](mod/README.md) installed. Building the Mod needs the .NET 9 SDK
   and local game assemblies.
 - A model endpoint using the OpenAI Responses, Chat Completions, or Anthropic Messages

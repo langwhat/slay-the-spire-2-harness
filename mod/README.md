@@ -4,9 +4,9 @@
 
 ## Game Compatibility
 
-The Mod supports **Slay the Spire 2 v0.113.1 only**. In Steam, select `public-beta`
+The Mod supports **Slay the Spire 2 v0.114.0 only**. In Steam, select `public-beta`
 under **Properties → Game Versions & Betas** and verify the installed game version
-is v0.113.1.
+is v0.114.0.
 
 ## Layout
 

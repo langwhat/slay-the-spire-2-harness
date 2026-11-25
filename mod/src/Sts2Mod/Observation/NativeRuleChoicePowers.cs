@@ -892,7 +892,25 @@ internal sealed partial class NativeRuleText
             handled.Add("ModifyHpLostBeforeOstyLate");
             handled.Add("AfterDamageReceived");
             handled.Add("BeforeSideTurnStart");
+            if (FindOverride(type, "AfterModifyingHpLostBeforeOsty") is { } afterSideCap && IsPurePresentationHook(afterSideCap))
+                handled.Add(afterSideCap.Name);
             lines.Add($"{powerPrefix}HP loss cap per side turn: total unblocked HP lost by owner during each side turn is capped at stacks (resets before every side turn starts)");
+        }
+        else if (FindOverride(type, "ModifyHpLostBeforeOstyLate") is { } beforeOstyCapHook)
+        {
+            handled.Add(beforeOstyCapHook.Name);
+            var rendered = ReadHpLossCap(beforeOstyCapHook);
+            if (rendered is null)
+            {
+                Gap($"{type.Name}.{beforeOstyCapHook.Name}");
+            }
+            else
+            {
+                if (rendered.Count > 0)
+                    lines.Add($"{powerPrefix}HP loss cap per hit, after block (before {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} redirection): {string.Join("; ", rendered)}");
+                if (FindOverride(type, "AfterModifyingHpLostBeforeOsty") is { } afterBeforeOsty && IsPurePresentationHook(afterBeforeOsty))
+                    handled.Add(afterBeforeOsty.Name);
+            }
         }
         if (FindOverride(type, "ModifyHpLostAfterOstyLate") is { } bufferHook)
         {
@@ -999,15 +1017,66 @@ internal sealed partial class NativeRuleText
         if (body.Incomplete)
             return null;
         var capped = body.Returns.Where(result => result.Value is not Input { Name: "amount" }).ToArray();
-        if (capped is not [var active] || ValueText(active.Value) is not { } bound)
+        if (capped is not [var active])
             return null;
-        var ownerOnly = active.Conditions.Where(test =>
-            !(test.Value is Call { Method.Name: "op_LessThan", Method.DeclaringType: var d, Arguments: [Input { Name: "amount" }, var limit] }
-              && d == typeof(decimal) && ValueText(limit) == bound)).ToArray();
-        return Guard(ownerOnly) is { } guard && guard != Never
+        var isMinCall = false;
+        Value boundValue;
+        switch (active.Value)
+        {
+            case Call { Method.DeclaringType: var math, Method.Name: nameof(Math.Min), Arguments: [Input { Name: "amount" }, var minBound] }
+                when math == typeof(Math):
+                isMinCall = true;
+                boundValue = minBound;
+                break;
+            case Call { Method.DeclaringType: var math, Method.Name: nameof(Math.Min), Arguments: [var minBound, Input { Name: "amount" }] }
+                when math == typeof(Math):
+                isMinCall = true;
+                boundValue = minBound;
+                break;
+            default:
+                boundValue = active.Value;
+                break;
+        }
+        if (ReferencesInput(boundValue, "amount") || ValueText(boundValue) is not { } bound)
+            return null;
+        var hasLowerPassthrough = false;
+        var ownerOnly = new List<Test>();
+        foreach (var test in active.Conditions)
+        {
+            if (test is { Expected: false, Value: Call { Method.Name: "op_LessThan" or "op_LessThanOrEqual", Method.DeclaringType: var d, Arguments: [Input { Name: "amount" }, var limit] } }
+                && d == typeof(decimal) && ValueText(limit) == bound)
+            {
+                hasLowerPassthrough = true;
+                continue;
+            }
+            if (test is { Expected: true, Value: Call { Method.Name: "op_GreaterThan" or "op_GreaterThanOrEqual", Method.DeclaringType: var dGt, Arguments: [Input { Name: "amount" }, var limitGt] } }
+                && dGt == typeof(decimal) && ValueText(limitGt) == bound)
+            {
+                hasLowerPassthrough = true;
+                continue;
+            }
+            if (test is { Expected: false, Value: Call { Method.Name: "op_Equality", Method.DeclaringType: var d2, Arguments: [Input { Name: "amount" }, var zero] } }
+                && d2 == typeof(decimal) && Numeric(zero) == 0m)
+            {
+                continue;
+            }
+            ownerOnly.Add(test);
+        }
+        if (!isMinCall && !hasLowerPassthrough)
+            return null;
+        return Guard([.. ownerOnly]) is { } guard && guard != Never
             ? [When(guard, $"at most {bound}")]
             : null;
     }
+
+    private static bool ReferencesInput(Value? value, string inputName) => value switch
+    {
+        Input { Name: var name } => name == inputName,
+        Field field => ReferencesInput(field.Receiver, inputName),
+        Operation op => ReferencesInput(op.Left, inputName) || ReferencesInput(op.Right, inputName),
+        Call call => ReferencesInput(call.Receiver, inputName) || call.Arguments.Any(arg => ReferencesInput(arg, inputName)),
+        _ => false,
+    };
 
     private bool HasSideTurnHpLossCap(Type power)
     {

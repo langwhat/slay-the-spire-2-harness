@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Ascension;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -405,11 +406,31 @@ public sealed class NativeExtractionTests
         Assert.Contains("global cost modifiers still apply", bulletTimeRule!, StringComparison.Ordinal);
         Assert.Contains("Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources", bulletTimeRule!, StringComparison.Ordinal);
 
-        var arrowStabRule = ItemMechanismReader.DescribeCard(ModelDb.Card<ArrowStab>());
-        Assert.NotNull(arrowStabRule);
-        Assert.Contains("owner has at least 1 arrow", arrowStabRule!, StringComparison.Ordinal);
-        Assert.Contains("hand is not full", arrowStabRule!, StringComparison.Ordinal);
-        Assert.Contains("Shoot card(s)", arrowStabRule!, StringComparison.Ordinal);
+        var wahKiRule = ItemMechanismReader.DescribeCard(ModelDb.Card<WahKi>());
+        Assert.NotNull(wahKiRule);
+        Assert.Contains("Resolves attack damage first", wahKiRule!, StringComparison.Ordinal);
+        Assert.Contains("discard pile", wahKiRule!, StringComparison.Ordinal);
+        Assert.Contains("on top of draw pile", wahKiRule!, StringComparison.Ordinal);
+
+        Assert.Null(ItemMechanismReader.DescribeCard(ModelDb.Card<ArrowStab>()));
+
+        var (hardToKillText, hardToKillGaps) = PowerMechanismReader.Describe(typeof(HardToKillPower), true);
+        Assert.Empty(hardToKillGaps);
+        Assert.Contains("HP loss cap per hit, after block (before MONSTER.OSTY redirection):", hardToKillText!, StringComparison.Ordinal);
+        Assert.Contains("at most stacks", hardToKillText!, StringComparison.Ordinal);
+
+        var (hardenedShellText, hardenedShellGaps) = PowerMechanismReader.Describe(typeof(HardenedShellPower), true);
+        Assert.Empty(hardenedShellGaps);
+        Assert.Contains("HP loss cap per side turn:", hardenedShellText!, StringComparison.Ordinal);
+
+        var (dampenText, dampenGaps) = PowerMechanismReader.Describe(typeof(DampenPower), true);
+        Assert.Empty(dampenGaps);
+        Assert.Contains("record the upgrade level of each upgraded combat card and remove all upgrades from it", dampenText!, StringComparison.Ordinal);
+
+        var (cloneText, cloneGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(Clone));
+        Assert.Empty(cloneGaps);
+        Assert.NotNull(cloneText);
+        Assert.Contains("Clone option", cloneText!, StringComparison.Ordinal);
 
         var liquidRule = ItemMechanismReader.DescribePotion(ModelDb.Potion<LiquidMemories>());
         Assert.NotNull(liquidRule);
@@ -643,7 +664,7 @@ public sealed class NativeExtractionTests
         var (unmovableText, unmovableGaps) = PowerMechanismReader.Describe(typeof(UnmovablePower), true);
         Assert.Empty(unmovableGaps);
         Assert.Contains("target is not a monster/pet", unmovableText!, StringComparison.Ordinal);
-        Assert.Contains("earlier card/move Block gains from other card plays by owner this turn<stacks", unmovableText!, StringComparison.Ordinal);
+        Assert.Contains("earlier distinct other card plays by owner that gained card/move Block this turn<stacks", unmovableText!, StringComparison.Ordinal);
         Assert.Contains("(source card=none or source card's owner=owner): ×2", unmovableText!, StringComparison.Ordinal);
 
         var (autoText, autoGaps) = PowerMechanismReader.Describe(typeof(AutomationPower), true);
@@ -709,6 +730,8 @@ public sealed class NativeExtractionTests
             (typeof(StrikeDummy), "(attacker=owner or source card's owner=owner): +3"),
             (typeof(PhilosophersStone), "Maximum Energy:"),
             (typeof(TheAbacus), "After shuffling draw pile:"),
+            (typeof(HappyFlower), "After player turn starts, early:"),
+            (typeof(FakeHappyFlower), "After player turn starts, early:"),
         };
 
         foreach (var (relicType, expected) in relicExpectations)
@@ -1218,6 +1241,23 @@ public sealed class NativeExtractionTests
         Assert.Contains("Secondary enemy (removed when all primary enemies die; not required to win combat): yes", minionText!, StringComparison.Ordinal);
         Assert.Contains("Owner death triggers Fatal: no", minionText!, StringComparison.Ordinal);
         Assert.Contains("Removed on owner death: no", minionText!, StringComparison.Ordinal);
+
+        // Non-cap/floor/amplifying ModifyHpLostBeforeOstyLate hooks and wrong DistinctBy key selectors must fail closed.
+        foreach (var badHpLossPower in new[]
+        {
+            typeof(SyntheticNonCapHpLossPower),
+            typeof(SyntheticFloorHpLossPower),
+            typeof(SyntheticAmplifyHpLossPower),
+        })
+        {
+            var (badText, badGaps) = PowerMechanismReader.Describe(badHpLossPower, true);
+            Assert.Null(badText);
+            Assert.NotEmpty(badGaps);
+        }
+
+        var (wrongDistinctText, wrongDistinctGaps) = PowerMechanismReader.Describe(typeof(SyntheticWrongDistinctByBlockPower), true);
+        Assert.Null(wrongDistinctText);
+        Assert.NotEmpty(wrongDistinctGaps);
     }
 
     [Fact]
@@ -2241,6 +2281,62 @@ public sealed class NativeExtractionTests
             known.FollowUpState = broken;
             broken.FollowUpState = known;
             return new MonsterMoveStateMachine([known, broken], known);
+        }
+    }
+
+    private sealed class SyntheticNonCapHpLossPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override decimal ModifyHpLostBeforeOstyLate(Creature target, decimal amount, ValueProp props, Creature? dealer, CardModel? cardSource)
+        {
+            if (target != Owner || amount == 0m)
+                return amount;
+            return Amount;
+        }
+    }
+
+    private sealed class SyntheticFloorHpLossPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Debuff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override decimal ModifyHpLostBeforeOstyLate(Creature target, decimal amount, ValueProp props, Creature? dealer, CardModel? cardSource)
+        {
+            if (target != Owner)
+                return amount;
+            if (amount < 5m)
+                return 5m;
+            return amount;
+        }
+    }
+
+    private sealed class SyntheticAmplifyHpLossPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Debuff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override decimal ModifyHpLostBeforeOstyLate(Creature target, decimal amount, ValueProp props, Creature? dealer, CardModel? cardSource)
+        {
+            if (target != Owner)
+                return amount;
+            return amount * 2m;
+        }
+    }
+
+    private sealed class SyntheticWrongDistinctByBlockPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override decimal ModifyBlockMultiplicative(Creature target, decimal block, ValueProp props, CardModel? cardSource, CardPlay? cardPlay)
+        {
+            if (target.IsMonster || !props.IsCardOrMonsterMove())
+                return 1m;
+            if (cardSource != null && cardSource.Owner.Creature != Owner)
+                return 1m;
+            var count = CombatManager.Instance.History.Entries.OfType<BlockGainedEntry>()
+                .Where(e => e.HappenedThisTurn(CombatState) && e.CardPlay != null && e.CardPlay.Player.Creature == Owner && e.Props.IsCardOrMonsterMove() && e.CardPlay != cardPlay)
+                .DistinctBy(e => e.Actor)
+                .Count();
+            return count >= Amount ? 1m : 2m;
         }
     }
 }

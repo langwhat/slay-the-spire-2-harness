@@ -361,16 +361,52 @@ internal static class ModifierMechanismReader
             }
         }
 
+        if (type.GetMethod("TryModifyRestSiteOptions", DeclaredInstance) is { } restSiteOptions)
+        {
+            var restBody = NativeRuleBody.Read(restSiteOptions);
+            if (restBody.Incomplete)
+            {
+                gaps.Add("TryModifyRestSiteOptions");
+            }
+            else if (DescribeTryModifyRestSiteOptions(restBody) is { } restClause)
+            {
+                parts.Add(restClause);
+            }
+            else
+            {
+                gaps.Add("TryModifyRestSiteOptions");
+            }
+        }
+
         RecordUnhandledModifierHooks(type, typeof(EnchantmentModel), HandledEnchantmentHooks, gaps);
 
         return (parts.Count > 0 ? string.Join(" ", parts) : null, gaps);
+    }
+
+    private static string? DescribeTryModifyRestSiteOptions(NativeRuleBody body)
+    {
+        var addedOptions = body.Calls
+            .Where(s => s.Call.Method.Name == "Add"
+                && s.Call.Receiver is Input { Name: "options" }
+                && s.Call.Arguments is [Call { Method: ConstructorInfo ctor }]
+                && ctor.DeclaringType is { } optType
+                && typeof(MegaCrit.Sts2.Core.Entities.RestSite.RestSiteOption).IsAssignableFrom(optType))
+            .Select(s => ((Call)s.Call.Arguments[0]).Method.DeclaringType!)
+            .Distinct()
+            .ToArray();
+        if (addedOptions is [var optionType]
+            && optionType == typeof(MegaCrit.Sts2.Core.Entities.RestSite.CloneRestSiteOption))
+        {
+            return "At Rest Sites, adds one Clone option while at least one card with this enchantment is in your deck (choosing Clone duplicates every card with this enchantment into your deck).";
+        }
+        return null;
     }
 
     private static readonly HashSet<string> HandledEnchantmentHooks = new(StringComparer.Ordinal)
     {
         "CanEnchantCardType", "CanEnchant", "AfterCardPlayed", "EnchantDamageAdditive", "EnchantDamageMultiplicative",
         "EnchantBlockAdditive", "EnchantPlayCount", "OnPlay", "OnEnchant", "AfterAutoPrePlayPhaseEntered",
-        "BeforeFlush", "AfterCardDrawn", "ModifyShuffleOrder", "RecalculateValues",
+        "BeforeFlush", "AfterCardDrawn", "ModifyShuffleOrder", "TryModifyRestSiteOptions", "RecalculateValues",
     };
 
     private static readonly HashSet<string> HandledAfflictionHooks = new(StringComparer.Ordinal)

@@ -41,6 +41,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("BeforeCombatStart", "Before combat starts"),
         ("BeforeSideTurnStart", "Before side turn starts"),
         ("AfterSideTurnStart", "After side turn starts"),
+        ("AfterPlayerTurnStartEarly", "After player turn starts, early"),
         ("AfterPlayerTurnStart", "After player turn starts"),
         ("AfterSideTurnStartLate", "At side turn start, late"),
         ("AfterBlockCleared", "After Block expires at turn start"),
@@ -1800,12 +1801,17 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 recognized = false;
                 return null;
             }
-            if (args is [Constant { Data: int flag }] && flag is 0 or 1
-                && (flags.Contains(propName)
-                    || backing is not null && backing.FieldType == typeof(bool)
-                    || (power is not null && type == power || type is not null && typeof(RelicModel).IsAssignableFrom(type))
-                        && call.Method.GetParameters() is [{ ParameterType: var flagType }] && flagType == typeof(bool)))
-                return new Effect($"{HumanizeLower(propName)} = {(flag == 1 ? "true" : "false")}", ChangesGuard: true);
+            var isBoolProp = flags.Contains(propName)
+                || backing is not null && backing.FieldType == typeof(bool)
+                || (power is not null && type == power || type is not null && typeof(RelicModel).IsAssignableFrom(type))
+                    && call.Method.GetParameters() is [{ ParameterType: var flagType }] && flagType == typeof(bool);
+            if (isBoolProp)
+            {
+                if (args is [Constant { Data: int flag }] && flag is 0 or 1)
+                    return new Effect($"{HumanizeLower(propName)} = {(flag == 1 ? "true" : "false")}", ChangesGuard: true);
+                if (Condition(new Test(assignedValue, true)) is { Length: > 0 } condText && condText != Never)
+                    return new Effect($"{HumanizeLower(propName)} = ({condText})", ChangesGuard: true);
+            }
             if ((power is null || (type is not null && typeof(RelicModel).IsAssignableFrom(type)))
                 && call.Method.GetParameters() is [{ ParameterType: var intType }] && intType == typeof(int)
                 && type is not null && BackingField(type, (MethodInfo)call.Method) is { } intBacking && IsGameplayField(intBacking))

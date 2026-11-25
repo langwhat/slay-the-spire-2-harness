@@ -280,7 +280,6 @@ public enum ArrowSlotStatus
 {
     Retrieved,
     Away,
-    Destroyed,
 }
 
 public sealed record ArrowSlotView(

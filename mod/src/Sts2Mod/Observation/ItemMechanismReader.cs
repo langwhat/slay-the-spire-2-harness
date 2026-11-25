@@ -346,7 +346,7 @@ internal static class ItemMechanismReader
             }
         }
 
-        // Attack or Block -> select from combat pile -> move to target pile (e.g., Headbutt, Hologram, ArrowStab).
+        // Attack or Block -> select from combat pile -> move to target pile (e.g., Headbutt, Hologram, WahKi).
         if ((attackIdx >= 0 || blockIdx >= 0) && selectCombatPileIdx > Math.Max(attackIdx, blockIdx) && pileAddIdx > selectCombatPileIdx)
         {
             var firstAction = attackIdx >= 0 ? "Resolves attack damage first" : "Gains Block first";
@@ -441,12 +441,7 @@ internal static class ItemMechanismReader
         var clauses = new List<string>();
         foreach (var cond in selGroup.First().Conditions)
         {
-            if (cond is { Expected: true, Value: Call { Method.Name: "PlayerHasAnyArrows" } })
-            {
-                if (!clauses.Contains("owner has at least 1 arrow", StringComparer.Ordinal))
-                    clauses.Add("owner has at least 1 arrow");
-            }
-            else if (cond.Value is Operation { Operator: "clt" or "blt" or "bge",
+            if (cond.Value is Operation { Operator: "clt" or "blt" or "bge",
                 Left: Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Cards" } },
                 Right: Constant { Data: int } or Call { Method.Name: "get_MaxCardsInHand" } } handOp
                 && ((handOp.Operator == "bge" && !cond.Expected) || (handOp.Operator != "bge" && cond.Expected)))

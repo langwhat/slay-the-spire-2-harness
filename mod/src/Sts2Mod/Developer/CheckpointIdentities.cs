@@ -128,7 +128,7 @@ internal static class CheckpointIdentities
     /// </summary>
     private static (int? Threshold, int? Reset) CounterBounds(RelicModel relic)
     {
-        if (relic.IsMock || relic is not (HappyFlower or OrnamentalFan or LastingCandy or LetterOpener))
+        if (relic.IsMock || relic is not (HappyFlower or FakeHappyFlower or OrnamentalFan or LastingCandy or LetterOpener))
             return (null, null);
 
         var type = relic.GetType();

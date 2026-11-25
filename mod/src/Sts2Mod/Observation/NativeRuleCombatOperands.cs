@@ -600,10 +600,16 @@ internal sealed partial class NativeRuleText
                 Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo drawnPred }] }] }
                 when ofType.GetGenericArguments()[0].Name == "CardDrawnEntry" && DescribeHistoryEntryCount("drawn", drawnPred) is { } drawnLabel
                 => drawnLabel,
-            Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
-                Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo blkPred }] }] }
-                when ofType.GetGenericArguments()[0].Name == "BlockGainedEntry" && IsBlockGainedThisTurnPredicate(blkPred)
-                => "earlier card/move Block gains from other card plays by owner this turn",
+            Call { Method.Name: nameof(Enumerable.Count), Arguments: [
+                Call { Method.Name: nameof(Enumerable.DistinctBy), Arguments: [
+                    Call { Method.Name: nameof(Enumerable.Where), Arguments: [
+                        Call { Method: { Name: "OfType", IsGenericMethod: true } ofType },
+                        Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo blkPred }] }] },
+                    Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo keySel }] }] }] }
+                when ofType.GetGenericArguments()[0].Name == "BlockGainedEntry"
+                    && IsBlockGainedThisTurnPredicate(blkPred)
+                    && IsCardPlayKeySelector(keySel)
+                => "earlier distinct other card plays by owner that gained card/move Block this turn",
             Call { Method.Name: nameof(Enumerable.Count), Arguments: [Call { Method.Name: "get_CardPlaysFinished" },
                 Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo finPred }] }] }
                 when DescribeHistoryEntryCount("finished", finPred) is { } finLabel
@@ -817,6 +823,15 @@ internal sealed partial class NativeRuleText
             return false;
         }
         return hasTurnCheck && hasMoveCheck && hasOwnerCheck && excludesCurrentCardPlay;
+    }
+
+    private bool IsCardPlayKeySelector(MethodInfo selector)
+    {
+        if (selector.ContainsGenericParameters || Body(selector) is not { Incomplete: false, Returns: [{ Conditions.Length: 0, Value: var retVal }] })
+            return false;
+        var paramName = selector.GetParameters().FirstOrDefault()?.Name;
+        return retVal is Call { Method: { Name: "get_CardPlay", DeclaringType.Name: "BlockGainedEntry" }, Receiver: Input { Name: var rn } }
+            && (paramName is null || rn == paramName);
     }
 
     private static bool IsOwnerOrClosureOwner(Value? value)

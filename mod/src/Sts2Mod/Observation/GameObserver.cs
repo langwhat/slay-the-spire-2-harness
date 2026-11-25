@@ -923,7 +923,6 @@ internal sealed class GameObserver(
             {
                 ArrowStatus.Retrieved => ArrowSlotStatus.Retrieved,
                 ArrowStatus.Away => ArrowSlotStatus.Away,
-                ArrowStatus.Destroyed => ArrowSlotStatus.Destroyed,
                 _ => throw new ArgumentOutOfRangeException(nameof(slots), slot.Status, "Unknown native arrow status."),
             },
             slot.Status == ArrowStatus.Away ? targetRefs.GetValueOrDefault(slot) : null)).ToImmutableArray();

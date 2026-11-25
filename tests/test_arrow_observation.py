@@ -19,7 +19,6 @@ def test_combat_delivers_ordered_arrow_slots_and_replaces_their_previous_targets
             {"status": "retrieved"},
             {"status": "away", "impaled_target_ref": "e1"},
             {"status": "away"},
-            {"status": "destroyed"},
         ]
         payload = json.loads(COMBAT)
         payload["state"]["arrow_slots"] = slots
@@ -49,14 +48,14 @@ def test_combat_delivers_ordered_arrow_slots_and_replaces_their_previous_targets
 
 
 def test_mod_rejects_unknown_arrow_status() -> None:
-    async def read() -> None:
+    async def read(status: str) -> None:
         payload = json.loads(COMBAT)
-        payload["state"]["arrow_slots"] = [{"status": "normal"}]
+        payload["state"]["arrow_slots"] = [{"status": status}]
         with pytest.raises(ClientUnavailable) as failure:
             await read_observation(json.dumps(payload))
         assert failure.value.reason is ClientFailureKind.PROTOCOL
 
-    asyncio.run(read())
-
-    with pytest.raises(ValidationError):
-        RunObservation.model_validate_json('{"arrow_slots":[{"status":"normal"}]}')
+    for bad_status in ("normal", "destroyed"):
+        asyncio.run(read(bad_status))
+        with pytest.raises(ValidationError):
+            RunObservation.model_validate_json(f'{{"arrow_slots":[{{"status":"{bad_status}"}}]}}')
