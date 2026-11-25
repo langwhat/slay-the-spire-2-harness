@@ -160,8 +160,42 @@ def shop_controls(state: native.RunState) -> bool:
     )
 
 
+_GLORY_ACT_ID = "ACT.GLORY"
+_ARCHITECT_EVENT_ID = "EVENT.THE_ARCHITECT"
+
+
 def event_reward_surface(state: native.RunState) -> bool:
     return state.screen is native.RunScreen.REWARDS and state.progress.room_type == "event"
+
+
+def _post_boss_epilogue_action(
+    state: native.RunState, enabled: tuple[native.Action, ...]
+) -> native.Action | None:
+    # After the final boss in ACT.GLORY, The Architect advances single-option dialogue pages
+    # whose native EventOptions do not set ActionOperation.PROCEED until WinRun finishes the run.
+    if (
+        state.screen is not native.RunScreen.EVENT
+        or state.progress.room_type != "event"
+        or state.progress.definition_id != _GLORY_ACT_ID
+        or state.progress.act != state.progress.acts
+        or state.progress.bosses_left != 0
+        or state.event is None
+        or state.event.definition_id != _ARCHITECT_EVENT_ID
+        or len(enabled) != 1
+    ):
+        return None
+    action = enabled[0]
+    if (
+        action.destination is not MISSING
+        or action.cost is not MISSING
+        or action.targets is not MISSING
+        or (
+            action.operation is not MISSING
+            and action.operation is not native.ActionOperation.PROCEED
+        )
+    ):
+        return None
+    return action
 
 
 def _event_potion_action(
@@ -287,6 +321,9 @@ def _candidate(
     if len(enabled) == 1 and enabled[0].operation is native.ActionOperation.PROCEED:
         action = enabled[0]
         return ActionStep(ActionKind.INTERACT, action.ref), action.label, _Reason.CONTINUE
+    epilogue = _post_boss_epilogue_action(state, enabled)
+    if epilogue is not None:
+        return ActionStep(ActionKind.INTERACT, epilogue.ref), epilogue.label, _Reason.CONTINUE
     return None
 
 

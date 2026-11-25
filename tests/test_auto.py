@@ -698,3 +698,335 @@ def test_unsuccessful_auto_requires_strategy_even_after_interrupted_model_reques
         archive.close()
 
     asyncio.run(scenario())
+
+
+def glory_epilogue_page(
+    action_ref: str,
+    label: str,
+    *,
+    option_ref: str = "option:53:1",
+    sequence: int = 2429,
+    floor: int = 49,
+    act: int = 3,
+    acts: int = 3,
+    act_definition_id: str | MISSING = "ACT.GLORY",
+    bosses_left: int | MISSING = 0,
+    room_type: str = "event",
+    screen: native.RunScreen = native.RunScreen.EVENT,
+    event_definition_id: str | None | MISSING = "EVENT.THE_ARCHITECT",
+    extra_actions: tuple[native.Action, ...] = (),
+    cost: native.ActionCost | MISSING = MISSING,
+) -> native.Observation:
+    observation = native.Observation.model_validate_json(RUN)
+    assert isinstance(observation.state, native.RunState)
+    event = (
+        None
+        if event_definition_id is None
+        else native.EventState(
+            ref="event:53:1",
+            name="建筑师",
+            ancient=False,
+            definition_id=event_definition_id,
+        )
+    )
+    primary = native.Action(
+        ref=action_ref,
+        label=label,
+        enabled=True,
+        subject=option_ref,
+        cost=cost,
+    )
+    objects: dict[str, native.ObjectEntry] = {
+        option_ref: native.OptionEntry(kind=native.ObjectKind.OPTION, name=label),
+    }
+    if event is not None:
+        objects[event.ref] = native.EventEntry(
+            kind=native.ObjectKind.EVENT,
+            name=event.name,
+            ancient=event.ancient,
+            definition_id=event.definition_id,
+        )
+    return observation.model_copy(
+        update={
+            "game_language": "zhs",
+            "stamp": observation.stamp.model_copy(update={"observation_sequence": sequence}),
+            "location": observation.location.model_copy(update={"node_id": "node-53"}),
+            "objects": objects,
+            "state": observation.state.model_copy(
+                update={
+                    "screen": screen,
+                    "event": event,
+                    "progress": observation.state.progress.model_copy(
+                        update={
+                            "act": act,
+                            "acts": acts,
+                            "floor": floor,
+                            "room_type": room_type,
+                            "definition_id": act_definition_id,
+                            "bosses_left": bosses_left,
+                        }
+                    ),
+                    "actions": (primary, *extra_actions),
+                }
+            ),
+        }
+    )
+
+
+def test_glory_post_boss_epilogue_auto_continues_to_victory_without_model_calls(
+    tmp_path: Path,
+) -> None:
+    from io import StringIO
+
+    from sts2_harness.diagnostics import Diagnostics
+    from sts2_harness.game import RunEndReason, Settle
+
+    pages = [
+        glory_epilogue_page("interaction:53:1", "啾", option_ref="option:53:1", sequence=2429),
+        glory_epilogue_page(
+            "interaction:53:2", "继续", option_ref="option:53:2", sequence=2434, floor=50
+        ),
+        glory_epilogue_page(
+            "interaction:53:3", "继续", option_ref="option:53:3", sequence=2439, floor=50
+        ),
+    ]
+    victory = terminal(pages[-1]).model_copy(
+        update={"stamp": pages[-1].stamp.model_copy(update={"observation_sequence": 2441})}
+    )
+    http = AutoHTTP([*pages, victory], [])
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        response = http.mod(request)
+        if request.url.path == "/action" and len(http.actions) == len(pages):
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": http.actions[-1].operation_id,
+                    "status": "completed",
+                    "boundary": "terminal",
+                },
+            )
+        return response
+
+    console = StringIO()
+    diagnostics = Diagnostics("glory-epilogue", console=console)
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="glory-epilogue",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(http.model)),
+            diagnostics=diagnostics,
+        ) as session:
+            ended = await session.run()
+        assert ended.reason is RunEndReason.TERMINAL
+        assert ended.observation is not None
+        assert isinstance(ended.observation.state, native.TerminalState)
+        assert ended.observation.state.screen is native.TerminalScreen.RUN_COMPLETE
+        assert ended.observation.state.result is native.TerminalResult.VICTORY
+        assert http.inputs == []
+        assert [
+            step.step.action for step in http.actions if isinstance(step.step, native.Interact)
+        ] == ["interaction:53:1", "interaction:53:2", "interaction:53:3"]
+
+        archive = Journal.open(tmp_path / "archive.sqlite")
+        assert archive.requests() == ()
+        settles = [op for op in archive.operations() if isinstance(op.request, Settle)]
+        assert len(settles) == 3
+        recorded_terminal = [
+            obs.state
+            for op in archive.operations()
+            if op.reply is not None
+            for obs in op.reply.observations
+            if isinstance(obs.state, native.TerminalState)
+        ]
+        assert recorded_terminal
+        assert recorded_terminal[-1].result is native.TerminalResult.VICTORY
+        archive.close()
+
+        events = [json.loads(line) for line in console.getvalue().splitlines()]
+        auto_events = [line for line in events if line["event"] == "auto_finished"]
+        assert [line["label"] for line in auto_events] == ["啾", "继续", "继续"]
+        assert all(line["outcome"] == "completed" for line in auto_events)
+        diagnostics.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "multi_option",
+        "other_event",
+        "missing_event",
+        "bosses_left_nonzero",
+        "bosses_left_missing",
+        "not_final_act",
+        "other_act",
+        "action_has_cost",
+    ],
+)
+def test_glory_epilogue_auto_stops_and_defers_unsafe_or_ordinary_events(
+    tmp_path: Path, case: str
+) -> None:
+    from sts2_harness.journal_models import AutomaticSnapshot
+
+    page1 = glory_epilogue_page("interaction:53:1", "啾", option_ref="option:53:1", sequence=2429)
+    if case == "multi_option":
+        unsafe = glory_epilogue_page(
+            "interaction:53:2",
+            "继续",
+            option_ref="option:53:2",
+            sequence=2434,
+            extra_actions=(native.Action(ref="interaction:53:alt", label="另一项", enabled=True),),
+        )
+        states = [page1, unsafe, terminal(unsafe)]
+        expected_actions = ["interaction:53:1", "interaction:53:2"]
+        expected_auto = ["啾"]
+        chosen_ref = "interaction:53:2"
+    else:
+        unsafe = glory_epilogue_page(
+            "interaction:53:1",
+            "继续",
+            option_ref="option:53:1",
+            sequence=2429,
+            event_definition_id=(
+                "EVENT.TRIAL"
+                if case == "other_event"
+                else None
+                if case == "missing_event"
+                else "EVENT.THE_ARCHITECT"
+            ),
+            bosses_left=(
+                1
+                if case == "bosses_left_nonzero"
+                else MISSING
+                if case == "bosses_left_missing"
+                else 0
+            ),
+            act=2 if case == "not_final_act" else 3,
+            act_definition_id="ACT.HIVE" if case == "other_act" else "ACT.GLORY",
+            cost=native.ActionCost(gold=10) if case == "action_has_cost" else MISSING,
+        )
+        states = [unsafe, terminal(unsafe)]
+        expected_actions = ["interaction:53:1"]
+        expected_auto = []
+        chosen_ref = "interaction:53:1"
+
+    http = AutoHTTP(
+        states,
+        [
+            reply(
+                (
+                    "choose",
+                    "run_act",
+                    f'{{"steps":[{{"kind":"interact","action":"{chosen_ref}"}}]}}',
+                )
+            )
+        ],
+    )
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(http.mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id=f"unsafe-{case}",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(http.model)),
+        ) as session:
+            await session.run()
+        assert len(http.inputs) == 1
+        assert [
+            step.step.action for step in http.actions if isinstance(step.step, native.Interact)
+        ] == expected_actions
+        archive = Journal.open(tmp_path / "archive.sqlite")
+        automatic = [
+            message
+            for message in archive.requests()[0].input
+            if isinstance(message, AutomaticSnapshot)
+        ]
+        assert [message.content.automatic_progress.label for message in automatic] == expected_auto
+        archive.close()
+
+    asyncio.run(scenario())
+
+
+def test_glory_epilogue_auto_stops_on_phase_change_to_combat(tmp_path: Path) -> None:
+    from test_lifecycle import unavailable_history
+    from test_mod_client import COMBAT
+
+    from sts2_harness.game import RunEndReason
+
+    page1 = glory_epilogue_page("interaction:53:1", "啾", option_ref="option:53:1", sequence=2429)
+    combat_base = native.Observation.model_validate_json(COMBAT)
+    assert isinstance(combat_base.state, native.CombatState)
+    combat = combat_base.model_copy(
+        update={
+            "stamp": page1.stamp.model_copy(update={"observation_sequence": 2434}),
+            "location": native.Location(
+                game_instance_id="game",
+                run_id="run",
+                node_id="node-54",
+                owner=native.DecisionOwner.COMBAT,
+            ),
+            "state": combat_base.state.model_copy(
+                update={
+                    "progress": combat_base.state.progress.model_copy(
+                        update={"act": 3, "acts": 3, "definition_id": "ACT.GLORY"}
+                    )
+                }
+            ),
+        }
+    )
+    http = AutoHTTP(
+        [page1, combat, terminal(combat)],
+        [reply(("turn", "combat_act", '{"steps":[{"kind":"end_turn"}]}'))],
+    )
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/inspect":
+            return unavailable_history(http.current)
+        return http.mod(request)
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="epilogue-phase-change",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(http.model)),
+        ) as session:
+            ended = await session.run()
+        assert ended.reason is RunEndReason.TERMINAL
+        assert len(http.inputs) == 1
+        assert isinstance(http.actions[0].step, native.Interact)
+        assert http.actions[0].step.action == "interaction:53:1"
+        assert isinstance(http.actions[1].step, native.EndTurn)
+
+    asyncio.run(scenario())
