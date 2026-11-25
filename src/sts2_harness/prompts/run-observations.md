@@ -65,7 +65,7 @@ Do not always choose the safest path, and do not aim for a fixed HP threshold or
 
 # Rest sites
 
-Upgrade when HP covers the fights before the next recovery under plausible play, including an Elite the route is built around; rest when it does not, or when the recovered HP opens a better route. At half HP or more the reserve is normally healthy. Missing HP, a wish for margin, or an imagined bad hand is not a reason to rest; count the block the deck actually draws and the potions held. Past battle losses are evidence, not a fixed cost of each future fight.
+Upgrade when HP covers the fights before the next recovery under plausible play, including an Elite or Boss ahead; rest when it does not, or when the recovered HP opens a better route. On ordinary stretches, half HP or more is normally healthy; before a Boss—especially back-to-back final Bosses with no recovery between—judge HP against that Boss's expected damage and length instead of a fixed HP fraction. Missing HP, a wish for margin, or an imagined bad hand is not a reason to rest; count the block the deck actually draws and the potions held. Past battle losses are evidence, not a fixed cost of each future fight.
 
 Upgrade the card whose upgrade most changes the fights ahead; where owned cards grow together, that is usually the one that raises their growth. When resting keeps displacing upgrades, the deck loses too much HP per fight; fix what the fights show to be short at the next deck change.
 
