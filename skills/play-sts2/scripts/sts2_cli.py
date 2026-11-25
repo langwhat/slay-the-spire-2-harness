@@ -1732,6 +1732,7 @@ def cmd_call(
         print(text)
         return 1
     cache = _load_cache(session)
+    was_new_run = _reset_session_if_new_run(payload, cache)
     caller_outcome = _as_dict(payload.get("outcome"))
     caller_status = _str(caller_outcome.get("status"))
     confirmed_prefix: int | None = None
@@ -1764,7 +1765,7 @@ def cmd_call(
         render_reply(
             payload,
             cache,
-            full=full,
+            full=full or was_new_run,
             tool_name=tool_name,
             force_map_topology=force_map_topology,
             handoff_trim=handoff_trim,

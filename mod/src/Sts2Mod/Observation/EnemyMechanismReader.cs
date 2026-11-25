@@ -42,6 +42,16 @@ internal static class EnemyMechanismReader
             System.Threading.Interlocked.Read(ref _cachedExtractionCount),
             System.Threading.Interlocked.Read(ref _cachedExtractionTicks) * 1000.0 / Stopwatch.Frequency);
 
+    internal static string FormatLatencySummary()
+    {
+        var enemy = ReadLatencyMetrics();
+        var encounter = EncounterMechanismReader.ReadLatencyMetrics();
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"enemy_cold={enemy.ColdCount} ({enemy.ColdMs:F2}ms), enemy_cached={enemy.CachedCount} ({enemy.CachedMs:F2}ms), "
+            + $"encounter_cold={encounter.ColdCount} ({encounter.ColdMs:F2}ms), encounter_cached={encounter.CachedCount} ({encounter.CachedMs:F2}ms)");
+    }
+
     private static void PushWarning(string message)
     {
         if (MegaCrit.Sts2.Core.Nodes.NGame.Instance is not null)

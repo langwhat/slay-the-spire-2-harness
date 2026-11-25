@@ -80,10 +80,31 @@ def _message_observation(
     return None
 
 
+def extract_mechanisms(messages: ModelInput) -> tuple[dict[str, JsonValue], ...]:
+    extracted: list[dict[str, JsonValue]] = []
+    for message in messages:
+        if isinstance(message, BaselineMessage):
+            baseline = message.content.get("context_baseline")
+            if isinstance(baseline, dict):
+                observation = baseline.get("observation")
+                if isinstance(observation, dict):
+                    rules = observation.get("mechanisms")
+                    if isinstance(rules, list):
+                        for rule in rules:
+                            if isinstance(rule, dict):
+                                extracted.append(rule)
+            continue
+        projected = _message_observation(message)
+        if projected is not None and projected.mechanisms is not MISSING:
+            extracted.extend(projected.mechanisms)
+    return tuple(extracted)
+
+
 __all__ = [
     "CombatActInput",
     "CombatReviewInput",
     "Context",
+    "extract_mechanisms",
     "QueryToolResult",
     "ReadCompleted",
     "ActionToolResult",
@@ -150,6 +171,10 @@ class Context:
         self._history.append(TextMessage(TextRole.USER, GuidanceContent(guidance=changed)))
         self._record_documents(changed)
         self._record_guidance(changed)
+
+    @property
+    def role(self) -> native.DecisionOwner:
+        return self._role
 
     @property
     def _delivery(self) -> RunDelivery:

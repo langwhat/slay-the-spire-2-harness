@@ -33,7 +33,7 @@ from sts2_harness.decisions import (
     TaskComplete,
 )
 from sts2_harness.deck import next_card_reward
-from sts2_harness.diagnostics import AutoFinished, Diagnostics
+from sts2_harness.diagnostics import AutoFinished, Diagnostics, MechanismTracker
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.game import GameReadError
 from sts2_harness.knowledge import DocumentView, GuidanceContent
@@ -193,6 +193,7 @@ class RunAgent(Agent):
         diagnostics: Diagnostics | None = None,
         user_input: UserInputSource | None = None,
         card_reports: list[tuple[AutomaticProgress, ActionToolResult]] | None = None,
+        mechanism_tracker: MechanismTracker | None = None,
     ) -> None:
         if tools.notes is None:
             raise ValueError("Run requires the run's notes owner.")
@@ -203,6 +204,7 @@ class RunAgent(Agent):
             materials=materials,
             diagnostics=diagnostics,
             user_input=user_input,
+            mechanism_tracker=mechanism_tracker,
         )
         self._client = client
         self._notes = tools.notes

@@ -78,6 +78,7 @@ class EventKind(StrEnum):
     BATTLE_FINISHED = "battle_finished"
     NOTE_BUDGET_EXCEEDED = "note_budget_exceeded"
     MECHANISM_METRICS = "mechanism_metrics"
+    MECHANISM_METRICS_SUMMARY = "mechanism_metrics_summary"
 
 
 class Event(native.WireModel):
@@ -119,17 +120,28 @@ class MechanismMetrics(Event):
     event: EventKind = EventKind.MECHANISM_METRICS
     mechanism_count: int
     mechanism_characters: int
-    mechanism_tokens: int
+    estimated_mechanism_tokens: int
     repeated_mechanism_count: int
-    repeated_mechanism_tokens: int
+    estimated_repeated_mechanism_tokens: int
 
 
-def measure_mechanisms(
+class MechanismMetricsSummary(Event):
+    event: EventKind = EventKind.MECHANISM_METRICS_SUMMARY
+    requests_with_mechanisms: int
+    unique_mechanism_count: int
+    mechanism_count: int
+    mechanism_characters: int
+    estimated_mechanism_tokens: int
+    repeated_mechanism_count: int
+    estimated_repeated_mechanism_tokens: int
+
+
+def _measure_mechanisms_with_bytes(
     mechanisms: Sequence[Mapping[str, JsonValue]],
     *,
     seen_keys: set[tuple[str, str, str | None, str | None]] | None = None,
     role: native.DecisionOwner | None = None,
-) -> MechanismMetrics:
+) -> tuple[MechanismMetrics, int, int]:
     total_chars = 0
     total_bytes = 0
     repeated_count = 0
@@ -157,14 +169,74 @@ def measure_mechanisms(
                 repeated_bytes += encoded_bytes
             else:
                 seen_keys.add(key)
-    return MechanismMetrics(
+    metrics = MechanismMetrics(
         role=role,
         mechanism_count=len(mechanisms),
         mechanism_characters=total_chars,
-        mechanism_tokens=(total_bytes + 3) // 4 if total_bytes else 0,
+        estimated_mechanism_tokens=(total_bytes + 3) // 4 if total_bytes else 0,
         repeated_mechanism_count=repeated_count,
-        repeated_mechanism_tokens=(repeated_bytes + 3) // 4 if repeated_bytes else 0,
+        estimated_repeated_mechanism_tokens=(repeated_bytes + 3) // 4 if repeated_bytes else 0,
     )
+    return metrics, total_bytes, repeated_bytes
+
+
+def measure_mechanisms(
+    mechanisms: Sequence[Mapping[str, JsonValue]],
+    *,
+    seen_keys: set[tuple[str, str, str | None, str | None]] | None = None,
+    role: native.DecisionOwner | None = None,
+) -> MechanismMetrics:
+    return _measure_mechanisms_with_bytes(mechanisms, seen_keys=seen_keys, role=role)[0]
+
+
+class MechanismTracker:
+    """Run-scoped accumulator for delivered mechanism size and cross-node repeats."""
+
+    def __init__(self) -> None:
+        self._seen_keys: set[tuple[str, str, str | None, str | None]] = set()
+        self._requests = 0
+        self._count = 0
+        self._characters = 0
+        self._total_bytes = 0
+        self._repeated_count = 0
+        self._repeated_bytes = 0
+
+    def record(
+        self,
+        mechanisms: Sequence[Mapping[str, JsonValue]],
+        *,
+        role: native.DecisionOwner | None = None,
+        diagnostics: "Diagnostics | None" = None,
+    ) -> MechanismMetrics | None:
+        if not mechanisms:
+            return None
+        metrics, total_bytes, repeated_bytes = _measure_mechanisms_with_bytes(
+            mechanisms, seen_keys=self._seen_keys, role=role
+        )
+        self._requests += 1
+        self._count += metrics.mechanism_count
+        self._characters += metrics.mechanism_characters
+        self._total_bytes += total_bytes
+        self._repeated_count += metrics.repeated_mechanism_count
+        self._repeated_bytes += repeated_bytes
+        if diagnostics is not None:
+            diagnostics.emit(metrics)
+        return metrics
+
+    def summary(self) -> MechanismMetricsSummary | None:
+        if self._requests == 0:
+            return None
+        return MechanismMetricsSummary(
+            requests_with_mechanisms=self._requests,
+            unique_mechanism_count=len(self._seen_keys),
+            mechanism_count=self._count,
+            mechanism_characters=self._characters,
+            estimated_mechanism_tokens=(self._total_bytes + 3) // 4 if self._total_bytes else 0,
+            repeated_mechanism_count=self._repeated_count,
+            estimated_repeated_mechanism_tokens=(
+                (self._repeated_bytes + 3) // 4 if self._repeated_bytes else 0
+            ),
+        )
 
 
 class ResultEvent(Event):
@@ -389,7 +461,7 @@ def _event_level(event: Event) -> Level:
 
 
 def _event_component(event: Event) -> Literal["game_control", "model", "session"]:
-    if isinstance(event, (EncodingMetadata, MechanismMetrics)):
+    if isinstance(event, (EncodingMetadata, MechanismMetrics, MechanismMetricsSummary)):
         return "model"
     if isinstance(event, NoteBudgetExceeded):
         return "session"

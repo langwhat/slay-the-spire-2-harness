@@ -14,7 +14,7 @@ from sts2_harness.decisions import DecisionSource
 from sts2_harness.deck import CardChoiceCompletion
 from sts2_harness.deck_role import DeckAgent, DeckRole
 from sts2_harness.deck_stats import DeckStatistics
-from sts2_harness.diagnostics import Diagnostics, RecoveryExhausted
+from sts2_harness.diagnostics import Diagnostics, MechanismTracker, RecoveryExhausted
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
@@ -89,6 +89,9 @@ class RunSession:
         self._card_reports: list[tuple[AutomaticProgress, ActionToolResult]] = []
         self._current_run: RunRole | None = None
         self._flow: RunFlow | None = None
+        self._mechanism_tracker: MechanismTracker | None = (
+            MechanismTracker() if diagnostics is not None else None
+        )
 
     def _recovery_exhausted(self, failures: int) -> None:
         if self._diagnostics is not None:
@@ -134,6 +137,7 @@ class RunSession:
                 diagnostics=self._diagnostics,
                 user_input=self._user_input,
                 card_reports=self._card_reports,
+                mechanism_tracker=self._mechanism_tracker,
             )
         )
         self._current_run = run
@@ -155,7 +159,13 @@ class RunSession:
     async def run(self) -> RunEnded:
         if self._flow is None:
             raise RuntimeError("Enter the run session before running its flow.")
-        return await self._flow.run()
+        try:
+            return await self._flow.run()
+        finally:
+            if self._diagnostics is not None and self._mechanism_tracker is not None:
+                summary = self._mechanism_tracker.summary()
+                if summary is not None:
+                    self._diagnostics.emit(summary)
 
     def _tools(self, role: native.DecisionOwner, *, focused_deck: bool = False) -> ToolCatalog:
         return ToolCatalog(
@@ -202,6 +212,7 @@ class RunSession:
             completion=self._dependencies.card_completion,
             diagnostics=self._diagnostics,
             user_input=self._user_input,
+            mechanism_tracker=self._mechanism_tracker,
         )
 
     def _materials(
@@ -262,4 +273,5 @@ class RunSession:
             materials=self._materials(MaterialRole.COMBAT, opening),
             diagnostics=self._diagnostics,
             user_input=self._user_input,
+            mechanism_tracker=self._mechanism_tracker,
         )

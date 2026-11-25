@@ -29,7 +29,7 @@ from sts2_harness.deck import (
     deck_observation,
     same_card_options,
 )
-from sts2_harness.diagnostics import Diagnostics
+from sts2_harness.diagnostics import Diagnostics, MechanismTracker
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
 from sts2_harness.knowledge import DocumentView
 from sts2_harness.llm.messages import ModelClient, ToolCall
@@ -261,6 +261,7 @@ class DeckAgent(Agent):
         completion: Callable[[CardChoiceCompletion], None] | None = None,
         user_input: UserInputSource | None = None,
         diagnostics: Diagnostics | None = None,
+        mechanism_tracker: MechanismTracker | None = None,
     ) -> None:
         if tools.notes is None:
             raise ValueError("Deck requires the run's notes owner.")
@@ -273,6 +274,7 @@ class DeckAgent(Agent):
             materials=materials,
             diagnostics=diagnostics,
             user_input=user_input,
+            mechanism_tracker=mechanism_tracker,
         )
         self._client = client
         self._notes = tools.notes

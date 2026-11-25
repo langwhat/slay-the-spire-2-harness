@@ -12,7 +12,7 @@ from sts2_harness.capacity import (
     RecoveryDecision,
 )
 from sts2_harness.client import models as native
-from sts2_harness.context import Context
+from sts2_harness.context import Context, extract_mechanisms
 from sts2_harness.decisions import (
     ActionDecision,
     ActionProposal,
@@ -25,7 +25,7 @@ from sts2_harness.decisions import (
     RewardDecision,
     TaskComplete,
 )
-from sts2_harness.diagnostics import Diagnostics
+from sts2_harness.diagnostics import Diagnostics, MechanismTracker
 from sts2_harness.execution.recovery import DecisionInterrupted, ModelFailure, ToolRecoveryBudget
 from sts2_harness.game import GameLifetimeEnded
 from sts2_harness.knowledge import DocumentView
@@ -77,6 +77,7 @@ class Agent(ABC):
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
         user_input: UserInputSource | None = None,
+        mechanism_tracker: MechanismTracker | None = None,
     ) -> None:
         self._diagnostics = diagnostics
         self._user_input = user_input
@@ -87,6 +88,15 @@ class Agent(ABC):
         self._context: Context | None = None
         self._pending_call: ToolCall | None = None
         self._usage_anchor: ModelUsageAnchor | None = None
+        self._mechanism_tracker = (
+            mechanism_tracker
+            if mechanism_tracker is not None
+            else MechanismTracker()
+            if diagnostics is not None
+            else None
+        )
+        self._measured_context: Context | None = None
+        self._measured_history_len = 0
 
     @abstractmethod
     def _initial_context(
@@ -126,9 +136,28 @@ class Agent(ABC):
             observation,
         )
 
+    def _record_mechanisms(
+        self, context: Context, prepared: PreparedRequest, *, compacted: bool
+    ) -> None:
+        if self._mechanism_tracker is None:
+            return
+        if context is not self._measured_context or compacted:
+            self._measured_context = context
+            self._measured_history_len = 0
+        new_messages = prepared.input[self._measured_history_len :]
+        self._measured_history_len = len(prepared.input)
+        mechanisms = extract_mechanisms(new_messages)
+        if mechanisms:
+            self._mechanism_tracker.record(
+                mechanisms, role=context.role, diagnostics=self._diagnostics
+            )
+
     async def _request(self, context: Context) -> ModelReply:
         assert self._llm is not None
         prepared, evidence = await self.compact(context)
+        self._record_mechanisms(
+            context, prepared, compacted=evidence.decision is CompactionDecision.COMPACTED
+        )
         try:
             reply = await self._llm.complete_prepared(prepared, preparation=evidence)
             self._remember_usage(prepared, reply)
@@ -177,6 +206,7 @@ class Agent(ABC):
                 CompactionValidation.PASSED,
                 rejected.reference,
             )
+            self._record_mechanisms(context, compacted, compacted=True)
             reply = await self._llm.complete_prepared(compacted, preparation=recovery)
             self._remember_usage(compacted, reply)
             return reply

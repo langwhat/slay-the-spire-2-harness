@@ -22,7 +22,13 @@ from sts2_harness.decisions import (
     ReviewTask,
     TaskComplete,
 )
-from sts2_harness.diagnostics import BattleEnd, BattleFinished, BattleStarted, Diagnostics
+from sts2_harness.diagnostics import (
+    BattleEnd,
+    BattleFinished,
+    BattleStarted,
+    Diagnostics,
+    MechanismTracker,
+)
 from sts2_harness.execution import Executed, Execution, Rejected, RouteChanged
 from sts2_harness.execution.recovery import Interrupted, ModelFailure, ToolRecoveryBudget
 from sts2_harness.fights import FightKind
@@ -78,6 +84,7 @@ class CombatAgent(Agent):
         materials: MaterialReader | None = None,
         diagnostics: Diagnostics | None = None,
         user_input: UserInputSource | None = None,
+        mechanism_tracker: MechanismTracker | None = None,
     ) -> None:
         super().__init__(
             llm,
@@ -86,6 +93,7 @@ class CombatAgent(Agent):
             materials=materials,
             diagnostics=diagnostics,
             user_input=user_input,
+            mechanism_tracker=mechanism_tracker,
         )
         self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._opening_notes = opening_notes

@@ -2164,6 +2164,27 @@ public sealed class NativeExtractionTests
         Assert.Equal(MechanismCompleteness.Unavailable, EnemyMechanismReader.ClassifyCompleteness(unavailableText, unavailableGaps.Count));
     }
 
+    [Fact]
+    public void MechanismLatencySummary_FormatsEnemyAndEncounterCounters()
+    {
+        var previousCulture = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo("de-DE");
+            var summary = EnemyMechanismReader.FormatLatencySummary();
+            Assert.Contains("enemy_cold=", summary, StringComparison.Ordinal);
+            Assert.Contains("enemy_cached=", summary, StringComparison.Ordinal);
+            Assert.Contains("encounter_cold=", summary, StringComparison.Ordinal);
+            Assert.Contains("encounter_cached=", summary, StringComparison.Ordinal);
+            Assert.Matches(@"enemy_cold=\d+ \(\d+\.\d{2}ms\)", summary);
+            Assert.Matches(@"encounter_cold=\d+ \(\d+\.\d{2}ms\)", summary);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = previousCulture;
+        }
+    }
+
     private abstract class SyntheticOverloadedHookBase : PowerModel
     {
         public virtual Task AfterSideTurnStart(int extraPhase) => Task.CompletedTask;

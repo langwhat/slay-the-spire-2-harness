@@ -666,3 +666,121 @@ def test_cmd_call_roundtrip_against_fake_http_server(
         assert requests_log == [("/tools/run_inspect", {"area": "state"})]
     finally:
         server.shutdown()
+
+
+@pytest.mark.parametrize("auto_on_skip", [False, True])
+def test_cmd_call_new_run_after_raw_preserves_skipped_card_guard(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    auto_on_skip: bool,
+) -> None:
+    def cache_path(session: str) -> Path:
+        return tmp_path / f"{session}.json"
+
+    monkeypatch.setattr(_MOD, "_cache_path", cache_path)
+
+    # Seed existing session cache from an older run at identical act/floor/character.
+    old_cache: JsonObj = {
+        "game_instance_id": "game-1",
+        "run_id": "run-1",
+        "last_act": 1,
+        "last_floor": 2,
+        "player_definition_id": "CHARACTER.IRONCLAD",
+        "was_terminal": False,
+        "calls": 7,
+        "defs": {"CARD.STRIKE_IRONCLAD": "Deal 6 damage."},
+        "opened_card_offers": ["game-1:run-1:node-old:offer-old"],
+    }
+    cache_path("shared").write_text(json.dumps(old_cache), encoding="utf-8")
+
+    card_offer = {
+        "ref": "offer-card-1",
+        "kind": "card",
+        "requires_selection": True,
+        "contents": [],
+        "actions": ["interaction:1:12"],
+    }
+    card_action = {
+        "ref": "interaction:1:12",
+        "label": "Choose a Card",
+        "enabled": True,
+        "subject": "offer-card-1",
+    }
+    new_run_state = _base_run_payload(
+        run_id="run-2",
+        node_id="node-new",
+        offers=[card_offer],
+        actions=[card_action],
+    )
+    # Sanity-check that without the skip guard, auto-advance would open this card reward.
+    unguarded_step = _next_auto(
+        new_run_state,
+        opened_shops=set(),
+        opened_card_offers=set(),
+        allow_stateful_auto=True,
+        skip_card_open=False,
+    )
+    assert unguarded_step is not None
+    assert unguarded_step[0] == {"kind": "interact", "action": "interaction:1:12"}
+    server, url, requests_log = _start_fake_server(
+        [
+            new_run_state,  # 1. --raw inspect (does not touch cache)
+            new_run_state,  # 2. run_act open + skip card reward
+            new_run_state,  # 3. follow-up run_inspect --auto
+        ]
+    )
+    try:
+        # Step 1: raw inspect on new run leaves old session cache untouched.
+        rc_raw = _cmd_call(
+            url, "run_inspect", '{"area":"state"}', session="shared", full=False, raw=True
+        )
+        assert rc_raw == 0
+        capsys.readouterr()
+
+        # Step 2: first normal response on new run opens & skips the card reward.
+        skip_args = json.dumps(
+            {
+                "steps": [
+                    {"kind": "interact", "action": "interaction:1:12"},
+                    {"kind": "select", "refs": []},
+                ]
+            }
+        )
+        rc_skip = _cmd_call(
+            url,
+            "run_act",
+            skip_args,
+            session="shared",
+            full=False,
+            raw=False,
+            auto=auto_on_skip,
+        )
+        assert rc_skip == 0
+        skip_out = capsys.readouterr().out
+        assert "session_calls=1" in skip_out
+        assert "Deal 6 damage." in skip_out
+
+        saved = cast(JsonObj, json.loads(cache_path("shared").read_text(encoding="utf-8")))
+        assert saved["run_id"] == "run-2"
+        assert saved["opened_card_offers"] == ["game-1:run-2:node-new:offer-card-1"]
+
+        # Step 3: next auto inspect must NOT re-open the skipped card offer.
+        rc_auto = _cmd_call(
+            url,
+            "run_inspect",
+            '{"area":"state"}',
+            session="shared",
+            full=False,
+            raw=False,
+            auto=True,
+        )
+        assert rc_auto == 0
+        capsys.readouterr()
+        assert [path for path, _ in requests_log] == [
+            "/tools/run_inspect",
+            "/tools/run_act",
+            "/tools/run_inspect",
+        ]
+    finally:
+        server.shutdown()

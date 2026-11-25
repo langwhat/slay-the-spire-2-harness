@@ -2,27 +2,33 @@
 
 import asyncio
 import json
+import logging
 from io import StringIO
 from pathlib import Path
 from typing import cast
 
 import httpx2 as httpx
 from pydantic import JsonValue
+from test_combat import reply
 from test_mod_client import COMBAT, RUN
+from test_responses import configuration
 
 from sts2_harness.auto import battle_reward, choose_auto
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import CatalogResult, InspectResult
-from sts2_harness.context import Context
+from sts2_harness.context import Context, extract_mechanisms
 from sts2_harness.context.map_projection import upcoming_act_elites
 from sts2_harness.context.models import CombatActInput, RunActInput
-from sts2_harness.decisions import ActionStep
+from sts2_harness.decisions import ActionStep, ActTask
 from sts2_harness.deck import deck_observation
 from sts2_harness.diagnostics import (
     Diagnostics,
     Event,
     EventKind,
+    MechanismMetrics,
+    MechanismMetricsSummary,
+    MechanismTracker,
     NoteBudgetExceeded,
     NoteBudgetField,
     measure_mechanisms,
@@ -30,10 +36,12 @@ from sts2_harness.diagnostics import (
 from sts2_harness.entry_materials import entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import ToolRecoveryBudget
-from sts2_harness.game import LiveGame
+from sts2_harness.game import LiveGame, RunEnded, RunEndReason
 from sts2_harness.journal import Manifest, SessionMaterials
 from sts2_harness.knowledge import MaterialRole, SubjectId
+from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelClient, TextMessage, ToolCall
+from sts2_harness.loop import CombatFactory, RunFlow
 from sts2_harness.materials import DocumentSource, FileDocuments
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import OTHER_SOFT_LIMIT, SUMMARY_SOFT_LIMIT, NotesState, NotesView
@@ -258,6 +266,9 @@ def test_partial_and_unavailable_enemy_mechanisms_reach_combat_context() -> None
     compacted_text = _rendered_texts(context)
     assert '"completeness":"partial"' in compacted_text
     assert '"completeness":"unavailable"' in compacted_text
+    extracted = extract_mechanisms(context.model_input())
+    extracted_ids = {did for item in extracted if isinstance(did := item.get("definition_id"), str)}
+    assert {"MONSTER.PARTIAL", "MONSTER.BROKEN"} <= extracted_ids
 
 
 def test_deck_receives_reachable_elite_mechanisms_and_guidance_only_when_elites_ahead(
@@ -461,13 +472,221 @@ def test_measure_mechanisms_tracks_tokens_and_cross_node_repeats() -> None:
     assert first.event is EventKind.MECHANISM_METRICS
     assert first.mechanism_count == 2
     assert first.mechanism_characters > 0
-    assert first.mechanism_tokens > 0
+    assert first.estimated_mechanism_tokens > 0
     assert first.repeated_mechanism_count == 0
-    assert first.repeated_mechanism_tokens == 0
+    assert first.estimated_repeated_mechanism_tokens == 0
 
     second = measure_mechanisms(batch1, seen_keys=seen, role=native.DecisionOwner.RUN)
     assert second.repeated_mechanism_count == 2
-    assert second.repeated_mechanism_tokens == second.mechanism_tokens
+    assert second.estimated_repeated_mechanism_tokens == second.estimated_mechanism_tokens
+
+
+def test_run_session_wires_mechanism_metrics_and_emits_info_summary(tmp_path: Path) -> None:
+    base_run = native.Observation.model_validate_json(RUN)
+    boss_mech = native.MechanismView(
+        kind=native.MechanismKind.OTHER,
+        definition_id="ENCOUNTER.BOSS",
+        name="Boss",
+        text="First move: SLAM",
+        owner="act",
+    )
+    run_obs = base_run.model_copy(update={"mechanisms": (boss_mech,)})
+    base_combat = native.Observation.model_validate_json(COMBAT)
+    ritual_mech = native.MechanismView(
+        kind=native.MechanismKind.POWER,
+        definition_id="POWER.RITUAL",
+        name="Ritual",
+        text="Gain Strength at end of turn.",
+        owner="enemy-1",
+    )
+    combat_obs = base_combat.model_copy(update={"mechanisms": (ritual_mech,)})
+    combat_obs_2 = combat_obs.model_copy(
+        update={
+            "location": combat_obs.location.model_copy(update={"node_id": "node-combat-2"}),
+            "mechanisms": (
+                ritual_mech,
+                native.MechanismView(
+                    kind=native.MechanismKind.POWER,
+                    definition_id="POWER.CURL_UP",
+                    name="Curl Up",
+                    text="Gain Block on first hit.",
+                    owner="enemy-1",
+                ),
+            ),
+        }
+    )
+
+    responses = iter(
+        [
+            reply(("call-notes", "run_notes", '{"mode":"read"}')),
+            reply(
+                (
+                    "call-act",
+                    "run_act",
+                    '{"steps":[{"kind":"interact","action":"act-1"}],"reason":"go"}',
+                )
+            ),
+            reply(("call-combat-1", "combat_act", '{"steps":[{"kind":"end_turn"}],"reason":"b1"}')),
+            reply(("call-combat-2", "combat_act", '{"steps":[{"kind":"end_turn"}],"reason":"b2"}')),
+        ]
+    )
+
+    def fake_model_http(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=next(responses)
+        )
+
+    debug_stream = StringIO()
+    info_stream = StringIO()
+    events: list[Event] = []
+
+    class _CaptureDiagnostics(Diagnostics):
+        def emit(self, event: Event) -> None:
+            events.append(event)
+            super().emit(event)
+
+    info_diagnostics = _CaptureDiagnostics("metrics-info", console=info_stream, level=logging.INFO)
+    debug_diagnostics = Diagnostics("metrics-debug", console=debug_stream, level=logging.DEBUG)
+
+    current_obs: list[native.Observation] = [run_obs]
+
+    def fake_mod_http(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/state":
+            return httpx.Response(200, text=current_obs[0].model_dump_json())
+        if request.url.path == "/inspect":
+            reply_obj = native.InspectCompleted(
+                status=native.ResultStatus.COMPLETED,
+                observation=current_obs[0],
+                data=native.HistoryData(
+                    cards_played_this_combat=(),
+                    cards_played_this_turn=(),
+                    cards_exhausted_this_turn=(),
+                ),
+            )
+            return httpx.Response(200, text=reply_obj.model_dump_json())
+        raise AssertionError(f"unexpected mod call: {request.method} {request.url}")
+
+    async def exercise() -> None:
+        # Exercise real Llm + Agent._request across RunAgent (2 turns) and CombatAgent (1 turn)
+        # sharing a single RunSession MechanismTracker.
+        async with (
+            ModClient("http://mod", transport=httpx.MockTransport(fake_mod_http)) as client,
+            Llm(configuration(tmp_path), transport=httpx.MockTransport(fake_model_http)) as llm,
+        ):
+            live = LiveGame(client, namespace="test", game_instance_id="game", run_id="run")
+            manifest = Manifest(
+                recording_id="rec-metrics",
+                core_version="0.1.0",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+                materials=SessionMaterials(
+                    act_guidance={},
+                    battle_guidance=(),
+                    entry_documents_enabled=False,
+                ),
+            )
+
+            def model_factory(_purpose: ModelPurpose, _stream: str) -> ModelClient:
+                return llm
+
+            class _TwoRoleFlow:
+                def __init__(
+                    self,
+                    run_role: RunRole,
+                    combat_factory: CombatFactory,
+                    notes: Notes,
+                ) -> None:
+                    self._run = run_role
+                    self._combat_factory = combat_factory
+                    self._notes = notes
+
+                async def run(self) -> RunEnded:
+                    task_run = ActTask(
+                        expected_route=native.RouteKey.model_validate(run_obs.location.model_dump())
+                    )
+                    await self._run.decide(task_run, run_obs)
+                    current_obs[0] = combat_obs
+                    combat = self._combat_factory(combat_obs, self._notes.read(), None)
+                    task_combat = ActTask(
+                        expected_route=native.RouteKey.model_validate(
+                            combat_obs.location.model_dump()
+                        )
+                    )
+                    await combat.decide(task_combat, combat_obs)
+                    current_obs[0] = combat_obs_2
+                    combat_2 = self._combat_factory(combat_obs_2, self._notes.read(), None)
+                    task_combat_2 = ActTask(
+                        expected_route=native.RouteKey.model_validate(
+                            combat_obs_2.location.model_dump()
+                        )
+                    )
+                    await combat_2.decide(task_combat_2, combat_obs_2)
+                    return RunEnded(RunEndReason.TERMINAL, run_obs)
+
+            def flow_factory(
+                _execution: Execution,
+                _recovery: ToolRecoveryBudget,
+                notes: Notes,
+                run_role: RunRole,
+                combat_factory: CombatFactory,
+            ) -> RunFlow:
+                return cast(RunFlow, _TwoRoleFlow(run_role, combat_factory, notes))
+
+            deps = SessionDependencies(
+                game=live,
+                model=model_factory,
+                prompts=PackagedPrompts(),
+                documents=FileDocuments(()),
+            )
+            session = RunSession(
+                manifest,
+                deps,
+                flow_factory=flow_factory,
+                diagnostics=info_diagnostics,
+            )
+            async with session:
+                ended = await session.run()
+                assert ended.reason is RunEndReason.TERMINAL
+
+        # Direct DEBUG check on MechanismTracker emits per-request MechanismMetrics.
+        tracker = MechanismTracker()
+        tracker.record(
+            [{"kind": "other", "definition_id": "ENCOUNTER.BOSS", "name": "Boss", "text": "SLAM"}],
+            role=native.DecisionOwner.RUN,
+            diagnostics=debug_diagnostics,
+        )
+        assert '"event":"mechanism_metrics"' in debug_stream.getvalue()
+        assert '"estimated_mechanism_tokens"' in debug_stream.getvalue()
+
+    asyncio.run(exercise())
+
+    per_request = [e for e in events if isinstance(e, MechanismMetrics)]
+    summaries = [e for e in events if isinstance(e, MechanismMetricsSummary)]
+    # Turn 1 of RunAgent delivered boss_mech (1 new, 0 repeated);
+    # Turn 2 of RunAgent added no new mechanisms (not double-counted);
+    # Battle 1 delivered ritual (1 new, 0 repeated);
+    # Battle 2 delivered ritual + curl_up (2 total, 1 cross-node repeat).
+    assert len(per_request) == 3
+    assert per_request[0].mechanism_count == 1
+    assert per_request[0].repeated_mechanism_count == 0
+    assert per_request[1].mechanism_count == 1
+    assert per_request[1].repeated_mechanism_count == 0
+    assert per_request[2].mechanism_count == 2
+    assert per_request[2].repeated_mechanism_count == 1
+    assert len(summaries) == 1
+    summary = summaries[0]
+    assert summary.requests_with_mechanisms == 3
+    assert summary.unique_mechanism_count == 3
+    assert summary.mechanism_count == 4
+    assert summary.repeated_mechanism_count == 1
+    assert summary.estimated_mechanism_tokens > 0
+    assert summary.estimated_repeated_mechanism_tokens > 0
+    # Default INFO console output includes the run summary but suppresses DEBUG per-request noise.
+    info_output = info_stream.getvalue()
+    assert '"event":"mechanism_metrics_summary"' in info_output
+    assert '"event":"mechanism_metrics"' not in info_output
+    assert '"estimated_mechanism_tokens"' in info_output
 
 
 def test_soft_note_budget_accepts_over_limit_writes_without_rejecting() -> None:

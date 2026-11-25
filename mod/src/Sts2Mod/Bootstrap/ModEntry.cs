@@ -68,6 +68,7 @@ public static class ModEntry
         ControlState.SetMode(AgentControlMode.Paused);
         ReasonFeed.Clear();
         CardSelectionInterceptor.ResetForRunBoundary();
+        GD.Print($"[sts2agent] Mechanism extraction metrics (process cumulative): {EnemyMechanismReader.FormatLatencySummary()}.");
     }
 
     internal static void OnRunCleanUp()
