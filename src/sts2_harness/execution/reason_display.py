@@ -64,7 +64,8 @@ def _unwrap(token: str) -> str:
 
 
 def _already_named(prefix: str, name: str) -> bool:
-    return prefix.rstrip().endswith(name)
+    stripped = prefix.rstrip()
+    return stripped.endswith(name) or stripped.endswith(f"{name}+")
 
 
 def _sub_with_prefix(
@@ -235,11 +236,12 @@ class ReasonDisplaySanitizer:
             return name
 
         def replace_paren(prefix: str, match: re.Match[str]) -> str:
-            if not prefix.strip():
-                tokens = _RAW_TOKEN_RE.findall(match.group(1))
-                name = self._lookup_first(tokens)
-                return name if name is not None else ""
-            return ""
+            tokens = _RAW_TOKEN_RE.findall(match.group(1))
+            name = self._lookup_first(tokens)
+            if name is None or _already_named(prefix, name):
+                return ""
+            leading = match.group(0)[: match.start(1) - match.start(0)]
+            return f"{leading}{name}" if prefix.strip() and leading else name
 
         def replace_token(prefix: str, match: re.Match[str]) -> str:
             name = self._lookup(match.group(0))

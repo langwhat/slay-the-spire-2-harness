@@ -1638,6 +1638,8 @@ def test_display_reason_sanitizes_internal_ids_and_refs_while_preserving_raw_jou
                 observation=obs_zhs,
             )
             await execution.display_reason("先打戏法 (card:13:323)，再打猛击（CARD.ALPHA）。")
+            await execution.display_reason("先打（CARD.ALPHA）再结束回合。")
+            await execution.display_reason("先打（CARD.UNKNOWN）再结束回合。")
             await execution.display_reason("用 card:13:323 配合 CARD.ALPHA 打爆发。")
             await execution.display_reason("选戏法 [[CARD.JEST]]。")
 
@@ -1653,13 +1655,19 @@ def test_display_reason_sanitizes_internal_ids_and_refs_while_preserving_raw_jou
                 "Play [[CARD.JEST]] (card:13:323) for cheap cycle.",
                 observation=obs_eng,
             )
+            await execution.display_reason("Play (CARD.JEST) then pass.")
+            await execution.display_reason("Play Jest (CARD.JEST) next.")
 
         assert shown == [
             "拿 戏法 补过牌，先不拿。",
             "先打戏法，再打猛击。",
+            "先打猛击再结束回合。",
+            "先打再结束回合。",
             "用 戏法 配合 猛击 打爆发。",
             "选戏法。",
             "Play Jest for cheap cycle.",
+            "Play Jest then pass.",
+            "Play Jest next.",
         ]
         for line in shown:
             assert "CARD." not in line
