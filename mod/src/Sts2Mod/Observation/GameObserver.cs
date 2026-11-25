@@ -511,8 +511,8 @@ internal sealed class GameObserver(
         }
         else if (overlay is NCardRewardSelectionScreen cardReward)
         {
-            ObserveCardRewards(cardReward);
-            selection = ObserveCardRewardSelection(cardReward);
+            var activeOfferRef = ObserveCardRewards(cardReward);
+            selection = ObserveCardRewardSelection(cardReward, activeOfferRef);
             screen = RunScreen.Rewards;
         }
         else if (overlay is NRewardsScreen rewards)
@@ -1409,7 +1409,7 @@ internal sealed class GameObserver(
             ObserveButton(proceed, operation: InteractionOperation.Proceed);
     }
 
-    private void ObserveCardRewards(NCardRewardSelectionScreen screen)
+    private string? ObserveCardRewards(NCardRewardSelectionScreen screen)
     {
         var reference = registry.GetRef(screen);
         var cards = screen.GetNode<Control>("UI/CardRow").GetChildren().OfType<NCardHolder>()
@@ -1433,22 +1433,42 @@ internal sealed class GameObserver(
 
         actions.AddRange(_interactions.Where(action => action.Subject == reference).Select(action => action.Ref));
 
+        var parentScreens = NOverlayStack.Instance is { } overlays
+            ? overlays.GetChildren().OfType<NRewardsScreen>().ToArray()
+            : [];
+        var matchingParents = parentScreens
+            .SelectMany(parent => NodeHierarchy.Descendants(parent.GetNode<Control>("%RewardsContainer")).OfType<NRewardButton>())
+            .Select(button => button.Reward)
+            .OfType<CardReward>()
+            .Where(reward => ReferenceEquals(RunSurfaceLifecycle.GetCardRewardScreen(reward), screen))
+            .Distinct(ReferenceEqualityComparer.Instance)
+            .Cast<CardReward>()
+            .ToArray();
+        var parentOfferRef = matchingParents.Length == 1
+            ? registry.GetRef(matchingParents[0])
+            : null;
+
         var title = new LocString("gameplay_ui", "CHOOSE_CARD_HEADER").GetFormattedText();
         _objects[reference] = new OfferEntry(title);
         _descriptions[reference] = title;
         _offers.Add(new OfferView(reference, OfferKind.Card, Refs(cards.Select(holder => holder.CardModel!)), actions.ToImmutable())
         {
+            ParentOfferRef = parentOfferRef,
             RequiresSelection = true,
         });
 
-        if (NOverlayStack.Instance is { } overlays)
+        foreach (var parent in parentScreens)
+            ObserveRewards(parent, active: false);
+
+        return matchingParents.Length switch
         {
-            foreach (var parent in overlays.GetChildren().OfType<NRewardsScreen>())
-                ObserveRewards(parent, active: false);
-        }
+            1 => parentOfferRef,
+            0 => reference,
+            _ => null,
+        };
     }
 
-    private SelectionView ObserveCardRewardSelection(NCardRewardSelectionScreen screen)
+    private SelectionView ObserveCardRewardSelection(NCardRewardSelectionScreen screen, string? activeOfferRef)
     {
         if (!RunSurfaceLifecycle.TryGetRewardChoice(screen, out var choice))
             throw new InvalidOperationException("Native reward choice was not registered before publication.");
@@ -1462,7 +1482,10 @@ internal sealed class GameObserver(
             canSkip ? 0 : 1,
             1,
             Refs(choice.Cards.Select(result => result.Card)),
-            []);
+            [])
+        {
+            OfferRef = activeOfferRef,
+        };
     }
 
     private void ObserveShop(NMerchantInventory inventory)

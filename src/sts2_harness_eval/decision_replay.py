@@ -12,7 +12,7 @@ from time import monotonic
 
 from pydantic import MISSING, JsonValue, TypeAdapter, ValidationError
 
-from sts2_harness.capacity import CapacityPolicy, Measurement
+from sts2_harness.capacity import CapacityPolicy, Measurement, ModelAttemptReference
 from sts2_harness.client import models as native
 from sts2_harness.config import ConfigurationError, load_configuration
 from sts2_harness.context import Context
@@ -73,6 +73,7 @@ from sts2_harness.prompts import PackagedPrompts, PromptReader
 from sts2_harness.results import (
     ActionToolResult,
     CardRewardBatchResult,
+    HandoffCompletion,
     NotesText,
     NotesUpdated,
     PlanAccepted,
@@ -777,6 +778,11 @@ class MeasuredModel:
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None:
         await self.client.record_recovery(recovery)
+
+    async def record_handoff(
+        self, reference: ModelAttemptReference, completion: HandoffCompletion
+    ) -> None:
+        await self.client.record_handoff(reference, completion)
 
     async def complete_prepared(
         self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None

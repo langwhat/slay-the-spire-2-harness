@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx2 as httpx
 from pydantic import JsonValue, ValidationError
 
-from sts2_harness.capacity import CapacityPolicy
+from sts2_harness.capacity import CapacityPolicy, ModelAttemptReference
 from sts2_harness.client import ClientUnavailable
 from sts2_harness.client import models as native
 from sts2_harness.config import Protocol
@@ -64,7 +64,7 @@ from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedP
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.native_template import TemplateError
 from sts2_harness.prompts import PromptReader
-from sts2_harness.results import Reason
+from sts2_harness.results import HandoffCompletion, Reason
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval._material_boundary import RejectingDocuments, RejectingPrompts
 from sts2_harness_eval._replay import (
@@ -638,6 +638,16 @@ class _Takeover:
                         await switch.current.model(role, stream).record_recovery(recovery)
                     else:
                         await historical.record_recovery(recovery)
+
+                async def record_handoff(
+                    self, reference: ModelAttemptReference, completion: HandoffCompletion
+                ) -> None:
+                    if switch.live:
+                        await switch.current.model(role, stream).record_handoff(
+                            reference, completion
+                        )
+                    else:
+                        await historical.record_handoff(reference, completion)
 
                 async def complete_prepared(
                     self,

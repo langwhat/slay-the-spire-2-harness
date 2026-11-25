@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 
-from sts2_harness.capacity import CapacityPolicy
+from sts2_harness.capacity import CapacityPolicy, ModelAttemptReference
 from sts2_harness.client import models as native
 from sts2_harness.game import LiveGame
 from sts2_harness.journal import ArchiveError, Journal, RecordedGame, SceneVariant
@@ -22,6 +22,7 @@ from sts2_harness.llm.messages import (
 from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedPrompts
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.prompts import PromptReader
+from sts2_harness.results import HandoffCompletion
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval._material_boundary import RejectingDocuments, RejectingPrompts
 from sts2_harness_eval._replay import prefix
@@ -90,6 +91,11 @@ class SceneSession:
 
                 async def record_recovery(self, recovery: CapacityRecovery) -> None:
                     await recorded.record_recovery(recovery)
+
+                async def record_handoff(
+                    self, reference: ModelAttemptReference, completion: HandoffCompletion
+                ) -> None:
+                    await recorded.record_handoff(reference, completion)
 
                 async def complete_prepared(
                     self,

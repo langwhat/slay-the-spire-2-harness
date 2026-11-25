@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Text.Json;
 using Sts2Mod.Core.Developer;
 using Sts2Mod.Core.Observation;
+using Sts2Mod.Core.Transport;
 using Xunit;
 
 namespace Sts2Mod.Core.Tests;
@@ -349,5 +350,34 @@ public sealed class ObservationTests
         Assert.IsType<AvailableUpgradePreview>(reader.Read(isUpgradable: true, () => preview));
         Assert.IsType<UnavailableUpgradePreview>(reader.Read(isUpgradable: true, () => throw new InvalidOperationException()));
         Assert.Equal(2, failures);
+    }
+
+    [Fact]
+    public void SelectionAndOfferViews_SerializeOptionalRewardIdentityRefsOnlyWhenPresent()
+    {
+        var withRefs = new
+        {
+            Selection = new SelectionView("Choose a Card", null, 0, 1, ["card:1:1"], [])
+            {
+                OfferRef = "offer:1:1",
+            },
+            Overlay = new OfferView("offer:1:overlay", OfferKind.Card, ["card:1:1"], ["interaction:1:1"])
+            {
+                ParentOfferRef = "offer:1:1",
+                RequiresSelection = true,
+            },
+            PlainSelection = new SelectionView("Choose a Card", null, 0, 1, ["card:1:1"], []),
+            PlainOffer = new OfferView("offer:1:1", OfferKind.Card, ["card:1:1"], ["interaction:1:2"])
+            {
+                RequiresSelection = true,
+            },
+        };
+
+        using var doc = JsonDocument.Parse(JsonContract.Serialize(withRefs));
+        var root = doc.RootElement;
+        Assert.Equal("offer:1:1", root.GetProperty("selection").GetProperty("offer_ref").GetString());
+        Assert.Equal("offer:1:1", root.GetProperty("overlay").GetProperty("parent_offer_ref").GetString());
+        Assert.False(root.GetProperty("plain_selection").TryGetProperty("offer_ref", out _));
+        Assert.False(root.GetProperty("plain_offer").TryGetProperty("parent_offer_ref", out _));
     }
 }

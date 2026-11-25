@@ -17,7 +17,7 @@ from openai import (
 )
 from pydantic import ValidationError
 
-from sts2_harness.capacity import CapacityPolicy, measure
+from sts2_harness.capacity import CapacityPolicy, ModelAttemptReference, measure
 from sts2_harness.config import ModelConfiguration, Protocol
 from sts2_harness.llm.anthropic_boundary import classify_error as classify_anthropic_error
 from sts2_harness.llm.anthropic_messages import MessagesAdapter
@@ -38,6 +38,7 @@ from sts2_harness.llm.messages import (
 from sts2_harness.llm.openai_boundary import capacity_signal, classify_error
 from sts2_harness.llm.responses import ResponsesAdapter
 from sts2_harness.model_purpose import ModelPurpose
+from sts2_harness.results import HandoffCompletion
 
 
 class _BorrowedTransport(httpx.AsyncBaseTransport):
@@ -156,6 +157,11 @@ class Llm:
         return PreparedRequest(input, tools, measurement, body)
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None:
+        return None
+
+    async def record_handoff(
+        self, reference: ModelAttemptReference, completion: HandoffCompletion
+    ) -> None:
         return None
 
     async def complete(

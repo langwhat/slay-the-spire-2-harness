@@ -683,6 +683,120 @@ def test_joint_deck_decision_compares_order_and_keeps_each_group(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("fresh", (False, True))
+@pytest.mark.parametrize("reordered", (False, True))
+def test_three_group_joint_deck_decision_compares_order_and_keeps_each_group(
+    tmp_path: Path, reordered: bool, fresh: bool
+) -> None:
+    async def run() -> None:
+        raw = decision_case(tmp_path).model_dump(mode="json")
+        raw["decision_offer"] = None
+        raw["labels"] = {
+            "comment": "PRIVATE-THREE-GROUP-LABEL",
+            "reward_groups": [
+                {"offer": "offer", "good": ["CARD.ONE"]},
+                {"offer": "second", "good": ["CARD.TWO"]},
+                {"offer": "third", "good": ["skip"]},
+            ],
+            "reward_order": ["offer", "second", "third"],
+        }
+        raw["recorded_reward_groups"] = [
+            {"offer": "offer", "choices": ["CARD.ONE"], "reason": "Original group 1."},
+            {"offer": "second", "choices": ["CARD.TWO"], "reason": "Original group 2."},
+            {"offer": "third", "choices": ["skip"], "reason": "Original group 3."},
+        ]
+        observation = raw["events"][0]["observation"]
+        observation["objects"]["second-card"] = {
+            **observation["objects"]["candidate"],
+            "definition_id": "CARD.TWO",
+            "name": "Two",
+        }
+        observation["objects"]["third-card"] = {
+            **observation["objects"]["candidate"],
+            "definition_id": "CARD.THREE",
+            "name": "Three",
+        }
+        observation["descriptions"]["second-card"] = "Second candidate."
+        observation["descriptions"]["third-card"] = "Third candidate."
+        observation["state"]["offers"].extend(
+            [
+                {
+                    "ref": "second",
+                    "kind": "card",
+                    "contents": ["second-card"],
+                    "actions": ["open-second"],
+                    "requires_selection": True,
+                },
+                {
+                    "ref": "third",
+                    "kind": "card",
+                    "contents": ["third-card"],
+                    "actions": ["open-third"],
+                    "requires_selection": True,
+                },
+            ]
+        )
+        observation["state"]["actions"].extend(
+            [
+                {"ref": "open-second", "label": "Second reward", "enabled": True},
+                {"ref": "open-third", "label": "Third reward", "enabled": True},
+            ]
+        )
+        case = DecisionCase.model_validate_json(json.dumps(raw))
+        choices = [
+            {"offer": "offer", "choice": "take", "card": "candidate", "reason": "Group 1 reason."},
+            {
+                "offer": "second",
+                "choice": "take",
+                "card": "second-card",
+                "reason": "Group 2 reason.",
+            },
+            {"offer": "third", "choice": "skip", "reason": "Group 3 reason."},
+        ]
+        if reordered:
+            choices = [choices[0], choices[2], choices[1]]
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            payload = request.content.decode()
+            assert "candidate" in payload and "second-card" in payload and "third-card" in payload
+            assert "PRIVATE-THREE-GROUP-LABEL" not in payload
+            assert "Original group 1." not in payload
+            assert "Original group 2." not in payload
+            assert "Original group 3." not in payload
+            return httpx.Response(
+                200,
+                content=reply(("joint3", "run_deck_choice", json.dumps({"choices": choices}))),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        async with Llm(
+            replace(configuration(tmp_path), extra_retries=0),
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            if fresh:
+                catalog = FrozenCatalog.model_validate_json(
+                    '{"complete":false,"catalog":{"categories":[],"card_filters":'
+                    '{"pools":[],"types":[],"rarities":[],"energy_costs":[]}},"definitions":[]}'
+                )
+                result = await sample_fresh(case, client, catalog=catalog, role=EvaluationRole.DECK)
+            else:
+                result = await sample_case(case, client, variant=DecisionVariant.DECK)
+        assert result.verdict is (DecisionVerdict.FAILED if reordered else DecisionVerdict.PASSED)
+        expected = [
+            ("offer", ("CARD.ONE",), "Group 1 reason."),
+            ("second", ("CARD.TWO",), "Group 2 reason."),
+            ("third", ("skip",), "Group 3 reason."),
+        ]
+        if reordered:
+            expected = [expected[0], expected[2], expected[1]]
+        assert result.choices == tuple(item[1][0] for item in expected)
+        assert [
+            (group.offer, group.choices, group.reason) for group in result.reward_groups
+        ] == expected
+
+    asyncio.run(run())
+
+
 def test_deck_replay_reuses_the_open_overlay_in_a_legacy_offer_case(tmp_path: Path) -> None:
     raw = decision_case(tmp_path, multiselect=True).model_dump(mode="json")
     raw.update(decision_tool="run_deck_choice", decision_offer="overlay")

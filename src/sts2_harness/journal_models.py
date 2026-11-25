@@ -666,6 +666,11 @@ class PreparationInput(native.WireModel):
     tools: ToolSet
 
 
+class HandoffRecord(native.WireModel):
+    attempt: ModelAttemptReference
+    completion: HandoffCompletion
+
+
 class RecoveryRecord(native.WireModel):
     rejected: ModelAttemptReference
     classification: Literal["capacity_rejected"] = "capacity_rejected"
@@ -819,6 +824,7 @@ class ModelRecord(native.WireModel):
     delivered: bool
     failure: FailureKind | None
     capacity_recovery: RecordedRecovery | None = None
+    handoff: HandoffCompletion | None = None
 
 
 class MaterialKind(StrEnum):

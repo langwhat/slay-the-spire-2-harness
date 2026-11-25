@@ -14,7 +14,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Annotated, Literal, Self, TypedDict
 
-from pydantic import Field, TypeAdapter, ValidationError, field_validator, model_validator
+from pydantic import MISSING, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from sts2_harness.capacity import (
     CapacityClassifierConfig,
@@ -73,6 +73,7 @@ from sts2_harness.journal_models import (
     BlobEncoding,
     BlobKind,
     ConfigurationSnapshot,
+    HandoffRecord,
     InputDelta,
     MaterialFailed,
     MaterialKind,
@@ -98,7 +99,7 @@ from sts2_harness.journal_models import (
 )
 from sts2_harness.llm.messages import FailureKind
 from sts2_harness.note_values import InitialNotes
-from sts2_harness.results import Reason
+from sts2_harness.results import HandoffCompletion, Reason
 
 _WRITE_TIMEOUT_SECONDS = 0.1
 CURRENT_ARCHIVE_SCHEMA: Literal[22] = 22
@@ -367,6 +368,8 @@ CREATE TABLE IF NOT EXISTS model_requests (sequence INTEGER PRIMARY KEY, cursor 
 CREATE TABLE IF NOT EXISTS model_attempts (sequence INTEGER NOT NULL, attempt INTEGER NOT NULL,
     value TEXT NOT NULL, PRIMARY KEY(sequence,attempt));
 CREATE TABLE IF NOT EXISTS model_recoveries (sequence INTEGER PRIMARY KEY, value TEXT NOT NULL);
+-- Optional audit table in schema 22; older archives fall back to legacy ModelAttempt.handoff.
+CREATE TABLE IF NOT EXISTS handoff_completions (sequence INTEGER PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS card_choices (stream TEXT NOT NULL, call_id TEXT NOT NULL,
     value TEXT NOT NULL, PRIMARY KEY(stream,call_id));
 CREATE TABLE IF NOT EXISTS variant_preparations (timeline_index INTEGER PRIMARY KEY,
@@ -1058,6 +1061,19 @@ class Journal:
                     (self._blob(connection, updated), rejected.sequence),
                 )
 
+    def record_handoff(
+        self, reference: ModelAttemptReference, completion: HandoffCompletion
+    ) -> None:
+        if self._read_only:
+            raise ArchiveError("An evidence reader cannot record a handoff completion.")
+        with self._storage() as connection:
+            if connection is not None:
+                record = HandoffRecord(attempt=reference, completion=completion)
+                connection.execute(
+                    "INSERT INTO handoff_completions VALUES (?,?)",
+                    (reference.sequence, self._blob(connection, record)),
+                )
+
     def finish_model(self, sequence: int, *, failure: FailureKind | None = None) -> None:
         with self._storage() as connection:
             if connection is not None:
@@ -1135,6 +1151,13 @@ class Journal:
             start = max(start, prefix.before_sequence)
         try:
             with closing(self._read_connection(self.path)) as connection:
+                has_handoffs = (
+                    connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='handoff_completions'"
+                    ).fetchone()
+                    is not None
+                )
                 rows = connection.execute(
                     "SELECT sequence,cursor,role,stream,position,input,delivered,failure "
                     "FROM model_requests WHERE sequence>=? AND (? IS NULL OR sequence<=?) "
@@ -1279,6 +1302,42 @@ class Journal:
                         and preparation.input_after != decoded_input
                     ):
                         raise ArchiveError("A prepared input differs from its model request.")
+                    if any(attempt.handoff is not MISSING for attempt in attempts[:-1]):
+                        raise ArchiveError("A handoff completion record is inconsistent.")
+                    legacy_handoff = (
+                        attempts[-1].handoff
+                        if attempts and attempts[-1].handoff is not MISSING
+                        else None
+                    )
+                    handoff_row = (
+                        connection.execute(
+                            "SELECT value FROM handoff_completions WHERE sequence=?", (sequence,)
+                        ).fetchone()
+                        if has_handoffs
+                        else None
+                    )
+                    handoff = legacy_handoff
+                    if handoff_row is not None:
+                        handoff_record = HandoffRecord.model_validate_json(
+                            self._read_blob(connection, handoff_row[0])
+                        )
+                        ref = handoff_record.attempt
+                        if (
+                            not delivered
+                            or failure is not None
+                            or not attempts
+                            or ref.sequence != sequence
+                            or ref.attempt != len(attempts)
+                            or attempts[-1].index != ref.attempt
+                            or attempts[-1].reply is None
+                            or attempts[-1].failure is not None
+                            or (
+                                legacy_handoff is not None
+                                and legacy_handoff != handoff_record.completion
+                            )
+                        ):
+                            raise ArchiveError("A handoff completion record is inconsistent.")
+                        handoff = handoff_record.completion
                     result.append(
                         ModelRecord(
                             sequence=sequence,
@@ -1298,6 +1357,7 @@ class Journal:
                             delivered=bool(delivered),
                             failure=FailureKind(failure) if failure else None,
                             capacity_recovery=recovery,
+                            handoff=handoff,
                         )
                     )
                 return inherited + tuple(result)

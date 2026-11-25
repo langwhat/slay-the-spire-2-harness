@@ -293,7 +293,10 @@ public sealed record SelectionView(
     int Min,
     int Max,
     ImmutableArray<string> Candidates,
-    ImmutableArray<string> Selected);
+    ImmutableArray<string> Selected)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? OfferRef { get; init; }
+}
 
 public sealed record InteractionCost(
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? Gold = null,
@@ -327,6 +330,7 @@ public sealed record OfferView(
     ImmutableArray<string> Contents,
     ImmutableArray<string> Actions)
 {
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ParentOfferRef { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? RequiresSelection { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Price { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? Stocked { get; init; }

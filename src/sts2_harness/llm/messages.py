@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, Self
 
@@ -240,9 +239,7 @@ class ModelReply:
     assistant: AssistantMessage
     usage: Usage
     metadata: ModelMetadata
-    record_handoff: Callable[[HandoffCompletion], None] | None = field(
-        default=None, compare=False, repr=False
-    )
+    reference: ModelAttemptReference | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +311,10 @@ class ModelClient(Protocol):
     ) -> PreparedRequest: ...
 
     async def record_recovery(self, recovery: CapacityRecovery) -> None: ...
+
+    async def record_handoff(
+        self, reference: ModelAttemptReference, completion: HandoffCompletion
+    ) -> None: ...
 
     async def complete_prepared(
         self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None

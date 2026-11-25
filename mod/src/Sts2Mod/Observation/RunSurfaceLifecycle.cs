@@ -61,8 +61,14 @@ internal static class RunSurfaceLifecycle
     private static readonly FieldInfo? CardRewardAlternativesField =
         typeof(NCardRewardSelectionScreen).GetField("_extraOptions", BindingFlags.Instance | BindingFlags.NonPublic);
 
+    private static readonly FieldInfo? CardRewardScreenField =
+        typeof(CardReward).GetField("_currentlyShownScreen", BindingFlags.Instance | BindingFlags.NonPublic);
+
     public static CardModel? GetSpecialRewardCard(SpecialCardReward reward) =>
         SpecialCardField?.GetValue(reward) as CardModel;
+
+    public static NCardRewardSelectionScreen? GetCardRewardScreen(CardReward reward) =>
+        CardRewardScreenField?.GetValue(reward) as NCardRewardSelectionScreen;
 
     public static IReadOnlyList<CardRewardAlternative> GetCardRewardAlternatives(NCardRewardSelectionScreen screen) =>
         CardRewardAlternativesField?.GetValue(screen) as IReadOnlyList<CardRewardAlternative> ?? [];

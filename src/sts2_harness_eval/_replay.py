@@ -8,7 +8,7 @@ from typing import Never
 
 from pydantic import MISSING
 
-from sts2_harness.capacity import CapacityPolicy, RecoveryDecision
+from sts2_harness.capacity import CapacityPolicy, ModelAttemptReference, RecoveryDecision
 from sts2_harness.client import models as native
 from sts2_harness.game import (
     Admit,
@@ -95,7 +95,7 @@ from sts2_harness.llm.messages import (
 )
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
 from sts2_harness.model_purpose import ModelPurpose
-from sts2_harness.results import Reason
+from sts2_harness.results import HandoffCompletion, Reason
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval.results import (
     ArchiveUnreadable,
@@ -575,6 +575,11 @@ class ReplayModel:
             ):
                 unsupported(record.sequence, UnsupportedCause.INCOMPLETE_DEPENDENCY)
 
+    async def record_handoff(
+        self, reference: ModelAttemptReference, completion: HandoffCompletion
+    ) -> None:
+        return None
+
     def _check_preparation(
         self, record: ModelRecord, preparation: RequestPreparation | None
     ) -> None:
@@ -815,6 +820,11 @@ async def _run(
 
             async def record_recovery(self, recovery: CapacityRecovery) -> None:
                 await historical.record_recovery(recovery)
+
+            async def record_handoff(
+                self, reference: ModelAttemptReference, completion: HandoffCompletion
+            ) -> None:
+                await historical.record_handoff(reference, completion)
 
             async def complete_prepared(
                 self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None

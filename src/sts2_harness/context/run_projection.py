@@ -402,6 +402,7 @@ class RunDelivery:
             choice["actions"] = actions
             if state.selection is not None:
                 selection = _json(state.selection)
+                selection.pop("offer_ref", None)
                 selection["candidates"] = [
                     identity(ref)
                     if isinstance(state, native.CombatState) and ref in state.piles.hand
@@ -418,6 +419,7 @@ class RunDelivery:
                 offers: list[JsonValue] = []
                 for offer in state.offers:
                     row = _json(offer)
+                    row.pop("parent_offer_ref", None)
                     row["candidates"] = [
                         object_row(
                             ref,

@@ -180,10 +180,6 @@ internal static class RewardCheckpointIdentities
         typeof(CardReward).GetField("_cards", PrivateInstance)
         ?? throw new MissingFieldException(typeof(CardReward).FullName, "_cards");
 
-    private static readonly FieldInfo ScreenField =
-        typeof(CardReward).GetField("_currentlyShownScreen", PrivateInstance)
-        ?? throw new MissingFieldException(typeof(CardReward).FullName, "_currentlyShownScreen");
-
     public static ImmutableArray<CheckpointRewardIdentity> Capture(
         NativeObservation observation,
         NodeObjectRegistry registry,
@@ -235,7 +231,7 @@ internal static class RewardCheckpointIdentities
         {
             var parents = set.Rewards
                 .OfType<CardReward>()
-                .Where(reward => ReferenceEquals(ScreenField.GetValue(reward), choice))
+                .Where(reward => ReferenceEquals(RunSurfaceLifecycle.GetCardRewardScreen(reward), choice))
                 .ToArray();
             if (parents.Length != 1)
                 return [];

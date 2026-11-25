@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from sts2_harness.capacity import CapacityPolicy
+from sts2_harness.capacity import CapacityPolicy, ModelAttemptReference
 from sts2_harness.client import ModClient
 from sts2_harness.client import models as native
 from sts2_harness.client.http import ControlResult
@@ -41,6 +41,7 @@ from sts2_harness.model_journal import RecordedDocuments, RecordedLlm, RecordedP
 from sts2_harness.model_purpose import ModelPurpose
 from sts2_harness.note_values import InitialNotes
 from sts2_harness.prompts import PromptReader
+from sts2_harness.results import HandoffCompletion
 from sts2_harness.session import RunSession, SessionDependencies
 from sts2_harness_eval.cases import AfterDecisionsSpec, TargetBattle
 from sts2_harness_eval.laboratory import (
@@ -153,6 +154,11 @@ class _Sample:
 
                 async def record_recovery(self, recovery: CapacityRecovery) -> None:
                     await recorded.record_recovery(recovery)
+
+                async def record_handoff(
+                    self, reference: ModelAttemptReference, completion: HandoffCompletion
+                ) -> None:
+                    await recorded.record_handoff(reference, completion)
 
                 def _check_first(self) -> None:
                     if sample._first_request:

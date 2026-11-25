@@ -1026,3 +1026,155 @@ def test_hoisted_encounter_and_enemy_power_routing_and_deduplication() -> None:
     combat_ctx.append_task(CombatActInput(), combat_obs)
     combat_mechs = json.loads(combat_ctx.model_input()[-1].text)["observation"]["mechanisms"]
     assert [row["definition_id"] for row in combat_mechs] == ["POWER.WEAK_POWER"]
+
+
+def test_card_rewards_prefers_explicit_offer_refs_and_hides_them_from_model_input() -> None:
+    from sts2_harness.client.models import Action, Offer, OfferKind, RunScreen, Selection
+    from sts2_harness.deck import card_rewards, deck_context, deck_observation
+    from sts2_harness.prompts import PackagedPrompts
+
+    base = Observation.model_validate_json(RUN)
+    combat_card = Observation.model_validate_json(COMBAT).objects["c1"]
+    assert isinstance(base.state, RunState)
+    card_ref = "card-candidate"
+    overlay = Offer(
+        ref="overlay-screen",
+        kind=OfferKind.CARD,
+        contents=(card_ref,),
+        actions=("pick-card",),
+        parent_offer_ref="reward-second",
+        requires_selection=True,
+    )
+    first = Offer(
+        ref="reward-first",
+        kind=OfferKind.CARD,
+        contents=(card_ref,),
+        actions=("open-first",),
+        requires_selection=True,
+    )
+    second = Offer(
+        ref="reward-second",
+        kind=OfferKind.CARD,
+        contents=(card_ref,),
+        actions=("open-second",),
+        requires_selection=True,
+    )
+    selection = Selection(
+        prompt="Choose a Card",
+        source=None,
+        min=0,
+        max=1,
+        candidates=(card_ref,),
+        selected=(),
+        offer_ref="reward-second",
+    )
+    obs = base.model_copy(
+        update={
+            "objects": {**base.objects, card_ref: combat_card},
+            "descriptions": {**base.descriptions, card_ref: "Deal 6 damage."},
+            "state": base.state.model_copy(
+                update={
+                    "screen": RunScreen.REWARDS,
+                    "offers": (overlay, first, second),
+                    "selection": selection,
+                    "actions": (
+                        Action(ref="pick-card", label="Pick", enabled=True, subject=card_ref),
+                        Action(ref="open-first", label="First", enabled=False),
+                        Action(ref="open-second", label="Second", enabled=False),
+                    ),
+                }
+            ),
+        }
+    )
+
+    # Identical candidate contents across two offers still resolve via explicit refs.
+    offers, active = card_rewards(obs)
+    assert [offer.ref for offer in offers] == ["reward-first", "reward-second"]
+    assert active is not None and active.ref == "reward-second"
+
+    # Explicit offer_ref that matches no logical offer does not fall back or leak overlays.
+    unmatched = obs.model_copy(
+        update={
+            "state": obs.state.model_copy(
+                update={"selection": selection.model_copy(update={"offer_ref": "missing-offer"})}
+            )
+        }
+    )
+    unmatched_offers, unmatched_active = card_rewards(unmatched)
+    assert [offer.ref for offer in unmatched_offers] == ["reward-first", "reward-second"]
+    assert unmatched_active is None
+
+    # Filtering out the open offer drops its selection even when another offer shares candidates.
+    filtered_first = deck_observation(obs, (first,))
+    assert isinstance(filtered_first.state, RunState)
+    assert filtered_first.state.selection is None
+    assert card_rewards(filtered_first) == ((first,), None)
+
+    # Standalone card reward screen without parent_offer_ref resolves to itself.
+    standalone = obs.model_copy(
+        update={
+            "state": obs.state.model_copy(
+                update={
+                    "offers": (
+                        Offer(
+                            ref="standalone-screen",
+                            kind=OfferKind.CARD,
+                            contents=(card_ref,),
+                            actions=("pick-card",),
+                            requires_selection=True,
+                        ),
+                    ),
+                    "selection": selection.model_copy(update={"offer_ref": "standalone-screen"}),
+                }
+            )
+        }
+    )
+    standalone_offers, standalone_active = card_rewards(standalone)
+    assert [offer.ref for offer in standalone_offers] == ["standalone-screen"]
+    assert standalone_active is not None and standalone_active.ref == "standalone-screen"
+
+    # Legacy observations without offer_ref / parent_offer_ref fall back to candidate matching.
+    legacy = obs.model_copy(
+        update={
+            "state": obs.state.model_copy(
+                update={
+                    "offers": (
+                        Offer(
+                            ref="overlay-screen",
+                            kind=OfferKind.CARD,
+                            contents=(card_ref,),
+                            actions=("pick-card",),
+                            requires_selection=True,
+                        ),
+                        first,
+                    ),
+                    "selection": Selection(
+                        prompt="Choose a Card",
+                        source=None,
+                        min=0,
+                        max=1,
+                        candidates=(card_ref,),
+                        selected=(),
+                    ),
+                }
+            )
+        }
+    )
+    legacy_offers, legacy_active = card_rewards(legacy)
+    assert [offer.ref for offer in legacy_offers] == ["reward-first"]
+    assert legacy_active is not None and legacy_active.ref == "reward-first"
+
+    # Internal offer_ref / parent_offer_ref fields must not leak into model-visible context.
+    run_ctx = Context(DecisionOwner.RUN)
+    run_ctx.append_task(RunActInput(), obs)
+    run_choice = json.loads(run_ctx.model_input()[-1].text)["observation"]["choice"]
+    assert "selection" in run_choice and "offer_ref" not in run_choice["selection"]
+    assert len(run_choice["offers"]) == 3
+    assert all("parent_offer_ref" not in row for row in run_choice["offers"])
+
+    deck_view = deck_observation(obs, offers)
+    deck_ctx = deck_context(PackagedPrompts(), (), deck_view, minimal=False)
+    deck_ctx.append_task(RunActInput(), deck_view)
+    deck_choice = json.loads(deck_ctx.model_input()[-1].text)["observation"]["choice"]
+    assert "selection" in deck_choice and "offer_ref" not in deck_choice["selection"]
+    assert all("parent_offer_ref" not in row for row in deck_choice["offers"])

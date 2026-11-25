@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sts2_harness.capacity import CapacityPolicy
+from sts2_harness.capacity import CapacityPolicy, ModelAttemptReference
 from sts2_harness.client import models as native
 from sts2_harness.game import (
     Admitted,
@@ -32,7 +32,7 @@ from sts2_harness.llm.messages import (
     ToolDefinition,
 )
 from sts2_harness.model_purpose import ModelPurpose
-from sts2_harness.results import Reason
+from sts2_harness.results import HandoffCompletion, Reason
 from sts2_harness.session import ModelFactory, RunSession
 from sts2_harness_eval.results import Rejected
 
@@ -248,6 +248,11 @@ class SampleHost:
 
                 async def record_recovery(self, recovery: CapacityRecovery) -> None:
                     await client.record_recovery(recovery)
+
+                async def record_handoff(
+                    self, reference: ModelAttemptReference, completion: HandoffCompletion
+                ) -> None:
+                    await client.record_handoff(reference, completion)
 
                 async def complete_prepared(
                     self,

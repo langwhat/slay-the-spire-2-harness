@@ -486,11 +486,13 @@ def test_handoff_closes_bad_calls_without_side_effects_and_can_update_notes(
                 result = await execution.run_unit(agent, HandoffTask(handoff()))
                 assert result == TaskComplete(summary)
                 assert len(http.inputs) == (5 if combine_summary else 6)
-                assert journal.requests()[-1].attempts[-1].handoff == (
+                record = journal.requests()[-1]
+                assert record.handoff == (
                     HandoffCompletion(call_id="update", summary=summary)
                     if combine_summary
-                    else MISSING
+                    else None
                 )
+                assert record.attempts[-1].handoff is MISSING
                 assert await execution.run_unit(
                     agent, HandoffTask(handoff("Assess the next battle."))
                 ) == TaskComplete("Next report assessed.")
@@ -607,5 +609,192 @@ def test_enter_act_retries_initialization_and_delivers_current_notes_in_fresh_co
         assert isinstance(guide, dict) and isinstance(guide["content"], str)
         assert json.loads(guide["content"])["guidance"][0]["text"] == "New act guidance."
         assert http.actions == []
+
+    asyncio.run(scenario())
+
+
+def test_journal_reads_legacy_attempt_handoff_without_handoff_table(tmp_path: Path) -> None:
+    import sqlite3
+    from contextlib import closing
+
+    from sts2_harness.journal import Journal, Manifest
+    from sts2_harness.journal_models import ModelAttempt
+    from sts2_harness.model_journal import RecordedLlm
+    from sts2_harness.results import HandoffCompletion
+
+    summary = "Legacy handoff summary."
+    http = RunHTTP([reply(text="ok")])
+
+    async def scenario() -> None:
+        path = tmp_path / "legacy-handoff.sqlite"
+        journal = Journal.create(
+            path,
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="legacy-handoff",
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+            ),
+        )
+        budget = ToolRecoveryBudget()
+        async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
+            execution = Execution(
+                LiveGame(client, namespace="legacy", game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
+            )
+            tools = ToolCatalog(
+                native.DecisionOwner.RUN,
+                notes=Notes(""),
+                observe=execution.observe,
+                inspect=execution.inspect,
+                catalog=execution.catalog,
+            )
+            async with Llm(
+                configuration(tmp_path), transport=httpx.MockTransport(http.model)
+            ) as llm:
+                agent = RunAgent(
+                    lambda: RecordedLlm(
+                        llm, journal, role=native.DecisionOwner.RUN, stream="run:1"
+                    ),
+                    tools,
+                    budget,
+                )
+                assert await execution.run_unit(agent, HandoffTask(handoff())) == TaskComplete("ok")
+        record = journal.requests()[-1]
+        legacy_completion = HandoffCompletion(call_id="legacy-call", summary=summary)
+        journal.model_attempt(
+            record.sequence,
+            ModelAttempt.model_validate(
+                {**record.attempts[-1].model_dump(mode="python"), "handoff": legacy_completion}
+            ),
+        )
+        journal.close()
+        with closing(sqlite3.connect(path)) as connection:
+            connection.execute("DROP TABLE handoff_completions")
+            connection.commit()
+        reopened = Journal.open(path)
+        try:
+            loaded = reopened.requests()[-1]
+            assert loaded.handoff == legacy_completion
+            assert loaded.attempts[-1].handoff == legacy_completion
+        finally:
+            reopened.close()
+
+    asyncio.run(scenario())
+
+
+def test_journal_handoff_guards_read_only_and_rejects_inconsistent_records(tmp_path: Path) -> None:
+    from sts2_harness.capacity import ModelAttemptReference
+    from sts2_harness.journal import ArchiveError, Journal, Manifest
+    from sts2_harness.journal_models import ModelAttempt
+    from sts2_harness.llm.messages import FailureKind
+    from sts2_harness.model_journal import RecordedLlm
+    from sts2_harness.results import HandoffCompletion
+
+    completion = HandoffCompletion(call_id="handoff-1", summary="Summary.")
+
+    async def record_one_handoff_request(name: str) -> tuple[Journal, int]:
+        journal = Journal.create(
+            tmp_path / f"{name}.sqlite",
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id=name,
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes=NotesState(),
+            ),
+        )
+        budget = ToolRecoveryBudget()
+        http = RunHTTP([reply(text="ok")])
+        async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
+            execution = Execution(
+                LiveGame(client, namespace=name, game_instance_id="game", run_id="run"),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
+            )
+            tools = ToolCatalog(
+                native.DecisionOwner.RUN,
+                notes=Notes(""),
+                observe=execution.observe,
+                inspect=execution.inspect,
+                catalog=execution.catalog,
+            )
+            async with Llm(
+                configuration(tmp_path), transport=httpx.MockTransport(http.model)
+            ) as llm:
+                agent = RunAgent(
+                    lambda: RecordedLlm(
+                        llm, journal, role=native.DecisionOwner.RUN, stream="run:1"
+                    ),
+                    tools,
+                    budget,
+                )
+                assert await execution.run_unit(agent, HandoffTask(handoff())) == TaskComplete("ok")
+        return journal, journal.requests()[-1].sequence
+
+    async def scenario() -> None:
+        # 1. Read-only archive rejects record_handoff.
+        ro_journal, sequence = await record_one_handoff_request("ro")
+        ro_path = ro_journal.path
+        ro_journal.close()
+        reader = Journal.open(ro_path)
+        try:
+            with pytest.raises(ArchiveError):
+                reader.record_handoff(
+                    ModelAttemptReference(sequence=sequence, attempt=1), completion
+                )
+        finally:
+            reader.close()
+
+        # 2. Handoff attached to a failed/undelivered request is rejected on read.
+        failed_journal, failed_seq = await record_one_handoff_request("failed-live")
+        try:
+            failed_journal.finish_model(failed_seq, failure=FailureKind.TIMEOUT)
+            failed_journal.record_handoff(
+                ModelAttemptReference(sequence=failed_seq, attempt=1), completion
+            )
+            with pytest.raises(ArchiveError):
+                failed_journal.requests()
+        finally:
+            failed_journal.close()
+
+        # 3. Handoff referencing a non-final attempt is rejected on read.
+        stale_attempt, stale_seq = await record_one_handoff_request("stale-attempt")
+        try:
+            attempt = stale_attempt.requests()[-1].attempts[-1]
+            stale_attempt.model_attempt(stale_seq, attempt.model_copy(update={"index": 2}))
+            stale_attempt.record_handoff(
+                ModelAttemptReference(sequence=stale_seq, attempt=1), completion
+            )
+            with pytest.raises(ArchiveError):
+                stale_attempt.requests()
+        finally:
+            stale_attempt.close()
+
+        # 4. Stray legacy handoff on a non-final attempt is rejected on read.
+        stray, stray_seq = await record_one_handoff_request("stray-legacy")
+        try:
+            attempt = stray.requests()[-1].attempts[-1]
+            stray.model_attempt(
+                stray_seq,
+                ModelAttempt.model_validate(
+                    {**attempt.model_dump(mode="python"), "handoff": completion}
+                ),
+            )
+            stray.model_attempt(stray_seq, attempt.model_copy(update={"index": 2}))
+            with pytest.raises(ArchiveError):
+                stray.requests()
+        finally:
+            stray.close()
 
     asyncio.run(scenario())

@@ -3,6 +3,8 @@
 import json
 from enum import StrEnum
 
+from pydantic import MISSING
+
 from sts2_harness.client import models as native
 from sts2_harness.context import Context
 from sts2_harness.context.map_projection import upcoming_act_bosses
@@ -80,6 +82,13 @@ def card_rewards(
     offers = tuple(offer for offer in state.offers if offer.kind is native.OfferKind.CARD)
     if state.selection is None:
         return offers, None
+    if state.selection.offer_ref is not MISSING:
+        logical = tuple(offer for offer in offers if offer.parent_offer_ref is MISSING)
+        active = next(
+            (offer for offer in logical if offer.ref == state.selection.offer_ref),
+            None,
+        )
+        return logical, active
     candidates = set(state.selection.candidates)
     matching = tuple(offer for offer in offers if set(offer.contents) == candidates)
     if len(matching) == 2:
@@ -132,9 +141,12 @@ def deck_observation(
         candidates = tuple(
             ref for ref in selection.candidates if any(ref in offer.contents for offer in offers)
         )
-        if not any(
-            set(offer.contents) <= set(selection.candidates) for offer in offers
-        ) or selection.min > len(candidates):
+        offer_matches = (
+            any(selection.offer_ref in (offer.ref, offer.parent_offer_ref) for offer in offers)
+            if selection.offer_ref is not MISSING
+            else any(set(offer.contents) <= set(selection.candidates) for offer in offers)
+        )
+        if not offer_matches or selection.min > len(candidates):
             selection = None
         else:
             selection = selection.model_copy(

@@ -436,6 +436,7 @@ class Selection(WireModel):
     max: Annotated[int, Field(ge=0)]
     candidates: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)]
     selected: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)]
+    offer_ref: Nonempty | MISSING = MISSING
 
 
 class Offer(WireModel):
@@ -443,6 +444,7 @@ class Offer(WireModel):
     kind: OfferKind
     contents: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)]
     actions: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)]
+    parent_offer_ref: Nonempty | MISSING = MISSING
     price: Annotated[int, Field(ge=0)] | None | MISSING = MISSING
     stocked: bool | None | MISSING = MISSING
     on_sale: bool | None | MISSING = MISSING

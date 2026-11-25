@@ -160,6 +160,9 @@ class IdentityGame:
             update={
                 "candidates": tuple(map(self._in_ref, value.candidates)),
                 "selected": tuple(map(self._in_ref, value.selected)),
+                "offer_ref": self._in_ref(value.offer_ref)
+                if value.offer_ref is not MISSING
+                else MISSING,
             }
         )
 
@@ -210,6 +213,9 @@ class IdentityGame:
                                 "ref": self._in_ref(offer.ref),
                                 "contents": tuple(map(self._in_ref, offer.contents)),
                                 "actions": tuple(map(self._in_ref, offer.actions)),
+                                "parent_offer_ref": self._in_ref(offer.parent_offer_ref)
+                                if offer.parent_offer_ref is not MISSING
+                                else MISSING,
                             }
                         )
                         for offer in value.offers

@@ -184,14 +184,16 @@ raise SystemExit(main(materials=entry_materials()))
 ```
 
 `--variant deck` shares the live card-reward role's input assembly. Its prompt
-loads `deck-tasks.md`, `state-format.md`, `deck.md`, the current act's threshold,
-and `deck-choice.md` in that order. It only exposes `run_deck_choice`. It sees one
-current card offer, current player/deck/relics/potions, notes, statistics including
-the average fixed energy cost of playable circulating cards, definitions/mechanisms,
-and the latest battle report/review. It projects the remaining recorded route when
-available and omits the map and earlier reward interactions. Guidance is selected for
-the Deck audience from owned objects and the focused offer, rather than the Run
-audience. Non-card selection cases are `not_applicable` for this variant.
+loads `deck-tasks.md`, `run-report-reader.md`, `state-format.md`, `deck.md`, the
+current act's threshold, and `deck-choice.md` in that order. It only exposes
+`run_deck_choice`. It sees the visible card reward groups to plan jointly (or the
+focused single offer for legacy single-offer cases), current
+player/deck/relics/potions, notes, statistics including the average fixed energy
+cost of playable circulating cards, definitions/mechanisms, and the latest battle
+report/review. It projects the remaining recorded route when available and omits the
+map and earlier reward interactions. Guidance is selected for the Deck audience from
+owned objects and the visible card offers, rather than the Run audience. Non-card
+selection cases are `not_applicable` for this variant.
 
 ### Case extraction
 

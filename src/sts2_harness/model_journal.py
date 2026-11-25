@@ -126,9 +126,9 @@ class _Attempts:
         self._attempt = self._attempt.model_copy(update={"reply": ReplySnapshot.of(reply)})
         self._journal.model_attempt(self._sequence, self._attempt)
 
-    def record_handoff(self, completion: HandoffCompletion) -> None:
-        self._attempt = self._attempt.model_copy(update={"handoff": completion})
-        self._journal.model_attempt(self._sequence, self._attempt)
+    @property
+    def reference(self) -> ModelAttemptReference:
+        return ModelAttemptReference(sequence=self._sequence, attempt=self._attempt.index)
 
     def failed(self, reason: FailureKind, *, capacity_signal: str | None = None) -> None:
         self._attempt = self._attempt.model_copy(
@@ -208,6 +208,11 @@ class RecordedLlm:
             recovery.comparison,
             recovery.decision,
         )
+
+    async def record_handoff(
+        self, reference: ModelAttemptReference, completion: HandoffCompletion
+    ) -> None:
+        self._journal.record_handoff(reference, completion)
 
     async def complete_prepared(
         self, prepared: PreparedRequest, *, preparation: RequestPreparation | None = None
@@ -310,7 +315,7 @@ class RecordedLlm:
         else:
             self._journal.finish_model(sequence)
             attempts.finished()
-            return replace(reply, record_handoff=attempts.record_handoff)
+            return replace(reply, reference=attempts.reference)
         finally:
             self._journal.end_model()
             self._journal.diagnostics.finished()

@@ -324,9 +324,10 @@ class Agent(ABC):
                         and isinstance(result.data, NotesUpdated)
                         and result.data.summary is not MISSING
                     ):
-                        if reply.record_handoff is not None:
-                            reply.record_handoff(
-                                HandoffCompletion(call_id=call.id, summary=result.data.summary)
+                        if reply.reference is not None and self._llm is not None:
+                            await self._llm.record_handoff(
+                                reply.reference,
+                                HandoffCompletion(call_id=call.id, summary=result.data.summary),
                             )
                         return TaskComplete(result.data.summary)
                     if not isinstance(result.outcome, ReadCompleted):
