@@ -41,11 +41,13 @@ Pass `EntryMaterials(documents, settings)` to `sts2_harness.cli.main(argv=None, 
 
 ## When documents are delivered
 
-**Run context.** Every time Run builds a context (at act start and at each confirmed node change), the core does the following:
+**Run context.** When Run enters an act, the core does the following:
 
 - reads the configured act guidance IDs;
 - looks up the act itself and every Boss encounter shown on the act map, fetching the map first if needed and checking that the run and act have not changed;
 - merges configured and matched documents by ID.
+
+Within an act, new or changed applicable documents are appended incrementally before later Run requests via `Context.append_materials`.
 
 **Combat context.** When a battle starts, the core reads the configured battle guidance IDs. It also looks up the encounter, every card in every pile, relics, potions, all enemies (including inactive ones), player, enemy, and ally powers, and orbs. Selection candidates are included when Combat owns the menu. New or changed battle objects can bring in more material before a later model request. If a referenced object cannot be read, that is a loading failure; the guidance is not silently skipped.
 
@@ -53,8 +55,7 @@ Pass `EntryMaterials(documents, settings)` to `sts2_harness.cli.main(argv=None, 
 
 - The first documents go into the role's system prompt when its context is built.
 - Later, `Context.append_materials` appends only documents that are new or changed, comparing the complete view, not just the text. Earlier messages are never rewritten, and an empty selection does not retract anything.
-- Each context tracks delivery on its own, even when Run and Combat share documents. A rebuilt context starts a fresh record, so the same material can be delivered again. Pause and resume do not reset it.
-- If building a replacement Run context fails, the previous context stays in place until a new one succeeds.
+- Each context tracks delivery on its own, even when Run and Combat share documents. A new act context starts a fresh record, so the same material can be delivered again. Pause and resume do not reset it.
 
 ## Explicit reads and native knowledge
 

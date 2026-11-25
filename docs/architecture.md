@@ -81,19 +81,13 @@ Decisions are plain data:
 
 | Role | Agent lifetime | Context | Tools |
 | --- | --- | --- | --- |
-| Run | One native act | Rebuilt at each confirmed node change | `run_act`, `run_plan`, `run_next`, `run_notes`, `run_inspect`, `run_knowledge`, `run_skill` |
+| Run | One native act | One per act (append-only across nodes, compacted on capacity) | `run_act`, `run_plan`, `run_next`, `run_notes`, `run_inspect`, `run_knowledge`, `run_skill` |
 | Deck | One node's visible card reward groups or card-adding selection | Its own, across re-decisions until those rewards resolve or the node changes | `run_deck_choice` |
 | Combat | One battle, including its review | One per battle | `combat_act`, `combat_inspect`, `combat_knowledge`, `combat_skill` |
 
 See [ADR 0004](adr/0004-role-agent-and-context-lifetimes.md) for why the lifetimes are set this way.
 
-**Run** handles routes, rewards, shops, events, and rest sites, and owns the strategy notes. Its agent lasts one act, but its context is rebuilt at every confirmed node change. The fresh context holds:
-
-- the current observation, map, and route plan;
-- applicable guidance and the latest battle evidence;
-- in ordinary mode, the current notes.
-
-Queries and actions inside one node stay in one conversation, so opening a reward screen or continuing a shop visit keeps the local back-and-forth. The full history stays in the archive.
+**Run** handles routes, rewards, shops, events, and rest sites, and owns the strategy notes. Its agent and context both last one act: Run starts from current public state, map, route plan, guidance, and (in ordinary mode) notes, then appends changed sections, guidance, notes, and battle evidence incrementally across map nodes so stable definitions, mechanisms, and prefix caches are reused. Capacity compaction bounds long acts, and the full history stays in the archive.
 
 **Deck** plans the node's visible card reward groups jointly (or resolves a standalone card-adding selection). `DeckAgent` is an independent `Agent` that composes shared notes, fight history, deck statistics, and route-plan projection without inheriting `RunAgent`, using its own prompt (including battle-report reading rules) and only the `run_deck_choice` tool. Execution resolves the submitted `CardRewardPlan` sequentially, re-validating each group against the live native state and stopping on any change or failure so Deck can re-decide in the same context. `DefaultFlow` owns the node's resolved reward progress; attempted group outcomes are reported back to Run as progress without consuming Run's pending combat handoff.
 

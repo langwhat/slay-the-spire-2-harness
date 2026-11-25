@@ -310,7 +310,6 @@ class DecisionRun(RunAgent):
         context = self._initial_context(selected, opening)
         self._context = context
         self._llm = self._client()
-        self._context_location = first.observation.location
         calls: dict[str, ToolCall] = {}
         only_call_id: str | None = None
         pending_routes: set[str] = set()
@@ -383,6 +382,12 @@ class DecisionRun(RunAgent):
                     context.set_route_plan(self._plan)
                 elif event.action and not isinstance(event.outcome, Rejected):
                     anchored = False
+                if event.notes_after is not MISSING:
+                    self._notes.write(
+                        NotesState.model_validate_json(event.notes_after.model_dump_json()),
+                        set(NotesState.model_fields),
+                    )
+                    self._sync_notes(context)
                 if event.action:
                     if isinstance(
                         event.outcome,
@@ -399,12 +404,6 @@ class DecisionRun(RunAgent):
                     if context.has_active_group:
                         context.finish_group()
                 else:
-                    if event.notes_after is not MISSING:
-                        self._notes.write(
-                            NotesState.model_validate_json(event.notes_after.model_dump_json()),
-                            set(NotesState.model_fields),
-                        )
-                        self._sync_notes(context)
                     result = await _query_result(event, call, self._notes, execution, documents)
                     context.append_tool_result(
                         call, result, defer_observation=isinstance(task, ActTask)
@@ -433,8 +432,33 @@ class DecisionRun(RunAgent):
                         current.location
                         == native.Location.model_validate(task.expected_route.model_dump())
                     )
-                    self._plan = reconcile_plan(self._plan, current.state.progress.position).plan
-                    context.set_route_plan(self._plan)
+                    if event.state is not None:
+                        self._notes.write(_notes_state(event.state), set(NotesState.model_fields))
+                        self._tools.deck_stats = CaseStatistics(event.state, observation)
+                        if self._tools.fights is not None:
+                            self._tools.fights.recent = event.state.fights
+                            self._tools.fights.act_elites = event.state.elites_fought
+                        route = event.state.route
+                        self._plan = (
+                            RoutePlan(
+                                route.position,
+                                "",
+                                tuple(Edge(*edge) for edge in route.edges),
+                            )
+                            if route is not None
+                            else None
+                        )
+                        if self.variant is DecisionVariant.DECK:
+                            self._plan = reconcile_plan(
+                                self._plan, observation.state.progress.position
+                            ).plan
+                        context.set_route_plan(self._plan)
+                        await self._enrich(context, observation)
+                    else:
+                        self._plan = reconcile_plan(
+                            self._plan, current.state.progress.position
+                        ).plan
+                        context.set_route_plan(self._plan)
                 else:
                     anchored = False
                 context.append_automatic(

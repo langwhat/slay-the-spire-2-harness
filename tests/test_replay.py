@@ -409,6 +409,55 @@ def test_reach_rejects_missing_prefix_and_unknown_writes(tmp_path: Path) -> None
     asyncio.run(scenario())
 
 
+def test_legacy_node_local_archive_opens_but_rejects_replay_and_session(tmp_path: Path) -> None:
+    import pytest
+
+    async def scenario() -> None:
+        archive = tmp_path / "archive.sqlite"
+        anchors = await record_campaign(archive, Campaign())
+        journal = Journal.open(archive)
+        assert journal.manifest.run_context_policy == "act_local_v1"
+        legacy_manifest = journal.manifest.model_copy(
+            update={"run_context_policy": "node_local_v1"}
+        )
+        journal.close()
+        with closing(sqlite3.connect(archive)) as connection, connection:
+            connection.execute(
+                "UPDATE manifest SET value=? WHERE singleton=1",
+                (legacy_manifest.model_dump_json(),),
+            )
+        reopened = Journal.open(archive)
+        assert reopened.manifest.run_context_policy == "node_local_v1"
+        reopened.close()
+        async with reach(archive, anchors[0]) as result:
+            assert result == Rejected(
+                RejectReason.UNSUPPORTED_HISTORY,
+                None,
+                Unsupported(UnsupportedCause.RUN_CONTEXT_POLICY),
+            )
+
+        def unused_model(purpose: ModelPurpose, stream: str) -> ModelClient:
+            raise AssertionError(f"Unexpected model call: {purpose} {stream}")
+
+        with pytest.raises(ValueError, match="Unsupported run context policy"):
+            RunSession(
+                legacy_manifest,
+                SessionDependencies(
+                    game=LiveGame(
+                        ModClient("http://mod"),
+                        namespace="legacy",
+                        game_instance_id="game",
+                        run_id="run",
+                    ),
+                    prompts=PackagedPrompts(),
+                    documents=FileDocuments(()),
+                    model=unused_model,
+                ),
+            )
+
+    asyncio.run(scenario())
+
+
 def test_document_audience_round_trips_or_requires_matching_historical_source(
     tmp_path: Path,
 ) -> None:

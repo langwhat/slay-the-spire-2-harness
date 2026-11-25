@@ -25,7 +25,7 @@ from sts2_harness.tools import ToolCatalog
 
 
 @pytest.mark.parametrize("minimal", [False, True])
-def test_run_keeps_local_exchanges_and_rebuilds_current_node_input(
+def test_run_keeps_act_context_and_appends_updates_across_nodes(
     tmp_path: Path, minimal: bool
 ) -> None:
     http = RunHTTP(
@@ -55,7 +55,7 @@ def test_run_keeps_local_exchanges_and_rebuilds_current_node_input(
         budget = ToolRecoveryBudget()
         async with ModClient("http://mod", transport=httpx.MockTransport(http.mod)) as client:
             execution = Execution(
-                LiveGame(client, namespace="node-context", game_instance_id="game", run_id="run"),
+                LiveGame(client, namespace="act-context", game_instance_id="game", run_id="run"),
                 game_instance_id="game",
                 run_id="run",
                 recovery=budget,
@@ -86,19 +86,16 @@ def test_run_keeps_local_exchanges_and_rebuilds_current_node_input(
                     assert isinstance(await execution.run_unit(agent, ActTask(route)), Executed)
         first = http.inputs[0]["input"]
         second = http.inputs[1]["input"]
-        assert isinstance(first, list) and isinstance(second, list)
+        third = http.inputs[2]["input"]
+        assert isinstance(first, list) and isinstance(second, list) and isinstance(third, list)
         assert second[: len(first)] == first
+        assert third[: len(second)] == second
         assert "open-choice" in json.dumps(second)
-        latest = json.dumps(http.inputs[2]["input"])
-        assert "open-choice" not in latest and "select-choice" not in latest
-        assert "Guidance for node." not in latest
-        assert "Guidance for next." in latest
-        assert "Old decision memo." not in latest
-        assert ("Current decision memo." in latest) is (not minimal)
-        latest_input = http.inputs[2]["input"]
-        assert isinstance(latest_input, list)
+        appended = json.dumps(third[len(second) :])
+        assert "Guidance for next." in appended
+        assert ("Current decision memo." in appended) is (not minimal)
         observations: list[dict[str, JsonValue]] = []
-        for item in latest_input:
+        for item in third:
             if not isinstance(item, dict) or item.get("role") != "user":
                 continue
             content = item.get("content")
@@ -108,7 +105,56 @@ def test_run_keeps_local_exchanges_and_rebuilds_current_node_input(
             observation = task.get("observation")
             if isinstance(observation, dict):
                 observations.append(observation)
+        assert sum(1 for obs in observations if obs.get("baseline") is True) == 1
         assert any("map" in observation for observation in observations)
         assert len(http.actions) == 3
 
     asyncio.run(scenario())
+
+
+def test_act_local_run_context_compacts_cleanly_across_nodes() -> None:
+    from test_context import RUN
+
+    from sts2_harness.context import Context
+    from sts2_harness.context.models import RunActInput
+    from sts2_harness.note_values import NotesView
+
+    first = native.Observation.model_validate_json(RUN)
+    second = first.model_copy(
+        update={
+            "location": first.location.model_copy(update={"node_id": "node-2"}),
+            "state": first.state.model_copy(
+                update={"progress": first.state.progress.model_copy(update={"floor": 2})}
+            ),
+        }
+    )
+    third = second.model_copy(
+        update={
+            "location": second.location.model_copy(update={"node_id": "node-3"}),
+            "state": second.state.model_copy(
+                update={"progress": second.state.progress.model_copy(update={"floor": 3})}
+            ),
+        }
+    )
+    ctx = Context(native.DecisionOwner.RUN)
+    for obs, plan_text in (
+        (first, "Node 1 plan"),
+        (second, "Node 2 plan"),
+        (third, "Node 3 plan"),
+    ):
+        notes = NotesView(plan=plan_text)
+        ctx.begin_group(obs, notes)
+        ctx.append_task(RunActInput(notes), obs)
+        ctx.finish_group()
+
+    candidate = ctx.compaction_candidate()
+    ctx.validate_compaction(candidate)
+    ctx.install_compaction(candidate)
+
+    messages = ctx.model_input()
+    baseline = json.loads(messages[0].text)["context_baseline"]["observation"]
+    assert baseline["baseline"] is True
+    assert baseline["location"]["node_id"] == "node-2"
+    retained = json.loads(messages[-1].text)["observation"]
+    assert retained["location"]["node_id"] == "node-3"
+    assert retained["notes"]["plan"] == "Node 3 plan"

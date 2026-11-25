@@ -210,8 +210,6 @@ class RunAgent(Agent):
         self._notes = tools.notes
         self._prompts = prompts if prompts is not None else PackagedPrompts()
         self._notes_delivered = False
-        self._context_location: native.Location | None = None
-        self._context_settled = True
         self._pending_auto: tuple[AutomaticProgress, native.Observation] | None = None
         self._force_strategy = False
         self._shop_strategy_node: native.Location | None = None
@@ -561,39 +559,6 @@ class RunAgent(Agent):
                 proposal, progress = automatic
                 self._pending_auto = progress, observation
                 return ActionDecision(proposal)
-        location = observation.location
-        if (
-            isinstance(task, ActTask)
-            and not self._context.has_active_group
-            and self._context_settled
-            and observation.map is not MISSING
-            and self._context_location is not None
-            and (
-                location.game_instance_id,
-                location.run_id,
-                location.node_id,
-            )
-            != (
-                self._context_location.game_instance_id,
-                self._context_location.run_id,
-                self._context_location.node_id,
-            )
-        ):
-            try:
-                documents = (
-                    await self._materials(observation) if self._materials is not None else ()
-                )
-            except MaterialUnavailable as error:
-                raise DecisionInterrupted(
-                    Reason(code=ReasonCode.CONTENT_UNAVAILABLE, message=str(error)),
-                    self._recovery.record_failure(),
-                ) from error
-            context = self._initial_context(documents, observation)
-            context.set_route_plan(self._plan)
-            context.begin_group(observation, self._notes.read(), self._plan_value(observation))
-            self._context = context
-            self._context_location = location
-            self._notes_delivered = False
         if isinstance(observation.state, native.RunState) and shop_controls(observation.state):
             self._shop_strategy_node = observation.location
         self._context.begin_group(observation, self._notes.read(), self._plan_value(observation))
@@ -608,10 +573,6 @@ class RunAgent(Agent):
             raise TypeError("RunAgent accepts action results only.")
         if outcome.observation is not None:
             outcome = replace(outcome, observation=self._reward_view(outcome.observation))
-        # A closed group can still contain uncertain execution feedback.
-        self._context_settled = (
-            isinstance(outcome.outcome, ActionCompleted) and outcome.observation is not None
-        )
         movement = (
             self._sync_plan(outcome.observation)
             if outcome.observation is not None
@@ -668,7 +629,6 @@ class RunAgent(Agent):
         client = self._client()
         self._llm = client
         self._context = context
-        self._context_location = start.observation.location
         self._notes_delivered = False
 
     async def _prepare(self, observation: native.Observation) -> Context:

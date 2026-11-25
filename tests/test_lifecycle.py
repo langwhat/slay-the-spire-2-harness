@@ -401,9 +401,14 @@ def test_session_keeps_notes_and_replaces_act_context_before_next_battle(
         from sts2_harness.decisions import BattleResult
 
         assert handoff_task.content.battle_report.result is BattleResult.UNKNOWN
-        visible_notes = handoff_task.content.observation.notes
-        assert isinstance(visible_notes, NotesView)
-        assert visible_notes.plan == "Build enough block for both Boss fights."
+        opening_task = requests[0].input[-1]
+        assert isinstance(opening_task, RunTaskSnapshot)
+        assert isinstance(opening_task.content, RunActContent)
+        assert isinstance(opening_task.content.observation.notes, NotesView)
+        assert opening_task.content.observation.notes.plan == (
+            "Build enough block for both Boss fights."
+        )
+        assert handoff_task.content.observation.notes is MISSING
         assert handoff_task.content.battle_report.encounter == native.NamedDefinition(
             name="Boss", definition_id="ENCOUNTER.BOSS"
         )

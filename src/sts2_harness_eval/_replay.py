@@ -884,6 +884,8 @@ def prefix(journal: Journal, target: ModelAnchor) -> tuple[Dependency, ...]:
         )
     if journal.manifest.initial_notes is None:
         unsupported(None, UnsupportedCause.MISSING_INITIAL_NOTES)
+    if journal.manifest.run_context_policy != "act_local_v1":
+        unsupported(None, UnsupportedCause.RUN_CONTEXT_POLICY)
     # Replayed game reads answer from recorded replies; attempt evidence is not consulted.
     records = journal.timeline(stop=target.model_sequence, attempts=False)
     declaration = journal.manifest.variant

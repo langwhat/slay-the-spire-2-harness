@@ -22,6 +22,7 @@ class RejectReason(StrEnum):
 
 class UnsupportedCause(StrEnum):
     MISSING_INITIAL_NOTES = "missing_initial_notes"
+    RUN_CONTEXT_POLICY = "run_context_policy"
     PREFIX_GAP = "prefix_gap"
     INCOMPLETE_DEPENDENCY = "incomplete_dependency"
     UNKNOWN_WRITE = "unknown_write"

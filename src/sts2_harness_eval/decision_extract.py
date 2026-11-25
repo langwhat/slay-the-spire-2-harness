@@ -21,6 +21,7 @@ from sts2_harness.context.models import (
     RunResultMessage,
     TaskMessage,
 )
+from sts2_harness.context.run_models import RunObservation
 from sts2_harness.decisions import CardRewardChoice, CardRewardPlan, SelectStep
 from sts2_harness.deck import CardChoiceKind, card_rewards, deck_observation
 from sts2_harness.execution.rewards import reward_steps
@@ -355,7 +356,15 @@ def _state(
     content = message.content
     if not isinstance(content, RunActContent):
         return previous
-    observation = content.observation
+    return _state_from_observation(content.observation, previous, original, originals)
+
+
+def _state_from_observation(
+    observation: RunObservation,
+    previous: HarnessState,
+    original: native.Observation,
+    originals: tuple[native.Observation, ...],
+) -> HarnessState:
     notes, added, skipped = previous.notes, previous.added, previous.skipped
     plays, route = previous.observed_plays, previous.route
     if observation.notes is not MISSING:
@@ -554,6 +563,16 @@ def _events(
             if source.observation is not None:
                 raw, declined = _native_observation(source.observation, originals)
                 event = event.model_copy(update={"observation": raw, "declined_offers": declined})
+            shown = message.content.observation
+            if shown is not None and shown.notes is not MISSING:
+                event = event.model_copy(update={"notes_after": shown.notes})
+                state = state.model_copy(
+                    update={
+                        "notes": TypeAdapter(dict[str, JsonValue]).validate_json(
+                            shown.notes.model_dump_json()
+                        )
+                    }
+                )
             if isinstance(source, QueryToolResult) and source.data is not MISSING:
                 data = source.data
                 if isinstance(data, DocumentView):
@@ -578,7 +597,6 @@ def _events(
                 elif isinstance(data, NotesText):
                     event = event.model_copy(update={"notes_read": True})
                 elif isinstance(data, NotesUpdated):
-                    shown = message.content.observation
                     notes_after = shown.notes if shown is not None else MISSING
                     event = event.model_copy(
                         update={
@@ -587,14 +605,6 @@ def _events(
                             "notes_after": notes_after,
                         }
                     )
-                    if notes_after is not MISSING:
-                        state = state.model_copy(
-                            update={
-                                "notes": TypeAdapter(dict[str, JsonValue]).validate_json(
-                                    notes_after.model_dump_json()
-                                )
-                            }
-                        )
                 elif isinstance(data, PlanData):
                     event = event.model_copy(update={"plan": data})
                 else:
@@ -606,11 +616,16 @@ def _events(
                 if message.source.observation is not None
                 else (None, ())
             )
+            auto_state: HarnessState | None = None
+            if message.content.observation is not None and raw is not None:
+                state = _state_from_observation(message.content.observation, state, raw, originals)
+                auto_state = state
             events.append(
                 AutomaticEvent(
                     progress=message.content.automatic_progress,
                     outcome=message.source.outcome,
                     observation=raw,
+                    state=auto_state,
                     invalidated=message.content.route_plan_status is not MISSING,
                     declined_offers=declined,
                 )

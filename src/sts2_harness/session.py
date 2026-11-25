@@ -71,6 +71,10 @@ class RunSession:
     ) -> None:
         if manifest.initial_notes is None:
             raise ValueError("A run session requires explicit initial notes in its manifest.")
+        if manifest.run_context_policy != "act_local_v1":
+            raise ValueError(
+                f"Unsupported run context policy for this core: {manifest.run_context_policy}."
+            )
         self.notes = Notes(manifest.initial_notes)
         self.deck_stats = DeckStatistics()
         self.recovery = ToolRecoveryBudget(on_exhausted=self._recovery_exhausted)

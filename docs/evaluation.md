@@ -235,7 +235,7 @@ The extractor replays the journal to the requested model anchor without model
 or game calls. It checks the original inputs, tools and encoded request digest.
 Cases retain raw native replies and harness-owned semantic state/history,
 including original assistant native replies needed to reconstruct earlier
-interactions within the node. They do not retain rendered prompts, tools,
+interactions within the role context. They do not retain rendered prompts, tools,
 projections or knowledge bodies. A Deck case can retain the active Run plan as
 native edges reconciled at the reward position. Labels never enter the model
 input. Cases can contain real model text, so store them as private data.

@@ -116,6 +116,7 @@ class AutomaticEvent(native.WireModel):
     progress: AutomaticProgress
     outcome: ActionOutcome
     observation: native.Observation | None
+    state: HarnessState | None = None
     invalidated: bool = False
     declined_offers: tuple[str, ...] = ()
 

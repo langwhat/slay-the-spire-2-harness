@@ -211,7 +211,7 @@ class Manifest(native.WireModel):
     materials: SessionMaterials
     capacity_policy: CapacityPolicy = CapacityPolicy()
     minimal: bool = False
-    run_context_policy: Literal["node_local_v1"] = "node_local_v1"
+    run_context_policy: Literal["node_local_v1", "act_local_v1"] = "act_local_v1"
     state_format: Literal["sections_v2"] = "sections_v2"
     seed: str | None = None
     template: str | None = None

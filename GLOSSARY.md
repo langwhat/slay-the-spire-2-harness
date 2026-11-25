@@ -78,7 +78,7 @@ A role's view of a raw observation, delivered into its context. It contains only
 _Avoid_: Raw observation, public observation
 
 **Role context**:
-The conversation and delivery record owned by one role agent. A Run context covers one map node inside an act-scoped Run agent. A Deck context covers a node's visible card reward groups (or a card-adding selection) across any re-decisions until they resolve or the node changes. A Combat context covers one battle through its review. It holds dialogue, projections, handoffs, and delivered knowledge. Another role's history and archived Journal evidence are not part of it.
+The conversation and delivery record owned by one role agent. A Run context covers one native act inside an act-scoped Run agent. A Deck context covers a node's visible card reward groups (or a card-adding selection) across any re-decisions until they resolve or the node changes. A Combat context covers one battle through its review. It holds dialogue, projections, handoffs, and delivered knowledge. Another role's history and archived Journal evidence are not part of it.
 
 **Projection profile**:
 An immutable description of observed game content, shared by instances with identical content within one role context. It is neither a native game definition nor a single game instance.
