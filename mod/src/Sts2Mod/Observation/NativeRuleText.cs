@@ -79,7 +79,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("AfterRemoved", "After this power is removed"),
         ("BeforeAttack", "Before an attack"),
         ("AfterAttack", "After an attack resolves"),
-        ("BeforeDamageReceived", "Before damage resolves"),
+        ("BeforeDamageReceived", "Before a hit's damage resolves (if this kills the attacker, this hit still lands; only later hits cancel)"),
         ("AfterDamageGiven", "After dealing damage"),
         ("AfterCurrentHpChanged", "After HP changes"),
         ("AfterBlockBroken", "After block is broken"),

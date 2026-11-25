@@ -2165,6 +2165,19 @@ public sealed class NativeExtractionTests
     }
 
     [Fact]
+    public void ThornsPower_ClarifiesCurrentHitStillResolves()
+    {
+        var (text, gaps) = PowerMechanismReader.Describe(typeof(ThornsPower));
+        Assert.Empty(gaps);
+        Assert.NotNull(text);
+        Assert.Contains(
+            "Before a hit's damage resolves (if this kills the attacker, this hit still lands; only later hits cancel):",
+            text!,
+            StringComparison.Ordinal);
+        Assert.Contains("deal stacks unpowered damage to attacker", text!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MechanismLatencySummary_FormatsEnemyAndEncounterCounters()
     {
         var previousCulture = System.Globalization.CultureInfo.CurrentCulture;
