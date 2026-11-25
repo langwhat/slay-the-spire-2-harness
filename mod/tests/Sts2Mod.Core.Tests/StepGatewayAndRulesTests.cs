@@ -592,29 +592,29 @@ public sealed class StepGatewayAndRulesTests
         gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 2, _ => null);
         Assert.Equal(NativeInputReadiness.Selection, gateway.Status().InputReadiness);
 
-        // Pause aborts cleanly.
+        // Pause after dispatch settles as Unknown (never conflated with pre-dispatch Skipped).
         Assert.True(tracker.TryBegin(request, out var pausedOpen));
         tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: false, activeSelectionOfferRef: null);
-        Assert.Equal(RewardOpenStatus.Skipped, await pausedOpen);
+        Assert.Equal(RewardOpenStatus.Unknown, await pausedOpen);
         Assert.False(tracker.IsBusy);
 
-        // Timeout aborts cleanly.
+        // Timeout after dispatch settles as Unknown.
         Assert.True(tracker.TryBegin(request, out var timedOut));
         clock.Seconds = 2;
         tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: true, activeSelectionOfferRef: null);
         Assert.True(tracker.IsBusy);
         clock.Seconds = 3;
         tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: true, activeSelectionOfferRef: null);
-        Assert.Equal(RewardOpenStatus.Skipped, await timedOut);
+        Assert.Equal(RewardOpenStatus.Unknown, await timedOut);
         Assert.False(tracker.IsBusy);
 
-        // Route change aborts cleanly.
+        // Route change after dispatch settles as Unknown.
         Assert.True(tracker.TryBegin(request, out var routeChanged));
         tracker.ObserveFrame(RunLocation with { NodeId = "node-2" }, NativeInputReadiness.Ready, isRunning: true, activeSelectionOfferRef: null);
-        Assert.Equal(RewardOpenStatus.Skipped, await routeChanged);
+        Assert.Equal(RewardOpenStatus.Unknown, await routeChanged);
         Assert.False(tracker.IsBusy);
 
-        // Close transition gates StepGateway until Ready with no selection settles.
+        // Close transition gates StepGateway until Ready with no selection settles; timeout settles as Unknown.
         Assert.True(tracker.TryBeginClose(request, out var closing));
         Assert.True(tracker.IsBusy);
         Assert.Equal(NativeInputReadiness.Busy, gateway.Status().InputReadiness);
@@ -622,6 +622,12 @@ public sealed class StepGatewayAndRulesTests
         Assert.True(tracker.IsBusy);
         tracker.ObserveFrame(RunLocation, NativeInputReadiness.Ready, isRunning: true, activeSelectionOfferRef: null, hasSelection: false);
         Assert.Equal(RewardCloseStatus.Closed, await closing);
+        Assert.False(tracker.IsBusy);
+
+        Assert.True(tracker.TryBeginClose(request, out var timedOutClose));
+        clock.Seconds = 6;
+        tracker.ObserveFrame(RunLocation, NativeInputReadiness.Selection, isRunning: true, activeSelectionOfferRef: "offer:1:2", hasSelection: true);
+        Assert.Equal(RewardCloseStatus.Unknown, await timedOutClose);
         Assert.False(tracker.IsBusy);
     }
 
@@ -660,10 +666,15 @@ public sealed class StepGatewayAndRulesTests
         Assert.True(tracker.TryBegin(dequeued.Request, out var completion, dequeued.EnqueuedAt));
         clock.Seconds = 5; // 3s total since enqueue (2s after dequeue) reaches the 3s settle limit.
         tracker.ObserveFrame(RunLocation, NativeInputReadiness.Busy, isRunning: true, activeSelectionOfferRef: null);
-        Assert.Equal(RewardOpenStatus.Skipped, await completion);
+        Assert.Equal(RewardOpenStatus.Unknown, await completion);
         Assert.False(tracker.IsBusy);
-        dequeued.Reply.TrySetResult(RewardOpenQueue.OpenReplyJson(RewardOpenStatus.Skipped));
-        Assert.Equal(200, (await fresh).StatusCode);
+        dequeued.Reply.TrySetResult(RewardOpenQueue.OpenReplyJson(RewardOpenStatus.Unknown));
+        var freshReply = await fresh;
+        Assert.Equal(200, freshReply.StatusCode);
+        using (var freshDoc = JsonDocument.Parse(freshReply.Json))
+        {
+            Assert.Equal("unknown", freshDoc.RootElement.GetProperty("status").GetString());
+        }
     }
 
     [Fact]

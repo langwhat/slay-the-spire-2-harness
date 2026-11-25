@@ -1202,7 +1202,7 @@ internal sealed class GameStepDispatcher
                 catch (Exception error)
                 {
                     GD.PrintErr($"[sts2agent] Viewer card reward open failed: {error}");
-                    _rewardOpen.Complete(RewardOpenStatus.Skipped);
+                    _rewardOpen.Complete(RewardOpenStatus.Unknown);
                 }
 
                 _ = CompleteRewardOpenReplyAsync(completion, reply);
@@ -1282,7 +1282,7 @@ internal sealed class GameStepDispatcher
             catch (Exception error)
             {
                 GD.PrintErr($"[sts2agent] Viewer card reward close failed: {error}");
-                _rewardOpen.CompleteClose(RewardCloseStatus.Skipped);
+                _rewardOpen.CompleteClose(RewardCloseStatus.Unknown);
             }
 
             _ = CompleteRewardCloseReplyAsync(completion, reply);
@@ -1346,7 +1346,7 @@ internal sealed class GameStepDispatcher
         }
         catch
         {
-            reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Skipped));
+            reply.TrySetResult(RewardOpenReplyJson(RewardOpenStatus.Unknown));
         }
     }
 
@@ -1361,7 +1361,7 @@ internal sealed class GameStepDispatcher
         }
         catch
         {
-            reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Skipped));
+            reply.TrySetResult(RewardCloseReplyJson(RewardCloseStatus.Unknown));
         }
     }
 

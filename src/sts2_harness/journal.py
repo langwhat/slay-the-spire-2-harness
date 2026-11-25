@@ -2298,6 +2298,16 @@ def _result(outcome: GameSuccess | GameFailure) -> tuple[ResultKind, str | None]
             return ResultKind.REJECTED, None
         if isinstance(result, native.TechnicalError):
             return ResultKind.FAILED, result.error.code.value
+        if (
+            isinstance(result, native.RewardOpenReply)
+            and result.status is native.RewardOpenStatus.UNKNOWN
+        ):
+            return ResultKind.UNKNOWN, "reward_open_unconfirmed"
+        if (
+            isinstance(result, native.RewardCloseReply)
+            and result.status is native.RewardCloseStatus.UNKNOWN
+        ):
+            return ResultKind.UNKNOWN, "reward_close_unconfirmed"
         return ResultKind.COMPLETED, None
     if isinstance(outcome, (Inspected, Cataloged)):
         result = outcome.result

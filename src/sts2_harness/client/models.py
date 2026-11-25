@@ -1631,6 +1631,7 @@ class RewardOpenStatus(StrEnum):
     OPENED = "opened"
     ALREADY_OPEN = "already_open"
     SKIPPED = "skipped"
+    UNKNOWN = "unknown"
 
 
 class RewardOpenRequest(WireModel):
@@ -1646,6 +1647,7 @@ class RewardCloseStatus(StrEnum):
     CLOSED = "closed"
     ALREADY_CLOSED = "already_closed"
     SKIPPED = "skipped"
+    UNKNOWN = "unknown"
 
 
 class RewardCloseReply(WireModel):

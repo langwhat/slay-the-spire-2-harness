@@ -437,8 +437,9 @@ class DeckAgent(Agent):
             # An unconfirmed open may still have opened the native screen; let raw state decide.
             self._previewed_offer_ref = offer_ref
             return
-        if isinstance(result, native.RewardOpenReply) and (
-            result.status is native.RewardOpenStatus.OPENED
+        if isinstance(result, native.RewardOpenReply) and result.status in (
+            native.RewardOpenStatus.OPENED,
+            native.RewardOpenStatus.UNKNOWN,
         ):
             self._previewed_offer_ref = offer_ref
 
@@ -608,7 +609,10 @@ class DeckAgent(Agent):
                 ):
                     self._previewed_offer_ref = None
                     raw = await self._tools.current()
-                elif close_result is None:
+                elif close_result is None or (
+                    isinstance(close_result, native.RewardCloseReply)
+                    and close_result.status is native.RewardCloseStatus.UNKNOWN
+                ):
                     raw = await self._tools.current()
                     if (
                         raw is not None

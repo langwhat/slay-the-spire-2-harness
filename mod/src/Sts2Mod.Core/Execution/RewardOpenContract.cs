@@ -10,6 +10,7 @@ public enum RewardOpenStatus
     Opened,
     AlreadyOpen,
     Skipped,
+    Unknown,
 }
 
 public enum RewardCloseStatus
@@ -17,6 +18,7 @@ public enum RewardCloseStatus
     Closed,
     AlreadyClosed,
     Skipped,
+    Unknown,
 }
 
 public sealed record RewardOpenRequest(StepRoute ExpectedRoute, string Offer);
@@ -227,9 +229,9 @@ public sealed class RewardOpenTracker(TimeProvider? timeProvider = null, TimeSpa
         bool stillValid = true)
     {
         ActiveOpen? finishedOpen = null;
-        var openOutcome = RewardOpenStatus.Skipped;
+        var openOutcome = RewardOpenStatus.Unknown;
         ActiveClose? finishedClose = null;
-        var closeOutcome = RewardCloseStatus.Skipped;
+        var closeOutcome = RewardCloseStatus.Unknown;
 
         lock (_sync)
         {
@@ -256,7 +258,7 @@ public sealed class RewardOpenTracker(TimeProvider? timeProvider = null, TimeSpa
                          || _clock.GetElapsedTime(opening.StartedAt) >= _settleLimit)
                 {
                     finishedOpen = opening;
-                    openOutcome = RewardOpenStatus.Skipped;
+                    openOutcome = RewardOpenStatus.Unknown;
                     _activeOpen = null;
                 }
             }
@@ -283,7 +285,7 @@ public sealed class RewardOpenTracker(TimeProvider? timeProvider = null, TimeSpa
                          || _clock.GetElapsedTime(closing.StartedAt) >= _settleLimit)
                 {
                     finishedClose = closing;
-                    closeOutcome = RewardCloseStatus.Skipped;
+                    closeOutcome = RewardCloseStatus.Unknown;
                     _activeClose = null;
                 }
             }
@@ -317,7 +319,7 @@ public sealed class RewardOpenTracker(TimeProvider? timeProvider = null, TimeSpa
 
     public void Reset()
     {
-        Complete(RewardOpenStatus.Skipped);
-        CompleteClose(RewardCloseStatus.Skipped);
+        Complete(RewardOpenStatus.Unknown);
+        CompleteClose(RewardCloseStatus.Unknown);
     }
 }
