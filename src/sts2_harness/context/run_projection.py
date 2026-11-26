@@ -14,6 +14,7 @@ from sts2_harness.context.map_projection import (
     is_post_boss,
     planned_route,
     project_map,
+    reachable_room_summary,
     upcoming_act_bosses,
     upcoming_act_elites,
 )
@@ -61,11 +62,18 @@ def _slim(
             continue
         previous = {**known, **value} if name == "upgrade" else known.get(name)
         compact = _slim(child, definitions, previous)
-        if compact is None or compact == [] or compact == {}:
-            if previous is None or previous == [] or previous == {}:
-                continue
+        if (
+            name != "elites_fought"
+            and (compact is None or compact == [] or compact == {})
+            and (previous is None or previous == [] or previous == {})
+        ):
+            continue
         result[name] = compact
     return result
+
+
+def generated_key(value: dict[str, JsonValue]) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def mechanism_key(value: dict[str, JsonValue]) -> tuple[str, str, str | None, str | None]:
@@ -122,7 +130,7 @@ def definition_references(value: JsonValue) -> set[str]:
     if isinstance(identity, str) and "name" in value:
         references.add(identity)
     for name, child in value.items():
-        if name != "defs":
+        if name not in ("defs", "generated"):
             references.update(definition_references(child))
     return references
 
@@ -137,6 +145,9 @@ class RunDelivery:
     )
     delivered_defs: set[str] = field(default_factory=lambda: set[str]())
     sections: dict[str, JsonValue] = field(default_factory=lambda: dict[str, JsonValue]())
+
+    generated_entries: list[JsonValue] = field(default_factory=lambda: list[JsonValue]())
+    delivered_generated: set[str] = field(default_factory=lambda: set[str]())
 
     mechanisms: list[JsonValue] = field(default_factory=lambda: list[JsonValue]())
     delivered_mechanisms: set[tuple[str, str, str | None, str | None]] = field(
@@ -160,6 +171,7 @@ class RunDelivery:
             "baseline": True,
             "defs": [_slim(value) for value in definitions],
             **self.sections,
+            **({"generated": self.generated_entries} if self.generated_entries else {}),
             **({"mechanisms": self.mechanisms} if self.mechanisms else {}),
         }
 
@@ -352,16 +364,23 @@ class RunDelivery:
                     assert isinstance(progress, dict)
                     progress["route"] = list(route)
             if self.focused_deck and isinstance(state, native.RunState):
+                progress = sections["progress"]
+                assert isinstance(progress, dict)
                 upcoming = upcoming_act_bosses(source.map, state.progress)
                 if upcoming:
-                    progress = sections["progress"]
-                    assert isinstance(progress, dict)
                     progress["boss"] = [_json(boss) for boss in upcoming]
                 elites = upcoming_act_elites(source.map, state.progress, self.route_plan)
                 if elites:
-                    progress = sections["progress"]
-                    assert isinstance(progress, dict)
                     progress["elite_pool"] = [_json(elite) for elite in elites]
+                    if self.elites_fought is not None:
+                        progress["elites_fought"] = [_json(elite) for elite in self.elites_fought]
+                if "route" not in progress and source.map is not MISSING and not post_boss:
+                    try:
+                        reachable = reachable_room_summary(source.map, state.progress)
+                    except MapUnavailable:
+                        reachable = MISSING
+                    if reachable is not MISSING:
+                        progress["reachable_ahead"] = _json(reachable)
         if self.role is native.DecisionOwner.COMBAT:
             player = sections["player"]
             assert isinstance(player, dict)
@@ -384,6 +403,8 @@ class RunDelivery:
                 sections["arrow_slots"] = [_json(slot) for slot in state.arrow_slots]
             if state.melodies is not MISSING:
                 sections["melodies"] = list(state.melodies)
+            if state.turn_activity is not MISSING:
+                sections["turn_activity"] = _json(state.turn_activity)
             active_relics: list[JsonValue] = []
             for ref in state.relics:
                 entry = observation.objects.get(ref)
@@ -484,16 +505,47 @@ class RunDelivery:
                     else None
                 )
         sections["choice"] = choice
-        sections["generated"] = [
-            {
-                "source": object_row(ref, actionable=False),
+
+        def canonical_source(ref: str) -> dict[str, JsonValue]:
+            obj = observation.objects.get(ref)
+            if obj is not None:
+                key = _key(obj)
+                return {"id": key, "name": obj.name} if key is not None else {"name": obj.name}
+            if ref == "player":
+                return {"id": state.player.definition_id, "name": state.player.name}
+            if isinstance(state, native.CombatState):
+                actors = (
+                    *state.enemies,
+                    *state.inactive_enemies,
+                    *(state.allies if state.allies is not MISSING else ()),
+                )
+                for actor in actors:
+                    if actor.ref == ref:
+                        return (
+                            {"id": actor.definition_id, "name": actor.name}
+                            if actor.definition_id is not MISSING
+                            else {"name": actor.name}
+                        )
+            return {"name": ref}
+
+        generated: dict[str, dict[str, JsonValue]] = {}
+        for ref, cards in observation.generated.items():
+            if not cards:
+                continue
+            raw_entry: dict[str, JsonValue] = {
+                "source": canonical_source(ref),
                 "previews": [
                     {k: v for k, v in _json(card).items() if k != "rarity"} for card in cards
                 ],
             }
-            for ref, cards in observation.generated.items()
-            if cards
+            slimmed = _slim(raw_entry)
+            assert isinstance(slimmed, dict)
+            generated.setdefault(generated_key(slimmed), slimmed)
+        self.generated_entries = list(generated.values())
+        generated_additions: list[JsonValue] = [
+            body for key, body in generated.items() if key not in self.delivered_generated
         ]
+        self.delivered_generated.update(generated)
         mechanisms: dict[tuple[str, str, str | None, str | None], dict[str, JsonValue]] = {}
         for mechanism in observation.mechanisms:
             if _duplicates_definition(mechanism, self.definitions, referenced):
@@ -544,6 +596,8 @@ class RunDelivery:
         ]
         if additions:
             changed["defs"] = [_slim(value) for value in additions]
+        if generated_additions:
+            changed["generated"] = generated_additions
         if mechanism_additions:
             changed["mechanisms"] = [_slim(value) for value in mechanism_additions]
         if baseline:

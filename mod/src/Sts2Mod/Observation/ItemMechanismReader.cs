@@ -45,7 +45,7 @@ internal static class ItemMechanismReader
                 {
                     if (method.IsAbstract || method.ContainsGenericParameters || method.GetMethodBody() is null)
                         continue;
-                    foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(method))
+                    foreach (var inst in NativeRuleBody.ReadOriginalInstructions(method))
                     {
                         if (inst.operand is MethodBase called && predicate(called))
                         {
@@ -113,7 +113,7 @@ internal static class ItemMechanismReader
             {
                 var asyncAttr = onPlay.GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>();
                 var target = asyncAttr?.StateMachineType.GetMethod("MoveNext", DeclaredInstance) ?? onPlay;
-                foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(target))
+                foreach (var inst in NativeRuleBody.ReadOriginalInstructions(target))
                 {
                     if (inst.operand is MethodBase called
                         && called.DeclaringType == typeof(ArrowCmd)
@@ -886,7 +886,7 @@ internal static class ItemMechanismReader
     {
         var asyncAttr = onUse.GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>();
         var target = asyncAttr?.StateMachineType.GetMethod("MoveNext", DeclaredInstance) ?? onUse;
-        var instructions = HarmonyLib.PatchProcessor.GetOriginalInstructions(target);
+        var instructions = NativeRuleBody.ReadOriginalInstructions(target);
         var sawRandomOutOfCombat = false;
         foreach (var inst in instructions)
         {
@@ -1035,7 +1035,7 @@ internal static class ItemMechanismReader
         gap = null;
         var asyncAttr = onPlay.GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>();
         var target = asyncAttr?.StateMachineType.GetMethod("MoveNext", DeclaredInstance) ?? onPlay;
-        var instructions = HarmonyLib.PatchProcessor.GetOriginalInstructions(target);
+        var instructions = NativeRuleBody.ReadOriginalInstructions(target);
 
         var labelToIndex = new Dictionary<System.Reflection.Emit.Label, int>();
         for (var i = 0; i < instructions.Count; i++)

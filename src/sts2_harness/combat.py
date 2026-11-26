@@ -38,7 +38,13 @@ from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import ModelClient, TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
 from sts2_harness.note_values import NotesView
-from sts2_harness.prompts import DECK_STATE_FORMAT_SECTION, PackagedPrompts, PromptReader
+from sts2_harness.prompts import (
+    PackagedPrompts,
+    PromptReader,
+    combat_observations_prompt,
+    combat_tasks_prompt,
+    state_format_prompt,
+)
 from sts2_harness.results import Reason, ReasonCode
 from sts2_harness.route_plan import RoutePlan
 from sts2_harness.tools import ToolCatalog
@@ -76,25 +82,23 @@ def _should_review(report: BattleReport) -> bool:
 
 def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool = False) -> MaterialParts:
     blocks: list[MaterialText | str] = []
-    names = (
-        "combat-tasks",
-        "report-reader",
-        "combat-task-rules",
-        "state-format",
-        "combat-observations",
+    ordered: list[MaterialText] = [combat_tasks_prompt(prompts, minimal=minimal)]
+    if not minimal:
+        ordered.append(prompts.read("report-reader"))
+    ordered.extend(
+        [
+            prompts.read("combat-task-rules"),
+            state_format_prompt(prompts, deck_fields=False, minimal=minimal),
+            combat_observations_prompt(prompts, minimal=minimal),
+        ]
     )
-    for name in (
-        *names,
-        *(("combat-review",) if not minimal else ()),
-        *(("viewer-input",) if viewer_input else ()),
-    ):
+    if not minimal:
+        ordered.append(prompts.read("combat-review"))
+    if viewer_input:
+        ordered.append(prompts.read("viewer-input"))
+    for block in ordered:
         if blocks:
             blocks.append("\n")
-        block = prompts.read(name)
-        if name == "state-format":
-            body, separator, _ = block.body.partition(DECK_STATE_FORMAT_SECTION)
-            if separator:
-                block = MaterialText.create(block.id, body)
         blocks.append(block)
     return MaterialParts(tuple(blocks))
 

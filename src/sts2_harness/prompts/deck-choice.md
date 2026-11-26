@@ -4,7 +4,7 @@ Compare all available reward groups as one decision. Cards across different grou
 
 Before calling `run_deck_choice`, check in order:
 
-1. **Main gap** (from `deck`, `deck_stats`, `fights`, `progress.route`, and Boss/Elite rules, before reading candidates): urgent frontload/multi-target for rooms ahead, missing Boss growth or multiplier, slow or diluted cycles (high `circulating`, `cycle_turns`, or `basic_cards`), over-costed hands (stacked 2+ cost cards without energy help, or chosen cards going unplayed), or short opening/peak-turn mitigation?
+1. **Main gap** (from `deck`, `deck_stats`, `fights`, `progress.route` or `progress.reachable_ahead`, and Boss/Elite rules, before reading candidates): urgent frontload/multi-target for rooms ahead, missing Boss growth or multiplier, slow or diluted cycles (high `circulating`, `cycle_turns`, `basic_cards`, or `basic_and_curse_pct`), over-costed hands (stacked 2+ cost cards without energy help, or chosen cards going unplayed), or short opening/peak-turn mitigation?
 2. **Marginal draw-pool test** (for each candidate): Does adding it improve core arrival, Boss ceiling, or peak survival more than keeping the draw pool thinner—by forming or multiplying a real core with pieces you own or can take in the same plan, adding true net draw/unconditional fetch/reliable energy, or directly fixing step 1's gap? If standalone flat numbers, does it clearly beat your **best owned card** in that job?
 3. **Weak grounds for taking** — lean toward `skip` when the case for a candidate rests mainly on:
    - Beating basic starters while duplicating a job already covered by stronger owned cards;

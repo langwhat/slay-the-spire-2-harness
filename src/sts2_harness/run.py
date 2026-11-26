@@ -43,8 +43,18 @@ from sts2_harness.llm.messages import (
     TextRole,
     ToolCall,
 )
-from sts2_harness.material_text import MaterialParts, MaterialUnavailable
-from sts2_harness.prompts import PackagedPrompts, PromptReader, deck_act_prompt
+from sts2_harness.material_text import MaterialParts, MaterialText, MaterialUnavailable
+from sts2_harness.prompts import (
+    PackagedPrompts,
+    PromptReader,
+    deck_act_prompt,
+    deck_prompt,
+    run_observations_prompt,
+    run_report_reader_prompt,
+    run_task_rules_prompt,
+    run_tasks_prompt,
+    state_format_prompt,
+)
 from sts2_harness.results import (
     ActionCompleted,
     ActionToolResult,
@@ -148,6 +158,33 @@ def run_observation(observation: native.Observation) -> native.Observation:
             ),
         }
     )
+
+
+def _system(
+    prompts: PromptReader,
+    progress: native.Progress,
+    *,
+    viewer_input: bool,
+    minimal: bool = False,
+) -> MaterialParts:
+    blocks: tuple[str | MaterialText, ...] = (
+        run_tasks_prompt(prompts, minimal=minimal),
+        run_report_reader_prompt(prompts, minimal=minimal),
+        run_task_rules_prompt(prompts, minimal=minimal),
+        "\n",
+        state_format_prompt(prompts, deck_fields=True, minimal=minimal),
+        "\n",
+        run_observations_prompt(prompts, minimal=minimal),
+        "\n",
+        deck_prompt(prompts, minimal=minimal),
+        "\n",
+        prompts.read(deck_act_prompt(progress)),
+    )
+    if not minimal:
+        blocks += ("\n", prompts.read("run-notes"))
+    if viewer_input:
+        blocks += ("\n", prompts.read("viewer-input"))
+    return MaterialParts(blocks)
 
 
 def enrich_run_context(
@@ -649,25 +686,16 @@ class RunAgent(Agent):
     def _initial_context(
         self, documents: tuple[DocumentView, ...], observation: native.Observation
     ) -> Context:
-        blocks = (
-            self._prompts.read("run-tasks"),
-            self._prompts.read("run-report-reader"),
-            self._prompts.read("run-task-rules"),
-            "\n",
-            self._prompts.read("state-format"),
-            "\n",
-            self._prompts.read("run-observations"),
-            "\n",
-            self._prompts.read("deck"),
-            "\n",
-            self._prompts.read(deck_act_prompt(observation.state.progress)),
-        )
-        if not self._tools.minimal:
-            blocks += ("\n", self._prompts.read("run-notes"))
-        if self._user_input is not None:
-            blocks += ("\n", self._prompts.read("viewer-input"))
         system = (
-            TextMessage(TextRole.SYSTEM, MaterialParts(blocks)),
+            TextMessage(
+                TextRole.SYSTEM,
+                _system(
+                    self._prompts,
+                    observation.state.progress,
+                    viewer_input=self._user_input is not None,
+                    minimal=self._tools.minimal,
+                ),
+            ),
             TextMessage(
                 TextRole.SYSTEM,
                 json.dumps(

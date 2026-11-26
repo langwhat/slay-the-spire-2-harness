@@ -167,7 +167,7 @@ class ToolCatalog:
         self._catalog = catalog
         self._present = present
         self._display = display
-        self._supplements = supplements
+        self._supplements = None if minimal else supplements
         self._skills = skills
         inputs: dict[ToolName, type[BaseModel]] = {
             ToolName.RUN_ACT: MinimalRunActInput if minimal else RunActInput,
@@ -209,7 +209,9 @@ class ToolCatalog:
                     ToolName.RUN_DECK_CHOICE,
                     ToolName.RUN_PLAN,
                     ToolName.RUN_NEXT,
+                    ToolName.RUN_KNOWLEDGE,
                     ToolName.COMBAT_ACT,
+                    ToolName.COMBAT_KNOWLEDGE,
                 }
             )
         )

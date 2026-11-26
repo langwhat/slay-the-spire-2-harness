@@ -30,6 +30,7 @@ from sts2_harness.decisions import (
     SelectStep,
     TaskComplete,
 )
+from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.diagnostics import BatchSettled, BatchStatus, BatchSubmitted, Diagnostics
 from sts2_harness.execution.reason_display import (
     ReasonDisplaySanitizer,
@@ -112,6 +113,7 @@ class Execution:
         diagnostics: Diagnostics | None = None,
         display: Callable[[str], Awaitable[DisplayResult]] | None = None,
         on_viewer_reason: Callable[[ViewerReason], None] | None = None,
+        deck_stats: DeckStatistics | None = None,
     ) -> None:
         self._diagnostics = diagnostics
         self._game = game
@@ -125,6 +127,7 @@ class Execution:
         self._last_observation: native.Observation | None = None
         self._reason_display = ReasonDisplaySanitizer()
         self.fights = FightHistory()
+        self._deck_stats = deck_stats
         self._observed: Callable[[native.Observation], None] | None = None
 
     def sanitize_reason(self, reason: str, *, observation: native.Observation | None = None) -> str:
@@ -251,10 +254,15 @@ class Execution:
         if self._recovery is not None:
             self._recovery.reset()
 
-    def _record_observation(self, observation: native.Observation) -> None:
+    def _observe_telemetry(self, observation: native.Observation) -> None:
         self._last_observation = observation
         self._reason_display.observe(observation)
         self.fights.observe(observation)
+        if self._deck_stats is not None:
+            self._deck_stats.observe(observation)
+
+    def _record_observation(self, observation: native.Observation) -> None:
+        self._observe_telemetry(observation)
         if self._observed is not None:
             self._observed(observation)
 
@@ -610,9 +618,7 @@ class Execution:
                         await self.display_reason(proposal.reason, repeat=False)
                 settlement = await self._game.settle(route, step)
                 for observation in settlement.observations:
-                    self._last_observation = observation
-                    self._reason_display.observe(observation)
-                    self.fights.observe(observation)
+                    self._observe_telemetry(observation)
                 settled = unwrap(settlement)
                 receipt = settled.receipt
                 if isinstance(receipt, native.ReceiptCompleted):

@@ -2681,7 +2681,7 @@ public sealed class NativeExtractionTests
             {
                 if (method.IsAbstract || method.ContainsGenericParameters || method.GetMethodBody() is null)
                     continue;
-                foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(method))
+                foreach (var inst in NativeRuleBody.ReadOriginalInstructions(method))
                 {
                     if (inst.operand is MethodBase mb && mb.IsGenericMethod)
                     {

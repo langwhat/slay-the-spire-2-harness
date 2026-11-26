@@ -36,6 +36,7 @@ class RunObservation(SemanticValue):
     orbs: dict[str, JsonValue] | None | MISSING = MISSING
     arrow_slots: tuple[ArrowSlot, ...] | None | MISSING = MISSING
     melodies: DistinctMelodies | None | MISSING = MISSING
+    turn_activity: dict[str, JsonValue] | None | MISSING = MISSING
     active_relics: tuple[dict[str, JsonValue], ...] | None | MISSING = MISSING
     encounter: dict[str, JsonValue] | None | MISSING = MISSING
     mechanisms: tuple[dict[str, JsonValue], ...] | MISSING = MISSING

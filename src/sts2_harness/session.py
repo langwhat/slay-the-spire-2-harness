@@ -112,6 +112,7 @@ class RunSession:
             diagnostics=self._diagnostics,
             display=self._dependencies.display,
             on_viewer_reason=self._dependencies.viewer_reason,
+            deck_stats=self.deck_stats,
         )
         run = self._new_run()
         self._flow = (

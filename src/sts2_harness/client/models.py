@@ -480,8 +480,18 @@ class EventState(WireModel):
     definition_id: Nonempty | MISSING = MISSING
 
 
+class TurnActivity(WireModel):
+    cards_played: Annotated[int, Field(ge=0)]
+    attacks_played: Annotated[int, Field(ge=0)]
+    skills_played: Annotated[int, Field(ge=0)]
+    powers_played: Annotated[int, Field(ge=0)]
+    cards_exhausted: Annotated[int, Field(ge=0)]
+    cards_discarded: Annotated[int, Field(ge=0)] | MISSING = MISSING
+
+
 class RunState(WireModel):
     battle_turns: int | None | MISSING = MISSING
+    battle_cards_played: tuple[NamedDefinition, ...] | MISSING = MISSING
     card_rarity_offset: float
     control: StateControl
     progress: Progress
@@ -516,6 +526,7 @@ class CombatState(WireModel):
     allies: tuple[Ally, ...] | MISSING = MISSING
     arrow_slots: Annotated[tuple[ArrowSlot, ...], Field(min_length=1)] | MISSING = MISSING
     melodies: DistinctMelodies | MISSING = MISSING
+    turn_activity: TurnActivity | MISSING = MISSING
 
 
 class Piles(WireModel):

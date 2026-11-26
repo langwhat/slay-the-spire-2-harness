@@ -23,6 +23,11 @@ class MapPosition(SemanticValue):
     room: int
 
 
+class ReachableSummary(SemanticValue):
+    next_rooms: tuple[str, ...]
+    counts: dict[str, int]
+
+
 class MapView(SemanticValue):
     boss: tuple[native.NamedDefinition, ...]
     elite_pool: tuple[native.NamedDefinition, ...] | MISSING = MISSING
@@ -446,3 +451,52 @@ def upcoming_act_elites(
             return public_map.elite_pool
         pending.extend(nodes[pos].children)
     return ()
+
+
+def reachable_room_summary(
+    public_map: native.PublicMap | MISSING, progress: native.Progress
+) -> ReachableSummary | MISSING:
+    if (
+        public_map is MISSING
+        or not public_map.nodes
+        or is_post_boss(progress, public_map)
+        or progress.bosses_left == 0
+    ):
+        return MISSING
+    nodes = {node.position: node for node in public_map.nodes}
+    position = progress.position
+    children = {child for node in public_map.nodes for child in node.children}
+    roots = (
+        list(nodes[position].children)
+        if position is not None and position in nodes
+        else [node.position for node in public_map.nodes if node.position not in children]
+        if position is None
+        else []
+    )
+    if public_map.legal_destinations is not None:
+        roots = list(dict.fromkeys((*roots, *public_map.legal_destinations)))
+    immediate = list(public_map.legal_destinations) if public_map.legal_destinations else roots
+    reached: set[str] = set()
+    pending = list(roots)
+    while pending:
+        pos = pending.pop()
+        if pos in reached or pos not in nodes:
+            continue
+        reached.add(pos)
+        pending.extend(nodes[pos].children)
+    if not reached:
+        return MISSING
+    try:
+        next_rooms = tuple(
+            dict.fromkeys(
+                _ROOM_CODES[MapRoom(nodes[pos].room_type)] for pos in immediate if pos in nodes
+            )
+        )
+        raw_counts: dict[str, int] = {}
+        for pos in reached:
+            code = _ROOM_CODES[MapRoom(nodes[pos].room_type)]
+            raw_counts[code] = raw_counts.get(code, 0) + 1
+    except ValueError as error:
+        raise MapUnavailable("The native map has an unknown room type.") from error
+    counts = {code: raw_counts[code] for code in _ROOM_CODES.values() if code in raw_counts}
+    return ReachableSummary(next_rooms=next_rooms, counts=counts)
