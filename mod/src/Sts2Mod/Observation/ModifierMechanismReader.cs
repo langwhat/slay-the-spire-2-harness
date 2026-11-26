@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Reflection;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.ValueProps;
 using static Sts2Mod.Observation.NativeRuleBody;
@@ -684,53 +685,165 @@ internal static class ModifierMechanismReader
         return true;
     }
 
+    private static bool IsCardTypeInput(Value value)
+        => value is Input { Type: var t } && t == typeof(CardType);
+
     private static CardType[]? TryReadCanEnchantCardTypes(NativeRuleBody body)
     {
+        if (body.Calls.Count > 0 || body.Writes.Count > 0 || body.FieldSteps.Count > 0
+            || body.Loops.Count > 0 || body.ForeachRanges.Count > 0)
+            return null;
+
         var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
         if (positive.Length == 0)
             return null;
         var matched = new List<CardType>();
         foreach (var ret in positive)
         {
-            if (ret.Value is Operation { Operator: "ceq", Left: Input, Right: Constant { Data: int ct } }
-                && Enum.IsDefined(typeof(CardType), ct))
+            List<CardType>? branchAllowed = null;
+            var branchExcluded = new HashSet<CardType>();
+            var tests = new List<Test>(ret.Conditions);
+
+            if (!(TryTruth(ret.Value, out var rb) && rb))
+                tests.Add(new Test(ret.Value, true));
+
+            foreach (var raw in tests)
             {
-                if (!matched.Contains((CardType)ct))
-                    matched.Add((CardType)ct);
-                continue;
-            }
-            if (TryTruth(ret.Value, out var rb) && rb)
-            {
-                var branchTypes = new List<CardType>();
-                foreach (var raw in ret.Conditions)
+                var expr = raw.Value;
+                var expected = raw.Expected;
+                while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
                 {
-                    var expr = raw.Value;
-                    var expected = raw.Expected;
-                    while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
-                    {
-                        expr = inner;
-                        expected = !expected;
-                    }
-                    if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: Input, Right: Constant { Data: int cct } } op
-                        && Enum.IsDefined(typeof(CardType), cct))
-                    {
-                        var isEq = op.Operator == "bne.un" ? !expected : expected;
-                        if (isEq)
-                            branchTypes.Add((CardType)cct);
-                        continue;
-                    }
-                    return null;
+                    expr = inner;
+                    expected = !expected;
                 }
-                if (branchTypes.Count == 0)
-                    return null;
-                foreach (var bt in branchTypes)
-                    if (!matched.Contains(bt))
-                        matched.Add(bt);
-                continue;
+                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: var eqLeft, Right: Constant { Data: int cct } } op
+                    && IsCardTypeInput(eqLeft)
+                    && Enum.IsDefined(typeof(CardType), cct))
+                {
+                    var isEq = op.Operator == "bne.un" ? !expected : expected;
+                    var ct = (CardType)cct;
+                    if (isEq)
+                    {
+                        if (branchAllowed is null)
+                            branchAllowed = [ct];
+                        else
+                            branchAllowed.RemoveAll(existing => existing != ct);
+                    }
+                    else
+                    {
+                        branchExcluded.Add(ct);
+                    }
+                    continue;
+                }
+                if (TryReadCardTypeRange(expr, expected, out var rangeIncluded, out var rangeExcluded))
+                {
+                    if (rangeIncluded is not null)
+                    {
+                        if (branchAllowed is null)
+                            branchAllowed = [.. rangeIncluded];
+                        else
+                            branchAllowed.RemoveAll(existing => !rangeIncluded.Contains(existing));
+                    }
+                    if (rangeExcluded is not null)
+                        foreach (var ex in rangeExcluded)
+                            branchExcluded.Add(ex);
+                    continue;
+                }
+                return null;
             }
-            return null;
+
+            if (branchAllowed is null)
+                return null;
+            branchAllowed.RemoveAll(branchExcluded.Contains);
+            if (branchAllowed.Count == 0)
+                return null;
+            foreach (var bt in branchAllowed)
+                if (!matched.Contains(bt))
+                    matched.Add(bt);
         }
         return matched.ToArray();
+    }
+
+    private static bool TryReadCardTypeRange(
+        Value expr,
+        bool expected,
+        out CardType[]? included,
+        out CardType[]? excluded)
+    {
+        included = null;
+        excluded = null;
+        if (expr is not Operation { Operator: "bgt.un" or "cgt.un" or "ble.un" or "blt.un" or "clt.un" or "bge.un", Left: var lhs, Right: Constant { Data: int rhs } } op)
+            return false;
+
+        int low;
+        if (IsCardTypeInput(lhs))
+        {
+            low = 0;
+        }
+        else if (lhs is Operation { Operator: "sub", Left: var subInput, Right: Constant { Data: int subLow } }
+            && IsCardTypeInput(subInput))
+        {
+            low = subLow;
+        }
+        else if (lhs is Operation { Operator: "add", Left: var addInput, Right: Constant { Data: int addNeg } }
+            && IsCardTypeInput(addInput)
+            && addNeg < 0 && addNeg != int.MinValue)
+        {
+            low = -addNeg;
+        }
+        else
+        {
+            return false;
+        }
+
+        bool isInclusive;
+        int span;
+        switch (op.Operator)
+        {
+            case "bgt.un":
+            case "cgt.un":
+                isInclusive = !expected;
+                span = rhs;
+                break;
+            case "ble.un":
+                isInclusive = expected;
+                span = rhs;
+                break;
+            case "blt.un":
+            case "clt.un":
+                if (rhs <= 0)
+                    return false;
+                isInclusive = expected;
+                span = rhs - 1;
+                break;
+            case "bge.un":
+                if (rhs <= 0)
+                    return false;
+                isInclusive = !expected;
+                span = rhs - 1;
+                break;
+            default:
+                return false;
+        }
+
+        var maxSpan = Enum.GetValues<CardType>().Length - 1;
+        if (low < 0 || span < 0 || span > maxSpan || (long)low + span > int.MaxValue)
+            return false;
+
+        var high = low + span;
+        var types = new List<CardType>(span + 1);
+        for (var v = low; v <= high; v++)
+        {
+            if (!Enum.IsDefined(typeof(CardType), v))
+                return false;
+            types.Add((CardType)v);
+        }
+
+        if (isInclusive)
+            included = types.ToArray();
+        else
+            excluded = types.ToArray();
+        return true;
     }
 
     private static bool IsPositiveGainsBlockCanEnchant(NativeRuleBody body)
@@ -1027,6 +1140,10 @@ internal static class ModifierMechanismReader
                     .Distinct(StringComparer.Ordinal);
                 parts.Add($"Grants {string.Join(", ", kws)} to the afflicted card in combat.");
             }
+            else if (DescribePowerBoundAfflictionAfterEnteredCombat(type, enteredBody) is { } powerBoundClause)
+            {
+                parts.Add(powerBoundClause);
+            }
             else
             {
                 gaps.Add("AfterCardEnteredCombat");
@@ -1055,6 +1172,217 @@ internal static class ModifierMechanismReader
 
         RecordUnhandledModifierHooks(type, typeof(AfflictionModel), HandledAfflictionHooks, gaps);
         return (parts.Count > 0 ? string.Join(" ", parts) : null, gaps);
+    }
+
+    private static string? DescribePowerBoundAfflictionAfterEnteredCombat(Type afflictionType, NativeRuleBody enteredBody)
+    {
+        if (enteredBody.Incomplete || enteredBody.Writes.Count > 0 || enteredBody.FieldSteps.Count > 0
+            || enteredBody.Loops.Count > 0 || enteredBody.ForeachRanges.Count > 0 || enteredBody.OutStores.Count > 0)
+            return null;
+
+        // Fail closed if any call is outside the verified read-only / async-plumbing / ClearAffliction set.
+        foreach (var step in enteredBody.Calls)
+        {
+            var m = step.Call.Method;
+            if (m.DeclaringType == typeof(CardCmd) && m.Name == nameof(CardCmd.ClearAffliction))
+                continue;
+            if (IsAllowedAfflictionReadOrPlumbingCall(m))
+                continue;
+            return null;
+        }
+
+        var clearSteps = enteredBody.Calls
+            .Where(s => s.Call.Method.DeclaringType == typeof(CardCmd) && s.Call.Method.Name == nameof(CardCmd.ClearAffliction))
+            .ToArray();
+        if (clearSteps is not [var clearStep]
+            || clearStep.Call.Arguments is not [Call { Method.Name: "get_Card", Receiver: Input { Name: "this" } }])
+        {
+            return null;
+        }
+
+        var checksThisCard = false;
+        Type? guardPowerType = null;
+        foreach (var raw in clearStep.Conditions)
+        {
+            var expr = raw.Value;
+            var expected = raw.Expected;
+            while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            {
+                expr = inner;
+                expected = !expected;
+            }
+            if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: var l, Right: var r } eqOp
+                && (eqOp.Operator == "bne.un" ? !expected : expected)
+                && ((l is Input { Name: "card" } && r is Call { Method.Name: "get_Card", Receiver: Input { Name: "this" } })
+                    || (r is Input { Name: "card" } && l is Call { Method.Name: "get_Card", Receiver: Input { Name: "this" } })))
+            {
+                checksThisCard = true;
+                continue;
+            }
+            if (!expected && expr is Call
+                {
+                    Method: { Name: "HasPower", IsGenericMethod: true } hp,
+                    Arguments.Length: 0,
+                    Receiver: Call
+                    {
+                        Method.Name: "get_Creature",
+                        Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } },
+                    },
+                }
+                && hp.DeclaringType == typeof(Creature)
+                && hp.GetGenericArguments() is [var pt]
+                && typeof(PowerModel).IsAssignableFrom(pt))
+            {
+                if (guardPowerType is not null && guardPowerType != pt)
+                    return null;
+                guardPowerType = pt;
+                continue;
+            }
+            return null;
+        }
+
+        if (!checksThisCard || guardPowerType is null)
+            return null;
+
+        if (!TryReadAfflictionPowerKeywords(guardPowerType, afflictionType, out var keywords))
+            return null;
+
+        var powerLabel = NativeRuleText.ModelLabel(guardPowerType);
+        var keywordLabels = string.Join(", ", keywords.Select(NativeRuleText.KeywordLabel));
+        return $"While card owner has {powerLabel}, grants {keywordLabels} to the afflicted card in combat; if this card enters combat without {powerLabel} on its owner, clears this affliction.";
+    }
+
+    private static bool IsAllowedAfflictionReadOrPlumbingCall(MethodBase method)
+    {
+        var decl = method.DeclaringType;
+        if (decl is null)
+            return false;
+        if (method.Name is "get_Card" && typeof(AfflictionModel).IsAssignableFrom(decl))
+            return true;
+        if (method.Name is "get_Owner" && typeof(CardModel).IsAssignableFrom(decl))
+            return true;
+        if (method.Name is "get_Creature" && decl == typeof(MegaCrit.Sts2.Core.Entities.Players.Player))
+            return true;
+        if (method.Name is "HasPower" && decl == typeof(Creature))
+            return true;
+        if (decl == typeof(Task) && method.Name is "get_CompletedTask")
+            return true;
+        if (decl.Namespace == typeof(System.Runtime.CompilerServices.AsyncTaskMethodBuilder).Namespace
+            && (decl.Name.StartsWith("AsyncTaskMethodBuilder", StringComparison.Ordinal)
+                || decl.Name.StartsWith("TaskAwaiter", StringComparison.Ordinal)))
+            return true;
+        return false;
+    }
+
+    private static bool TryReadAfflictionPowerKeywords(Type powerType, Type afflictionType, out CardKeyword[] keywords)
+    {
+        keywords = [];
+        var method = powerType.GetMethod("TryModifyKeywordsInCombat", DeclaredInstance);
+        if (method is null)
+            return false;
+
+        var body = NativeRuleBody.Read(method);
+        if (body.Incomplete || body.Writes.Count > 0 || body.FieldSteps.Count > 0
+            || body.Loops.Count > 0 || body.ForeachRanges.Count > 0 || body.OutStores.Count > 0
+            || body.Returns.Count == 0)
+            return false;
+
+        foreach (var step in body.Calls)
+        {
+            var m = step.Call.Method;
+            var isRead = (m.Name == "get_Owner" && (typeof(CardModel).IsAssignableFrom(m.DeclaringType) || typeof(PowerModel).IsAssignableFrom(m.DeclaringType)))
+                || (m.Name == "get_Player" && m.DeclaringType == typeof(Creature))
+                || (m.Name == "get_Affliction" && typeof(CardModel).IsAssignableFrom(m.DeclaringType))
+                || (m.Name == "Add" && typeof(ICollection<CardKeyword>).IsAssignableFrom(m.DeclaringType) && step.Call.Receiver is Input { Name: "keywords" });
+            if (!isRead)
+                return false;
+        }
+
+        var addSteps = body.Calls
+            .Where(s => s.Call.Method.Name == "Add" && typeof(ICollection<CardKeyword>).IsAssignableFrom(s.Call.Method.DeclaringType))
+            .ToArray();
+        var positive = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+        if (positive.Length == 0 || addSteps.Length != positive.Length)
+            return false;
+
+        var matchedAdd = new bool[addSteps.Length];
+        var found = new List<CardKeyword>();
+        foreach (var ret in positive)
+        {
+            if (ret.Value is not Call { Method.Name: "Add", Receiver: Input { Name: "keywords" }, Arguments: [Constant { Data: int rawKw }] } retCall
+                || !typeof(ICollection<CardKeyword>).IsAssignableFrom(retCall.Method.DeclaringType)
+                || !Enum.IsDefined(typeof(CardKeyword), rawKw))
+            {
+                return false;
+            }
+
+            // Every keywords.Add call in the method body must match 1-to-1 with a validated positive return.
+            var addIdx = -1;
+            for (var i = 0; i < addSteps.Length; i++)
+            {
+                if (!matchedAdd[i]
+                    && ReferenceEquals(retCall, addSteps[i].Call)
+                    && ret.Conditions.SequenceEqual(addSteps[i].Conditions))
+                {
+                    addIdx = i;
+                    break;
+                }
+            }
+            if (addIdx < 0)
+                return false;
+            matchedAdd[addIdx] = true;
+
+            var checksOwner = false;
+            var checksAffliction = false;
+            foreach (var raw in ret.Conditions)
+            {
+                var expr = raw.Value;
+                var expected = raw.Expected;
+                while (expr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+                {
+                    expr = inner;
+                    expected = !expected;
+                }
+                if (expr is Operation { Operator: "cgt.un", Left: var posInner, Right: Constant { Data: 0 or null } })
+                    expr = posInner;
+
+                if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: var l, Right: var r } eqOp
+                    && (eqOp.Operator == "bne.un" ? !expected : expected)
+                    && ((IsCardOwnerExpr(l) && IsPowerOwnerPlayerExpr(r)) || (IsCardOwnerExpr(r) && IsPowerOwnerPlayerExpr(l))))
+                {
+                    checksOwner = true;
+                    continue;
+                }
+                if (expected && expr is Operation
+                    {
+                        Operator: "isinst",
+                        Left: Call { Method.Name: "get_Affliction", Receiver: Input { Name: "card" } },
+                        Right: Constant { Data: Type checkedAff },
+                    }
+                    && checkedAff == afflictionType)
+                {
+                    checksAffliction = true;
+                    continue;
+                }
+                return false;
+            }
+
+            if (!checksOwner || !checksAffliction)
+                return false;
+
+            var kw = (CardKeyword)rawKw;
+            if (!found.Contains(kw))
+                found.Add(kw);
+        }
+
+        keywords = found.ToArray();
+        return keywords.Length > 0;
+
+        static bool IsCardOwnerExpr(Value? v)
+            => v is Call { Method.Name: "get_Owner", Receiver: Input { Name: "card" } };
+
+        static bool IsPowerOwnerPlayerExpr(Value? v)
+            => v is Call { Method.Name: "get_Player", Receiver: Call { Method.Name: "get_Owner", Receiver: Input { Name: "this" } } };
     }
 
     internal static string? DescribeOrb(Type type)

@@ -2583,9 +2583,22 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 conditions.Add(text);
         }
         var distinct = conditions.Distinct().ToList();
-        // Drop `<subject> exists` when `<subject> has ...` already appears in the same guard.
-        distinct.RemoveAll(item => item.EndsWith(" exists", StringComparison.Ordinal)
-            && distinct.Any(other => other != item && other.StartsWith(item[..^" exists".Length] + " has ", StringComparison.Ordinal)));
+        var snapshot = distinct.ToArray();
+        // Drop `<subject> exists` when a positive `<subject> has ...` or `<subject> is ...` guard already implies existence.
+        distinct = distinct.Where(item => !(item.EndsWith(" exists", StringComparison.Ordinal)
+            && snapshot.Any(other => other != item
+                && ((other.StartsWith(item[..^" exists".Length] + " has ", StringComparison.Ordinal)
+                        && !other.StartsWith(item[..^" exists".Length] + " has no ", StringComparison.Ordinal))
+                    || (other.StartsWith(item[..^" exists".Length] + " is ", StringComparison.Ordinal)
+                        && !other.StartsWith(item[..^" exists".Length] + " is not ", StringComparison.Ordinal)))))).ToList();
+        snapshot = distinct.ToArray();
+        // Drop `<subject>≠none` when a positive `<subject> is ...` or positive `<subject>'s ...` guard already implies non-null.
+        distinct = distinct.Where(item => !(item.EndsWith("≠none", StringComparison.Ordinal)
+            && snapshot.Any(other => other != item
+                && ((other.StartsWith(item[..^"≠none".Length] + " is ", StringComparison.Ordinal)
+                        && !other.StartsWith(item[..^"≠none".Length] + " is not ", StringComparison.Ordinal))
+                    || (other.StartsWith(item[..^"≠none".Length] + "'s ", StringComparison.Ordinal)
+                        && !IsNegativeClause(other)))))).ToList();
         // Drop `<subject> is in a pile` when `<subject> is in <Pile>` already appears in the same guard.
         distinct.RemoveAll(item => item.EndsWith(" is in a pile", StringComparison.Ordinal)
             && distinct.Any(other => other != item && other.StartsWith(item[..^" is in a pile".Length] + " is in ", StringComparison.Ordinal)));
@@ -2716,8 +2729,25 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 var pileName = ((PileType)(int)rawPileType).ToString();
                 return op == "=" ? $"{subject} is in {pileName}" : $"{subject} is not in {pileName}";
             }
+            if (operation.Left is Call { Method.Name: "get_RoomType", Method.DeclaringType: var roomTypeDecl, Receiver: var roomSubjectExpr }
+                && typeof(MegaCrit.Sts2.Core.Rooms.AbstractRoom).IsAssignableFrom(roomTypeDecl)
+                && Numeric(right) is { } rawRoomType
+                && rawRoomType == decimal.Truncate(rawRoomType)
+                && rawRoomType is >= int.MinValue and <= int.MaxValue
+                && Enum.IsDefined(typeof(MegaCrit.Sts2.Core.Rooms.RoomType), (int)rawRoomType)
+                && op is "=" or "≠"
+                && DescribeRoomSubject(roomSubjectExpr) is { } roomSubject)
+            {
+                var roomKind = FormatRoomTypeLabel((MegaCrit.Sts2.Core.Rooms.RoomType)(int)rawRoomType);
+                return op == "=" ? $"{roomSubject} is {roomKind}" : $"{roomSubject} is not {roomKind}";
+            }
             if (operation.Left is Call { Method.Name: "get_Affliction" } && right is Constant { Data: null } && op is "=" or "≠")
                 return op == "=" ? "that card has no affliction" : "that card already has an affliction";
+            if (operation.Left is Call { Method.Name: "get_Enchantment", Method.DeclaringType: var enchEqDecl, Receiver: var enchEqCard }
+                && typeof(CardModel).IsAssignableFrom(enchEqDecl)
+                && right is Constant { Data: null } && op is "=" or "≠"
+                && ValueText(enchEqCard) is { } enchEqLabel)
+                return op == "=" ? $"{enchEqLabel} is not enchanted" : $"{enchEqLabel} is enchanted";
             if (operation.Left is Input { Name: "power" } && right == Self && op is "=" or "≠")
                 return op == "=" ? "this power changed" : "a different power changed";
             if (operation.Left is Call { Method: { Name: "GetRelic" or "GetPower", IsGenericMethod: true } lookup, Receiver: { } holder }
@@ -2797,6 +2827,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 return expected ? "present at turn start" : "not present at turn start";
             if (name == "get_Affliction")
                 return expected ? "that card already has an affliction" : "that card has no affliction";
+            if (name == "get_Enchantment" && call.Method.DeclaringType is { } enchCondDecl
+                && typeof(CardModel).IsAssignableFrom(enchCondDecl)
+                && ValueText(call.Receiver) is { } enchCondCard)
+                return expected ? $"{enchCondCard} is enchanted" : $"{enchCondCard} is not enchanted";
+            if (IsCurrentRoomCall(call))
+                return expected ? "current room exists" : "no current room";
             if (name == "get_IsPlayer" && call.Receiver is Call { Method.Name: "get_Current",
                 Receiver: Call { Method.Name: "GetEnumerator",
                     Receiver: Call { Method.Name: "ToList", Arguments: [Call { Method.Name: "get_Allies" }] } } })
@@ -2938,6 +2974,39 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 Conditions.Length: 0 }] }
             && Body(occupant) is { Incomplete: false, Returns: [{ Value: Call { Method.Name: "op_Inequality",
                 Arguments: [Call { Method.Name: "get_SlotName" }, _] }, Conditions.Length: 0 }] };
+
+    private static bool IsNegativeClause(string clause)
+        => clause.Contains('≠', StringComparison.Ordinal)
+            || clause.Contains("=none", StringComparison.Ordinal)
+            || clause.Contains(" is not ", StringComparison.Ordinal)
+            || clause.Contains(" lacks ", StringComparison.Ordinal)
+            || clause.Contains(" has no ", StringComparison.Ordinal)
+            || clause.Contains(" does not ", StringComparison.Ordinal);
+
+    private static bool IsCurrentRoomCall(Call call)
+        => call is { Method.Name: "get_CurrentRoom", Method.DeclaringType: var rsDecl, Receiver: Call { Method.Name: "get_RunState" } or Input { Name: "runState" } }
+            && typeof(MegaCrit.Sts2.Core.Runs.IRunState).IsAssignableFrom(rsDecl);
+
+    private static string? DescribeRoomSubject(Value? expr) => expr switch
+    {
+        Input { Name: "room" } => "room",
+        Call call when IsCurrentRoomCall(call) => "current room",
+        _ => null,
+    };
+
+    private static string FormatRoomTypeLabel(MegaCrit.Sts2.Core.Rooms.RoomType roomType) => roomType switch
+    {
+        MegaCrit.Sts2.Core.Rooms.RoomType.Elite => "an Elite room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.Event => "an Event room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.RestSite => "a Rest Site room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.Monster => "a Monster room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.Boss => "a Boss room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.Treasure => "a Treasure room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.Shop => "a Shop room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.Map => "a Map room",
+        MegaCrit.Sts2.Core.Rooms.RoomType.Unassigned => "an Unassigned room",
+        _ => $"a {roomType} room",
+    };
 
     private static string SideLabel(CombatSide side) => side switch
     {
@@ -3082,6 +3151,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     : nextItems is Call { Method: MethodInfo { ReturnType: var retT } } && typeof(IEnumerable<Creature>).IsAssignableFrom(retT)
                         ? $"a random target from {itemsLabel}"
                         : $"a random card from {itemsLabel}",
+            Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Cards", Receiver: Call { Method.Name: "GetPile", Arguments: [Constant { Data: int countPile }, var countPileOwner] } } }
+                when Enum.IsDefined(typeof(PileType), countPile) && ValueText(countPileOwner) is { } countPileWho
+                => $"number of cards in {Possessive(countPileWho)} {PileLocationLabel((PileType)countPile)}",
             Call { Method.Name: "get_Cards", Receiver: Call { Method.Name: "GetPile", Arguments: [Constant { Data: int rawPile }, var pileOwner] } }
                 when Enum.IsDefined(typeof(PileType), rawPile) && ValueText(pileOwner) is { } pileWho
                 => $"{Possessive(pileWho)} {PileLocationLabel((PileType)rawPile)}",

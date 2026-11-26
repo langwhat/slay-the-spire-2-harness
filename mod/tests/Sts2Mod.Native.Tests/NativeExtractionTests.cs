@@ -380,9 +380,17 @@ public sealed class NativeExtractionTests
         Assert.Contains("minimum base 0", glassText!, StringComparison.Ordinal);
         Assert.Contains("effective Passive value is > 0", glassText!, StringComparison.Ordinal);
 
-        // Hexed has an unhandled ClearAffliction/play hook that must surface a diagnostic gap instead of silent empty gaps.
-        var (_, hexedGaps) = ModifierMechanismReader.DescribeAfflictionWithGaps(typeof(Hexed));
-        Assert.NotEmpty(hexedGaps);
+        // Hexed extracts cleanly from AfterCardEnteredCombat + HexPower.TryModifyKeywordsInCombat.
+        var (hexedText, hexedGaps) = ModifierMechanismReader.DescribeAfflictionWithGaps(typeof(Hexed));
+        Assert.Empty(hexedGaps);
+        Assert.NotNull(hexedText);
+        Assert.Contains("POWER.HEX_POWER", hexedText!, StringComparison.Ordinal);
+        Assert.Contains("Ethereal", hexedText!, StringComparison.Ordinal);
+        Assert.Contains("clears this affliction", hexedText!, StringComparison.Ordinal);
+
+        // Unhandled affliction hooks (e.g. OnPlay) must still surface a diagnostic gap instead of silent empty gaps.
+        var (_, unhandledAfflictionGaps) = ModifierMechanismReader.DescribeAfflictionWithGaps(typeof(SyntheticUnhandledOnPlayAffliction));
+        Assert.Contains("OnPlay", unhandledAfflictionGaps);
     }
 
     [Fact]
@@ -3122,6 +3130,258 @@ public sealed class NativeExtractionTests
         var (extraCmdText, extraCmdGaps) = RelicMechanismReader.Describe(typeof(SyntheticReplayWithExtraCommandRelic));
         Assert.Null(extraCmdText);
         Assert.NotEmpty(extraCmdGaps);
+    }
+
+    [Fact]
+    public void RoomTypeEnchantmentHandCountAndPowerBoundAffliction_ExtractWithoutGaps()
+    {
+        var (conchText, conchGaps) = RelicMechanismReader.Describe(typeof(BoomingConch));
+        Assert.Empty(conchGaps);
+        Assert.NotNull(conchText);
+        Assert.Contains("Turn-start card draw", conchText!, StringComparison.Ordinal);
+        Assert.Contains("increase by 2", conchText!, StringComparison.Ordinal);
+        Assert.Contains("owner gains 1 Energy", conchText!, StringComparison.Ordinal);
+        Assert.Contains("turn number≤1", conchText!, StringComparison.Ordinal);
+        Assert.Contains("current room is an Elite room", conchText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("current room exists", conchText!, StringComparison.Ordinal);
+
+        var (claspText, claspGaps) = RelicMechanismReader.Describe(typeof(CloakClasp));
+        Assert.Empty(claspGaps);
+        Assert.NotNull(claspText);
+        Assert.Contains("Before side turn ends", claspText!, StringComparison.Ordinal);
+        Assert.Contains("owner participates this turn", claspText!, StringComparison.Ordinal);
+        Assert.Contains("number of cards in owner's hand>0", claspText!, StringComparison.Ordinal);
+        Assert.Contains("unpowered (number of cards in owner's hand × 1) Block", claspText!, StringComparison.Ordinal);
+
+        var (lighterText, lighterGaps) = RelicMechanismReader.Describe(typeof(MysticLighter));
+        Assert.Empty(lighterGaps);
+        Assert.NotNull(lighterText);
+        Assert.Contains("powered attack", lighterText!, StringComparison.Ordinal);
+        Assert.Contains("source card is enchanted", lighterText!, StringComparison.Ordinal);
+        Assert.Contains("source card's owner=owner", lighterText!, StringComparison.Ordinal);
+        Assert.Contains("+9", lighterText!, StringComparison.Ordinal);
+        Assert.DoesNotContain("source card≠none", lighterText!, StringComparison.Ordinal);
+
+        var (slingText, slingGaps) = RelicMechanismReader.Describe(typeof(SlingOfCourage));
+        Assert.Empty(slingGaps);
+        Assert.NotNull(slingText);
+        Assert.Contains("On entering a room", slingText!, StringComparison.Ordinal);
+        Assert.Contains("room is an Elite room", slingText!, StringComparison.Ordinal);
+        Assert.Contains("2", slingText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.STRENGTH_POWER", slingText!, StringComparison.Ordinal);
+
+        var (royalText, royalGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(RoyallyApproved));
+        Assert.Empty(royalGaps);
+        Assert.NotNull(royalText);
+        Assert.Contains("Eligible cards: Attack/Skill only.", royalText!, StringComparison.Ordinal);
+        Assert.Contains("Innate", royalText!, StringComparison.Ordinal);
+        Assert.Contains("Retain", royalText!, StringComparison.Ordinal);
+
+        var (hexedText, hexedGaps) = ModifierMechanismReader.DescribeAfflictionWithGaps(typeof(Hexed));
+        Assert.Empty(hexedGaps);
+        Assert.NotNull(hexedText);
+        Assert.Contains("POWER.HEX_POWER", hexedText!, StringComparison.Ordinal);
+        Assert.Contains("Ethereal", hexedText!, StringComparison.Ordinal);
+        Assert.Contains("clears this affliction", hexedText!, StringComparison.Ordinal);
+
+        // Conjunction inside CanEnchantCardType intersects positive constraints rather than unioning them.
+        var (intersectText, intersectGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(SyntheticIntersectRangeEnchantment));
+        Assert.Empty(intersectGaps);
+        Assert.Equal("Eligible cards: Attack only.", intersectText);
+
+        var (disjointText, disjointGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(typeof(SyntheticDisjointRangeEnchantment));
+        Assert.Null(disjointText);
+        Assert.Contains("CanEnchantCardType", disjointGaps);
+
+        // Fail-closed checks: out-of-enum, huge/overflow, and negated-only CardType ranges.
+        foreach (var badType in new[]
+        {
+            typeof(SyntheticOutOfEnumRangeEnchantment),
+            typeof(SyntheticHugeSpanRangeEnchantment),
+            typeof(SyntheticNegatedOnlyRangeEnchantment),
+        })
+        {
+            var (badText, badGaps) = ModifierMechanismReader.DescribeEnchantmentWithGaps(badType);
+            Assert.Null(badText);
+            Assert.Contains("CanEnchantCardType", badGaps);
+        }
+
+        // Fail-closed checks for power-bound Affliction.AfterCardEnteredCombat and companion power keyword hooks.
+        foreach (var badAff in new[]
+        {
+            typeof(SyntheticExtraCommandAffliction),
+            typeof(SyntheticDisjunctiveClearAffliction),
+            typeof(SyntheticInvertedPolarityClearAffliction),
+            typeof(SyntheticExtraPositiveKeywordAffliction),
+            typeof(SyntheticFalseBranchKeywordAffliction),
+        })
+        {
+            var (badText, badGaps) = ModifierMechanismReader.DescribeAfflictionWithGaps(badAff);
+            Assert.Null(badText);
+            Assert.Contains("AfterCardEnteredCombat", badGaps);
+        }
+
+        // Guard simplification preserves `source card≠none` when paired with negative clauses.
+        var (negOwnerText, negOwnerGaps) = RelicMechanismReader.Describe(typeof(SyntheticNonOwnerCardSourceRelic));
+        Assert.Empty(negOwnerGaps);
+        Assert.NotNull(negOwnerText);
+        Assert.Contains("source card≠none", negOwnerText!, StringComparison.Ordinal);
+        Assert.Contains("source card's owner≠owner", negOwnerText!, StringComparison.Ordinal);
+
+        var (unenchText, unenchGaps) = RelicMechanismReader.Describe(typeof(SyntheticUnenchantedCardSourceRelic));
+        Assert.Empty(unenchGaps);
+        Assert.NotNull(unenchText);
+        Assert.Contains("source card≠none", unenchText!, StringComparison.Ordinal);
+        Assert.Contains("source card is not enchanted", unenchText!, StringComparison.Ordinal);
+    }
+
+    private sealed class SyntheticIntersectRangeEnchantment : EnchantmentModel
+    {
+        public override bool CanEnchantCardType(CardType cardType)
+            => cardType is CardType.Attack or CardType.Skill or CardType.Power && cardType == CardType.Attack;
+    }
+
+    private sealed class SyntheticDisjointRangeEnchantment : EnchantmentModel
+    {
+        public override bool CanEnchantCardType(CardType cardType)
+            => (uint)((int)cardType - 1) <= 1u && cardType == CardType.Power;
+    }
+
+    private sealed class SyntheticOutOfEnumRangeEnchantment : EnchantmentModel
+    {
+        public override bool CanEnchantCardType(CardType cardType)
+            => (uint)((int)cardType - 1) <= 99u;
+    }
+
+    private sealed class SyntheticHugeSpanRangeEnchantment : EnchantmentModel
+    {
+        public override bool CanEnchantCardType(CardType cardType)
+            => (uint)cardType <= (uint)int.MaxValue;
+    }
+
+    private sealed class SyntheticNegatedOnlyRangeEnchantment : EnchantmentModel
+    {
+        public override bool CanEnchantCardType(CardType cardType)
+            => (uint)((int)cardType - 1) > 1u;
+    }
+
+    private sealed class SyntheticUnhandledOnPlayAffliction : AfflictionModel
+    {
+        public override Task OnPlay(PlayerChoiceContext choiceContext, Creature? target)
+            => CreatureCmd.GainBlock(Card.Owner.Creature, 1m, ValueProp.Unpowered, null);
+    }
+
+    private sealed class SyntheticExtraCommandAffliction : AfflictionModel
+    {
+        public override async Task AfterCardEnteredCombat(CardModel card)
+        {
+            if (card != Card)
+                return;
+            if (card.Owner.Creature.HasPower<HexPower>())
+                return;
+            CardCmd.ClearAffliction(Card);
+            await CreatureCmd.GainBlock(card.Owner.Creature, 3m, ValueProp.Unpowered, null);
+        }
+    }
+
+    private sealed class SyntheticDisjunctiveClearAffliction : AfflictionModel
+    {
+        public override Task AfterCardEnteredCombat(CardModel card)
+        {
+            if (card != Card)
+                return Task.CompletedTask;
+            if (!card.Owner.Creature.HasPower<HexPower>() || !card.Owner.Creature.HasPower<StrengthPower>())
+                CardCmd.ClearAffliction(Card);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class SyntheticInvertedPolarityClearAffliction : AfflictionModel
+    {
+        public override Task AfterCardEnteredCombat(CardModel card)
+        {
+            if (card != Card)
+                return Task.CompletedTask;
+            if (card.Owner.Creature.HasPower<HexPower>())
+                CardCmd.ClearAffliction(Card);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class SyntheticExtraPositiveKeywordPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Debuff;
+        public override PowerStackType StackType => PowerStackType.Single;
+
+        public override bool TryModifyKeywordsInCombat(CardModel card, ISet<CardKeyword> keywords)
+        {
+            if (card.Owner != Owner.Player)
+                return false;
+            if (card.Affliction is not SyntheticExtraPositiveKeywordAffliction)
+                return false;
+            keywords.Add(CardKeyword.Unplayable);
+            return keywords.Add(CardKeyword.Ethereal);
+        }
+    }
+
+    private sealed class SyntheticExtraPositiveKeywordAffliction : AfflictionModel
+    {
+        public override Task AfterCardEnteredCombat(CardModel card)
+        {
+            if (card != Card)
+                return Task.CompletedTask;
+            if (card.Owner.Creature.HasPower<SyntheticExtraPositiveKeywordPower>())
+                return Task.CompletedTask;
+            CardCmd.ClearAffliction(Card);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class SyntheticFalseBranchKeywordPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Debuff;
+        public override PowerStackType StackType => PowerStackType.Single;
+
+        public override bool TryModifyKeywordsInCombat(CardModel card, ISet<CardKeyword> keywords)
+        {
+            if (card.Owner != Owner.Player)
+            {
+                keywords.Add(CardKeyword.Exhaust);
+                return false;
+            }
+            if (card.Affliction is not SyntheticFalseBranchKeywordAffliction)
+                return false;
+            return keywords.Add(CardKeyword.Ethereal);
+        }
+    }
+
+    private sealed class SyntheticFalseBranchKeywordAffliction : AfflictionModel
+    {
+        public override Task AfterCardEnteredCombat(CardModel card)
+        {
+            if (card != Card)
+                return Task.CompletedTask;
+            if (card.Owner.Creature.HasPower<SyntheticFalseBranchKeywordPower>())
+                return Task.CompletedTask;
+            CardCmd.ClearAffliction(Card);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class SyntheticNonOwnerCardSourceRelic : RelicModel
+    {
+        public override MegaCrit.Sts2.Core.Entities.Relics.RelicRarity Rarity => MegaCrit.Sts2.Core.Entities.Relics.RelicRarity.Common;
+
+        public override decimal ModifyDamageAdditive(Creature? target, decimal amount, ValueProp props, Creature? dealer, CardModel? cardSource, CardPlay? cardPlay)
+            => cardSource != null && cardSource.Owner != Owner ? 2m : 0m;
+    }
+
+    private sealed class SyntheticUnenchantedCardSourceRelic : RelicModel
+    {
+        public override MegaCrit.Sts2.Core.Entities.Relics.RelicRarity Rarity => MegaCrit.Sts2.Core.Entities.Relics.RelicRarity.Common;
+
+        public override decimal ModifyDamageAdditive(Creature? target, decimal amount, ValueProp props, Creature? dealer, CardModel? cardSource, CardPlay? cardPlay)
+            => cardSource != null && cardSource.Enchantment == null ? 2m : 0m;
     }
 
     private sealed class SyntheticReplayWithExtraCommandRelic : RelicModel
