@@ -2405,6 +2405,165 @@ public sealed class NativeExtractionTests
         Assert.Contains("SyntheticXorMelodyReplayPower.ModifyCardPlayCount", xorGaps);
     }
 
+    [Fact]
+    public void FoolArrowCardsAndMacrosExtractAccurately()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+
+        var arrowMacro = MacroMechanismReader.FoolArrowsRule();
+        Assert.Contains("playable=true", arrowMacro, StringComparison.Ordinal);
+        Assert.Contains("POWER.IMPALED_POWER", arrowMacro, StringComparison.Ordinal);
+        Assert.Contains("before", arrowMacro, StringComparison.Ordinal);
+        Assert.Contains("replaying", arrowMacro, StringComparison.Ordinal);
+
+        var melodyMacro = MacroMechanismReader.FoolMelodiesRule();
+        Assert.Contains("distinct activated tags", melodyMacro, StringComparison.Ordinal);
+
+        var pureShots = new Type[]
+        {
+            typeof(MegaCrit.Sts2.Core.Models.Cards.DivineShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.FoolishShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.HeavyShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.MelodicShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.QuickShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.RepeatShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.SkyShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.TheShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.TwinShot),
+        };
+        foreach (var type in pureShots)
+        {
+            var card = (CardModel)ModelDb.GetById<CardModel>(ModelDb.GetId(type)).ToMutable();
+            Assert.True(ItemMechanismReader.UsesArrowShooting(card), $"Expected UsesArrowShooting for {type.Name}");
+            var rule = ItemMechanismReader.DescribeCard(card);
+            Assert.NotNull(rule);
+            Assert.Contains("Arrow-shooting card (requires 1 retrieved arrow)", rule, StringComparison.Ordinal);
+            Assert.DoesNotContain("follow-up effect", rule, StringComparison.Ordinal);
+        }
+
+        var followUpShots = new Type[]
+        {
+            typeof(MegaCrit.Sts2.Core.Models.Cards.BlossomShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.HobblingShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.RainShot),
+            typeof(MegaCrit.Sts2.Core.Models.Cards.TrickShot),
+        };
+        foreach (var type in followUpShots)
+        {
+            var card = (CardModel)ModelDb.GetById<CardModel>(ModelDb.GetId(type)).ToMutable();
+            Assert.True(ItemMechanismReader.UsesArrowShooting(card), $"Expected UsesArrowShooting for {type.Name}");
+            var rule = ItemMechanismReader.DescribeCard(card);
+            Assert.NotNull(rule);
+            Assert.Contains("Arrow-shooting card (requires 1 retrieved arrow)", rule, StringComparison.Ordinal);
+            Assert.Contains("follow-up effect is also skipped", rule, StringComparison.Ordinal);
+        }
+
+        var melodicShot = (CardModel)ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.MelodicShot>().ToMutable();
+        Assert.True(ItemMechanismReader.UsesMelodies(melodicShot));
+        var choFirmCard = (CardModel)ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.ChoFirm>().ToMutable();
+        Assert.True(ItemMechanismReader.UsesMelodies(choFirmCard));
+
+        var nail = (CardModel)ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.Nail>().ToMutable();
+        Assert.False(ItemMechanismReader.UsesArrowShooting(nail));
+        Assert.False(ItemMechanismReader.UsesMelodies(nail));
+        var nailRule = ItemMechanismReader.DescribeCard(nail);
+        Assert.NotNull(nailRule);
+        Assert.Contains("POWER.IMPALED_POWER", nailRule, StringComparison.Ordinal);
+        Assert.Contains("deals no damage and skips its follow-up effects", nailRule, StringComparison.Ordinal);
+
+        foreach (var type in new[] { typeof(MegaCrit.Sts2.Core.Models.Cards.BowSmack), typeof(MegaCrit.Sts2.Core.Models.Cards.KiHop) })
+        {
+            var card = (CardModel)ModelDb.GetById<CardModel>(ModelDb.GetId(type)).ToMutable();
+            Assert.False(ItemMechanismReader.UsesArrowShooting(card));
+            var rule = ItemMechanismReader.DescribeCard(card);
+            Assert.NotNull(rule);
+            Assert.Contains("before the attack hits", rule, StringComparison.Ordinal);
+        }
+
+        foreach (var type in new[] { typeof(MegaCrit.Sts2.Core.Models.Cards.Uproot), typeof(MegaCrit.Sts2.Core.Models.Cards.Wrest) })
+        {
+            var card = (CardModel)ModelDb.GetById<CardModel>(ModelDb.GetId(type)).ToMutable();
+            var rule = ItemMechanismReader.DescribeCard(card);
+            Assert.NotNull(rule);
+            Assert.Contains("dislodges all of owner's impaled arrows", rule, StringComparison.Ordinal);
+            Assert.Contains("once", rule, StringComparison.Ordinal);
+        }
+
+        var recall = (CardModel)ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.Recall>().ToMutable();
+        var recallRule = ItemMechanismReader.DescribeCard(recall);
+        Assert.NotNull(recallRule);
+        Assert.Contains("Dislodges all of owner's impaled arrows", recallRule, StringComparison.Ordinal);
+
+        var choFirmRule = ItemMechanismReader.DescribeCard(choFirmCard);
+        Assert.NotNull(choFirmRule);
+        Assert.Contains("at least 1 retrieved arrow", choFirmRule, StringComparison.Ordinal);
+
+        var volley = (CardModel)ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.Volley>().ToMutable();
+        Assert.False(ItemMechanismReader.UsesArrowShooting(volley));
+        var strikeFool = (CardModel)ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.StrikeFool>().ToMutable();
+        Assert.False(ItemMechanismReader.UsesArrowShooting(strikeFool));
+        Assert.False(ItemMechanismReader.UsesMelodies(strikeFool));
+        Assert.Null(ItemMechanismReader.DescribeCard(strikeFool));
+
+        // Fail-closed synthetic arrow card checks.
+        Assert.Null(ItemMechanismReader.DescribeCard(new SyntheticInLoopFollowUpDislodgeCard(), out var loopGap));
+        Assert.NotNull(loopGap);
+        Assert.Null(ItemMechanismReader.DescribeCard(new SyntheticSingleDislodgeCard(), out var singleGap));
+        Assert.Null(singleGap);
+        Assert.Null(ItemMechanismReader.DescribeCard(new SyntheticNegatedImpaledAttackCard()));
+        var damageOnlyImpaledRule = ItemMechanismReader.DescribeCard(new SyntheticImpaledDamageOnlyCard());
+        Assert.NotNull(damageOnlyImpaledRule);
+        Assert.Contains("deals no damage", damageOnlyImpaledRule, StringComparison.Ordinal);
+        Assert.DoesNotContain("follow-up effects", damageOnlyImpaledRule, StringComparison.Ordinal);
+    }
+
+    private sealed class SyntheticInLoopFollowUpDislodgeCard()
+        : CardModel(1, CardType.Skill, CardRarity.Common, TargetType.AnyEnemy)
+    {
+        protected override async Task OnPlay(MegaCrit.Sts2.Core.GameActions.Multiplayer.PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (!ArrowCmd.CreatureIsImpaledByPlayersArrow(cardPlay.Target!, Owner))
+                return;
+            while (ArrowCmd.CreatureIsImpaledByPlayersArrow(cardPlay.Target!, Owner))
+            {
+                await ArrowCmd.DislodgeArrow(cardPlay.Target!, cardPlay.Player, choiceContext, this);
+                await CardPileCmd.Draw(choiceContext, 1m, Owner);
+            }
+        }
+    }
+
+    private sealed class SyntheticSingleDislodgeCard()
+        : CardModel(1, CardType.Skill, CardRarity.Common, TargetType.AnyEnemy)
+    {
+        protected override async Task OnPlay(MegaCrit.Sts2.Core.GameActions.Multiplayer.PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (ArrowCmd.CreatureIsImpaledByPlayersArrow(cardPlay.Target!, Owner))
+                await ArrowCmd.DislodgeArrow(cardPlay.Target!, cardPlay.Player, choiceContext, this);
+        }
+    }
+
+    private sealed class SyntheticNegatedImpaledAttackCard()
+        : CardModel(1, CardType.Attack, CardRarity.Common, TargetType.AnyEnemy)
+    {
+        protected override async Task OnPlay(MegaCrit.Sts2.Core.GameActions.Multiplayer.PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (ArrowCmd.CreatureIsImpaledByArrow(cardPlay.Target!))
+                return;
+            await DamageCmd.Attack(8m).FromCard(this, cardPlay).Targeting(cardPlay.Target!).Execute(choiceContext);
+        }
+    }
+
+    private sealed class SyntheticImpaledDamageOnlyCard()
+        : CardModel(1, CardType.Attack, CardRarity.Common, TargetType.AnyEnemy)
+    {
+        protected override async Task OnPlay(MegaCrit.Sts2.Core.GameActions.Multiplayer.PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (!ArrowCmd.CreatureIsImpaledByArrow(cardPlay.Target!))
+                return;
+            await DamageCmd.Attack(8m).FromCard(this, cardPlay).Targeting(cardPlay.Target!).Execute(choiceContext);
+        }
+    }
+
     private sealed class SyntheticXorMelodyReplayPower : PowerModel
     {
         public override PowerType Type => PowerType.Buff;

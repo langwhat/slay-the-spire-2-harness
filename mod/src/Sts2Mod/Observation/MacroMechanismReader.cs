@@ -15,6 +15,8 @@ internal static class MacroMechanismReader
     public const string XCostRuleId = "MACRO.X_COST";
     public const string OstyRoutingId = "MACRO.OSTY_DAMAGE_ROUTING";
     public const string OrbQueueRuleId = "MACRO.ORB_QUEUE";
+    public const string FoolArrowsRuleId = "MACRO.FOOL_ARROWS";
+    public const string FoolMelodiesRuleId = "MACRO.FOOL_MELODIES";
 
     private static readonly FieldInfo? MerchantEntryRawCost = AccessTools.Field(typeof(MerchantEntry), "_cost");
     private static readonly PropertyInfo? RemovalBaseCost = AccessTools.Property(typeof(MerchantCardRemovalEntry), "BaseCost");
@@ -106,4 +108,13 @@ internal static class MacroMechanismReader
 
     public static string OrbQueueRule()
         => "Orb queue: channeling into a full queue automatically evokes the front (oldest) orb first; Focus modifies only Focus-scaled orb values (not Plasma).";
+
+    public static string FoolArrowsRule()
+    {
+        var impaled = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.ImpaledPower));
+        return $"Fool arrows: arrow-shooting cards consume 1 retrieved arrow slot (turning it away) on each play or replay. When 0 retrieved arrows remain, shooting cards still report playable=true and non-zero native damage previews and still spend Energy if played, but fire no arrow, deal no arrow damage, do not apply {impaled}, and skip arrow-gated follow-up effects. Multi-hit shooting cards use 1 arrow for all hits; replaying a shooting card requires another retrieved arrow unless an arrow returned first. On a shot, arrow damage resolves before {impaled} is applied, so that shot does not gain impaled-target bonuses from its own impale. If the shot kills the target or an impaled enemy dies, its impaled arrows dislodge back to retrieved (triggering dislodge hooks).";
+    }
+
+    public static string FoolMelodiesRule()
+        => "Fool melodies: Wah, Cho, and Ki tags are recorded in Combat state melodies when a card play with that tag starts this turn (counting replays and auto-plays) and reset at turn end. Effects counting melodies this turn count distinct activated tags (0-3).";
 }

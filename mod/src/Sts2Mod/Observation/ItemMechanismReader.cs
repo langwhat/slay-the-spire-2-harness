@@ -21,7 +21,86 @@ internal static class ItemMechanismReader
     private static readonly ConcurrentDictionary<SimpleCacheKey, string?> RelicCache = new();
     private static readonly ConcurrentDictionary<Type, Type[]> CardPowerCache = new();
     private static readonly ConcurrentDictionary<Type, Type[]> PotionPowerCache = new();
+    private static readonly ConcurrentDictionary<Type, bool> CardArrowShootCache = new();
+    private static readonly ConcurrentDictionary<Type, bool> CardMelodyCache = new();
     private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
+
+    public static bool UsesArrowShooting(CardModel card)
+    {
+        var cardType = card.GetType();
+        if (CardArrowShootCache.TryGetValue(cardType, out var cached))
+            return cached;
+
+        var uses = false;
+        try
+        {
+            if (cardType.GetMethod("OnPlay", DeclaredInstance) is { } onPlay)
+            {
+                var asyncAttr = onPlay.GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>();
+                var target = asyncAttr?.StateMachineType.GetMethod("MoveNext", DeclaredInstance) ?? onPlay;
+                foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(target))
+                {
+                    if (inst.operand is MethodBase called
+                        && called.DeclaringType == typeof(ArrowCmd)
+                        && called.Name is nameof(ArrowCmd.ShootArrowAtTarget) or nameof(ArrowCmd.TryShootArrow))
+                    {
+                        uses = true;
+                        break;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            uses = false;
+        }
+
+        CardArrowShootCache[cardType] = uses;
+        return uses;
+    }
+
+    public static bool UsesMelodies(CardModel card)
+    {
+        if (card.Tags.Any(t => t is CardTag.Wah or CardTag.Cho or CardTag.Ki))
+            return true;
+
+        var cardType = card.GetType();
+        if (CardMelodyCache.TryGetValue(cardType, out var cached))
+            return cached;
+
+        var uses = false;
+        try
+        {
+            var scanTypes = cardType.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic).Prepend(cardType);
+            foreach (var scanType in scanTypes)
+            {
+                foreach (var method in scanType.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    if (method.IsAbstract || method.ContainsGenericParameters)
+                        continue;
+                    foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(method))
+                    {
+                        if (inst.operand is MethodBase called && called.DeclaringType == typeof(MelodyCmd))
+                        {
+                            uses = true;
+                            break;
+                        }
+                    }
+                    if (uses)
+                        break;
+                }
+                if (uses)
+                    break;
+            }
+        }
+        catch
+        {
+            uses = false;
+        }
+
+        CardMelodyCache[cardType] = uses;
+        return uses;
+    }
 
     public static Type[] ReferencedPowers(CardModel card)
         => ReferencedPowersFromMethod(card.GetType(), "OnPlay", CardPowerCache);
@@ -73,7 +152,13 @@ internal static class ItemMechanismReader
         string? text = null;
         try
         {
-            text = DescribeCard(card);
+            text = DescribeCard(card, out var gap);
+            if (gap is not null)
+            {
+                var id = card.Id.ToString();
+                if (LoggedGaps.TryAdd(id, 0))
+                    Godot.GD.PushWarning($"[sts2agent] Unresolved card rule for {id}: {gap}");
+            }
         }
         catch (Exception error)
         {
@@ -130,8 +215,11 @@ internal static class ItemMechanismReader
         return text;
     }
 
-    internal static string? DescribeCard(CardModel card)
+    internal static string? DescribeCard(CardModel card) => DescribeCard(card, out _);
+
+    internal static string? DescribeCard(CardModel card, out string? gap)
     {
+        gap = null;
         var cardType = card.GetType();
         if (card.Type is CardType.Status or CardType.Curse)
             return DescribeStatusOrCurseCard(card, cardType);
@@ -154,6 +242,13 @@ internal static class ItemMechanismReader
 
                 if (DescribeCardCostLifetime(body) is { } costLifetime)
                     notes.Add(costLifetime);
+
+                if (DescribeCardArrowRules(body) is { } arrowRule)
+                    notes.Add(arrowRule);
+            }
+            else if (DescribeCardArrowLoopRules(onPlay, out gap) is { } arrowLoopRule)
+            {
+                notes.Add(arrowLoopRule);
             }
         }
 
@@ -778,6 +873,202 @@ internal static class ItemMechanismReader
             if (relic.DynamicVars.TryGetValue("Cards", out var cardsVar) && cardsVar.BaseValue > 1m)
                 return (int)cardsVar.BaseValue;
         }
+        return null;
+    }
+
+    private static bool CallsArrowShoot(NativeRuleBody body) =>
+        body.Calls.Any(s =>
+            s.Call.Method.DeclaringType == typeof(ArrowCmd)
+            && s.Call.Method.Name is nameof(ArrowCmd.ShootArrowAtTarget) or nameof(ArrowCmd.TryShootArrow));
+
+    private static bool IsGameplayFollowUpCall(MethodBase method) =>
+        (method.DeclaringType == typeof(CardPileCmd) && method.Name == nameof(CardPileCmd.Draw))
+        || (method.DeclaringType == typeof(PowerCmd) && method.Name == nameof(PowerCmd.Apply))
+        || (method.DeclaringType == typeof(PlayerCmd) && method.Name == nameof(PlayerCmd.GainEnergy))
+        || (method.DeclaringType == typeof(CreatureCmd) && method.Name is nameof(CreatureCmd.GainBlock) or nameof(CreatureCmd.Damage))
+        || (method.DeclaringType == typeof(CardCmd) && method.Name is nameof(CardCmd.Exhaust) or nameof(CardCmd.AutoPlay) or nameof(CardCmd.TransformTo));
+
+    private static bool HasArrowGatedFollowUp(NativeRuleBody body)
+    {
+        if (body.Calls.Any(s =>
+            IsGameplayFollowUpCall(s.Call.Method)
+            && s.Conditions.Any(c =>
+                ContainsMethodName(c.Value, nameof(ArrowCmd.ShootArrowAtTarget))
+                || ContainsMethodName(c.Value, nameof(ArrowCmd.TryShootArrow)))))
+        {
+            return true;
+        }
+
+        foreach (var step in body.Calls)
+        {
+            if (step.Call.Method.DeclaringType != typeof(ArrowCmd)
+                || step.Call.Method.Name is not (nameof(ArrowCmd.ShootArrowAtTarget) or nameof(ArrowCmd.ImpaleTarget)))
+            {
+                continue;
+            }
+
+            foreach (var arg in step.Call.Arguments)
+            {
+                if (arg is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo callback }] })
+                    continue;
+                var cbBody = NativeRuleBody.Read(callback);
+                if (cbBody.Incomplete)
+                    continue;
+                var extraCalls = cbBody.Calls
+                    .Where(s => IsGameplayFollowUpCall(s.Call.Method))
+                    .DistinctBy(s => (s.Epoch, s.Index))
+                    .Count();
+                var hasSingleAttack = cbBody.Calls.Any(s =>
+                    s.Call.Method.Name == "Execute" && s.Call.Method.DeclaringType?.Name == "AttackCommand");
+                // ActionToPerform callbacks either add a follow-up (e.g. BlossomShot PowerCmd.Apply)
+                // or perform multiple damage steps (e.g. RainShot primary + splash CreatureCmd.Damage).
+                if ((hasSingleAttack && extraCalls > 0) || extraCalls >= 2)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? DescribeCardArrowRules(NativeRuleBody body)
+    {
+        var impaled = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.ImpaledPower));
+
+        if (CallsArrowShoot(body))
+        {
+            return HasArrowGatedFollowUp(body)
+                ? "Arrow-shooting card (requires 1 retrieved arrow); its follow-up effect is also skipped when 0 retrieved arrows remain."
+                : "Arrow-shooting card (requires 1 retrieved arrow).";
+        }
+
+        var ordered = body.Calls.GroupBy(s => (s.Epoch, s.Index))
+            .OrderBy(g => (g.Key.Epoch, g.Max(s => s.Order), g.Key.Index))
+            .ToArray();
+
+        var attackIdx = FindStepIndex(ordered, c =>
+            c.Method.Name == "Execute" && c.Method.DeclaringType?.Name == "AttackCommand");
+        var impaledCheckIdx = FindStepIndex(ordered, c =>
+            c.Method.DeclaringType == typeof(ArrowCmd)
+            && c.Method.Name == nameof(ArrowCmd.CreatureIsImpaledByArrow));
+        if (attackIdx >= 0 && impaledCheckIdx >= 0 && impaledCheckIdx < attackIdx)
+        {
+            var attackGated = ordered[attackIdx].Any(s =>
+                s.Conditions.Any(c => c.Expected && ContainsMethodName(c.Value, nameof(ArrowCmd.CreatureIsImpaledByArrow))));
+            if (attackGated)
+            {
+                var hasFollowUp = ordered.Skip(attackIdx + 1)
+                    .Any(g => g.Any(s => IsGameplayFollowUpCall(s.Call.Method)));
+                return hasFollowUp
+                    ? $"Requires target to have {impaled}; if target is not impaled, playing it still spends Energy but deals no damage and skips its follow-up effects (native playable and damage previews ignore this check)."
+                    : $"Requires target to have {impaled}; if target is not impaled, playing it still spends Energy but deals no damage (native playable and damage previews ignore this check).";
+            }
+
+            var postAttackBonusGated = ordered.Skip(attackIdx + 1).Any(g => g.Any(s =>
+                IsGameplayFollowUpCall(s.Call.Method)
+                && s.Conditions.Any(c => c.Expected && ContainsMethodName(c.Value, nameof(ArrowCmd.CreatureIsImpaledByArrow)))));
+            if (postAttackBonusGated)
+            {
+                return $"Checks {impaled} before the attack hits, so its bonus still triggers even if this attack dislodges the target's last impaled arrow.";
+            }
+        }
+
+        if (body.Calls.Any(s =>
+            s.Call.Method.DeclaringType == typeof(ArrowCmd)
+            && s.Call.Method.Name == nameof(ArrowCmd.PlayerHasAnyArrows)))
+        {
+            return "Checks for at least 1 retrieved arrow (away/impaled arrows do not count).";
+        }
+
+        return null;
+    }
+
+    private static string? DescribeCardArrowLoopRules(MethodInfo onPlay, out string? gap)
+    {
+        gap = null;
+        var asyncAttr = onPlay.GetCustomAttribute<System.Runtime.CompilerServices.AsyncStateMachineAttribute>();
+        var target = asyncAttr?.StateMachineType.GetMethod("MoveNext", DeclaredInstance) ?? onPlay;
+        var instructions = HarmonyLib.PatchProcessor.GetOriginalInstructions(target);
+
+        var labelToIndex = new Dictionary<System.Reflection.Emit.Label, int>();
+        for (var i = 0; i < instructions.Count; i++)
+        {
+            foreach (var label in instructions[i].labels)
+                labelToIndex[label] = i;
+        }
+
+        var hasUnhandledArrowCall = false;
+        var ownerImpaledIndices = new List<int>();
+        var dislodgeIndices = new List<int>();
+        var followUpIndices = new List<int>();
+        var hasPlayerArrowsCheck = false;
+
+        for (var i = 0; i < instructions.Count; i++)
+        {
+            if (instructions[i].operand is not MethodBase called)
+                continue;
+            if (called.DeclaringType == typeof(ArrowCmd))
+            {
+                if (called.Name is nameof(ArrowCmd.ShootArrowAtTarget) or nameof(ArrowCmd.TryShootArrow) or nameof(ArrowCmd.CreatureIsImpaledByArrow))
+                    hasUnhandledArrowCall = true;
+                else if (called.Name == nameof(ArrowCmd.CreatureIsImpaledByPlayersArrow))
+                    ownerImpaledIndices.Add(i);
+                else if (called.Name == nameof(ArrowCmd.DislodgeArrow))
+                    dislodgeIndices.Add(i);
+                else if (called.Name == nameof(ArrowCmd.PlayerHasAnyArrows))
+                    hasPlayerArrowsCheck = true;
+            }
+            else if (IsGameplayFollowUpCall(called))
+            {
+                followUpIndices.Add(i);
+            }
+        }
+
+        if (hasUnhandledArrowCall)
+        {
+            gap = "incomplete OnPlay body with arrow call";
+            return null;
+        }
+
+        if (dislodgeIndices.Count > 0)
+        {
+            if (dislodgeIndices.Count == 1
+                && ownerImpaledIndices.Count >= 2
+                && ownerImpaledIndices[0] < dislodgeIndices[0]
+                && ownerImpaledIndices[^1] > dislodgeIndices[0])
+            {
+                var dislodgeIdx = dislodgeIndices[0];
+                var loopCheckIdx = ownerImpaledIndices[^1];
+                var backBranchIdx = -1;
+                for (var i = loopCheckIdx + 1; i < instructions.Count; i++)
+                {
+                    if (instructions[i].opcode.FlowControl == System.Reflection.Emit.FlowControl.Cond_Branch
+                        && instructions[i].operand is System.Reflection.Emit.Label targetLabel
+                        && labelToIndex.TryGetValue(targetLabel, out var targetIdx)
+                        && targetIdx > ownerImpaledIndices[0]
+                        && targetIdx <= dislodgeIdx)
+                    {
+                        backBranchIdx = i;
+                        break;
+                    }
+                }
+
+                // Fail closed unless we verified a backward loop branch with no follow-up before or inside the loop.
+                if (backBranchIdx >= 0 && followUpIndices.All(idx => idx > backBranchIdx))
+                {
+                    var impaled = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.ImpaledPower));
+                    return followUpIndices.Count > 0
+                        ? $"Requires target to have owner's {impaled}; dislodges all of owner's impaled arrows from target, then applies its follow-up effect once (if not impaled, does nothing)."
+                        : "Dislodges all of owner's impaled arrows from target (if not impaled, does nothing).";
+                }
+            }
+
+            gap = "incomplete OnPlay body with unmatched dislodge loop";
+            return null;
+        }
+
+        if (hasPlayerArrowsCheck)
+            return "Checks for at least 1 retrieved arrow (away/impaled arrows do not count).";
+
         return null;
     }
 
