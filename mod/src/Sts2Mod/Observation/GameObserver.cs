@@ -460,7 +460,7 @@ internal sealed class GameObserver(
             Allies = allies.IsEmpty ? null : allies,
             Orbs = ObserveOrbs(pcs.OrbQueue.Capacity, pcs.OrbQueue.Orbs, actor),
             ArrowSlots = ObserveArrowSlots(pcs.Arrows, combat, actor),
-            Melodies = ObserveMelodies(player),
+            Melodies = ObserveMelodies(player, actor),
         };
 
         FlushPowerMechanisms();
@@ -825,6 +825,24 @@ internal sealed class GameObserver(
                 MacroMechanismReader.XCostRule(),
                 reference));
         }
+        if (ItemMechanismReader.UsesArrowShooting(card))
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                MacroMechanismReader.FoolArrowsRuleId,
+                "Fool Arrows",
+                MacroMechanismReader.FoolArrowsRule(),
+                reference));
+        }
+        if (ItemMechanismReader.UsesMelodies(card))
+        {
+            _mechanisms.Add(new MechanismView(
+                MechanismKind.Other,
+                MacroMechanismReader.FoolMelodiesRuleId,
+                "Fool Melodies",
+                MacroMechanismReader.FoolMelodiesRule(),
+                reference));
+        }
 
         var upgradeReader = UpgradeReaders.GetValue(
             card,
@@ -927,6 +945,13 @@ internal sealed class GameObserver(
             }
         }
 
+        _mechanisms.Add(new MechanismView(
+            MechanismKind.Other,
+            MacroMechanismReader.FoolArrowsRuleId,
+            "Fool Arrows",
+            MacroMechanismReader.FoolArrowsRule(),
+            CreatureHolderKey(owner)));
+
         return slots.Select(slot => new ArrowSlotView(
             slot.Status switch
             {
@@ -937,7 +962,7 @@ internal sealed class GameObserver(
             slot.Status == ArrowStatus.Away ? targetRefs.GetValueOrDefault(slot) : null)).ToImmutableArray();
     }
 
-    private static ImmutableArray<MelodyTag>? ObserveMelodies(Player player)
+    private ImmutableArray<MelodyTag>? ObserveMelodies(Player player, Creature actor)
     {
         var melodies = ImmutableArray.CreateBuilder<MelodyTag>(3);
         if (MelodyCmd.PlayedWahThisTurn(player))
@@ -948,6 +973,12 @@ internal sealed class GameObserver(
             melodies.Add(MelodyTag.Ki);
         if (melodies.Count == 0 && player.Character is not Fool)
             return null;
+        _mechanisms.Add(new MechanismView(
+            MechanismKind.Other,
+            MacroMechanismReader.FoolMelodiesRuleId,
+            "Fool Melodies",
+            MacroMechanismReader.FoolMelodiesRule(),
+            CreatureHolderKey(actor)));
         return melodies.ToImmutable();
     }
 

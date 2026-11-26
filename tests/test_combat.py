@@ -493,6 +493,83 @@ def test_boss_rewards_skip_review_only_after_the_last_boss(
     assert len(battle.inputs) == (2 if review else 1)
 
 
+@pytest.mark.parametrize(
+    ("room_type", "turn", "before_hp", "max_hp", "after_hp", "screen", "review"),
+    [
+        ("monster", 2, 70, 75, 68, native.RunScreen.REWARDS, False),
+        ("monster", 4, 70, 75, 61, native.RunScreen.REWARDS, False),
+        ("monster", 2, 70, 75, 74, native.RunScreen.REWARDS, False),
+        ("monster", 2, 70, 75, 60, native.RunScreen.REWARDS, True),
+        ("monster", 2, 50, 50, 42, native.RunScreen.REWARDS, True),
+        ("monster", 5, 70, 75, 70, native.RunScreen.REWARDS, True),
+        ("monster", None, 70, 75, 70, native.RunScreen.REWARDS, True),
+        ("monster", 2, 70, 0, 70, native.RunScreen.REWARDS, True),
+        ("monster", 2, 70, 75, 70, native.RunScreen.MAP, True),
+        ("elite", 2, 70, 75, 70, native.RunScreen.REWARDS, True),
+        ("event", 2, 70, 75, 70, native.RunScreen.REWARDS, False),
+        ("event", 2, 70, 75, 58, native.RunScreen.REWARDS, True),
+        (None, 2, 70, 75, 70, native.RunScreen.REWARDS, True),
+        ("treasure", 2, 70, 75, 70, native.RunScreen.REWARDS, True),
+    ],
+)
+def test_routine_short_low_loss_wins_skip_combat_review(
+    tmp_path: Path,
+    room_type: str | None,
+    turn: int | None,
+    before_hp: int,
+    max_hp: int,
+    after_hp: int,
+    screen: native.RunScreen,
+    review: bool,
+) -> None:
+    review_text = "Notable combat review."
+    battle = BattleHTTP(
+        [
+            reply(("action", "combat_act", '{"steps":[{"kind":"end_turn"}]}')),
+            reply(text=review_text),
+        ]
+    )
+    opening = battle.opening
+    ending = battle.ending
+    progress = opening.state.progress.model_copy(update={"room_type": room_type})
+    battle.opening = opening.model_copy(
+        update={
+            "state": opening.state.model_copy(
+                update={
+                    "progress": progress,
+                    "turn": turn,
+                    "player": opening.state.player.model_copy(
+                        update={"hp": before_hp, "max_hp": max_hp}
+                    ),
+                }
+            )
+        }
+    )
+    battle.ending = ending.model_copy(
+        update={
+            "state": ending.state.model_copy(
+                update={
+                    "progress": progress,
+                    "screen": screen,
+                    "player": ending.state.player.model_copy(
+                        update={"hp": after_hp, "max_hp": max_hp}
+                    ),
+                }
+            )
+        }
+    )
+
+    result = asyncio.run(battle.run(tmp_path))
+
+    assert isinstance(result, CombatHandoff)
+    expected_result = (
+        BattleResult.WON if screen is native.RunScreen.REWARDS else BattleResult.UNKNOWN
+    )
+    assert result.report.result is expected_result
+    assert result.review == (review_text if review else None)
+    assert len(battle.inputs) == (2 if review else 1)
+
+
 class PlainCombat:
     def __init__(self) -> None:
         self.accepted: list[ActionToolResult] = []

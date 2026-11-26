@@ -1,6 +1,7 @@
 """One battle's model role, execution units, trustworthy facts, and optional review."""
 
 import logging
+from enum import StrEnum
 
 from pydantic import MISSING
 
@@ -44,6 +45,33 @@ from sts2_harness.tools import ToolCatalog
 from sts2_harness.user_input_values import UserInputSource
 
 _LOG = logging.getLogger(__name__)
+_REVIEW_MIN_HP_LOSS = 10
+_REVIEW_MIN_HP_LOSS_PCT = 15
+_REVIEW_MIN_TURNS = 5
+
+
+class _RoutineCombatRoom(StrEnum):
+    MONSTER = "monster"
+    EVENT = "event"
+
+
+_ROUTINE_COMBAT_ROOMS: frozenset[str] = frozenset(_RoutineCombatRoom)
+
+
+def _should_review(report: BattleReport) -> bool:
+    if report.result is not BattleResult.WON:
+        return True
+    if report.location.room_type not in _ROUTINE_COMBAT_ROOMS:
+        return True
+    if report.last_observed_turn is None or report.last_observed_turn >= _REVIEW_MIN_TURNS:
+        return True
+    hp_lost = max(0, report.before.hp - report.after.hp)
+    if hp_lost >= _REVIEW_MIN_HP_LOSS:
+        return True
+    max_hp = report.before.max_hp
+    if max_hp <= 0:
+        return True
+    return hp_lost * 100 >= max_hp * _REVIEW_MIN_HP_LOSS_PCT
 
 
 def _system(prompts: PromptReader, *, viewer_input: bool, minimal: bool = False) -> MaterialParts:
@@ -308,6 +336,8 @@ class CombatTask:
                 and self._last.state.progress.bosses_left == 0
             ):
                 # Victory may still have reward or event screens before the run ends.
+                return CombatHandoff(report)
+            if not _should_review(report):
                 return CombatHandoff(report)
             while True:
                 reviewed = await self._execution.run_unit(self._role, ReviewTask(report))
