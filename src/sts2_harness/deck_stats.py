@@ -14,6 +14,10 @@ class _CardType(StrEnum):
     POWER = "power"
 
 
+class _CardRarity(StrEnum):
+    BASIC = "basic"
+
+
 class _Keyword(StrEnum):
     UNPLAYABLE = "unplayable"
     EXHAUST = "exhaust"
@@ -82,6 +86,10 @@ class DeckStatistics:
             "attacks": kinds[_CardType.ATTACK],
             "skills": kinds[_CardType.SKILL],
             "powers": kinds[_CardType.POWER],
+            "basic_cards": sum(
+                card.rarity is not None and card.rarity.casefold() == _CardRarity.BASIC
+                for card in cards
+            ),
             "unplayable": sum(_Keyword.UNPLAYABLE in words for words in keywords),
             "circulating": len(circulating),
             "added": choices[True],
@@ -92,6 +100,8 @@ class DeckStatistics:
         draw, energy = state.player.base_draw, state.player.base_energy
         if draw is not MISSING:
             stats["base_draw"] = draw
+            if draw > 0:
+                stats["cycle_turns"] = round(len(circulating) / draw, 1)
         if energy is not MISSING:
             stats["base_energy"] = energy
         counts = Counter(

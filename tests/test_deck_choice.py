@@ -505,7 +505,6 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
                 if isinstance(message, dict) and isinstance(message.get("content"), str)
             ]
             first_run_text = "\n".join(text for text in texts if isinstance(text, str))
-            assert '"circulating_avg_energy"' not in first_run_text
             assert "local mechanism" not in first_run_text
             assert "CARD.LOCAL" not in first_run_text
             assert "owned mechanism" in first_run_text
@@ -533,6 +532,12 @@ def test_reward_roles_share_state_and_preserve_real_completion_evidence(
             ]
             decks = [state["deck"] for state in observations if state and "deck" in state]
             assert len(decks) == 1
+            run_stats = [
+                state["deck_stats"] for state in observations if state and "deck_stats" in state
+            ]
+            assert len(run_stats) == 1
+            assert run_stats[0]["circulating_avg_energy"] == 2.0
+            assert run_stats[0]["basic_cards"] == 0
             assert {card["id"] for card in decks[0]} == {
                 "CARD.OWNED",
                 "CARD.REGULAR",

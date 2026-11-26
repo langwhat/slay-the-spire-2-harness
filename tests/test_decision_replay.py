@@ -444,8 +444,6 @@ def test_deck_and_run_use_the_act_valuation_with_deck_only_choice_steps(
         assert run_ids[deck_index + 1] == act_id
         assert "prompt:deck-choice" not in run_ids
         deck_fields = {
-            "circulating_avg_energy",
-            "deck_stats.circulating_avg_energy",
             "progress.route",
         }
         for shared_part in run_parts[deck_index : deck_index + 2]:

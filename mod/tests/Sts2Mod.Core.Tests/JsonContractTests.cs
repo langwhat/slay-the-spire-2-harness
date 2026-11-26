@@ -104,4 +104,32 @@ public sealed class JsonContractTests
         Assert.Equal("failed", techDoc.RootElement.GetProperty("status").GetString());
         Assert.Equal("internal_error", techDoc.RootElement.GetProperty("error").GetProperty("code").GetString());
     }
+
+    [Fact]
+    public void MelodyTag_SerializesLowercaseAndCombatStateOmitsNullMelodies()
+    {
+        var baseState = new CombatStateView(
+            PublicInputControl.Ready,
+            new PublicProgress(3, 1, 1, null, null, "Act 1", "ACT.OVERGROWTH"),
+            new CombatPlayer("Fool", "CHARACTER.FOOL", 77, 77, 99, 2, 2, 0, new ResourceBalances(3, 0), []),
+            [],
+            [],
+            [],
+            null,
+            ObservationPhase.Combat,
+            CombatScreen.Combat,
+            1,
+            [],
+            new PileMembership([], [], [], [], []),
+            [],
+            []);
+
+        using var omitted = JsonDocument.Parse(JsonContract.Serialize(baseState));
+        Assert.False(omitted.RootElement.TryGetProperty("melodies", out _));
+
+        var withMelodies = baseState with { Melodies = [MelodyTag.Wah, MelodyTag.Cho, MelodyTag.Ki] };
+        using var present = JsonDocument.Parse(JsonContract.Serialize(withMelodies));
+        var values = present.RootElement.GetProperty("melodies").EnumerateArray().Select(e => e.GetString()).ToArray();
+        Assert.Equal(new[] { "wah", "cho", "ki" }, values);
+    }
 }

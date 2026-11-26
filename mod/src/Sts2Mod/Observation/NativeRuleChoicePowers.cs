@@ -382,7 +382,7 @@ internal sealed partial class NativeRuleText
             && r.Value is not Operation { Operator: "add", Left: Input { Name: "playCount" }, Right: Constant { Data: 1 } }))
             return null;
         var boosted = body.Returns.Where(r => r.Value is Operation { Operator: "add", Left: Input { Name: "playCount" }, Right: Constant { Data: 1 } }).ToArray();
-        if (boosted is not [var active])
+        if (boosted.Length == 0)
             return null;
 
         var hasOwnerCheck = false;
@@ -390,43 +390,112 @@ internal sealed partial class NativeRuleText
         CardType? filteredType = null;
         var firstPlaysPerTurn = false;
         var countsPlaySeries = false;
-        foreach (var rawCond in active.Conditions)
+        var requiredTags = new List<CardTag>();
+        var tagPaths = new List<(CardTag Tag, HashSet<CardTag> Excluded)>();
+        var firstPath = true;
+        foreach (var active in boosted)
         {
-            var condExpr = rawCond.Value;
-            var condExpected = rawCond.Expected;
-            while (condExpr is Operation { Operator: "ceq", Left: var inner, Right: Constant { Data: 0 or null } })
+            var pathOwnerCheck = false;
+            var pathExcludesDupe = false;
+            CardType? pathType = null;
+            var pathFirstPlays = false;
+            var pathCountsSeries = false;
+            CardTag? pathTag = null;
+            var pathExcludedTags = new HashSet<CardTag>();
+            foreach (var rawCond in active.Conditions)
             {
-                condExpr = inner;
-                condExpected = !condExpected;
+                var cond = NormalizeCondition(rawCond);
+                var condExpr = cond.Value;
+                var condExpected = cond.Expected;
+                if (IsCardOwnerCheck(cond, "card"))
+                {
+                    pathOwnerCheck = true;
+                    continue;
+                }
+                if (!condExpected && condExpr is Call { Method.Name: "get_IsDupe", Receiver: Input { Name: "card" } })
+                {
+                    pathExcludesDupe = true;
+                    continue;
+                }
+                if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type", Receiver: Input { Name: "card" } }
+                    && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
+                {
+                    var nextType = (CardType)(int)ct;
+                    if (pathType is not null && pathType != nextType)
+                        return null;
+                    pathType = nextType;
+                    continue;
+                }
+                var tagConst = condExpr switch
+                {
+                    Call { Method.Name: "Contains", Arguments: [Call { Method.Name: "get_Tags", Receiver: Input { Name: "card" } }, Constant { Data: int rt }] } => (int?)rt,
+                    Call { Method.Name: "Contains", Receiver: Call { Method.Name: "get_Tags", Receiver: Input { Name: "card" } }, Arguments: [Constant { Data: int rt2 }] } => rt2,
+                    _ => null,
+                };
+                if (tagConst is { } rawTag && Enum.IsDefined(typeof(CardTag), rawTag))
+                {
+                    var tagVal = (CardTag)rawTag;
+                    if (condExpected)
+                    {
+                        if (pathTag is not null && pathTag != tagVal)
+                            return null;
+                        pathTag = tagVal;
+                    }
+                    else
+                    {
+                        pathExcludedTags.Add(tagVal);
+                    }
+                    continue;
+                }
+                if (IsCountLessThanStacksCheck(cond, out var countPred) && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes, out var predCountsSeries) && countedTypes.Count == 0)
+                {
+                    pathFirstPlays = true;
+                    pathCountsSeries = predCountsSeries;
+                    continue;
+                }
+                // Fail closed on any unrecognized condition (e.g., Relic.UsedThisCombat on ThrowingAxe).
+                return null;
             }
-            var cond = new Test(condExpr, condExpected);
-            if (IsCardOwnerCheck(cond, "card"))
+            if (!pathOwnerCheck)
+                return null;
+            if (boosted.Length > 1 && pathTag is null)
+                return null;
+            if (pathTag is null && pathExcludedTags.Count > 0)
+                return null;
+            if (firstPath)
             {
-                hasOwnerCheck = true;
-                continue;
+                hasOwnerCheck = pathOwnerCheck;
+                excludesDupe = pathExcludesDupe;
+                filteredType = pathType;
+                firstPlaysPerTurn = pathFirstPlays;
+                countsPlaySeries = pathCountsSeries;
+                firstPath = false;
             }
-            if (!condExpected && condExpr is Call { Method.Name: "get_IsDupe", Receiver: Input { Name: "card" } })
+            else if (excludesDupe != pathExcludesDupe || filteredType != pathType
+                || firstPlaysPerTurn != pathFirstPlays || countsPlaySeries != pathCountsSeries)
             {
-                excludesDupe = true;
-                continue;
+                return null;
             }
-            if (IsEquality(cond, true, out var l, out var r) && l is Call { Method.Name: "get_Type", Receiver: Input { Name: "card" } }
-                && Numeric(r) is { } ct && Enum.IsDefined(typeof(CardType), (int)ct))
+            if (pathTag is { } pt)
             {
-                var nextType = (CardType)(int)ct;
-                if (filteredType is not null && filteredType != nextType)
+                if (requiredTags.Contains(pt) || pathExcludedTags.Contains(pt))
                     return null;
-                filteredType = nextType;
-                continue;
+                requiredTags.Add(pt);
+                tagPaths.Add((pt, pathExcludedTags));
             }
-            if (IsCountLessThanStacksCheck(cond, out var countPred) && IsOwnerCardPlaysStartedPredicate(countPred, out var countedTypes, out var predCountsSeries) && countedTypes.Count == 0)
+        }
+        // Verify tag paths form an exact short-circuit OR (T_0 || T_1 || ...):
+        // ordered by excluded count, path i excludes exactly {T_0, ..., T_{i-1}}.
+        if (tagPaths.Count > 0)
+        {
+            tagPaths.Sort((a, b) => a.Excluded.Count.CompareTo(b.Excluded.Count));
+            var priorTags = new HashSet<CardTag>();
+            for (var i = 0; i < tagPaths.Count; i++)
             {
-                firstPlaysPerTurn = true;
-                countsPlaySeries = predCountsSeries;
-                continue;
+                if (tagPaths[i].Excluded.Count != i || !tagPaths[i].Excluded.SetEquals(priorTags))
+                    return null;
+                priorTags.Add(tagPaths[i].Tag);
             }
-            // Fail closed on any unrecognized condition (e.g., Relic.UsedThisCombat on ThrowingAxe).
-            return null;
         }
         if (!hasOwnerCheck)
             return null;
@@ -449,16 +518,18 @@ internal sealed partial class NativeRuleText
             }
         }
 
+        requiredTags.Sort();
         var dupeQualifier = excludesDupe ? "non-dupe " : "";
+        var tagQualifier = requiredTags.Count > 0 ? $"{string.Join(" or ", requiredTags)}-tagged " : "";
         var playUnit = countsPlaySeries ? "card play series" : "card plays";
         var seriesNote = countsPlaySeries ? "; replays do not consume additional charges" : "";
         var subject = firstPlaysPerTurn
             ? filteredType is { } firstKind
-                ? $"owned {dupeQualifier}{firstKind} cards played among owner's first N {playUnit} each turn (where N = stacks{seriesNote})"
-                : $"each of owner's first N {dupeQualifier}{playUnit} each turn (where N = stacks{seriesNote})"
+                ? $"owned {dupeQualifier}{tagQualifier}{firstKind} cards played among owner's first N {playUnit} each turn (where N = stacks{seriesNote})"
+                : $"each of owner's first N {dupeQualifier}{tagQualifier}{playUnit} each turn (where N = stacks{seriesNote})"
             : filteredType is { } kind
-                ? $"owned {dupeQualifier}{kind} cards"
-                : $"owned {dupeQualifier}cards";
+                ? $"owned {dupeQualifier}{tagQualifier}{kind} cards"
+                : $"owned {dupeQualifier}{tagQualifier}cards";
         return $"Card replay: plays {subject} 1 additional time{consumeSuffix}";
     }
 

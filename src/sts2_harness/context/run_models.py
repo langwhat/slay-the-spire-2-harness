@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import MISSING, JsonValue
 
-from sts2_harness.client.models import ArrowSlot
+from sts2_harness.client.models import ArrowSlot, DistinctMelodies
 from sts2_harness.fights import Fight
 from sts2_harness.note_values import NotesView
 from sts2_harness.results import SemanticValue
@@ -35,6 +35,8 @@ class RunObservation(SemanticValue):
     allies: tuple[dict[str, JsonValue], ...] | None | MISSING = MISSING
     orbs: dict[str, JsonValue] | None | MISSING = MISSING
     arrow_slots: tuple[ArrowSlot, ...] | None | MISSING = MISSING
+    melodies: DistinctMelodies | None | MISSING = MISSING
+    active_relics: tuple[dict[str, JsonValue], ...] | None | MISSING = MISSING
     encounter: dict[str, JsonValue] | None | MISSING = MISSING
     mechanisms: tuple[dict[str, JsonValue], ...] | MISSING = MISSING
     generated: tuple[dict[str, JsonValue], ...] | MISSING = MISSING

@@ -75,7 +75,7 @@ Upgrade the card whose upgrade most changes the fights ahead; where owned cards 
 
 # Shops
 
-Compare the affordable combinations of cards, relics, removal, and potions with keeping the gold for a reachable later use. A bought card is judged like any added card, by the demand it answers. Removing a basic card, or a transition card once a core works, is often the best purchase. Spending all gold is not a goal, and an empty slot is not a reason to buy a potion.
+Compare the affordable combinations of cards, relics, removal, and potions with keeping the gold for a reachable later use. A bought card pays twice—gold and a draw slot—so hold shop cards to a higher bar than free rewards: do not buy discounted or secondary-synergy cards that would be marginal additions. Removing a basic starter (or an obsolete transition card once a core works) permanently raises the draw rate of every core, mitigation, and upgraded card in every remaining fight at zero energy and upgrade cost; when `deck_stats.basic_cards` or `deck_stats.cycle_turns` is high, removal is a top-priority purchase alongside key relics and decisive potions. Spending all gold is not a goal, and an empty slot is not a reason to buy a potion.
 
 - Which affordable combination best answers the current gap? Does a relic offered fix it more lastingly than cards that work around it?
 - After this purchase, what is lost at the next reachable shop, and can saved gold become strength before the next unavoidable fight?

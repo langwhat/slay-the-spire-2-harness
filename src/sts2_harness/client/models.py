@@ -409,6 +409,21 @@ class ArrowSlotStatus(StrEnum):
     AWAY = "away"
 
 
+class MelodyTag(StrEnum):
+    WAH = "wah"
+    CHO = "cho"
+    KI = "ki"
+
+
+type DistinctMelodies = Annotated[tuple[MelodyTag, ...], AfterValidator(_distinct)]
+
+
+class RelicStatus(StrEnum):
+    NORMAL = "normal"
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
 class ArrowSlot(WireModel):
     status: ArrowSlotStatus
     impaled_target_ref: Nonempty | MISSING = MISSING
@@ -499,6 +514,7 @@ class CombatState(WireModel):
     orbs: Orbs | MISSING = MISSING
     allies: tuple[Ally, ...] | MISSING = MISSING
     arrow_slots: Annotated[tuple[ArrowSlot, ...], Field(min_length=1)] | MISSING = MISSING
+    melodies: DistinctMelodies | MISSING = MISSING
 
 
 class Piles(WireModel):
@@ -591,7 +607,7 @@ class RelicEntry(WireModel):
     definition_id: Nonempty
     name: Nonempty
     counter: Number | None | MISSING = MISSING
-    status: Nonempty | None | MISSING = MISSING
+    status: RelicStatus | None | MISSING = MISSING
     is_used_up: bool | None | MISSING = MISSING
     is_melted: bool | None | MISSING = MISSING
     used_this_combat: bool | None | MISSING = MISSING

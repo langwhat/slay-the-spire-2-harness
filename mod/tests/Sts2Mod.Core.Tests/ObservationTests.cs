@@ -36,7 +36,7 @@ public sealed class ObservationTests
             .Add("card:1:2", SampleCard("CARD.POMMEL_STRIKE", "Pommel Strike"))
             .Add("bundle:1:1", new BundleEntry("Starter Pack", ["card:1:2"]))
             .Add("offer:1:1", new OfferEntry("Card Reward"))
-            .Add("relic:1:1", new RelicEntry("RELIC.BURNING_BLOOD", "Burning Blood", "normal", false, false, 1))
+            .Add("relic:1:1", new RelicEntry("RELIC.BURNING_BLOOD", "Burning Blood", RelicStatus.Normal, false, false, 1))
             .Add("option:1:1", new OptionEntry("[green]Rest[/green]") { DefinitionId = "REST.HEAL" });
 
         var descriptions = ImmutableDictionary<string, string?>.Empty

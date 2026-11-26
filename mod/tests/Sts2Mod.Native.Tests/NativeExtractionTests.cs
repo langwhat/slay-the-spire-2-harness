@@ -497,13 +497,14 @@ public sealed class NativeExtractionTests
         Assert.Contains("after the 3rd Attack play resolves", jugglingText!, StringComparison.Ordinal);
         Assert.Contains("owner's hand", jugglingText!, StringComparison.Ordinal);
 
-        // TangledPower must remain intact and EnsemblePower must continue failing closed on unrecognized cost conditions.
+        // TangledPower and EnsemblePower extract cleanly without gaps.
         var (tangledText, tangledGaps) = PowerMechanismReader.Describe(typeof(TangledPower), true);
         Assert.Empty(tangledGaps);
         Assert.Contains("cost +stacks Energy (Energy X-cost cards ignore cost modifiers and spend all remaining Energy when paying resources)", tangledText!, StringComparison.Ordinal);
 
-        var (_, ensembleGaps) = PowerMechanismReader.Describe(typeof(EnsemblePower), true);
-        Assert.Contains("EnsemblePower.TryModifyEnergyCostInCombatLate", ensembleGaps);
+        var (ensembleText, ensembleGaps) = PowerMechanismReader.Describe(typeof(EnsemblePower), true);
+        Assert.Empty(ensembleGaps);
+        Assert.Contains("teammates' cards (not owner's) in Hand or Play cost 0 Energy", ensembleText!, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2337,6 +2338,84 @@ public sealed class NativeExtractionTests
                 .DistinctBy(e => e.Actor)
                 .Count();
             return count >= Amount ? 1m : 2m;
+        }
+    }
+
+    [Fact]
+    public void FoolPowersAndRelicsExtractWithoutGaps()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+        var foolPowers = new[]
+        {
+            typeof(AimPower), typeof(AllIsWellPower), typeof(ArcheryPower), typeof(ChoBarbsPower),
+            typeof(CompostPower), typeof(ConductorsBatonPower), typeof(CoveringFirePower), typeof(DislikeYouPower),
+            typeof(EcstasyPower), typeof(EncorePower), typeof(EnnuiPower), typeof(EnsemblePower),
+            typeof(ExplosiveArrowsPower), typeof(HiddenRootsPower), typeof(HoningPower), typeof(ImpaledPower),
+            typeof(KiVersePower), typeof(LostLutePower), typeof(LullabyPower), typeof(MotifPower),
+            typeof(MythicFormPower), typeof(QuietusPower), typeof(SerratedArrowsPower), typeof(ShowOffPower),
+            typeof(SimpletonPower), typeof(SongPathPower), typeof(StretchPower), typeof(TunePower),
+            typeof(ViolentChordPower), typeof(YahPower),
+        };
+        var foolRelics = new[]
+        {
+            typeof(BizarreLamp), typeof(ConductorsBaton), typeof(ExerciseMat), typeof(Fertilizer),
+            typeof(Ocarina), typeof(SongBow), typeof(Twine), typeof(WhittlingKnife), typeof(Fiddle),
+        };
+        var problems = new List<string>();
+        var extracted = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var type in foolPowers)
+        {
+            var (text, gaps) = PowerMechanismReader.Describe(type, true);
+            if (gaps.Count > 0 || string.IsNullOrWhiteSpace(text))
+                problems.Add($"POWER {type.Name}: gaps=[{string.Join(", ", gaps.Order(StringComparer.Ordinal))}] text={text ?? "<null>"}");
+            else
+                extracted[type.Name] = text;
+        }
+        foreach (var type in foolRelics)
+        {
+            var (text, gaps) = RelicMechanismReader.Describe(type);
+            if (gaps.Count > 0 || string.IsNullOrWhiteSpace(text))
+                problems.Add($"RELIC {type.Name}: gaps=[{string.Join(", ", gaps.Order(StringComparer.Ordinal))}] text={text ?? "<null>"}");
+            else
+                extracted[type.Name] = text;
+        }
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+        Assert.Contains("hit counter starts at 3", extracted[nameof(ImpaledPower)], StringComparison.Ordinal);
+        Assert.Contains("powered card attack hit from the applier", extracted[nameof(ImpaledPower)], StringComparison.Ordinal);
+        Assert.DoesNotContain("HitCounter", extracted[nameof(ImpaledPower)], StringComparison.Ordinal);
+        Assert.Contains("Next Block-gaining card bonus", extracted[nameof(StretchPower)], StringComparison.Ordinal);
+        Assert.Contains("if that card granted powered Block", extracted[nameof(StretchPower)], StringComparison.Ordinal);
+        Assert.Contains("non-Unplayable card", extracted[nameof(SimpletonPower)], StringComparison.Ordinal);
+        Assert.DoesNotContain("ValueProp.FromArrow", extracted[nameof(QuietusPower)], StringComparison.Ordinal);
+        Assert.DoesNotContain("Cards counter", extracted[nameof(EnnuiPower)], StringComparison.Ordinal);
+        Assert.Contains("Card play limit", extracted[nameof(EncorePower)], StringComparison.Ordinal);
+        Assert.Contains("Card replay: plays owned", extracted[nameof(KiVersePower)], StringComparison.Ordinal);
+        Assert.Contains("Wah", extracted[nameof(KiVersePower)], StringComparison.Ordinal);
+        Assert.Contains("Cho", extracted[nameof(KiVersePower)], StringComparison.Ordinal);
+        Assert.Contains("first Cho-tagged card play this turn", extracted[nameof(SongPathPower)], StringComparison.Ordinal);
+        Assert.Contains("first Ki-tagged card play this turn", extracted[nameof(TunePower)], StringComparison.Ordinal);
+        Assert.Contains("first Wah-tagged card play this turn", extracted[nameof(ViolentChordPower)], StringComparison.Ordinal);
+        Assert.Contains("After an arrow impales a target", extracted[nameof(ExplosiveArrowsPower)], StringComparison.Ordinal);
+        Assert.Contains("After an arrow is dislodged", extracted[nameof(Twine)], StringComparison.Ordinal);
+        Assert.Contains("After an arrow is dislodged", extracted[nameof(YahPower)], StringComparison.Ordinal);
+        Assert.Contains("distinct Melody tags (Wah/Cho/Ki)", extracted[nameof(ConductorsBaton)], StringComparison.Ordinal);
+        Assert.Contains("CARD.JOY", extracted[nameof(EcstasyPower)], StringComparison.Ordinal);
+
+        var (_, xorGaps) = PowerMechanismReader.Describe(typeof(SyntheticXorMelodyReplayPower), true);
+        Assert.Contains("SyntheticXorMelodyReplayPower.ModifyCardPlayCount", xorGaps);
+    }
+
+    private sealed class SyntheticXorMelodyReplayPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Counter;
+        public override int ModifyCardPlayCount(CardModel card, Creature? target, int playCount)
+        {
+            if (card.Owner.Creature != Owner)
+                return playCount;
+            if (card.Tags.Contains(CardTag.Wah) ^ card.Tags.Contains(CardTag.Cho))
+                return playCount + 1;
+            return playCount;
         }
     }
 }

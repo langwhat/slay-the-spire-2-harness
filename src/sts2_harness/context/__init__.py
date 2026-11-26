@@ -205,11 +205,7 @@ class Context:
         self._run_delivery.elites_fought = elites
 
     def set_deck_stats(self, stats: dict[str, JsonValue], use: dict[str, int]) -> None:
-        self._run_delivery.deck_stats = (
-            stats
-            if self._run_delivery.focused_deck
-            else {name: value for name, value in stats.items() if name != "circulating_avg_energy"}
-        )
+        self._run_delivery.deck_stats = stats
         self._run_delivery.deck_use = use
 
     def set_notes(self, notes: NotesView) -> None:

@@ -193,7 +193,8 @@ internal sealed partial class NativeRuleText
             return IsGameplayField(internalBool) ? UpperFirst(internalBool.Name.TrimStart('_')) : null;
         if (field.Receiver is Input { Name: "this" }
             && (typeof(PowerModel).IsAssignableFrom(field.Member.DeclaringType)
-                || typeof(MonsterModel).IsAssignableFrom(field.Member.DeclaringType))
+                || typeof(MonsterModel).IsAssignableFrom(field.Member.DeclaringType)
+                || typeof(RelicModel).IsAssignableFrom(field.Member.DeclaringType))
             && IsGameplayField(field.Member))
             return UpperFirst(field.Member.Name.TrimStart('_'));
         return null;
@@ -391,6 +392,8 @@ internal sealed partial class NativeRuleText
     {
         if (CorridorCombatCondition(test) is { } corridorCond)
             return corridorCond;
+        if (FoolCombatCondition(test) is { } foolCond)
+            return foolCond;
 
         var expected = test.Expected;
         if (test.Value is Operation { Operator: "isinst", Right: Constant { Data: Type card },
@@ -538,6 +541,8 @@ internal sealed partial class NativeRuleText
     {
         if (CorridorCombatValue(value) is { } corridorVal)
             return corridorVal;
+        if (FoolCombatValue(value) is { } foolVal)
+            return foolVal;
 
         return value switch
         {

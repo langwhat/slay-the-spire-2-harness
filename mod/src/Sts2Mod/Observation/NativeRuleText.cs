@@ -59,6 +59,10 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("AfterCardChangedPilesLate", "After a card changes piles, late"),
         ("AfterOrbChanneled", "After channeling an orb"),
         ("AfterOrbEvoked", "After an orb is evoked"),
+        ("AfterArrowShot", "After shooting an arrow"),
+        ("AfterArrowImpaled", "After an arrow impales a target"),
+        ("AfterArrowDislodged", "After an arrow is dislodged"),
+        ("AfterPreventingDraw", "After preventing a draw"),
         ("AfterStarsGained", "After gaining Stars"),
         ("AfterStarsSpent", "After spending Stars"),
         ("AfterForge", "After forging"),
@@ -248,6 +252,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 ReadSpecialPowerHooks(type, powerPrefix, preHandled, targetLines);
                 ReadDamageCapHooks(type, powerPrefix, preHandled, targetLines);
             }
+            ReadFoolHooks(type, powerPrefix, preHandled, targetLines);
             ReadPlayerResourceHooks(type, powerPrefix, preHandled, targetLines);
             ReadPowerReceptionHooks(type, powerPrefix, preHandled, targetLines);
             foreach (var name in preHandled)
@@ -1543,7 +1548,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         var args = call.Arguments;
         var generic = call.Method.IsGenericMethod ? call.Method.GetGenericArguments()[0] : null;
 
-        if (IsPresentationCall(call.Method))
+        if (IsPresentationCall(call.Method)
+            || (type == typeof(MelodyCmd) && effect is nameof(MelodyCmd.IsFirstPlayThisTurn)
+                or nameof(MelodyCmd.PlayedWahThisTurn) or nameof(MelodyCmd.PlayedChoThisTurn)
+                or nameof(MelodyCmd.PlayedKiThisTurn) or nameof(MelodyCmd.PlayedThisTurn)
+                or nameof(MelodyCmd.MelodiesThisTurn)))
         {
             recognized = false;
             return null;
