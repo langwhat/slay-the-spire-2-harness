@@ -1,3 +1,4 @@
+from pydantic import MISSING
 from test_mod_client import CARD, COMBAT, RUN
 
 from sts2_harness.client import models as native
@@ -50,10 +51,12 @@ def test_current_deck_counts_are_independent_of_battle_history() -> None:
         "attacks": 4,
         "skills": 0,
         "powers": 0,
+        "basic_cards": 0,
         "unplayable": 0,
         "circulating": 4,
         "circulating_avg_energy": 1.33,
         "base_draw": 2,
+        "cycle_turns": 2.0,
         "base_energy": 3,
         "added": 0,
         "skipped": 0,
@@ -129,3 +132,61 @@ def test_circulating_excludes_each_one_shot_card_once_and_choices_reset_each_act
     )
     next_stats, _ = statistics.view(next_act)
     assert (next_stats["added"], next_stats["skipped"]) == (0, 0)
+
+
+def test_basic_cards_and_cycle_turns_reflect_rarity_and_base_draw() -> None:
+    current = observation(1, 1, 1, 1, 1, 1, 1)
+    objects = dict(current.objects)
+    for ref, updates in {
+        "c0": {"rarity": "basic"},
+        "c1": {"rarity": "BASIC"},
+        "c2": {"rarity": "common"},
+        "c3": {"rarity": "uncommon"},
+        "c4": {"rarity": "rare", "card_type": "power"},
+        "c5": {"rarity": None},
+    }.items():
+        card = objects[ref]
+        assert isinstance(card, native.CardEntry)
+        objects[ref] = card.model_copy(update=updates)
+    assert isinstance(current.state, native.RunState)
+    with_draw = current.model_copy(
+        update={
+            "objects": objects,
+            "state": current.state.model_copy(
+                update={"player": current.state.player.model_copy(update={"base_draw": 4})}
+            ),
+        }
+    )
+    stats, _ = DeckStatistics().view(with_draw)
+    assert stats["cards"] == 7
+    assert stats["circulating"] == 6
+    assert stats["basic_cards"] == 2
+    assert stats["cycle_turns"] == 1.5
+
+    empty_circulating = with_draw.model_copy(
+        update={"state": with_draw.state.model_copy(update={"deck": ("c4",)})}
+    )
+    empty_stats, _ = DeckStatistics().view(empty_circulating)
+    assert empty_stats["circulating"] == 0
+    assert empty_stats["cycle_turns"] == 0.0
+
+    zero_draw = with_draw.model_copy(
+        update={
+            "state": with_draw.state.model_copy(
+                update={"player": with_draw.state.player.model_copy(update={"base_draw": 0})}
+            )
+        }
+    )
+    zero_stats, _ = DeckStatistics().view(zero_draw)
+    assert zero_stats["basic_cards"] == 2
+    assert "cycle_turns" not in zero_stats
+
+    missing_draw = with_draw.model_copy(
+        update={
+            "state": with_draw.state.model_copy(
+                update={"player": with_draw.state.player.model_copy(update={"base_draw": MISSING})}
+            )
+        }
+    )
+    missing_stats, _ = DeckStatistics().view(missing_draw)
+    assert "cycle_turns" not in missing_stats
