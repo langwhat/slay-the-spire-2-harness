@@ -944,3 +944,195 @@ def test_start_returns_to_pause_while_native_input_is_stalled(
         assert pauses == 2
 
     asyncio.run(scenario())
+
+
+def test_unanticipated_selection_stops_before_non_select_tail() -> None:
+    async def scenario() -> None:
+        from sts2_harness.results import ActionStopped, ReasonCode
+
+        observation = native.Observation.model_validate_json(COMBAT)
+        initial = observation.model_copy(
+            update={
+                "input_readiness": native.InputReadiness.READY,
+                "state": observation.state.model_copy(
+                    update={"selection": None, "screen": native.CombatScreen.COMBAT}
+                ),
+            }
+        )
+        state_reads = 0
+        submitted: list[native.StepKind] = []
+        budget = ToolRecoveryBudget()
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            nonlocal state_reads
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": observation.location.model_dump(mode="json"),
+                        "presentation": None,
+                        "control_intent": "running",
+                        "input_readiness": "ready",
+                        "receipt": None,
+                    },
+                )
+            if request.url.path == "/state":
+                state_reads += 1
+                return httpx.Response(
+                    200,
+                    content=native.StateCompleted(
+                        status=native.ResultStatus.COMPLETED,
+                        observation=initial if state_reads == 1 else observation,
+                    ).to_json(),
+                )
+            assert request.url.path == "/action"
+            body = native.StepRequest.model_validate_json(request.content)
+            submitted.append(body.step.kind)
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": body.operation_id,
+                    "status": "completed",
+                    "boundary": "selection",
+                },
+            )
+
+        source = Source(
+            ActionDecision(
+                ActionProposal(
+                    (
+                        ActionStep(ActionKind.PLAY_CARD, "c1", "e1"),
+                        ActionStep(ActionKind.PLAY_CARD, "c2", "e1"),
+                        ActionStep(ActionKind.END_TURN),
+                    )
+                )
+            )
+        )
+        route = native.RouteKey.model_validate(observation.location.model_dump())
+        async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=False,
+                ),
+                game_instance_id="game",
+                run_id="run",
+                recovery=budget,
+            )
+            result = await execution.run_unit(source, ActTask(route))
+        assert isinstance(result, Executed)
+        outcome = result.outcome.outcome
+        assert isinstance(outcome, ActionStopped)
+        assert (outcome.completed_steps, outcome.next_step) == (1, 2)
+        assert outcome.reason.code is ReasonCode.SELECTION_REQUIRED
+        assert result.outcome.observation == observation
+        assert submitted == [native.StepKind.PLAY_CARD]
+        assert budget.failures == 0
+
+    asyncio.run(scenario())
+
+
+def test_selection_boundary_continues_into_reroll_and_completes_single_step() -> None:
+    async def scenario() -> None:
+        from sts2_harness.decisions import RerollCardRewardStep
+
+        run_observation = native.Observation.model_validate_json(RUN)
+        combat_observation = native.Observation.model_validate_json(COMBAT)
+        run_route = native.RouteKey.model_validate(run_observation.location.model_dump())
+        combat_route = native.RouteKey.model_validate(combat_observation.location.model_dump())
+        active_observation = run_observation
+        submitted: list[native.StepKind] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/status":
+                return httpx.Response(
+                    200,
+                    json={
+                        "location": active_observation.location.model_dump(mode="json"),
+                        "presentation": None,
+                        "control_intent": "running",
+                        "input_readiness": "ready",
+                        "receipt": None,
+                    },
+                )
+            if request.url.path == "/state":
+                return httpx.Response(
+                    200,
+                    content=native.StateCompleted(
+                        status=native.ResultStatus.COMPLETED,
+                        observation=active_observation,
+                    ).to_json(),
+                )
+            assert request.url.path == "/action"
+            body = native.StepRequest.model_validate_json(request.content)
+            submitted.append(body.step.kind)
+            boundary = "ready" if body.step.kind is native.StepKind.SELECT else "selection"
+            return httpx.Response(
+                200,
+                json={
+                    "operation_id": body.operation_id,
+                    "status": "completed",
+                    "boundary": boundary,
+                },
+            )
+
+        async with ModClient("http://mod", transport=httpx.MockTransport(respond)) as client:
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="test",
+                    game_instance_id="game",
+                    run_id="run",
+                    wait_for_start=False,
+                ),
+                game_instance_id="game",
+                run_id="run",
+            )
+            single = await execution.run_unit(
+                Source(ActionDecision(ActionProposal((ActionStep(ActionKind.INTERACT, "a1"),)))),
+                ActTask(run_route),
+            )
+            reroll = await execution.run_unit(
+                Source(
+                    ActionDecision(
+                        ActionProposal(
+                            (ActionStep(ActionKind.INTERACT, "a1"), RerollCardRewardStep()),
+                        )
+                    )
+                ),
+                ActTask(run_route),
+            )
+            active_observation = combat_observation
+            play_select_play = await execution.run_unit(
+                Source(
+                    ActionDecision(
+                        ActionProposal(
+                            (
+                                ActionStep(ActionKind.PLAY_CARD, "c1", "e1"),
+                                SelectStep(("c2",)),
+                                ActionStep(ActionKind.PLAY_CARD, "c2", "e1"),
+                            )
+                        )
+                    )
+                ),
+                ActTask(combat_route),
+            )
+        assert isinstance(single, Executed)
+        assert single.outcome.outcome == ActionCompleted(completed_steps=1)
+        assert isinstance(reroll, Executed)
+        assert reroll.outcome.outcome == ActionCompleted(completed_steps=2)
+        assert isinstance(play_select_play, Executed)
+        assert play_select_play.outcome.outcome == ActionCompleted(completed_steps=3)
+        assert submitted == [
+            native.StepKind.INTERACT,
+            native.StepKind.INTERACT,
+            native.StepKind.REROLL_CARD_REWARD,
+            native.StepKind.PLAY_CARD,
+            native.StepKind.SELECT,
+            native.StepKind.PLAY_CARD,
+        ]
+
+    asyncio.run(scenario())

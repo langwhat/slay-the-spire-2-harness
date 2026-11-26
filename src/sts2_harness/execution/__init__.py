@@ -501,6 +501,32 @@ class Execution:
                         status = BatchStatus.COMPLETED
                         ended = RunEnded(RunEndReason.TERMINAL, None)
                         break
+                    if (
+                        receipt.boundary is native.InputReadiness.SELECTION
+                        and confirmed < len(steps)
+                        and not isinstance(
+                            steps[confirmed], (native.Select, native.RerollCardReward)
+                        )
+                    ):
+                        outcome = ActionStopped(
+                            completed_steps=confirmed,
+                            next_step=confirmed + 1,
+                            reason=Reason(
+                                code=ReasonCode.SELECTION_REQUIRED,
+                                message="Complete the opened selection before continuing.",
+                            ),
+                            suggested_actions=(
+                                Suggestion(
+                                    message=(
+                                        "Use the current state to choose a new action; "
+                                        "the remaining steps were not run."
+                                    )
+                                ),
+                            ),
+                        )
+                        reason = outcome.reason.code
+                        status = BatchStatus.STOPPED
+                        break
                     continue
                 if receipt is None or isinstance(receipt, native.ReceiptUnknown):
                     outcome = ActionUnknown(

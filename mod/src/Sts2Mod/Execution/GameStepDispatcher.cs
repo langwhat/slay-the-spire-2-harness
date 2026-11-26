@@ -464,12 +464,20 @@ internal sealed class GameStepDispatcher
 
         if (binding.Owner is MerchantEntry entry)
         {
-            var panel = NMerchantRoom.Instance?.Inventory
-                        ?? (NEventRoom.Instance?.CustomEventNode as NFakeMerchant)?.Inventory;
-            var inventory = panel?.Inventory;
+            var runState = RunManager.Instance.DebugOnlyGetState();
+            var panel = NMerchantRoom.Instance is { } currentMerchant && GodotObject.IsInstanceValid(currentMerchant)
+                ? currentMerchant.Inventory
+                : NEventRoom.Instance is { } currentEvent
+                  && GodotObject.IsInstanceValid(currentEvent)
+                  && currentEvent.CustomEventNode is NFakeMerchant fakeMerchant
+                  && GodotObject.IsInstanceValid(fakeMerchant)
+                    ? fakeMerchant.Inventory
+                    : null;
+            var inventory = panel is not null && GodotObject.IsInstanceValid(panel) ? panel.Inventory : null;
             if (panel is not { IsOpen: true }
                 || inventory is null
-                || !ReferenceEquals(inventory, RunManager.Instance.MerchantSynchronizer.GetLocalInventory())
+                || ShopInputProbe.IsShopSettling(runState)
+                || !ReferenceEquals(inventory, ShopInputProbe.TryGetLocalInventory(runState))
                 || !inventory.AllEntries.Any(candidate => ReferenceEquals(candidate, entry))
                 || !entry.IsStocked
                 || !entry.EnoughGold)

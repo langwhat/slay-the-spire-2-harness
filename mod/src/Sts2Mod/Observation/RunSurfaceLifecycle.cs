@@ -6,6 +6,7 @@ using HarmonyLib;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
@@ -28,7 +29,18 @@ namespace Sts2Mod.Observation;
 
 internal static class RunSurfaceLifecycle
 {
-    internal sealed record NativeInteractionBinding(object Control, object Owner, object Subject);
+    internal sealed class NativeInteractionBinding(object control, object owner, object subject)
+    {
+        public object Control { get; private set; } = control;
+        public object Owner { get; private set; } = owner;
+        public object Subject { get; } = subject;
+
+        internal void RebindControl(object control, object owner)
+        {
+            Control = control;
+            Owner = owner;
+        }
+    }
 
     internal abstract record CardChoicePresentation
     {
@@ -51,6 +63,7 @@ internal static class RunSurfaceLifecycle
     private sealed class MerchantRegistration;
 
     private static readonly ConditionalWeakTable<object, InteractionRegistration> Interactions = new();
+    private static readonly ConditionalWeakTable<RestSiteOption, InteractionRegistration> RestSiteOptionInteractions = new();
     private static readonly ConditionalWeakTable<NChooseACardSelectionScreen, NativeCardChoice> CardChoices = new();
     private static readonly ConditionalWeakTable<NCardRewardSelectionScreen, NativeRewardChoice> RewardChoices = new();
     private static readonly ConditionalWeakTable<MerchantEntry, MerchantRegistration> Merchants = new();
@@ -93,13 +106,58 @@ internal static class RunSurfaceLifecycle
                 return;
             }
             if (ReferenceEquals(previous.Registry, registry) && previous.NodeId == registry.NodeId)
-                registry.Retire(previous.Binding);
+                RetireInteractionBinding(registry, previous.Binding);
             Interactions.Remove(control);
         }
 
         var binding = new NativeInteractionBinding(control, owner, subject);
         registry.Register(binding, PublicObjectKind.Interaction);
         Interactions.Add(control, new InteractionRegistration(binding, registry));
+    }
+
+    private static void RetireInteractionBinding(NodeObjectRegistry registry, NativeInteractionBinding binding)
+    {
+        registry.Retire(binding);
+        if (binding.Subject is RestSiteOption retiredOption
+            && RestSiteOptionInteractions.TryGetValue(retiredOption, out var tracked)
+            && ReferenceEquals(tracked.Binding, binding))
+        {
+            RestSiteOptionInteractions.Remove(retiredOption);
+        }
+    }
+
+    internal static void RegisterRestSiteInteraction(NodeObjectRegistry registry, object button, RestSiteOption option)
+    {
+        if (RestSiteOptionInteractions.TryGetValue(option, out var existing)
+            && ReferenceEquals(existing.Registry, registry)
+            && existing.NodeId == registry.NodeId)
+        {
+            if (Interactions.TryGetValue(button, out var previousButton)
+                && !ReferenceEquals(previousButton.Binding, existing.Binding))
+            {
+                if (ReferenceEquals(previousButton.Registry, registry) && previousButton.NodeId == registry.NodeId)
+                    RetireInteractionBinding(registry, previousButton.Binding);
+                Interactions.Remove(button);
+            }
+
+            if (!ReferenceEquals(existing.Binding.Control, button))
+            {
+                Interactions.Remove(existing.Binding.Control);
+                existing.Binding.RebindControl(button, button);
+            }
+
+            Interactions.Remove(button);
+            Interactions.Add(button, existing);
+            registry.Register(existing.Binding, PublicObjectKind.Interaction);
+            return;
+        }
+
+        RegisterInteraction(registry, button, button, option);
+        if (Interactions.TryGetValue(button, out var created))
+        {
+            RestSiteOptionInteractions.Remove(option);
+            RestSiteOptionInteractions.Add(option, created);
+        }
     }
 
     internal static RelicModel? GetInitializedTreasureRelic(NTreasureRoomRelicHolder holder) =>
@@ -157,7 +215,7 @@ internal static class RunSurfaceLifecycle
 
     public static void RegisterSurface(Node? surface)
     {
-        if (surface is null || ObservationHub.Identities?.Registry is not { } registry)
+        if (surface is null || surface.IsQueuedForDeletion() || ObservationHub.Identities?.Registry is not { } registry)
             return;
         RegisterNode(surface, registry);
         foreach (var child in surface.GetChildren())
@@ -247,7 +305,10 @@ internal static class RunSurfaceLifecycle
 
     private static void RegisterNode(Node node, NodeObjectRegistry registry)
     {
-        if (node is NClickableControl clickable)
+        if (node is NRestSiteButton && node.IsQueuedForDeletion())
+            return;
+
+        if (node is NClickableControl clickable && node is not NRestSiteButton { Option: not null })
             EnsureInteraction(registry, clickable);
 
         switch (node)
@@ -297,7 +358,7 @@ internal static class RunSurfaceLifecycle
                 break;
             case NRestSiteButton button when button.Option is { } option:
                 registry.Register(option, PublicObjectKind.Option);
-                RegisterInteraction(registry, button, button, option);
+                RegisterRestSiteInteraction(registry, button, option);
                 break;
             case NCardHolder holder when holder.CardModel is { } card:
                 RegisterInteraction(registry, holder, holder, card);
