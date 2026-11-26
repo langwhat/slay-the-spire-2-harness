@@ -43,6 +43,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("AfterSideTurnStart", "After side turn starts"),
         ("AfterPlayerTurnStartEarly", "After player turn starts, early"),
         ("AfterPlayerTurnStart", "After player turn starts"),
+        ("AfterPlayerTurnStartLate", "After player turn starts, late"),
         ("AfterSideTurnStartLate", "At side turn start, late"),
         ("AfterBlockCleared", "After Block expires at turn start"),
         ("AfterEnergyReset", "After turn-start Energy reset"),
@@ -90,6 +91,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         ("AfterBlockBroken", "After block is broken"),
         ("BeforeDeath", "Before death"),
         ("BeforePotionUsed", "Before a potion is used"),
+        ("AfterPotionUsed", "After a potion is used"),
+        ("AfterPotionProcured", "After a potion is obtained"),
+        ("AfterPotionDiscarded", "After a potion is discarded"),
         ("AfterCardGeneratedForCombat", "After a card is generated in combat"),
         ("AfterCreatureAddedToCombat", "After a creature enters combat"),
         ("AfterOstyRevived", "After Osty revives"),
@@ -253,6 +257,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 ReadDamageCapHooks(type, powerPrefix, preHandled, targetLines);
             }
             ReadFoolHooks(type, powerPrefix, preHandled, targetLines);
+            ReadCrossCharHooks(type, powerPrefix, preHandled, targetLines);
             ReadPlayerResourceHooks(type, powerPrefix, preHandled, targetLines);
             ReadPowerReceptionHooks(type, powerPrefix, preHandled, targetLines);
             foreach (var name in preHandled)
@@ -590,11 +595,15 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             ("if player=owner: ", trigger switch
             {
                 "After player turn starts" => "After owner's turn starts",
+                "After player turn starts, late" => "After owner's turn starts, late",
                 "Before turn-start hand draw" => "Before owner's turn-start hand draw",
                 "After turn-start Energy reset" => "After owner's turn-start Energy reset",
                 "At end of turn before hand discard" => "At end of owner's turn before hand discard",
                 _ => null,
             }),
+            ("if potion's owner=owner: ", trigger == "After a potion is used"
+                ? "After owner uses a potion"
+                : null),
             ("if event target=owner: ", trigger == "After Block expires at turn start"
                 ? "After owner's Block expires at turn start"
                 : null),
@@ -845,6 +854,8 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         var incomplete = false;
         if (body.Incomplete)
         {
+            if (power is null && depth == 0 && bindings is null && TryReadSpecialIncompleteHook(method) is { } specialHookEffects)
+                return (specialHookEffects, false);
             MarkIncomplete(method.Name);
             return ([], true);
         }
@@ -1840,6 +1851,13 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                     return new Effect($"{HumanizeLower(propName)} = {intText}", ChangesGuard: true);
                 }
             }
+            if (type is not null && typeof(RelicModel).IsAssignableFrom(type)
+                && call.Method.GetParameters() is [{ ParameterType: var cardPropType }] && cardPropType == typeof(CardModel)
+                && BackingField(type, (MethodInfo)call.Method) is { } cardBacking && IsGameplayField(cardBacking)
+                && ValueText(assignedValue) is { } cardValText)
+            {
+                return new Effect($"{HumanizeLower(propName)} = {cardValText}", ChangesGuard: true);
+            }
         }
 
         if (call.Method is MethodInfo casterHelper && IsCasterRegistrationHelper(casterHelper)
@@ -1852,6 +1870,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             && ValueText(call.Receiver) is { } upgradedTarget)
         {
             return new Effect($"increase turn-end damage of {upgradedTarget} by {Number(upgradeDelta)}", AddedCard: type);
+        }
+
+        if (type is not null && typeof(CardModel).IsAssignableFrom(type) && effect == "SetToFreeThisTurn"
+            && args.Length == 0 && call.Receiver is not null && ValueText(call.Receiver) is { } freeTarget)
+        {
+            return new Effect($"set Energy and Star cost of {freeTarget} to 0 for this turn");
         }
 
         if (type == typeof(CardPileCmd) && effect == "AddToCombatAndPreview" && generic is not null
@@ -1948,6 +1972,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             if (effect == "GainGold" && args.Length >= 2
                 && ValueText(args[0]) is { } goldAmt && ValueText(args[1]) is { } goldWho)
                 return new Effect($"{goldWho} gains {goldAmt} Gold");
+            if (effect == "LoseGold" && args.Length >= 2
+                && ValueText(args[0]) is { } lostGoldAmt && ValueText(args[1]) is { } lostGoldWho)
+                return new Effect($"{lostGoldWho} loses {lostGoldAmt} Gold");
         }
 
         if (type == typeof(OrbCmd))
@@ -2079,6 +2106,26 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                         return null;
                 }
                 return new Effect($"apply {string.Join(", ", keywords)} to {targetCard}");
+            }
+            return null;
+        }
+
+        if (type is not null && typeof(CardModel).IsAssignableFrom(type) && effect == "CreateInHand"
+            && call.Method is MethodInfo { IsStatic: true } createInHandMethod)
+        {
+            var cardOwner = Argument(call, "owner");
+            var cardCount = Argument(call, "count");
+            var isSingleCardOverload = cardCount is null
+                && createInHandMethod.ReturnType is { IsGenericType: true } retType
+                && retType.GetGenericTypeDefinition() == typeof(Task<>)
+                && typeof(CardModel).IsAssignableFrom(retType.GetGenericArguments()[0]);
+            if (cardOwner is not null && ValueText(cardOwner) is { } cardWho)
+            {
+                var countText = cardCount is not null
+                    ? ValueText(cardCount)
+                    : isSingleCardOverload ? "1" : null;
+                if (countText is not null)
+                    return new Effect($"add {countText} {ModelLabel(type)} to {Possessive(cardWho)} hand (overflows to discard pile if hand is full)", AddedCard: type);
             }
             return null;
         }
@@ -2230,12 +2277,43 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 when IsOwner(who) => $"each {PowerLabel(inst.GetGenericArguments()[0])}",
             Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator",
                 Receiver: Call { Method.Name: "ToList", Arguments: [Call { Method.Name: "Where",
+                    Arguments: [Call { Method.Name: "SelectMany",
+                        Arguments: [Call { Method.Name: "GetTeammatesOf", Arguments: [var tmFocus] },
+                            Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo selMethod }] }] },
+                        Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo whereMethod }] }] }] } } }
+                when (tmFocus is Input { Name: "oldOwner" } or Field { Member.Name: "oldOwner" })
+                    && PowerInstanceTypeFromSelector(selMethod) is { } teammatePowerType
+                    && IsApplierOldOwnerPredicate(whereMethod)
+                => $"each {PowerLabel(teammatePowerType)} applied by former owner on former owner's teammates",
+            Call { Method.Name: "get_Current", Receiver: Call { Method.Name: "GetEnumerator",
+                Receiver: Call { Method.Name: "ToList", Arguments: [Call { Method.Name: "Where",
                     Arguments: [Call { Method.Name: "get_Powers", Receiver: var pWho },
                         Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo pred }] }] }] } } }
                 when IsOwner(pWho) && ExcludedPowerLabels(pred) is { Count: > 0 } excluded
                 => $"each power on {(power is null ? "self" : "owner")} except {string.Join(" and ", excluded)}",
             _ => null,
         };
+
+    private Type? PowerInstanceTypeFromSelector(MethodInfo selector)
+    {
+        var body = Body(selector);
+        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: Call { Method: { Name: "GetPowerInstances", IsGenericMethod: true } inst } }])
+            return null;
+        var pt = inst.GetGenericArguments()[0];
+        return typeof(PowerModel).IsAssignableFrom(pt) ? pt : null;
+    }
+
+    private bool IsApplierOldOwnerPredicate(MethodInfo predicate)
+    {
+        var body = Body(predicate);
+        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: var retVal }])
+            return false;
+        if (!IsEquality(new Test(retVal, true), true, out var left, out var right))
+            return false;
+        static bool IsApplier(Value? v) => v is Call { Method.Name: "get_Applier", Receiver: Input };
+        static bool IsOldOwner(Value? v) => v is Input { Name: "oldOwner" } or Field { Member.Name: "oldOwner" };
+        return (IsApplier(left) && IsOldOwner(right)) || (IsApplier(right) && IsOldOwner(left));
+    }
 
     private List<string> ExcludedPowerLabels(MethodInfo pred)
     {
@@ -2723,7 +2801,7 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 Receiver: Call { Method.Name: "GetEnumerator",
                     Receiver: Call { Method.Name: "ToList", Arguments: [Call { Method.Name: "get_Allies" }] } } })
                 return expected ? "" : "ally is not a player"; // The card collection expression already quantifies over player combat decks.
-            if (name == "get_CombatState" && call.Receiver is Input { Name: "oldOwner" })
+            if (name == "get_CombatState" && call.Receiver is Input { Name: "oldOwner" } or Field { Member.Name: "oldOwner" })
                 return expected ? "former owner still attached to combat" : "former owner detached from combat";
             if (name == "get_HasValue" && call.Method.DeclaringType is { IsGenericType: true } nullableDecl
                 && nullableDecl.GetGenericTypeDefinition() == typeof(Nullable<>))
@@ -2761,6 +2839,21 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             }
             if (name == "get_IsUpgradable" && call.Receiver is { } upgCheck && ValueText(upgCheck) is { } upgWhat)
                 return expected ? $"{upgWhat} is upgradable" : $"{upgWhat} is not upgradable";
+            if (name == "get_IsUpgraded" && call.Receiver is { } isUpgCheck && ValueText(isUpgCheck) is { } isUpgWhat)
+                return expected ? $"{isUpgWhat} is upgraded" : $"{isUpgWhat} is not upgraded";
+            if (name == "get_IsEmpty" && call.Receiver is Call { Method.Name: "GetPile", Arguments: [Constant { Data: int emptyPile }, var emptyOwner] }
+                && Enum.IsDefined(typeof(PileType), emptyPile) && ValueText(emptyOwner) is { } emptyWho)
+                return expected
+                    ? $"{Possessive(emptyWho)} {PileLocationLabel((PileType)emptyPile)} is empty"
+                    : $"{Possessive(emptyWho)} {PileLocationLabel((PileType)emptyPile)} is not empty";
+            if (name == nameof(Enumerable.Any) && call.Arguments is [Call { Method.Name: "get_Potions", Receiver: var potOwner }]
+                && ValueText(potOwner) is { } potWho)
+                return expected ? $"{potWho} holds any potion" : $"{potWho} holds no potions";
+            if (name == nameof(Enumerable.Any)
+                && call.Arguments is [Call { Method.Name: "get_CardPlaysFinished" or "get_CardPlaysStarted" } histSrc,
+                    Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo histPred }] }]
+                && DescribeHistoryEntryCount(histSrc.Method.Name == "get_CardPlaysStarted" ? "started" : "finished", histPred) is { } histLabel)
+                return expected ? $"at least 1 {histLabel}" : $"0 {histLabel}";
             if (name == "get_IsAlive" && call.Receiver is Call { Method.Name: "get_Creature" })
                 return expected ? "self alive" : "self dead";
             if (name == "get_IsAlive" && call.Receiver is { } aliveCheck && ValueText(aliveCheck) is { } aliveWho)
@@ -2777,6 +2870,9 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 return expected ? "an encounter slot is empty" : "no encounter slot is empty";
             if (name == "get_Player" && call.Method.DeclaringType == typeof(Creature) && ValueText(call.Receiver) is { } playerWho)
                 return expected ? $"{playerWho} is a player" : $"{playerWho} is not a player";
+            if (call.Method is MethodInfo { ReturnType: var intRetType } && intRetType == typeof(int)
+                && ValueText(call) is { } intCondText)
+                return expected ? $"{intCondText}≠0" : $"{intCondText}=0";
             if (BooleanGetter(call) is { } property && call.Method is MethodInfo boolGetter)
             {
                 if (boolGetter.DeclaringType is { } ownerType && BackingField(ownerType, boolGetter) is { } bField)
@@ -2870,9 +2966,11 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
             Input { Name: "cardSource" } => "source card",
             Input { Name: "cardPlay" } => "card play",
             Input { Name: "amount" } => "amount",
+            Input { Name: "modifiedAmount" } => "modified amount",
             Input { Name: "power" } => "changed power",
             Input { Name: "canonicalPower" } => "applied power",
             Input { Name: "card" } => "that card",
+            Input { Name: "potion" } => "that potion",
             Input { Name: "creature" } => "event target",
             Input { Name: "player" } => "player",
             Input { Name: "shuffler" } => "shuffler",
@@ -2923,6 +3021,12 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 when orbOwnerType == typeof(OrbModel) => "that orb's owner",
             Call { Method.Name: "get_Owner", Method.DeclaringType: var csOwnerType, Receiver: Input { Name: "cardSource" } }
                 when csOwnerType == typeof(CardModel) => "source card's owner",
+            Call { Method.Name: "get_Owner", Method.DeclaringType: var potOwnerType, Receiver: Input { Name: "potion" } }
+                when potOwnerType == typeof(PotionModel) => "potion's owner",
+            Call { Method.Name: "get_Gold", Receiver: var goldOwner }
+                when ValueText(goldOwner) is { } goldWho => $"{Possessive(goldWho)} Gold",
+            Call { Method.Name: "get_Players", Receiver: Call { Method.Name: "get_CombatState" } }
+                => IsMultiplayer() ? "each player in combat" : "the player",
             Call { Method.Name: "get_Count", Receiver: Call { Method.Name: "get_Orbs" } } => "owner's orb count",
             Call { Method.Name: "get_Item", Receiver: Call { Method.Name: "get_Orbs" }, Arguments: [Constant { Data: 0 }] } => "owner's first (next) orb",
             Call { Method.Name: "get_Orbs" } => "each orb in owner's orb queue",
@@ -3022,12 +3126,23 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
                 && Arithmetic(arithmetic.Method.Name) is { } symbol => Formula(left, symbol, right),
             Operation { Operator: "rem", Left: var remL, Right: { } remR }
                 when ValueText(remL) is { } rl && ValueText(remR) is { } rr => $"({rl} mod {rr})",
+            Field relicIntField when RelicIntSlot(relicIntField) is { } relicIntSlotName
+                => relicIntSlotName,
             Call { Method: MethodInfo relicGetter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
                 when _hookOwner is not null && typeof(RelicModel).IsAssignableFrom(_hookOwner)
-                    && relicGetter.ReturnType == typeof(int) && relicGetter.Name.StartsWith("get_", StringComparison.Ordinal)
+                    && (relicGetter.ReturnType == typeof(int) || relicGetter.ReturnType == typeof(CardModel))
+                    && relicGetter.Name.StartsWith("get_", StringComparison.Ordinal)
                     && relicGetter.DeclaringType == _hookOwner
                     && BackingField(_hookOwner, relicGetter) is { } relicBacking && IsGameplayField(relicBacking)
                 => HumanizeLower(relicGetter.Name[4..]),
+            Call { Method: MethodInfo computedRelicGetter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+                when _hookOwner is not null && typeof(RelicModel).IsAssignableFrom(_hookOwner)
+                    && (computedRelicGetter.ReturnType == typeof(int) || computedRelicGetter.ReturnType == typeof(decimal))
+                    && computedRelicGetter.Name.StartsWith("get_", StringComparison.Ordinal)
+                    && computedRelicGetter.DeclaringType == _hookOwner
+                    && BackingField(_hookOwner, computedRelicGetter) is null
+                    && InlineComputedValueGetter(computedRelicGetter) is { } computedRelicVal
+                => computedRelicVal,
             Operation { Right: { } right } operation when Arithmetic(operation.Operator) is { } symbol
                 => Formula(operation.Left, symbol, right),
             _ => null,
@@ -3035,6 +3150,23 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
 
         string? Formula(Value left, string symbol, Value right)
             => ValueText(left) is { } a && ValueText(right) is { } b ? $"({a} {symbol} {b})" : null;
+    }
+
+    private string? InlineComputedValueGetter(MethodInfo getter)
+    {
+        if (_expandingGetters.Count >= MaxGetterDepth || !_expandingGetters.Add(getter))
+            return null;
+        try
+        {
+            var body = Body(getter);
+            if (!body.Incomplete && body.Returns is [{ Conditions.Length: 0, Value: var retVal }])
+                return ValueText(retVal);
+            return null;
+        }
+        finally
+        {
+            _expandingGetters.Remove(getter);
+        }
     }
 
     private bool IsOrbIdentityKeySelector(MethodInfo keySelector)

@@ -6,7 +6,7 @@ from typing import Annotated, Protocol
 
 from pydantic import MISSING, Field, JsonValue, TypeAdapter, model_serializer
 
-from sts2_harness.card_projection import card_rules, upgrade_changes
+from sts2_harness.card_projection import DEFAULT_FALSE_CARD_FLAGS, card_rules, upgrade_changes
 from sts2_harness.client import models as native
 from sts2_harness.material_text import MaterialText, MaterialUnavailable
 
@@ -24,12 +24,7 @@ def _compact(value: JsonValue, inherited: JsonValue = None) -> JsonValue:
         previous = value if name == "upgrade" else known.get(name)
         if name == "stars" and child == "none" and previous in (None, "none"):
             continue
-        if (
-            name
-            in ("should_retain_this_turn", "exhaust_on_next_play", "has_turn_end_in_hand_effect")
-            and child is False
-            and previous in (None, False)
-        ):
+        if name in DEFAULT_FALSE_CARD_FLAGS and child is False and previous in (None, False):
             continue
         compact = _compact(child, previous)
         if compact is None or compact == [] or compact == {}:
@@ -111,9 +106,7 @@ class KnowledgeEntry(native.WireModel):
             for name in (
                 "local_keywords",
                 "cost_without_global_effects",
-                "should_retain_this_turn",
-                "exhaust_on_next_play",
-                "has_turn_end_in_hand_effect",
+                *DEFAULT_FALSE_CARD_FLAGS,
                 "enchantment",
                 "affliction",
             ):

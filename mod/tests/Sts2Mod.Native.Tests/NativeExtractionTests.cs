@@ -69,6 +69,7 @@ internal static class NativeTestBootstrap
             {
                 "monsters", "powers", "afflictions", "cards", "relics", "potions",
                 "enchantments", "orbs", "events", "ancients", "encounters", "card_keywords",
+                "characters",
             }.ToDictionary(key => key, key => new LocTable(key, key switch
             {
                 "cards" => new Dictionary<string, string>
@@ -79,6 +80,14 @@ internal static class NativeTestBootstrap
                     ["ULTIMATE_STRIKE.title"] = "Ultimate Strike",
                     ["ULTIMATE_DEFEND.title"] = "Ultimate Defend",
                     ["DINGY_DAGGER.title.dingy"] = "Dingy Dagger",
+                    ["STRIKE_SILENT.title"] = "Strike",
+                    ["STRIKE_SILENT.description"] = "Deal {Damage:diff()} damage.",
+                    ["REFLEX.title"] = "Reflex",
+                    ["REFLEX.description"] = "Draw {Cards:diff()} cards.",
+                    ["GAMMA_BLAST.title"] = "Gamma Blast",
+                    ["GAMMA_BLAST.description"] = "Deal {Damage:diff()} damage.",
+                    ["STARDUST.title"] = "Stardust",
+                    ["STARDUST.description"] = "Deal {Damage:diff()} damage X times.",
                 },
                 "enchantments" => new Dictionary<string, string>
                 {
@@ -87,6 +96,11 @@ internal static class NativeTestBootstrap
                 "card_keywords" => new Dictionary<string, string>
                 {
                     ["sly.title"] = "Sly",
+                    ["SLY.title"] = "Sly",
+                    ["UNPLAYABLE.title"] = "Unplayable",
+                    ["EXHAUST.title"] = "Exhaust",
+                    ["RETAIN.title"] = "Retain",
+                    ["PERIOD"] = ".",
                 },
                 "events" => new Dictionary<string, string>
                 {
@@ -113,7 +127,11 @@ internal static class NativeTestBootstrap
                     || typeof(EnchantmentModel).IsAssignableFrom(t)
                     || typeof(OrbModel).IsAssignableFrom(t)
                     || typeof(EventModel).IsAssignableFrom(t)
-                    || typeof(EncounterModel).IsAssignableFrom(t))))
+                    || typeof(EncounterModel).IsAssignableFrom(t)
+                    || typeof(CharacterModel).IsAssignableFrom(t)
+                    || typeof(CardPoolModel).IsAssignableFrom(t)
+                    || typeof(RelicPoolModel).IsAssignableFrom(t)
+                    || typeof(PotionPoolModel).IsAssignableFrom(t))))
             {
                 try { ModelDb.Inject(type); }
                 catch { /* Some models require live Godot nodes; skip safely for offline tests. */ }
@@ -934,8 +952,12 @@ public sealed class NativeExtractionTests
         Assert.Empty(cacophonyGaps);
         Assert.Contains("if counter cards≤0: (set counter cards to 33; if a random hittable enemy≠none: deal stacks unpowered damage", cacophonyText!, StringComparison.Ordinal);
 
-        var (_, throwingAxeGaps) = RelicMechanismReader.Describe(typeof(ThrowingAxe));
-        Assert.Contains("ThrowingAxe.ModifyCardPlayCount", throwingAxeGaps);
+        var (throwingAxeText, throwingAxeGaps) = RelicMechanismReader.Describe(typeof(ThrowingAxe));
+        Assert.Empty(throwingAxeGaps);
+        Assert.Contains("Once per combat, card replay: plays the first owned card played 1 additional time", throwingAxeText!, StringComparison.Ordinal);
+
+        var (_, unmodeledReplayRelicGaps) = RelicMechanismReader.Describe(typeof(SyntheticUnmodeledReplayRelic));
+        Assert.Contains("SyntheticUnmodeledReplayRelic.ModifyCardPlayCount", unmodeledReplayRelicGaps);
 
         var spiralText = ModifierMechanismReader.DescribeEnchantment(typeof(Spiral));
         Assert.NotNull(spiralText);
@@ -2575,6 +2597,559 @@ public sealed class NativeExtractionTests
             if (card.Tags.Contains(CardTag.Wah) ^ card.Tags.Contains(CardTag.Cho))
                 return playCount + 1;
             return playCount;
+        }
+    }
+
+    private sealed class SyntheticUnmodeledReplayRelic : RelicModel
+    {
+        public override MegaCrit.Sts2.Core.Entities.Relics.RelicRarity Rarity => MegaCrit.Sts2.Core.Entities.Relics.RelicRarity.Rare;
+        public override int ModifyCardPlayCount(CardModel card, Creature? target, int playCount)
+        {
+            if (card.Owner != Owner || card.EnergyCost.Canonical != 2)
+                return playCount;
+            return playCount + 1;
+        }
+    }
+
+    [Fact]
+    public void FiveCharacterPoolsExtractWithoutGaps()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+        var characters = new[]
+        {
+            typeof(MegaCrit.Sts2.Core.Models.Characters.Ironclad),
+            typeof(MegaCrit.Sts2.Core.Models.Characters.Silent),
+            typeof(MegaCrit.Sts2.Core.Models.Characters.Regent),
+            typeof(MegaCrit.Sts2.Core.Models.Characters.Necrobinder),
+            typeof(MegaCrit.Sts2.Core.Models.Characters.Defect),
+        };
+
+        var problems = new List<string>();
+        foreach (var chType in characters)
+        {
+            var ch = (CharacterModel)ModelDb.GetById<CharacterModel>(ModelDb.GetId(chType));
+            var relics = ch.StartingRelics.Concat(ch.RelicPool.AllRelics)
+                .Select(r => r.GetType())
+                .Distinct()
+                .OrderBy(t => t.Name, StringComparer.Ordinal)
+                .ToArray();
+
+            var referencedPowers = new HashSet<Type>();
+            foreach (var card in ch.CardPool.AllCards)
+                CollectReferencedPowers(card.GetType(), referencedPowers);
+            foreach (var relicType in relics)
+                CollectReferencedPowers(relicType, referencedPowers);
+
+            Assert.NotEmpty(relics);
+            Assert.NotEmpty(referencedPowers);
+
+            foreach (var powerType in referencedPowers.OrderBy(t => t.Name, StringComparer.Ordinal))
+            {
+                var (text, gaps) = PowerMechanismReader.Describe(powerType, includeMultiplayerScale: true);
+                if (gaps.Count > 0 || string.IsNullOrWhiteSpace(text))
+                    problems.Add($"{ch.Id} POWER {powerType.Name}: gaps=[{string.Join(", ", gaps.Order(StringComparer.Ordinal))}] text={text ?? "<null>"}");
+            }
+
+            foreach (var relicType in relics)
+            {
+                var relic = ModelDb.GetById<RelicModel>(ModelDb.GetId(relicType));
+                if (ItemMechanismReader.DescribeRelic(relic) is not null)
+                    continue;
+                var (_, gaps) = RelicMechanismReader.Describe(relicType);
+                if (gaps.Count > 0)
+                    problems.Add($"{ch.Id} RELIC {relicType.Name}: gaps=[{string.Join(", ", gaps.Order(StringComparer.Ordinal))}]");
+            }
+        }
+
+        Assert.True(problems.Count == 0, string.Join(Environment.NewLine, problems));
+    }
+
+    private static void CollectReferencedPowers(Type root, HashSet<Type> target)
+    {
+        var scanTypes = root.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic).Prepend(root);
+        foreach (var scanType in scanTypes)
+        {
+            foreach (var method in scanType.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (method.IsAbstract || method.ContainsGenericParameters || method.GetMethodBody() is null)
+                    continue;
+                foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(method))
+                {
+                    if (inst.operand is MethodBase mb && mb.IsGenericMethod)
+                    {
+                        foreach (var ga in mb.GetGenericArguments())
+                            if (!ga.IsAbstract && typeof(PowerModel).IsAssignableFrom(ga))
+                                target.Add(ga);
+                    }
+                    else if (inst.operand is Type ty && !ty.IsAbstract && typeof(PowerModel).IsAssignableFrom(ty))
+                    {
+                        target.Add(ty);
+                    }
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void RegentStarCostXCostForgeAndPowersExtractAccurately()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+
+        // X-cost macro covers both Energy and Star X-cost cards, and Stardust triggers HasStarCostX.
+        var stardust = (CardModel)ModelDb.Card<Stardust>().ToMutable();
+        Assert.True(stardust.HasStarCostX);
+        Assert.False(stardust.EnergyCost.CostsX);
+        var xRule = MacroMechanismReader.XCostRule();
+        Assert.Contains("Energy X-cost", xRule, StringComparison.Ordinal);
+        Assert.Contains("Star X-cost", xRule, StringComparison.Ordinal);
+        Assert.Contains("Energy/Stars", xRule, StringComparison.Ordinal);
+
+        // Star-cost global modifier populates costWithoutGlobalEffects with localStar (CurrentStarCost),
+        // while Star X-cost does not emit a redundant costWithoutGlobalEffects.
+        const BindingFlags hidden = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
+        var regent = (CharacterModel)ModelDb.GetById<CharacterModel>(ModelDb.GetId(typeof(MegaCrit.Sts2.Core.Models.Characters.Regent)));
+        var player = (MegaCrit.Sts2.Core.Entities.Players.Player)RuntimeHelpers.GetUninitializedObject(typeof(MegaCrit.Sts2.Core.Entities.Players.Player));
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("<Character>k__BackingField", hidden)!.SetValue(player, regent);
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("_relics", hidden)!.SetValue(player, new List<RelicModel>());
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("_potionSlots", hidden)!.SetValue(player, new List<PotionModel?>());
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("_runPiles", hidden)!.SetValue(player, Array.Empty<MegaCrit.Sts2.Core.Entities.Cards.CardPile>());
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("<Deck>k__BackingField", hidden)!.SetValue(player, new MegaCrit.Sts2.Core.Entities.Cards.CardPile(PileType.Deck));
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("<IsActiveForHooks>k__BackingField", hidden)!.SetValue(player, true);
+        var pcs = new MegaCrit.Sts2.Core.Entities.Players.PlayerCombatState(player);
+        typeof(MegaCrit.Sts2.Core.Entities.Players.PlayerCombatState).GetField("_stars", hidden)!.SetValue(pcs, 4);
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("<PlayerCombatState>k__BackingField", hidden)!.SetValue(player, pcs);
+
+        var runState = (RunState)RuntimeHelpers.GetUninitializedObject(typeof(RunState));
+        typeof(RunState).GetField("_players", hidden)!.SetValue(runState, new List<MegaCrit.Sts2.Core.Entities.Players.Player> { player });
+        typeof(RunState).GetField("<Modifiers>k__BackingField", hidden)!.SetValue(runState, Array.Empty<ModifierModel>());
+        typeof(RunState).GetField("<BadgeModels>k__BackingField", hidden)!.SetValue(runState, Array.Empty<BadgeModel>());
+        typeof(RunState).GetField("<RunModels>k__BackingField", hidden)!.SetValue(runState, Array.Empty<RunModel>());
+        typeof(RunState).GetField("_currentRooms", hidden)!.SetValue(runState, new List<MegaCrit.Sts2.Core.Rooms.AbstractRoom>());
+        typeof(RunState).GetField("_allCards", hidden)!.SetValue(runState, new List<CardModel>());
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("_runState", hidden)!.SetValue(player, runState);
+
+        var combatState = new CombatState(
+            (EncounterModel)ModelDb.GetById<EncounterModel>(ModelDb.GetId(typeof(MegaCrit.Sts2.Core.Models.Encounters.NibbitsNormal))).ToMutable(),
+            runState,
+            [], [], [], null);
+        var creature = new Creature(player, 75, 75);
+        typeof(Creature).GetField("<CombatState>k__BackingField", hidden)!.SetValue(creature, combatState);
+        typeof(MegaCrit.Sts2.Core.Entities.Players.Player).GetField("<Creature>k__BackingField", hidden)!.SetValue(player, creature);
+        var alliesField = typeof(CombatState).GetField("_allies", hidden)!;
+        ((List<Creature>)alliesField.GetValue(combatState)!).Add(creature);
+
+        var zeroStarPower = (PowerModel)new SyntheticZeroAllStarCostPower().ToMutable();
+        typeof(PowerModel).GetField("_owner", hidden)!.SetValue(zeroStarPower, creature);
+        var powersField = typeof(Creature).GetField("_powers", hidden)!;
+        ((List<PowerModel>)powersField.GetValue(creature)!).Add(zeroStarPower);
+
+        var starCard = (CardModel)ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.GammaBlast>().ToMutable();
+        var originalStar = starCard.CurrentStarCost;
+        Assert.True(originalStar > 0, $"Expected positive BaseStarCost on GammaBlast, got {originalStar}");
+        typeof(CardModel).GetField("_owner", hidden)!.SetValue(starCard, player);
+        pcs.Hand.AddInternal(starCard);
+
+        typeof(CardModel).GetField("_owner", hidden)!.SetValue(stardust, player);
+        pcs.Hand.AddInternal(stardust);
+
+        var turnStateField = typeof(CombatManager).GetField("_turnState", hidden)!;
+        var prevTurnState = turnStateField.GetValue(CombatManager.Instance);
+        var turnStateType = turnStateField.FieldType;
+        var turnState = Activator.CreateInstance(turnStateType, hidden, null, [combatState], null)!;
+        turnStateType.GetField("<IsInProgress>k__BackingField", hidden)!.SetValue(turnState, true);
+        turnStateField.SetValue(CombatManager.Instance, turnState);
+        try
+        {
+            var renderedStar = CardPreviewReader.ReadLiveCard(starCard, PileType.Hand);
+            Assert.Equal(new ResourceCost(ResourceCostKind.Number, 0), renderedStar.Entry.Cost.Stars);
+            Assert.NotNull(renderedStar.Entry.CostWithoutGlobalEffects);
+            Assert.Equal(new ResourceCost(ResourceCostKind.Number, originalStar), renderedStar.Entry.CostWithoutGlobalEffects!.Stars);
+            Assert.Equal(renderedStar.Entry.Cost.Energy, renderedStar.Entry.CostWithoutGlobalEffects.Energy);
+
+            // Star X-cost card with no global Energy modification does not emit a redundant costWithoutGlobalEffects.
+            var renderedStardust = CardPreviewReader.ReadLiveCard(stardust, PileType.Hand);
+            Assert.Equal(new ResourceCost(ResourceCostKind.X), renderedStardust.Entry.Cost.Stars);
+            Assert.Null(renderedStardust.Entry.CostWithoutGlobalEffects);
+        }
+        finally
+        {
+            turnStateField.SetValue(CombatManager.Instance, prevTurnState);
+        }
+
+        // Regent macros & IL detectors.
+        var starsRule = MacroMechanismReader.RegentStarsRule();
+        Assert.Contains("persists across turns", starsRule, StringComparison.Ordinal);
+        var forgeRule = MacroMechanismReader.ForgeSovereignBladeRule();
+        Assert.Contains("CARD.SOVEREIGN_BLADE", forgeRule, StringComparison.Ordinal);
+        Assert.Contains("on-Forge effects", forgeRule, StringComparison.Ordinal);
+        Assert.Contains("exhausted copies", forgeRule, StringComparison.Ordinal);
+
+        Assert.True(ItemMechanismReader.UsesStars(ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.Glow>()));
+        Assert.True(ItemMechanismReader.UsesStars(ModelDb.Relic<DivineRight>()));
+        Assert.True(ItemMechanismReader.UsesStars(ModelDb.Potion<StarPotion>()));
+        Assert.True(ItemMechanismReader.UsesForge(ModelDb.Card<MegaCrit.Sts2.Core.Models.Cards.Conqueror>()));
+        Assert.True(ItemMechanismReader.UsesForge(ModelDb.Relic<FencingManual>()));
+        Assert.True(ItemMechanismReader.UsesForge(ModelDb.Potion<KingsCourage>()));
+
+        // Passive Regent marker powers.
+        var (seekingText, seekingGaps) = PowerMechanismReader.Describe(typeof(SeekingEdgePower), true);
+        Assert.Empty(seekingGaps);
+        Assert.Contains("CARD.SOVEREIGN_BLADE", seekingText!, StringComparison.Ordinal);
+        Assert.Contains("all enemies", seekingText!, StringComparison.Ordinal);
+
+        var (parryText, parryGaps) = PowerMechanismReader.Describe(typeof(ParryPower), true);
+        Assert.Empty(parryGaps);
+        Assert.Contains("CARD.SOVEREIGN_BLADE", parryText!, StringComparison.Ordinal);
+        Assert.Contains("base Block equal to stacks", parryText!, StringComparison.Ordinal);
+    }
+
+    private sealed class SyntheticZeroAllStarCostPower : PowerModel
+    {
+        public override PowerType Type => PowerType.Buff;
+        public override PowerStackType StackType => PowerStackType.Single;
+        public override bool TryModifyStarCost(CardModel card, decimal originalCost, out decimal modifiedCost)
+        {
+            modifiedCost = 0m;
+            return card.Owner.Creature == Owner;
+        }
+    }
+
+    [Fact]
+    public void NecrobinderOstyCardsMacrosAndDebilitateExtractAccurately()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+
+        var ostySummon = MacroMechanismReader.OstySummonRule();
+        Assert.Contains("MONSTER.OSTY", ostySummon, StringComparison.Ordinal);
+        Assert.Contains("POWER.DIE_FOR_YOU_POWER", ostySummon, StringComparison.Ordinal);
+        Assert.Contains("playable=true", ostySummon, StringComparison.Ordinal);
+
+        // HighFive overrides IsPlayable => !Owner.IsOstyMissing.
+        var highFive = (CardModel)ModelDb.Card<HighFive>().ToMutable();
+        Assert.True(ItemMechanismReader.UsesOsty(highFive));
+        var highFiveRule = ItemMechanismReader.DescribeCard(highFive);
+        Assert.NotNull(highFiveRule);
+        Assert.Contains("unplayable while missing or dead", highFiveRule!, StringComparison.Ordinal);
+
+        // Sacrifice has no FromOsty attack and early-returns on CheckMissingWithAnim.
+        var sacrifice = (CardModel)ModelDb.Card<Sacrifice>().ToMutable();
+        Assert.True(ItemMechanismReader.UsesOsty(sacrifice));
+        var sacrificeRule = ItemMechanismReader.DescribeCard(sacrifice);
+        Assert.NotNull(sacrificeRule);
+        Assert.Contains("does nothing", sacrificeRule!, StringComparison.Ordinal);
+        Assert.Contains("native playable ignores this check", sacrificeRule!, StringComparison.Ordinal);
+
+        // BoneShards & Fetch early-return and skip follow-up effects when Osty is missing.
+        foreach (var type in new[] { typeof(BoneShards), typeof(Fetch) })
+        {
+            var card = (CardModel)ModelDb.GetById<CardModel>(ModelDb.GetId(type)).ToMutable();
+            Assert.True(ItemMechanismReader.UsesOsty(card));
+            var rule = ItemMechanismReader.DescribeCard(card);
+            Assert.NotNull(rule);
+            Assert.Contains("skips its follow-up effects", rule!, StringComparison.Ordinal);
+        }
+
+        // SicEm & Snap skip only the Osty attack while their non-attack follow-up still resolves.
+        foreach (var type in new[] { typeof(SicEm), typeof(Snap) })
+        {
+            var card = (CardModel)ModelDb.GetById<CardModel>(ModelDb.GetId(type)).ToMutable();
+            Assert.True(ItemMechanismReader.UsesOsty(card));
+            var rule = ItemMechanismReader.DescribeCard(card);
+            Assert.NotNull(rule);
+            Assert.Contains("non-attack effect still resolves", rule!, StringComparison.Ordinal);
+        }
+
+        // Pure Osty attack cards skip damage only.
+        foreach (var type in new[]
+        {
+            typeof(Flatten), typeof(Poke), typeof(Protector), typeof(Rattle),
+            typeof(RightHandHand), typeof(Squeeze), typeof(SweepingGaze), typeof(Unleash),
+        })
+        {
+            var card = (CardModel)ModelDb.GetById<CardModel>(ModelDb.GetId(type)).ToMutable();
+            Assert.True(ItemMechanismReader.UsesOsty(card));
+            var rule = ItemMechanismReader.DescribeCard(card);
+            Assert.NotNull(rule);
+            Assert.Contains("deals no MONSTER.OSTY attack damage", rule!, StringComparison.Ordinal);
+            Assert.DoesNotContain("follow-up", rule!, StringComparison.Ordinal);
+            Assert.DoesNotContain("non-attack effect", rule!, StringComparison.Ordinal);
+        }
+
+        // Summon cards trigger UsesOsty without fabricating an Osty-missing attack warning.
+        var bodyguard = (CardModel)ModelDb.Card<Bodyguard>().ToMutable();
+        Assert.True(ItemMechanismReader.UsesOsty(bodyguard));
+        Assert.Null(ItemMechanismReader.DescribeCard(bodyguard, out var bodyguardGap));
+        Assert.Null(bodyguardGap);
+
+        // Fail closed on synthetic Osty-missing-only follow-up card and surface a diagnostic gap.
+        Assert.Null(ItemMechanismReader.DescribeCard(new SyntheticOstyMissingOnlyFollowUpCard(), out var ostyFailGap));
+        Assert.NotNull(ostyFailGap);
+
+        // DebilitatePower extracts ModifyVulnerableMultiplier and ModifyWeakMultiplier with caller scopes and native labels.
+        var (debText, debGaps) = PowerMechanismReader.Describe(typeof(DebilitatePower), true);
+        Assert.Empty(debGaps);
+        Assert.NotNull(debText);
+        Assert.Contains("POWER.VULNERABLE_POWER damage multiplier (when owner is targeted)", debText!, StringComparison.Ordinal);
+        Assert.Contains("double the POWER.VULNERABLE_POWER bonus above 1×", debText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.WEAK_POWER damage multiplier (when owner attacks)", debText!, StringComparison.Ordinal);
+        Assert.Contains("double the POWER.WEAK_POWER penalty below 1×", debText!, StringComparison.Ordinal);
+    }
+
+    private sealed class SyntheticOstyMissingOnlyFollowUpCard()
+        : CardModel(1, CardType.Skill, CardRarity.Common, TargetType.Self)
+    {
+        protected override async Task OnPlay(PlayerChoiceContext choiceContext, CardPlay cardPlay)
+        {
+            if (Osty.CheckMissingWithAnim(Owner))
+                await CardPileCmd.Draw(choiceContext, 1m, Owner);
+        }
+    }
+
+    [Fact]
+    public void SilentSlyMacrosAndPowersExtractAccurately()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+
+        var strike = (CardModel)ModelDb.Card<StrikeSilent>().ToMutable();
+        Assert.False(ItemMechanismReader.UsesSly(strike));
+        Assert.Null(CardPreviewReader.ReadLiveCard(strike, PileType.Hand).Entry.IsSlyThisTurn);
+
+        strike.GiveSingleTurnSly();
+        Assert.True(strike.IsSlyThisTurn);
+        Assert.True(ItemMechanismReader.UsesSly(strike));
+        Assert.True(CardPreviewReader.ReadLiveCard(strike, PileType.Hand).Entry.IsSlyThisTurn);
+
+        var reflex = (CardModel)ModelDb.Card<Reflex>().ToMutable();
+        Assert.True(reflex.IsSlyThisTurn);
+        Assert.True(ItemMechanismReader.UsesSly(reflex));
+        Assert.True(CardPreviewReader.ReadLiveCard(reflex, PileType.Hand).Entry.IsSlyThisTurn);
+
+        var handTrick = (CardModel)ModelDb.Card<HandTrick>().ToMutable();
+        Assert.True(ItemMechanismReader.UsesSly(handTrick));
+
+        var slyRule = MacroMechanismReader.SlyRule();
+        Assert.Contains("is_sly_this_turn=true", slyRule, StringComparison.Ordinal);
+        Assert.Contains("auto-plays for free", slyRule, StringComparison.Ordinal);
+        Assert.Contains("End-of-turn hand flush does not trigger Sly", slyRule, StringComparison.Ordinal);
+
+        var (fanText, fanGaps) = PowerMechanismReader.Describe(typeof(FanOfKnivesPower), true);
+        Assert.Empty(fanGaps);
+        Assert.Contains("CARD.SHIV", fanText!, StringComparison.Ordinal);
+        Assert.Contains("all enemies", fanText!, StringComparison.Ordinal);
+
+        var (accelText, accelGaps) = PowerMechanismReader.Describe(typeof(AccelerantPower), true);
+        Assert.Empty(accelGaps);
+        Assert.Contains("POWER.POISON_POWER", accelText!, StringComparison.Ordinal);
+        Assert.Contains("+stacks additional times", accelText!, StringComparison.Ordinal);
+
+        var (huntText, huntGaps) = PowerMechanismReader.Describe(typeof(TheHuntPower), true);
+        Assert.Empty(huntGaps);
+        Assert.Contains("CARD.THE_HUNT", huntText!, StringComparison.Ordinal);
+        Assert.Contains("extra card rewards", huntText!, StringComparison.Ordinal);
+
+        var (infText, infGaps) = PowerMechanismReader.Describe(typeof(InfiniteBladesPower), true);
+        Assert.Empty(infGaps);
+        Assert.Contains("CARD.SHIV", infText!, StringComparison.Ordinal);
+        Assert.Contains("CARD.SHIV · Attack", infText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.FAN_OF_KNIVES_POWER", infText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DefectOrbQueueAndSharedCrossCharHooksExtractAccurately()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+
+        var orbRule = MacroMechanismReader.OrbQueueRule();
+        Assert.Contains("slots[0]", orbRule, StringComparison.Ordinal);
+        Assert.Contains("slots[-1]", orbRule, StringComparison.Ordinal);
+        Assert.Contains("oldest", orbRule, StringComparison.Ordinal);
+        Assert.Contains("newest", orbRule, StringComparison.Ordinal);
+        Assert.Contains("POWER.FOCUS_POWER", orbRule, StringComparison.Ordinal);
+        Assert.Contains("ORB.PLASMA_ORB", orbRule, StringComparison.Ordinal);
+
+        var (chemText, chemGaps) = RelicMechanismReader.Describe(typeof(ChemicalX));
+        Assert.Empty(chemGaps);
+        Assert.Contains("+2 to resolved X", chemText!, StringComparison.Ordinal);
+        Assert.Contains("Star X-cost", chemText!, StringComparison.Ordinal);
+
+        var (thumbText, thumbGaps) = RelicMechanismReader.Describe(typeof(Thumbscrew));
+        Assert.Empty(thumbGaps);
+        Assert.Contains("original hit count>1", thumbText!, StringComparison.Ordinal);
+        Assert.Contains("+1 hit", thumbText!, StringComparison.Ordinal);
+
+        var (noEnergyText, noEnergyGaps) = PowerMechanismReader.Describe(typeof(NoEnergyGainPower), true);
+        Assert.Empty(noEnergyGaps);
+        Assert.Contains("Energy gain", noEnergyText!, StringComparison.Ordinal);
+        Assert.Contains("set to 0", noEnergyText!, StringComparison.Ordinal);
+
+        var (lampText, lampGaps) = RelicMechanismReader.Describe(typeof(UnsettlingLamp));
+        Assert.Empty(lampGaps);
+        Assert.Contains("×2", lampText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.ARTIFACT_POWER", lampText!, StringComparison.Ordinal);
+
+        var (crueltyText, crueltyGaps) = PowerMechanismReader.Describe(typeof(CrueltyPower), true);
+        Assert.Empty(crueltyGaps);
+        Assert.Contains("+(stacks/100)", crueltyText!, StringComparison.Ordinal);
+
+        var (phrogText, phrogGaps) = RelicMechanismReader.Describe(typeof(PaperPhrog));
+        Assert.Empty(phrogGaps);
+        Assert.Contains("+0.25", phrogText!, StringComparison.Ordinal);
+
+        var (kraneText, kraneGaps) = RelicMechanismReader.Describe(typeof(PaperKrane));
+        Assert.Empty(kraneGaps);
+        Assert.Contains("when owner is targeted", kraneText!, StringComparison.Ordinal);
+        Assert.Contains("0.15", kraneText!, StringComparison.Ordinal);
+
+        var (tankText, tankGaps) = PowerMechanismReader.Describe(typeof(TankPower), true);
+        Assert.Empty(tankGaps);
+        Assert.Contains("POWER.GUARDED_POWER", tankText!, StringComparison.Ordinal);
+        Assert.Contains("former owner", tankText!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LiveEnemyAfterAddedToRoomGapsExtractCompletely()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+
+        foreach (var segType in new[]
+        {
+            typeof(DecimillipedeSegmentFront),
+            typeof(DecimillipedeSegmentMiddle),
+            typeof(DecimillipedeSegmentBack),
+        })
+        {
+            var seg = (MonsterModel)ModelDb.GetById<MonsterModel>(ModelDb.GetId(segType)).ToMutable();
+            seg.SetUpForCombat();
+            var (segText, segGaps, _, hoisted) = EnemyMechanismReader.DescribeWithPowers(seg);
+            Assert.Empty(segGaps);
+            Assert.NotNull(segText);
+            Assert.Contains("POWER.REATTACH_POWER", segText!, StringComparison.Ordinal);
+            Assert.Contains("25", segText!, StringComparison.Ordinal);
+            Assert.Contains(typeof(ReattachPower), hoisted);
+        }
+
+        var decimillipedeEncounter = ModelDb.GetById<EncounterModel>(ModelDb.GetId(typeof(MegaCrit.Sts2.Core.Models.Encounters.DecimillipedeElite)));
+        var (encText, encHoisted, encCompleteness) = EncounterMechanismReader.ReadWithHoistedPowers(
+            decimillipedeEncounter, 0, GameMode.Standard, "eng");
+        Assert.Equal(MechanismCompleteness.Complete, encCompleteness);
+        Assert.NotNull(encText);
+        Assert.Contains(typeof(ReattachPower), encHoisted);
+
+        var merc = (MonsterModel)ModelDb.GetById<MonsterModel>(ModelDb.GetId(typeof(GremlinMerc))).ToMutable();
+        merc.SetUpForCombat();
+        var (mercText, mercGaps, _, mercHoisted) = EnemyMechanismReader.DescribeWithPowers(merc);
+        Assert.Empty(mercGaps);
+        Assert.NotNull(mercText);
+        Assert.Contains("POWER.SURPRISE_POWER", mercText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.THIEVERY_POWER", mercText!, StringComparison.Ordinal);
+        Assert.Contains("MONSTER.FAT_GREMLIN", mercText!, StringComparison.Ordinal);
+        Assert.Contains("MONSTER.SNEAKY_GREMLIN", mercText!, StringComparison.Ordinal);
+        Assert.Contains(typeof(SurprisePower), mercHoisted);
+        Assert.Contains(typeof(ThieveryPower), mercHoisted);
+    }
+
+    [Fact]
+    public void LiveCombatTacticalSharedRelicsExtractWithoutGaps()
+    {
+        NativeTestBootstrap.EnsureModelDb();
+
+        var (mummifiedText, mummifiedGaps) = RelicMechanismReader.Describe(typeof(MummifiedHand));
+        Assert.Empty(mummifiedGaps);
+        Assert.Contains("Power", mummifiedText!, StringComparison.Ordinal);
+        Assert.Contains("Energy and Star cost to 0 for this turn", mummifiedText!, StringComparison.Ordinal);
+
+        var (pocketText, pocketGaps) = RelicMechanismReader.Describe(typeof(Pocketwatch));
+        Assert.Empty(pocketGaps);
+        Assert.Contains("Turn-start card draw", pocketText!, StringComparison.Ordinal);
+        Assert.Contains("cards played last turn≤3", pocketText!, StringComparison.Ordinal);
+        Assert.Contains("increase by 3", pocketText!, StringComparison.Ordinal);
+
+        var (vambraceText, vambraceGaps) = RelicMechanismReader.Describe(typeof(Vambrace));
+        Assert.Empty(vambraceGaps);
+        Assert.Contains("×2", vambraceText!, StringComparison.Ordinal);
+        Assert.Contains("triggering card", vambraceText!, StringComparison.Ordinal);
+
+        var (forkText, forkGaps) = RelicMechanismReader.Describe(typeof(TuningFork));
+        Assert.Empty(forkGaps);
+        Assert.Contains("Skill", forkText!, StringComparison.Ordinal);
+        Assert.Contains("skills played≥10", forkText!, StringComparison.Ordinal);
+        Assert.Contains("7 Block", forkText!, StringComparison.Ordinal);
+
+        var (vialText, vialGaps) = RelicMechanismReader.Describe(typeof(BloodVial));
+        Assert.Empty(vialGaps);
+        Assert.Contains("heals 2 HP", vialText!, StringComparison.Ordinal);
+        Assert.Contains("turn number≤1", vialText!, StringComparison.Ordinal);
+
+        var (cannonText, cannonGaps) = RelicMechanismReader.Describe(typeof(MiniatureCannon));
+        Assert.Empty(cannonGaps);
+        Assert.Contains("source card is upgraded", cannonText!, StringComparison.Ordinal);
+        Assert.Contains("+3", cannonText!, StringComparison.Ordinal);
+
+        var (trinketText, trinketGaps) = RelicMechanismReader.Describe(typeof(ReptileTrinket));
+        Assert.Empty(trinketGaps);
+        Assert.Contains("After owner uses a potion", trinketText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.REPTILE_TRINKET_POWER", trinketText!, StringComparison.Ordinal);
+
+        var (flagonText, flagonGaps) = RelicMechanismReader.Describe(typeof(ScreamingFlagon));
+        Assert.Empty(flagonGaps);
+        Assert.Contains("hand is empty", flagonText!, StringComparison.Ordinal);
+        Assert.Contains("20 unpowered damage", flagonText!, StringComparison.Ordinal);
+
+        var (sealText, sealGaps) = RelicMechanismReader.Describe(typeof(SealOfGold));
+        Assert.Empty(sealGaps);
+        Assert.Contains("Gold≥3", sealText!, StringComparison.Ordinal);
+        Assert.Contains("gains 1 Energy", sealText!, StringComparison.Ordinal);
+        Assert.Contains("loses 3 Gold", sealText!, StringComparison.Ordinal);
+
+        var (pendulumText, pendulumGaps) = RelicMechanismReader.Describe(typeof(Pendulum));
+        Assert.Empty(pendulumGaps);
+        Assert.Contains("turns seen=0", pendulumText!, StringComparison.Ordinal);
+        Assert.Contains("mod 3", pendulumText!, StringComparison.Ordinal);
+        Assert.Contains("increase by 1", pendulumText!, StringComparison.Ordinal);
+
+        var (buckleText, buckleGaps) = RelicMechanismReader.Describe(typeof(BeltBuckle));
+        Assert.Empty(buckleGaps);
+        Assert.Contains("holds no potions", buckleText!, StringComparison.Ordinal);
+        Assert.Contains("holds any potion", buckleText!, StringComparison.Ordinal);
+        Assert.Contains("POWER.DEXTERITY_POWER", buckleText!, StringComparison.Ordinal);
+
+        var (rippleText, rippleGaps) = RelicMechanismReader.Describe(typeof(RippleBasin));
+        Assert.Empty(rippleGaps);
+        Assert.Contains("0 Attack card plays finished by owner this turn", rippleText!, StringComparison.Ordinal);
+        Assert.Contains("Block", rippleText!, StringComparison.Ordinal);
+
+        // Fail closed when a once-per-combat replay relic also invokes an extra gameplay command.
+        var (extraCmdText, extraCmdGaps) = RelicMechanismReader.Describe(typeof(SyntheticReplayWithExtraCommandRelic));
+        Assert.Null(extraCmdText);
+        Assert.NotEmpty(extraCmdGaps);
+    }
+
+    private sealed class SyntheticReplayWithExtraCommandRelic : RelicModel
+    {
+        private bool _usedThisCombat;
+        public override MegaCrit.Sts2.Core.Entities.Relics.RelicRarity Rarity => MegaCrit.Sts2.Core.Entities.Relics.RelicRarity.Rare;
+        private bool UsedThisCombat { get => _usedThisCombat; set => _usedThisCombat = value; }
+
+        public override Task AfterRoomEntered(MegaCrit.Sts2.Core.Rooms.AbstractRoom room)
+        {
+            if (room is MegaCrit.Sts2.Core.Rooms.CombatRoom)
+                UsedThisCombat = false;
+            return Task.CompletedTask;
+        }
+
+        public override int ModifyCardPlayCount(CardModel card, Creature? target, int playCount)
+            => !UsedThisCombat && card.Owner == Owner ? playCount + 1 : playCount;
+
+        public override async Task AfterModifyingCardPlayCount(CardModel card)
+        {
+            UsedThisCombat = true;
+            await CreatureCmd.GainBlock(Owner.Creature, 5m, MegaCrit.Sts2.Core.ValueProps.ValueProp.Unpowered, null);
+        }
+
+        public override Task AfterCombatEnd(MegaCrit.Sts2.Core.Rooms.CombatRoom room)
+        {
+            UsedThisCombat = false;
+            return Task.CompletedTask;
         }
     }
 }

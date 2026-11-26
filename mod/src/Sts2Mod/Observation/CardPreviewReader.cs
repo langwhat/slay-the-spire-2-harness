@@ -119,7 +119,8 @@ internal static class CardPreviewReader
                 ? card.EnergyCost.GetWithModifiers(CostModifiers.Local)
                 : card.EnergyCost.GetWithModifiers(CostModifiers.All);
             var localEnergy = card.EnergyCost.GetWithModifiers(CostModifiers.Local);
-            var starCost = definition ? card.CurrentStarCost : card.GetStarCostWithModifiers();
+            var localStar = card.CurrentStarCost;
+            var starCost = definition ? localStar : card.GetStarCostWithModifiers();
             var costsX = card.EnergyCost.CostsX;
             var starCostsX = card.HasStarCostX;
 
@@ -157,10 +158,12 @@ internal static class CardPreviewReader
                 ResourceCost.FromNative(displayEnergy, costsX),
                 ResourceCost.FromNative(starCost, starCostsX));
 
-            var costWithoutGlobalEffects = localEnergy != displayEnergy
-                ? new ResourceCosts(
-                    ResourceCost.FromNative(localEnergy, costsX),
-                    ResourceCost.FromNative(starCost, starCostsX))
+            var localCost = new ResourceCosts(
+                ResourceCost.FromNative(localEnergy, costsX),
+                ResourceCost.FromNative(localStar, starCostsX));
+
+            var costWithoutGlobalEffects = localCost != cost
+                ? localCost
                 : null;
 
             var entry = new CardEntry(
@@ -182,6 +185,7 @@ internal static class CardPreviewReader
             {
                 LocalKeywords = localKeywords,
                 CostWithoutGlobalEffects = costWithoutGlobalEffects,
+                IsSlyThisTurn = card.IsSlyThisTurn ? true : null,
                 Playable = playable,
                 Previews = previews,
             };
