@@ -134,8 +134,10 @@ internal sealed partial class NativeRuleText
                         || name is "WithHitFx" or "WithAttackerFx" or "WithAttackerAnim" or "WithNoAttackerAnim"
                             or "WithWaitBeforeHit" or "WithHitVfxNode" or "WithHitVfxSpawnedAtBase"
                             or "SpawningHitVfxOnEachCreature" or "OnlyPlayAnimOnce"))
+                || (declaring == typeof(decimal) && name == "op_Implicit")
                 || name is "get_Owner" or "get_Creature" or "get_Osty" or "get_DynamicVars" or "get_Damage"
-                    or "get_OstyDamage" or "get_HpLoss" or "get_Cards" or "get_BaseValue" or "get_EnergyCost"
+                    or "get_OstyDamage" or "get_HpLoss" or "get_Cards" or "get_Energy" or "get_BaseValue"
+                    or "get_IntValue" or "get_EnergyCost"
                     or "get_CombatState" or "get_Enemies" or "get_Powers" or "OfType" or "FirstOrDefault"
                 || call.Method is ConstructorInfo)
                 continue;
@@ -183,6 +185,13 @@ internal sealed partial class NativeRuleText
                     return null;
                 var n = Number(count);
                 effects.Add($"draw {n} {(n == "1" ? "card" : "cards")}");
+                continue;
+            }
+            if (declaring == typeof(PlayerCmd) && name == nameof(PlayerCmd.GainEnergy))
+            {
+                if (call.Arguments.Length < 1 || CardNumeric(card, call.Arguments[0]) is not { } energy)
+                    return null;
+                effects.Add($"gain {Number(energy)} Energy");
                 continue;
             }
             if (declaring == typeof(PowerCmd) && name == nameof(PowerCmd.ModifyAmount))
@@ -299,13 +308,16 @@ internal sealed partial class NativeRuleText
 
     private decimal? CardNumeric(CardModel card, Value value) => value switch
     {
+        Call { Method.Name: "op_Implicit", Arguments: [var inner] } => CardNumeric(card, inner),
         Call { Method.Name: "get_BaseValue", Receiver: Call { Method.Name: "get_HpLoss" } }
             when card.DynamicVars.TryGetValue("HpLoss", out var hp) => hp.BaseValue,
         Call { Method.Name: "get_BaseValue", Receiver: Call { Method.Name: "get_OstyDamage" } }
             when card.DynamicVars.TryGetValue("OstyDamage", out var ostyDmg) => ostyDmg.BaseValue,
         Call { Method.Name: "get_BaseValue", Receiver: Call { Method.Name: "get_Cards" } }
             when card.DynamicVars.TryGetValue("Cards", out var cards) => cards.BaseValue,
-        Call { Method.Name: "get_BaseValue", Receiver: var dyn }
+        Call { Method.Name: "get_BaseValue" or "get_IntValue", Receiver: Call { Method.Name: "get_Energy" } }
+            when card.DynamicVars.TryGetValue("Energy", out var energy) => energy.BaseValue,
+        Call { Method.Name: "get_BaseValue" or "get_IntValue", Receiver: var dyn }
             when DynamicKey(dyn) is { } key && card.DynamicVars.TryGetValue(key, out var found) => found.BaseValue,
         _ => Numeric(value),
     };

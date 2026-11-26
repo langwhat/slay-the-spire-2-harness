@@ -282,6 +282,20 @@ public enum ArrowSlotStatus
     Away,
 }
 
+public enum MelodyTag
+{
+    Wah,
+    Cho,
+    Ki,
+}
+
+public enum RelicStatus
+{
+    Normal,
+    Active,
+    Disabled,
+}
+
 public sealed record ArrowSlotView(
     ArrowSlotStatus Status,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ImpaledTargetRef);
@@ -385,6 +399,7 @@ public sealed record CombatStateView(
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OrbQueueView? Orbs { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<ArrowSlotView>? ArrowSlots { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<MelodyTag>? Melodies { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<AllyView>? Allies { get; init; }
 }
 
@@ -513,7 +528,7 @@ public sealed record CardDefinitionPreview : CardFacts
 public sealed record RelicEntry(
     string DefinitionId,
     string Name,
-    string Status,
+    RelicStatus Status,
     bool IsUsedUp,
     bool IsMelted,
     int StackCount) : ObservedObject

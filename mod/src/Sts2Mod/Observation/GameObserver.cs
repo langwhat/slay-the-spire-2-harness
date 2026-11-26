@@ -6,6 +6,7 @@ using MegaCrit.Sts2.addons.mega_text;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Combat.History.Entries;
+using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Ancients;
 using MegaCrit.Sts2.Core.Entities.Cards;
@@ -20,6 +21,7 @@ using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Characters;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
@@ -458,6 +460,7 @@ internal sealed class GameObserver(
             Allies = allies.IsEmpty ? null : allies,
             Orbs = ObserveOrbs(pcs.OrbQueue.Capacity, pcs.OrbQueue.Orbs, actor),
             ArrowSlots = ObserveArrowSlots(pcs.Arrows, combat, actor),
+            Melodies = ObserveMelodies(player),
         };
 
         FlushPowerMechanisms();
@@ -878,7 +881,13 @@ internal sealed class GameObserver(
         _objects[reference] = new RelicEntry(
             relic.Id.ToString(),
             title,
-            relic.Status.ToString().ToLowerInvariant(),
+            relic.Status switch
+            {
+                MegaCrit.Sts2.Core.Entities.Relics.RelicStatus.Normal => Sts2Mod.Core.Observation.RelicStatus.Normal,
+                MegaCrit.Sts2.Core.Entities.Relics.RelicStatus.Active => Sts2Mod.Core.Observation.RelicStatus.Active,
+                MegaCrit.Sts2.Core.Entities.Relics.RelicStatus.Disabled => Sts2Mod.Core.Observation.RelicStatus.Disabled,
+                _ => throw new ArgumentOutOfRangeException(nameof(relic), relic.Status, "Unknown native relic status."),
+            },
             relic.IsUsedUp,
             relic.IsMelted,
             relic.StackCount)
@@ -926,6 +935,20 @@ internal sealed class GameObserver(
                 _ => throw new ArgumentOutOfRangeException(nameof(slots), slot.Status, "Unknown native arrow status."),
             },
             slot.Status == ArrowStatus.Away ? targetRefs.GetValueOrDefault(slot) : null)).ToImmutableArray();
+    }
+
+    private static ImmutableArray<MelodyTag>? ObserveMelodies(Player player)
+    {
+        var melodies = ImmutableArray.CreateBuilder<MelodyTag>(3);
+        if (MelodyCmd.PlayedWahThisTurn(player))
+            melodies.Add(MelodyTag.Wah);
+        if (MelodyCmd.PlayedChoThisTurn(player))
+            melodies.Add(MelodyTag.Cho);
+        if (MelodyCmd.PlayedKiThisTurn(player))
+            melodies.Add(MelodyTag.Ki);
+        if (melodies.Count == 0 && player.Character is not Fool)
+            return null;
+        return melodies.ToImmutable();
     }
 
     private OrbQueueView ObserveOrbs(int capacity, IReadOnlyList<OrbModel> nativeOrbs, Creature holder)

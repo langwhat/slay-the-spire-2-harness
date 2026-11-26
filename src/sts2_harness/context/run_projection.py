@@ -55,7 +55,7 @@ def _slim(
             continue
         if name in ("is_used_up", "is_melted") and child is False:
             continue
-        if name == "status" and child == "normal":
+        if name == "status" and child == native.RelicStatus.NORMAL:
             continue
         if name == "stack_count" and child == 1:
             continue
@@ -384,6 +384,20 @@ class RunDelivery:
                 sections["orbs"] = _json(state.orbs)
             if state.arrow_slots is not MISSING:
                 sections["arrow_slots"] = [_json(slot) for slot in state.arrow_slots]
+            if state.melodies is not MISSING:
+                sections["melodies"] = list(state.melodies)
+            active_relics: list[JsonValue] = []
+            for ref in state.relics:
+                entry = observation.objects.get(ref)
+                if (
+                    isinstance(entry, native.RelicEntry)
+                    and entry.status is native.RelicStatus.ACTIVE
+                    and entry.is_melted is not True
+                ):
+                    row = object_row(ref, actionable=False)
+                    row.pop("status", None)
+                    active_relics.append(row)
+            sections["active_relics"] = active_relics
         if isinstance(state, (native.TerminalState, FinishedState, RunFinishedState)):
             sections["result"] = state.result
             if state.last_observed_turn is not MISSING:
@@ -503,12 +517,28 @@ class RunDelivery:
             for name, value in sections.items()
         }
         baseline = not self.sections
+        previous_turn = self.sections.get("turn")
+        current_turn = sections.get("turn")
+        turn_changed = (
+            not baseline
+            and self.role is native.DecisionOwner.COMBAT
+            and isinstance(state, native.CombatState)
+            and current_turn is not None
+            and current_turn != previous_turn
+        )
         changed = {
             name: content
             for name, content in sections.items()
             if baseline or self.sections.get(name, MISSING) != content
         }
         changed.update({name: None for name in self.sections if name not in sections})
+        if (
+            turn_changed
+            and "active_relics" not in changed
+            and isinstance(sections.get("active_relics"), list)
+            and sections["active_relics"]
+        ):
+            changed["active_relics"] = sections["active_relics"]
         additions: list[JsonValue] = [
             value
             for key, value in self.definitions.items()
