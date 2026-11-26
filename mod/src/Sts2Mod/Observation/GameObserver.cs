@@ -99,7 +99,8 @@ internal static class CombatInputProbe
 
     public static bool IsRunInputActionIdle() =>
         RunManager.Instance.ActionQueueSet.IsEmpty
-        && RunManager.Instance.ActionExecutor.CurrentlyRunningAction is null;
+        && RunManager.Instance.ActionExecutor.CurrentlyRunningAction is null
+        && !ShopInputProbe.IsShopSettling(RunManager.Instance.DebugOnlyGetState());
 
     public static bool IsPotionUsable(
         PotionModel potion,
@@ -110,7 +111,7 @@ internal static class CombatInputProbe
         if (hasBlockingSelection || potion.IsQueued || !owner.CanUseOrRemovePotions || !potion.PassesCustomUsabilityCheck)
             return false;
 
-        if (combat is null && RunManager.Instance.IsPotionUseLocked)
+        if (combat is null && (RunManager.Instance.IsPotionUseLocked || !IsRunInputActionIdle()))
             return false;
 
         switch (potion.Usage)
@@ -1430,13 +1431,17 @@ internal sealed class GameObserver(
 
     private void ObserveRestSite(NRestSiteRoom rest)
     {
+        var liveButtons = NodeHierarchy.Descendants(rest)
+            .OfType<NRestSiteButton>()
+            .Where(button => GodotObject.IsInstanceValid(button) && !button.IsQueuedForDeletion())
+            .ToArray();
         foreach (var option in rest.Options)
         {
             var reference = registry.GetRef(option);
             var title = option.Title.GetFormattedText();
             _objects[reference] = new OptionEntry(title);
             _descriptions[reference] = option.Description.GetFormattedText();
-            if (rest.GetButtonForOption(option) is { } button)
+            if (liveButtons.FirstOrDefault(candidate => ReferenceEquals(candidate.Option, option)) is { } button)
                 AddInteraction(button, title, option.IsEnabled && button.IsEnabled, reference);
         }
         ObserveButton(rest.ProceedButton, operation: InteractionOperation.Proceed);
@@ -1614,6 +1619,7 @@ internal sealed class GameObserver(
 
     private void ObserveShop(NMerchantInventory inventory)
     {
+        var shopSettling = ShopInputProbe.IsShopSettling(run);
         if (inventory.IsOpen)
         {
             foreach (var slot in inventory.GetAllSlots())
@@ -1680,7 +1686,7 @@ internal sealed class GameObserver(
                 var action = AddInteraction(
                     slot.Hitbox,
                     name,
-                    entry.IsStocked && entry.EnoughGold && slot.Hitbox.IsEnabled,
+                    !shopSettling && entry.IsStocked && entry.EnoughGold && slot.Hitbox.IsEnabled,
                     reference,
                     gold: entry.Cost);
                 _offers.Add(new OfferView(reference, kind, contents, [action])
@@ -1721,8 +1727,14 @@ internal sealed class GameObserver(
             return;
         }
 
-        foreach (var back in NodeHierarchy.Descendants(inventory).OfType<NBackButton>())
-            ObserveButton(back, operation: InteractionOperation.CloseShop);
+        foreach (var back in NodeHierarchy.Descendants(inventory).OfType<NBackButton>().Where(ShopInputProbe.IsVisible))
+        {
+            AddInteraction(
+                back,
+                DisplayedButtonLabel(back) ?? NativeInteractionLabels.Operation(gameLanguage, InteractionOperation.CloseShop),
+                !shopSettling && back.IsEnabled,
+                operation: InteractionOperation.CloseShop);
+        }
 
         if (NMerchantRoom.Instance is { } otherRoom)
         {

@@ -531,7 +531,7 @@
                   "card": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Card ref; it may be a card an earlier step brings into hand."
+                    "description": "Existing card ref (not a definition ID); it may be a known card an earlier step brings into hand, but stop at any step that creates a new card so its ref is observed first."
                   },
                   "target": {
                     "type": "string",
