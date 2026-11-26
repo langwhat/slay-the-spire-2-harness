@@ -70,32 +70,13 @@ def reward_steps(
     actual, active = card_rewards(observation)
     actual_by_ref = {offer.ref: offer for offer in actual if offer.ref not in ignored}
     remaining = tuple(item.offer for item in plan.choices[index:] if item.offer is not None)
-    if choice.reroll:
-        if choice.offer.ref not in actual_by_ref:
+    remaining_refs = {offer.ref for offer in remaining}
+    if plan.choices[-1].reroll:
+        before_offers, _ = card_rewards(plan.before)
+        expected_refs = {offer.ref for offer in before_offers if offer.ref not in ignored}
+        if set(actual_by_ref) != expected_refs or not remaining_refs <= set(actual_by_ref):
             return None
-        published = actual_by_ref[choice.offer.ref]
-        if (
-            set(published.contents) != set(choice.offer.contents)
-            or published.requires_selection != choice.offer.requires_selection
-            or published.can_reroll is not True
-            or not same_card_options(plan.before, observation, choice.offer.contents)
-        ):
-            return None
-        if state.selection is not None:
-            if active is None or active.ref != choice.offer.ref:
-                return None
-            return (RerollCardRewardStep(),)
-        if choice.offer.requires_selection is not True:
-            return None
-        action_refs = published.actions
-        opening = next(
-            (action for action in state.actions if action.enabled and action.ref in action_refs),
-            None,
-        )
-        if opening is None:
-            return None
-        return (ActionStep(ActionKind.INTERACT, opening.ref), RerollCardRewardStep())
-    if set(actual_by_ref) != {offer.ref for offer in remaining}:
+    elif set(actual_by_ref) != remaining_refs:
         return None
     for offer in remaining:
         published = actual_by_ref[offer.ref]
@@ -106,6 +87,23 @@ def reward_steps(
             or not same_card_options(plan.before, observation, offer.contents)
         ):
             return None
+    if choice.reroll:
+        if actual_by_ref[choice.offer.ref].can_reroll is not True:
+            return None
+        if state.selection is not None:
+            if active is None or active.ref != choice.offer.ref:
+                return None
+            return (RerollCardRewardStep(),)
+        if choice.offer.requires_selection is not True:
+            return None
+        action_refs = actual_by_ref[choice.offer.ref].actions
+        opening = next(
+            (action for action in state.actions if action.enabled and action.ref in action_refs),
+            None,
+        )
+        if opening is None:
+            return None
+        return (ActionStep(ActionKind.INTERACT, opening.ref), RerollCardRewardStep())
     if state.selection is not None:
         if (
             active is None

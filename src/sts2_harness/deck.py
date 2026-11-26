@@ -86,12 +86,21 @@ def card_rewards(
     if state.selection is None:
         return offers, None
     if state.selection.offer_ref is not MISSING:
-        logical = tuple(offer for offer in offers if offer.parent_offer_ref is MISSING)
-        active = next(
-            (offer for offer in logical if offer.ref == state.selection.offer_ref),
+        overlay = next(
+            (offer for offer in offers if offer.parent_offer_ref == state.selection.offer_ref),
             None,
         )
-        return logical, active
+        logical_list: list[native.Offer] = []
+        active: native.Offer | None = None
+        for offer in offers:
+            if offer.parent_offer_ref is not MISSING:
+                continue
+            if offer.ref == state.selection.offer_ref:
+                if overlay is not None and overlay.can_reroll != offer.can_reroll:
+                    offer = offer.model_copy(update={"can_reroll": overlay.can_reroll})
+                active = offer
+            logical_list.append(offer)
+        return tuple(logical_list), active
     candidates = set(state.selection.candidates)
     matching = tuple(offer for offer in offers if set(offer.contents) == candidates)
     if len(matching) == 2:

@@ -280,11 +280,7 @@ def _candidate(
         )
         if opening is None:
             return None
-        has_ectoplasm = any(
-            isinstance(relic := observation.objects.get(ref), native.RelicEntry)
-            and relic.definition_id == "RELIC.ECTOPLASM"
-            for ref in state.relics
-        )
+        has_ectoplasm = _has_relic(observation, "RELIC.ECTOPLASM")
         is_fake_merchant = (
             state.event is not None and state.event.definition_id == "EVENT.FAKE_MERCHANT"
         )

@@ -199,7 +199,7 @@ class SkipCard(native.WireModel):
 
 
 class RerollCard(native.WireModel):
-    offer: native.Nonempty | MISSING = MISSING
+    offer: native.Nonempty
     choice: Literal[DeckChoice.REROLL]
     reason: native.Nonempty
 

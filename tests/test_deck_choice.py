@@ -1907,3 +1907,469 @@ def test_deck_choice_reroll_replaces_cards_and_keeps_offer_open(tmp_path: Path) 
     second_prompt = json.dumps(second_items[-1])
     assert "can_reroll" in first_prompt and "CARD.OLD" in first_prompt
     assert "can_reroll" not in second_prompt and "CARD.NEW" in second_prompt
+
+
+def test_deck_choice_multi_group_trailing_reroll_and_overlay_control(tmp_path: Path) -> None:
+    from sts2_harness.deck import CardChoiceKind, card_rewards, deck_observation
+    from sts2_harness.deck_role import deck_offers, validate_deck_choice
+    from sts2_harness.llm.messages import ToolCall
+    from sts2_harness.results import Rejected
+    from sts2_harness_eval.verification import Relation, VerificationFailure, check_control
+
+    base = native.Observation.model_validate_json(RUN)
+    assert isinstance(base.state, native.RunState)
+    card = native.CardEntry.model_validate_json(CARD)
+    cards = {
+        "owned": card.model_copy(update={"definition_id": "CARD.OWNED", "name": "Owned"}),
+        "a-old": card.model_copy(update={"definition_id": "CARD.A_OLD", "name": "A Old"}),
+        "a-new": card.model_copy(update={"definition_id": "CARD.A_NEW", "name": "A New"}),
+        "b-old": card.model_copy(update={"definition_id": "CARD.B_OLD", "name": "B Old"}),
+        "b-new": card.model_copy(update={"definition_id": "CARD.B_NEW", "name": "B New"}),
+        "c-only": card.model_copy(update={"definition_id": "CARD.C_ONLY", "name": "C Only"}),
+    }
+    offer_a = native.Offer(
+        ref="offer:a",
+        kind=native.OfferKind.CARD,
+        contents=("a-old",),
+        actions=("open-a",),
+        requires_selection=True,
+        can_reroll=True,
+    )
+    offer_b = native.Offer(
+        ref="offer:b",
+        kind=native.OfferKind.CARD,
+        contents=("b-old",),
+        actions=("open-b",),
+        requires_selection=True,
+        can_reroll=True,
+    )
+    offer_c = native.Offer(
+        ref="offer:c",
+        kind=native.OfferKind.CARD,
+        contents=("c-only",),
+        actions=("open-c",),
+        requires_selection=True,
+        can_reroll=True,
+    )
+    closed_state = base.model_copy(
+        update={
+            "objects": cards,
+            "state": base.state.model_copy(
+                update={
+                    "screen": native.RunScreen.REWARDS,
+                    "deck": ("owned",),
+                    "actions": (
+                        native.Action(
+                            ref="open-a",
+                            subject="offer:a",
+                            label="Cards A",
+                            enabled=True,
+                        ),
+                        native.Action(
+                            ref="open-b",
+                            subject="offer:b",
+                            label="Cards B",
+                            enabled=True,
+                        ),
+                        native.Action(
+                            ref="open-c",
+                            subject="offer:c",
+                            label="Cards C",
+                            enabled=True,
+                        ),
+                    ),
+                    "offers": (offer_a, offer_b, offer_c),
+                    "selection": None,
+                }
+            ),
+            "map": native.PublicMap(bosses=(), nodes=(), legal_destinations=None),
+        }
+    )
+
+    # Overlay can_reroll overrides parent when the reward screen is open.
+    overlay_without_reroll = native.Offer(
+        ref="offer:a-screen",
+        kind=native.OfferKind.CARD,
+        contents=("a-old",),
+        actions=(),
+        parent_offer_ref="offer:a",
+        requires_selection=True,
+    )
+    open_a_no_button = closed_state.model_copy(
+        update={
+            "input_readiness": native.InputReadiness.SELECTION,
+            "state": closed_state.state.model_copy(
+                update={
+                    "offers": (overlay_without_reroll, offer_a, offer_b, offer_c),
+                    "selection": native.Selection(
+                        prompt="Choose",
+                        source=None,
+                        min=0,
+                        max=1,
+                        candidates=("a-old",),
+                        selected=(),
+                        offer_ref="offer:a",
+                    ),
+                }
+            ),
+        }
+    )
+    logical, active = card_rewards(open_a_no_button)
+    assert active is not None and active.ref == "offer:a" and active.can_reroll is MISSING
+    assert [offer.ref for offer in logical] == ["offer:a", "offer:b", "offer:c"]
+    with pytest.raises(VerificationFailure):
+        check_control(
+            open_a_no_button,
+            native.RerollCardReward(kind=native.StepKind.REROLL_CARD_REWARD),
+            Relation.SOURCE_REPLAY,
+            0,
+        )
+
+    open_a_with_button = open_a_no_button.model_copy(
+        update={
+            "state": open_a_no_button.state.model_copy(
+                update={
+                    "offers": (
+                        overlay_without_reroll.model_copy(update={"can_reroll": True}),
+                        offer_a,
+                        offer_b,
+                        offer_c,
+                    ),
+                }
+            )
+        }
+    )
+    check_control(
+        open_a_with_button,
+        native.RerollCardReward(kind=native.StepKind.REROLL_CARD_REWARD),
+        Relation.SOURCE_REPLAY,
+        0,
+    )
+
+    # Reject non-trailing reroll, duplicate reroll, or rerolling another offer while one is open.
+    route = native.RouteKey.model_validate(closed_state.location.model_dump())
+    for payload, expected_code in (
+        (
+            {
+                "choices": [
+                    {"offer": "offer:a", "choice": "reroll", "reason": "First"},
+                    {"offer": "offer:b", "choice": "skip", "reason": "Second"},
+                ]
+            },
+            ReasonCode.INVALID_ARGUMENTS,
+        ),
+        (
+            {
+                "choices": [
+                    {"offer": "offer:a", "choice": "reroll", "reason": "First"},
+                    {"offer": "offer:b", "choice": "reroll", "reason": "Second"},
+                ]
+            },
+            ReasonCode.INVALID_ARGUMENTS,
+        ),
+        (
+            {"choices": [{"offer": "offer:b", "choice": "reroll", "reason": "Skip open A"}]},
+            ReasonCode.PENDING_CHOICE,
+        ),
+    ):
+        target = open_a_no_button if expected_code is ReasonCode.PENDING_CHOICE else closed_state
+        delivered = deck_observation(target, deck_offers(target))
+        bad = validate_deck_choice(
+            ToolCall("c-bad", ToolName.RUN_DECK_CHOICE, json.dumps(payload)),
+            ActTask(route),
+            delivered,
+            target,
+        )
+        assert not isinstance(bad, tuple)
+        assert isinstance(bad.outcome, Rejected)
+        assert bad.outcome.reason.code is expected_code
+
+    current = closed_state
+    steps: list[native.NativeStep] = []
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        nonlocal current
+        if request.url.path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "location": current.location.model_dump(mode="json"),
+                    "presentation": None,
+                    "control_intent": "running",
+                    "input_readiness": current.input_readiness.value,
+                    "receipt": None,
+                },
+            )
+        if request.url.path == "/state":
+            return httpx.Response(
+                200,
+                content=native.StateCompleted(
+                    status=native.ResultStatus.COMPLETED, observation=current
+                ).to_json(),
+            )
+        assert request.url.path == "/action"
+        submitted = native.StepRequest.model_validate_json(request.content)
+        steps.append(submitted.step)
+        assert isinstance(current.state, native.RunState)
+        match submitted.step:
+            case native.Interact(action="open-a"):
+                current = current.model_copy(
+                    update={
+                        "input_readiness": native.InputReadiness.SELECTION,
+                        "state": current.state.model_copy(
+                            update={
+                                "selection": native.Selection(
+                                    prompt="Choose A",
+                                    source=None,
+                                    min=0,
+                                    max=1,
+                                    candidates=("a-old",),
+                                    selected=(),
+                                    offer_ref="offer:a",
+                                )
+                            }
+                        ),
+                    }
+                )
+                boundary = "selection"
+            case native.RerollCardReward() if (
+                current.state.selection is not None
+                and current.state.selection.offer_ref == "offer:a"
+            ):
+                refreshed_a = offer_a.model_copy(
+                    update={"contents": ("a-new",), "can_reroll": MISSING}
+                )
+                current = current.model_copy(
+                    update={
+                        "input_readiness": native.InputReadiness.SELECTION,
+                        "state": current.state.model_copy(
+                            update={
+                                "offers": (refreshed_a, offer_b, offer_c),
+                                "selection": native.Selection(
+                                    prompt="Choose A",
+                                    source=None,
+                                    min=0,
+                                    max=1,
+                                    candidates=("a-new",),
+                                    selected=(),
+                                    offer_ref="offer:a",
+                                ),
+                            }
+                        ),
+                    }
+                )
+                boundary = "selection"
+            case native.Select(refs=("a-new",)):
+                current = current.model_copy(
+                    update={
+                        "input_readiness": native.InputReadiness.READY,
+                        "state": current.state.model_copy(
+                            update={
+                                "offers": (offer_b, offer_c),
+                                "actions": tuple(
+                                    a for a in current.state.actions if a.ref != "open-a"
+                                ),
+                                "selection": None,
+                            }
+                        ),
+                    }
+                )
+                boundary = "ready"
+            case native.Interact(action="open-b"):
+                current = current.model_copy(
+                    update={
+                        "input_readiness": native.InputReadiness.SELECTION,
+                        "state": current.state.model_copy(
+                            update={
+                                "selection": native.Selection(
+                                    prompt="Choose B",
+                                    source=None,
+                                    min=0,
+                                    max=1,
+                                    candidates=("b-old",),
+                                    selected=(),
+                                    offer_ref="offer:b",
+                                )
+                            }
+                        ),
+                    }
+                )
+                boundary = "selection"
+            case native.RerollCardReward() if (
+                current.state.selection is not None
+                and current.state.selection.offer_ref == "offer:b"
+            ):
+                refreshed_b = offer_b.model_copy(
+                    update={"contents": ("b-new",), "can_reroll": MISSING}
+                )
+                current = current.model_copy(
+                    update={
+                        "input_readiness": native.InputReadiness.SELECTION,
+                        "state": current.state.model_copy(
+                            update={
+                                "offers": (refreshed_b, offer_c),
+                                "selection": native.Selection(
+                                    prompt="Choose B",
+                                    source=None,
+                                    min=0,
+                                    max=1,
+                                    candidates=("b-new",),
+                                    selected=(),
+                                    offer_ref="offer:b",
+                                ),
+                            }
+                        ),
+                    }
+                )
+                boundary = "selection"
+            case native.Select(refs=()):
+                current = current.model_copy(
+                    update={
+                        "input_readiness": native.InputReadiness.READY,
+                        "state": current.state.model_copy(
+                            update={
+                                "offers": (offer_c,),
+                                "actions": tuple(
+                                    a for a in current.state.actions if a.ref != "open-b"
+                                ),
+                                "selection": None,
+                            }
+                        ),
+                    }
+                )
+                boundary = "ready"
+            case native.Interact(action="open-c"):
+                current = current.model_copy(
+                    update={
+                        "input_readiness": native.InputReadiness.SELECTION,
+                        "state": current.state.model_copy(
+                            update={
+                                "selection": native.Selection(
+                                    prompt="Choose C",
+                                    source=None,
+                                    min=0,
+                                    max=1,
+                                    candidates=("c-only",),
+                                    selected=(),
+                                    offer_ref="offer:c",
+                                )
+                            }
+                        ),
+                    }
+                )
+                boundary = "selection"
+            case native.Select(refs=("c-only",)):
+                current = terminal(current)
+                boundary = "terminal"
+            case _:
+                raise AssertionError(submitted.step)
+        return httpx.Response(
+            200,
+            json={
+                "operation_id": submitted.operation_id,
+                "status": "completed",
+                "boundary": boundary,
+            },
+        )
+
+    replies = iter(
+        [
+            reply(
+                (
+                    "call-1",
+                    ToolName.RUN_DECK_CHOICE,
+                    json.dumps(
+                        {
+                            "choices": [
+                                {"offer": "offer:a", "choice": "reroll", "reason": "Reroll A."}
+                            ]
+                        }
+                    ),
+                )
+            ),
+            reply(
+                (
+                    "call-2",
+                    ToolName.RUN_DECK_CHOICE,
+                    json.dumps(
+                        {
+                            "choices": [
+                                {
+                                    "offer": "offer:a",
+                                    "choice": "take",
+                                    "card": "a-new",
+                                    "reason": "Take A new.",
+                                },
+                                {"offer": "offer:b", "choice": "reroll", "reason": "Reroll B."},
+                            ]
+                        }
+                    ),
+                )
+            ),
+            reply(
+                (
+                    "call-3",
+                    ToolName.RUN_DECK_CHOICE,
+                    json.dumps(
+                        {
+                            "choices": [
+                                {"offer": "offer:b", "choice": "skip", "reason": "Skip B."},
+                                {
+                                    "offer": "offer:c",
+                                    "choice": "take",
+                                    "card": "c-only",
+                                    "reason": "Take C.",
+                                },
+                            ]
+                        }
+                    ),
+                )
+            ),
+        ]
+    )
+
+    def model(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=next(replies), headers={"Content-Type": "text/event-stream"}
+        )
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="driftwood-multi",
+                minimal=True,
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+        ) as session:
+            result = await session.run()
+            assert result.reason is RunEndReason.TERMINAL
+        with closing(Journal.open(tmp_path / "archive.sqlite")) as archive:
+            choices = archive.card_choices()
+            assert [(item.offer_ref, item.choice) for item in choices] == [
+                ("offer:a", CardChoiceKind.REROLL),
+                ("offer:a", CardChoiceKind.TAKE),
+                ("offer:b", CardChoiceKind.REROLL),
+                ("offer:b", CardChoiceKind.SKIP),
+                ("offer:c", CardChoiceKind.TAKE),
+            ]
+
+    asyncio.run(scenario())
+    assert steps == [
+        native.Interact(kind=native.StepKind.INTERACT, action="open-a"),
+        native.RerollCardReward(kind=native.StepKind.REROLL_CARD_REWARD),
+        native.Select(kind=native.StepKind.SELECT, refs=("a-new",)),
+        native.Interact(kind=native.StepKind.INTERACT, action="open-b"),
+        native.RerollCardReward(kind=native.StepKind.REROLL_CARD_REWARD),
+        native.Select(kind=native.StepKind.SELECT, refs=()),
+        native.Interact(kind=native.StepKind.INTERACT, action="open-c"),
+        native.Select(kind=native.StepKind.SELECT, refs=("c-only",)),
+    ]

@@ -248,47 +248,30 @@ def validate_deck_choice(
         return _deck_rejected(
             ReasonCode.REFERENCE_EXPIRED, "Review the updated card reward groups.", current
         )
-    if any(isinstance(item, RerollCard) for item in query.choices):
-        if selection is not None or len(query.choices) != 1:
+    reroll_count = sum(isinstance(item, RerollCard) for item in query.choices)
+    has_trailing_reroll = reroll_count > 0
+    if has_trailing_reroll:
+        if (
+            selection is not None
+            or reroll_count != 1
+            or not isinstance(query.choices[-1], RerollCard)
+        ):
             return _deck_rejected(
                 ReasonCode.INVALID_ARGUMENTS,
-                "Submit a single reroll choice for one rerollable card reward group.",
+                "Put at most one reroll choice at the end of choices "
+                "for a rerollable card reward group.",
                 current,
             )
-        reroll_item = query.choices[0]
-        assert isinstance(reroll_item, RerollCard)
-        if reroll_item.offer is MISSING or reroll_item.offer not in offers:
+        chosen_offers = [item.offer for item in query.choices]
+        if any(
+            item_offer is MISSING or item_offer not in offers for item_offer in chosen_offers
+        ) or len(set(chosen_offers)) != len(chosen_offers):
             return _deck_rejected(
                 ReasonCode.INVALID_ARGUMENTS,
-                "Specify a current card reward offer to reroll.",
+                "Specify distinct current card reward offers when rerolling.",
                 current,
             )
-        if state.selection is not None and (active is None or reroll_item.offer != active.ref):
-            return _deck_rejected(
-                ReasonCode.PENDING_CHOICE, "Decide the open card reward first.", current
-            )
-        offer = offers[reroll_item.offer]
-        if offer.can_reroll is not True:
-            return _deck_rejected(
-                ReasonCode.INVALID_ARGUMENTS,
-                "This card reward group cannot be rerolled.",
-                current,
-            )
-        if offer.requires_selection is MISSING:
-            return _deck_rejected(
-                ReasonCode.QUERY_FAILED,
-                "The Mod must publish the reward selection mode.",
-                current,
-            )
-        return (
-            CardRewardPlan(
-                choices=(CardRewardChoice(offer, (), reroll_item.reason, reroll=True),),
-                before=raw,
-                resolved=resolved,
-            ),
-            query.choices,
-        )
-    if selection is None and (
+    elif selection is None and (
         set(item.offer for item in query.choices) != set(offers)
         or len(query.choices) != len(offers)
     ):
@@ -314,13 +297,23 @@ def validate_deck_choice(
     plan: list[CardRewardChoice] = []
     for item in query.choices:
         offer = None if item.offer is MISSING else offers[item.offer]
-        chosen = item.cards if isinstance(item, TakeCard) else ()
         if offer is not None and offer.requires_selection is MISSING:
             return _deck_rejected(
                 ReasonCode.QUERY_FAILED,
                 "The Mod must publish the reward selection mode.",
                 current,
             )
+        if isinstance(item, RerollCard):
+            assert offer is not None
+            if offer.can_reroll is not True or offer.requires_selection is not True:
+                return _deck_rejected(
+                    ReasonCode.INVALID_ARGUMENTS,
+                    "This card reward group cannot be rerolled.",
+                    current,
+                )
+            plan.append(CardRewardChoice(offer, (), item.reason, reroll=True))
+            continue
+        chosen = item.cards if isinstance(item, TakeCard) else ()
         limits = selection if offer is None else state.selection if offer == active else None
         candidates = limits.candidates if limits is not None else offer.contents if offer else ()
         if (
@@ -541,15 +534,33 @@ class DeckAgent(Agent):
         result: CardRewardResult,
     ) -> None:
         offer = None if query.offer is MISSING else query.offer
-        taken = isinstance(query, TakeCard)
-        rerolled = isinstance(query, RerollCard)
-        choice_kind = (
-            CardChoiceKind.TAKE
-            if taken
-            else CardChoiceKind.REROLL
-            if rerolled
-            else CardChoiceKind.SKIP
-        )
+        match query:
+            case TakeCard():
+                choice_kind = CardChoiceKind.TAKE
+                card_ref: str | tuple[str, ...] | None = query.card
+                taken = True
+                rerolled = False
+                names = [
+                    entry.definition_id
+                    for ref in query.cards
+                    if isinstance(entry := result.before.objects.get(ref), native.CardEntry)
+                ]
+                label = ", ".join(names)
+                count = len(query.cards)
+            case RerollCard():
+                choice_kind = CardChoiceKind.REROLL
+                card_ref = None
+                taken = False
+                rerolled = True
+                label = "Reroll"
+                count = 1
+            case SkipCard():
+                choice_kind = CardChoiceKind.SKIP
+                card_ref = None
+                taken = False
+                rerolled = False
+                label = "Skip"
+                count = 1
         if self._completion is not None:
             self._completion(
                 CardChoiceCompletion(
@@ -558,7 +569,7 @@ class DeckAgent(Agent):
                     batch_index=index,
                     offer_ref=offer,
                     choice=choice_kind,
-                    card_ref=query.card if isinstance(query, TakeCard) else None,
+                    card_ref=card_ref,
                     before=result.before,
                     after=result.after,
                     outcome=ReadCompleted() if result.local_decline else result.outcome,
@@ -571,15 +582,8 @@ class DeckAgent(Agent):
             self._tools.deck_stats.record_choice(
                 result.before,
                 taken=taken,
-                count=len(query.cards) if isinstance(query, TakeCard) else 1,
+                count=count,
             )
-        names: list[str] = []
-        if isinstance(query, TakeCard):
-            for ref in query.cards:
-                entry = result.before.objects.get(ref)
-                if isinstance(entry, native.CardEntry):
-                    names.append(entry.definition_id)
-        label = ", ".join(names) if taken else "Reroll" if rerolled else "Skip"
         self._resolutions.append(
             CardResolution(
                 AutomaticProgress(label=label, reason=query.reason),

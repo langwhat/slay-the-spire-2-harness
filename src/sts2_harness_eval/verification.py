@@ -7,6 +7,7 @@ from enum import StrEnum
 from pydantic import JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
+from sts2_harness.deck import card_rewards
 from sts2_harness_eval.checkpoints import (
     CardKey,
     CreatureKey,
@@ -491,10 +492,12 @@ def check_control(
                 selection.candidates
             )
         case native.RerollCardReward():
+            _, active = card_rewards(observation)
             usable = (
                 isinstance(state, native.RunState)
                 and state.selection is not None
-                and any(offer.can_reroll is True for offer in state.offers)
+                and active is not None
+                and active.can_reroll is True
             )
         case native.PlayCard(card=ref):
             card = objects.get(ref)
