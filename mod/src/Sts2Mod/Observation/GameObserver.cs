@@ -413,6 +413,10 @@ internal sealed class GameObserver(
             .Select(ObserveAlly)
             .ToImmutableArray();
         var actor = player.Creature;
+        if (player.Character is Regent || pcs.Stars > 0)
+            AddRegentStarsMacro(CreatureHolderKey(actor));
+        if (player.Character is Necrobinder)
+            AddOstyMacros(CreatureHolderKey(actor));
 
         var selectionReady = pending is not null && CardSelectionInterceptor.IsSelectionReady(pending);
         var readiness = selectionReady
@@ -816,7 +820,7 @@ internal sealed class GameObserver(
                 affRule,
                 reference));
         }
-        if (card.EnergyCost.CostsX)
+        if (card.EnergyCost.CostsX || card.HasStarCostX)
         {
             _mechanisms.Add(new MechanismView(
                 MechanismKind.Other,
@@ -825,6 +829,14 @@ internal sealed class GameObserver(
                 MacroMechanismReader.XCostRule(),
                 reference));
         }
+        if (card.BaseStarCost > 0 || card.CurrentStarCost > 0 || card.HasStarCostX || ItemMechanismReader.UsesStars(card))
+            AddRegentStarsMacro(reference);
+        if (card is MegaCrit.Sts2.Core.Models.Cards.SovereignBlade || ItemMechanismReader.UsesForge(card))
+            AddForgeMacro(reference);
+        if (ItemMechanismReader.UsesOsty(card))
+            AddOstyMacros(reference);
+        if (ItemMechanismReader.UsesSly(card))
+            AddSlyMacro(reference);
         if (ItemMechanismReader.UsesArrowShooting(card))
         {
             _mechanisms.Add(new MechanismView(
@@ -887,6 +899,12 @@ internal sealed class GameObserver(
         }
         foreach (var powerType in ItemMechanismReader.ReferencedPowers(potion))
             _pendingPowerRules.Add((reference, powerType, powerType.Name));
+        if (ItemMechanismReader.UsesStars(potion))
+            AddRegentStarsMacro(reference);
+        if (ItemMechanismReader.UsesForge(potion))
+            AddForgeMacro(reference);
+        if (ItemMechanismReader.UsesOsty(potion))
+            AddOstyMacros(reference);
     }
 
     private void AddRelic(RelicModel relic)
@@ -926,6 +944,12 @@ internal sealed class GameObserver(
         }
         foreach (var powerType in RelicMechanismReader.ReferencedPowers(relic))
             _pendingPowerRules.Add((reference, powerType, powerType.Name));
+        if (ItemMechanismReader.UsesStars(relic))
+            AddRegentStarsMacro(reference);
+        if (ItemMechanismReader.UsesForge(relic))
+            AddForgeMacro(reference);
+        if (ItemMechanismReader.UsesOsty(relic))
+            AddOstyMacros(reference);
     }
 
     private ImmutableArray<ArrowSlotView>? ObserveArrowSlots(
@@ -1072,16 +1096,52 @@ internal sealed class GameObserver(
 
         _objects.Add(reference, new AllyEntry(name, id, hp, maxHp, creature.Block, display, powers, creature.IsAlive));
         _descriptions.Add(reference, null);
-        if (creature.Monster is MegaCrit.Sts2.Core.Models.Monsters.Osty && creature.IsAlive)
-        {
-            _mechanisms.Add(new MechanismView(
-                MechanismKind.Other,
-                MacroMechanismReader.OstyRoutingId,
-                name,
-                MacroMechanismReader.OstyDamageRoutingRule(),
-                reference));
-        }
+        if (creature.Monster is MegaCrit.Sts2.Core.Models.Monsters.Osty)
+            AddOstyMacros(reference, name);
         return new AllyView(reference, name, id, hp, maxHp, creature.Block, display, powers, creature.IsAlive);
+    }
+
+    private void AddRegentStarsMacro(string owner)
+        => _mechanisms.Add(new MechanismView(
+            MechanismKind.Other,
+            MacroMechanismReader.RegentStarsRuleId,
+            "Stars",
+            MacroMechanismReader.RegentStarsRule(),
+            owner));
+
+    private void AddForgeMacro(string owner)
+        => _mechanisms.Add(new MechanismView(
+            MechanismKind.Other,
+            MacroMechanismReader.ForgeSovereignBladeRuleId,
+            "Forge",
+            MacroMechanismReader.ForgeSovereignBladeRule(),
+            owner));
+
+    private void AddSlyMacro(string owner)
+        => _mechanisms.Add(new MechanismView(
+            MechanismKind.Other,
+            MacroMechanismReader.SlyRuleId,
+            "Sly",
+            MacroMechanismReader.SlyRule(),
+            owner));
+
+    private void AddOstyMacros(string owner, string? ostyName = null)
+    {
+        var label = ostyName
+            ?? ModelDb.GetByIdOrNull<MonsterModel>(ModelDb.GetId(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty)))?.Title.GetFormattedText()
+            ?? "Osty";
+        _mechanisms.Add(new MechanismView(
+            MechanismKind.Other,
+            MacroMechanismReader.OstyRoutingId,
+            label,
+            MacroMechanismReader.OstyDamageRoutingRule(),
+            owner));
+        _mechanisms.Add(new MechanismView(
+            MechanismKind.Other,
+            MacroMechanismReader.OstySummonId,
+            label,
+            MacroMechanismReader.OstySummonRule(),
+            owner));
     }
 
     private ImmutableArray<PublicIntent> ObserveIntents(Creature creature)
@@ -1145,6 +1205,10 @@ internal sealed class GameObserver(
                 var title = power.Title.GetFormattedText();
                 _pendingPowerRules.Add((holderKey, power.GetType(), title));
                 AddHoverTipMaterial(holderKey, title, power.Id.ToString(), power.HoverTips);
+                if (ItemMechanismReader.UsesStars(power))
+                    AddRegentStarsMacro(holderKey);
+                if (ItemMechanismReader.UsesForge(power))
+                    AddForgeMacro(holderKey);
                 return new PublicPower(
                     title,
                     power.Id.ToString(),

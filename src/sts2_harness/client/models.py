@@ -572,6 +572,7 @@ class CardEntry(WireModel):
     kind: Literal[ObjectKind.CARD]
     local_keywords: tuple[Nonempty, ...] | MISSING = MISSING
     cost_without_global_effects: ResourceCosts | MISSING = MISSING
+    is_sly_this_turn: bool | None | MISSING = MISSING
     playable: bool | None | MISSING = MISSING
     previews: tuple[TargetPreview, ...] | MISSING = MISSING
 
@@ -600,6 +601,7 @@ class CardDefinitionPreview(WireModel):
     text: str | None
     local_keywords: tuple[Nonempty, ...] | MISSING = MISSING
     cost_without_global_effects: ResourceCosts | MISSING = MISSING
+    is_sly_this_turn: bool | None | MISSING = MISSING
 
 
 class RelicEntry(WireModel):

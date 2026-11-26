@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from pydantic import MISSING, JsonValue, TypeAdapter
 
-from sts2_harness.card_projection import card_rules, upgrade_changes
+from sts2_harness.card_projection import DEFAULT_FALSE_CARD_FLAGS, card_rules, upgrade_changes
 from sts2_harness.client import models as native
 from sts2_harness.context.map_projection import (
     MapUnavailable,
@@ -272,9 +272,7 @@ class RunDelivery:
             for field_name in (
                 "local_keywords",
                 "cost_without_global_effects",
-                "should_retain_this_turn",
-                "exhaust_on_next_play",
-                "has_turn_end_in_hand_effect",
+                *DEFAULT_FALSE_CARD_FLAGS,
                 "enchantment",
                 "affliction",
             ):

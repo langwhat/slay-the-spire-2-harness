@@ -97,7 +97,7 @@ internal sealed partial class NativeRuleText
             || body.FieldSteps.Any(step => step.Assignment.Target.Member.DeclaringType?.IsDefined(typeof(CompilerGeneratedAttribute), false) != true))
             return null;
         var chainedAttackCalls = new HashSet<Call>(ReferenceEqualityComparer.Instance);
-        var seenAttackRoots = new HashSet<Call>(ReferenceEqualityComparer.Instance);
+        var seenAttackRoots = new Dictionary<Call, (int Epoch, int Index)>(ReferenceEqualityComparer.Instance);
         foreach (var step in body.Calls)
         {
             if (step.Call.Method.DeclaringType?.Name == "AttackCommand" && step.Call.Method.Name == "Execute")
@@ -108,9 +108,14 @@ internal sealed partial class NativeRuleText
                     chainedAttackCalls.Add(cur);
                     root = cur;
                 }
-                // AttackCommand is mutable; fail closed if the same DamageCmd.Attack instance is executed more than once.
-                if (root is not null && !seenAttackRoots.Add(root))
-                    return null;
+                // AttackCommand is mutable; fail closed if two distinct Execute instructions reuse the same DamageCmd.Attack instance.
+                if (root is not null)
+                {
+                    var loc = (step.Epoch, step.Index);
+                    if (seenAttackRoots.TryGetValue(root, out var prevLoc) && prevLoc != loc)
+                        return null;
+                    seenAttackRoots[root] = loc;
+                }
             }
         }
         var effects = new List<string>();
@@ -120,29 +125,42 @@ internal sealed partial class NativeRuleText
             var active = group.Where(s => s.Conditions.All(IsCurrentRun)).ToArray();
             if (active.Length == 0)
                 continue;
-            if (active.Length > 1 && active.Select(s => Key(s.Call)).Distinct(StringComparer.Ordinal).Count() > 1)
-                return null;
 
             var call = active[0].Call;
             var declaring = call.Method.DeclaringType;
             var name = call.Method.Name;
-            if (IsPresentationCall(call.Method)
-                || declaring?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
-                || (declaring == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty) && name == "CheckMissingWithAnim")
-                || ((declaring == typeof(DamageCmd) || (declaring?.Name == "AttackCommand" && name is not "Execute"))
-                    && (chainedAttackCalls.Contains(call)
-                        || name is "WithHitFx" or "WithAttackerFx" or "WithAttackerAnim" or "WithNoAttackerAnim"
-                            or "WithWaitBeforeHit" or "WithHitVfxNode" or "WithHitVfxSpawnedAtBase"
-                            or "SpawningHitVfxOnEachCreature" or "OnlyPlayAnimOnce"))
-                || (declaring == typeof(decimal) && name == "op_Implicit")
-                || name is "get_Owner" or "get_Creature" or "get_Osty" or "get_DynamicVars" or "get_Damage"
-                    or "get_OstyDamage" or "get_HpLoss" or "get_Cards" or "get_Energy" or "get_BaseValue"
-                    or "get_IntValue" or "get_EnergyCost"
-                    or "get_CombatState" or "get_Enemies" or "get_Powers" or "OfType" or "FirstOrDefault"
-                || call.Method is ConstructorInfo)
+            if (active.All(s => s.Call.Method == call.Method)
+                && (IsPresentationCall(call.Method)
+                    || declaring?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
+                    || (declaring == typeof(ArgumentNullException) && name == nameof(ArgumentNullException.ThrowIfNull))
+                    || (declaring == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty) && name == "CheckMissingWithAnim")
+                    || ((declaring == typeof(DamageCmd) || (declaring?.Name == "AttackCommand" && name is not "Execute"))
+                        && (active.All(s => chainedAttackCalls.Contains(s.Call))
+                            || name is "WithHitFx" or "WithAttackerFx" or "WithAttackerAnim" or "WithNoAttackerAnim"
+                                or "WithWaitBeforeHit" or "WithHitVfxNode" or "WithHitVfxSpawnedAtBase"
+                                or "SpawningHitVfxOnEachCreature" or "OnlyPlayAnimOnce"))
+                    || (declaring == typeof(decimal) && name == "op_Implicit")
+                    || name is "get_Owner" or "get_Creature" or "get_Osty" or "get_DynamicVars" or "get_Damage"
+                        or "get_OstyDamage" or "get_HpLoss" or "get_Cards" or "get_Energy" or "get_BaseValue"
+                        or "get_IntValue" or "get_EnergyCost" or "get_Character" or "get_Target"
+                        or "get_CombatState" or "get_Enemies" or "get_HittableEnemies" or "get_Powers"
+                        or "OfType" or "FirstOrDefault" or "LastOrDefault"
+                    || call.Method is ConstructorInfo))
                 continue;
-            if (declaring == card.GetType() && call.Method is MethodInfo cardHelper && IsPureCardLookupHelper(cardHelper))
+            if (active.All(s => s.Call.Method == call.Method)
+                && declaring == card.GetType() && call.Method is MethodInfo cardHelper
+                && (IsPureCardLookupHelper(cardHelper) || CardOwnerPowerCheck(card.GetType(), call) is not null))
                 continue;
+
+            if (active.Length > 1 && active.Select(s => Key(s.Call)).Distinct(StringComparer.Ordinal).Count() > 1)
+            {
+                if (DescribeConditionalAoeCardAttack(card, active) is { } aoeDesc)
+                {
+                    effects.Add(aoeDesc);
+                    continue;
+                }
+                return null;
+            }
 
             var reaching = active.Select(s => s.Conditions).ToArray();
             var missing = body.Terminals.Where(t => !t.Visited.Contains(group.Key)).Select(t => t.Conditions);
@@ -275,6 +293,8 @@ internal sealed partial class NativeRuleText
                 targetText ??= "a random enemy";
             else if (name == "TargetingAllOpponents")
                 targetText ??= "all enemies";
+            else if (name == "Targeting" && c.Arguments is [Call { Method.Name: "get_Target" }])
+                targetText ??= "target enemy";
             else if (name is not ("FromCard" or "FromCardUnpowered" or "FromPlayer" or "FromMonster"
                 or "WithHitFx" or "WithAttackerFx" or "WithAttackerAnim" or "WithNoAttackerAnim"
                 or "WithWaitBeforeHit" or "WithHitVfxNode" or "WithHitVfxSpawnedAtBase"
@@ -304,6 +324,69 @@ internal sealed partial class NativeRuleText
                 ? $"if {ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive: deal "
                 : "deal ";
         return $"{attackerPrefix}{dmgText}{DamageFlags(props)} damage to {targetText}";
+    }
+
+    private string? DescribeConditionalAoeCardAttack(CardModel card, Step[] active)
+    {
+        if (!active.All(s => s.Call.Method.DeclaringType?.Name == "AttackCommand"
+                && s.Call.Method.Name == "Execute" && s.Call.Receiver is Call))
+            return null;
+
+        var byPower = new List<(string Desc, Type Power, bool Expected)>();
+        foreach (var step in active)
+        {
+            if (DescribeCardAttackCommand(card, (Call)step.Call.Receiver!, requiresOsty: false) is not { } desc)
+                return null;
+            Type? gatePower = null;
+            bool? gateExpected = null;
+            foreach (var cond in step.Conditions)
+            {
+                if (IsDreadTest(cond) || Condition(cond) == "")
+                    continue;
+                // Ignore pure presentation character checks such as `Owner.Character is Silent`.
+                if (cond.Value is Operation { Operator: "isinst", Left: Call { Method.Name: "get_Character" } }
+                    || cond.Value is Operation { Operator: "cgt.un", Left: Operation { Operator: "isinst", Left: Call { Method.Name: "get_Character" } } })
+                    continue;
+                if (CardOwnerPowerCheck(card.GetType(), cond.Value) is { } pt)
+                {
+                    if (gatePower is not null && (gatePower != pt || gateExpected != cond.Expected))
+                        return null;
+                    gatePower = pt;
+                    gateExpected = cond.Expected;
+                    continue;
+                }
+                return null;
+            }
+            if (gatePower is null || gateExpected is null)
+                return null;
+            if (!byPower.Any(x => x.Desc == desc && x.Power == gatePower && x.Expected == gateExpected.Value))
+                byPower.Add((desc, gatePower, gateExpected.Value));
+        }
+
+        if (byPower.Count != 2 || byPower[0].Power != byPower[1].Power || byPower[0].Expected == byPower[1].Expected)
+            return null;
+        var withPower = byPower.First(x => x.Expected);
+        var withoutPower = byPower.First(x => !x.Expected);
+        return $"{withoutPower.Desc} (or if owner has {PowerLabel(withPower.Power)}: {withPower.Desc})";
+    }
+
+    private Type? CardOwnerPowerCheck(Type cardType, Value value)
+    {
+        if (value is Call { Method: MethodInfo getter, Receiver: Input { Name: "this" }, Arguments.Length: 0 }
+            && getter.DeclaringType == cardType && getter.ReturnType == typeof(bool) && !getter.ContainsGenericParameters)
+        {
+            var body = Body(getter);
+            if (!body.Incomplete)
+            {
+                var nonFalse = body.Returns.Where(r => !(TryTruth(r.Value, out var b) && !b)).ToArray();
+                if (nonFalse is [{ Value: var ret }])
+                    return CardOwnerPowerCheck(cardType, ret);
+            }
+        }
+        if (value is Call { Method: { Name: "HasPower", IsGenericMethod: true } hp, Receiver: { } rec }
+            && hp.DeclaringType == typeof(Creature) && IsCardOwnerCreature(rec))
+            return hp.GetGenericArguments()[0];
+        return null;
     }
 
     private decimal? CardNumeric(CardModel card, Value value) => value switch

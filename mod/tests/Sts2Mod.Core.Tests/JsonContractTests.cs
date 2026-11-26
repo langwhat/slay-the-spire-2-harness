@@ -132,4 +132,28 @@ public sealed class JsonContractTests
         var values = present.RootElement.GetProperty("melodies").EnumerateArray().Select(e => e.GetString()).ToArray();
         Assert.Equal(new[] { "wah", "cho", "ki" }, values);
     }
+
+    [Fact]
+    public void CardEntry_SerializesIsSlyThisTurnAndOmitsWhenNull()
+    {
+        var cost = new ResourceCosts(new ResourceCost(ResourceCostKind.Number, 1), new ResourceCost(ResourceCostKind.None));
+        var baseCard = new CardEntry(
+            "CARD.STRIKE_SILENT", "Strike", 0, "attack", "POOL.SILENT", "basic",
+            true, true, [], false, false, false, null, null, cost);
+
+        using var omitted = JsonDocument.Parse(JsonContract.Serialize(baseCard));
+        Assert.False(omitted.RootElement.TryGetProperty("is_sly_this_turn", out _));
+
+        var slyFalse = baseCard with { IsSlyThisTurn = false };
+        using var falseDoc = JsonDocument.Parse(JsonContract.Serialize(slyFalse));
+        Assert.False(falseDoc.RootElement.GetProperty("is_sly_this_turn").GetBoolean());
+
+        var slyTrue = baseCard with { IsSlyThisTurn = true };
+        using var trueDoc = JsonDocument.Parse(JsonContract.Serialize(slyTrue));
+        Assert.True(trueDoc.RootElement.GetProperty("is_sly_this_turn").GetBoolean());
+
+        var preview = new CardDefinitionPreview(slyTrue, "Deal 6 damage.");
+        using var previewDoc = JsonDocument.Parse(JsonContract.Serialize(preview));
+        Assert.True(previewDoc.RootElement.GetProperty("is_sly_this_turn").GetBoolean());
+    }
 }

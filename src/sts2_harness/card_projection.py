@@ -1,10 +1,19 @@
 """Shared card facts and next-upgrade changes for state and knowledge views."""
 
+from typing import Final
+
 from pydantic import JsonValue, TypeAdapter
 
 from sts2_harness.client import models as native
 
 _JSON_OBJECT = TypeAdapter(dict[str, JsonValue])
+
+DEFAULT_FALSE_CARD_FLAGS: Final[tuple[str, ...]] = (
+    "should_retain_this_turn",
+    "exhaust_on_next_play",
+    "has_turn_end_in_hand_effect",
+    "is_sly_this_turn",
+)
 
 
 def card_rules(

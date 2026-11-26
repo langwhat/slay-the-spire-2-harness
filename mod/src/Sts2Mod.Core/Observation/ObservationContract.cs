@@ -454,6 +454,7 @@ public abstract record CardFacts(
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<string>? LocalKeywords { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ResourceCosts? CostWithoutGlobalEffects { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? IsSlyThisTurn { get; init; }
 }
 
 public sealed record CardEntry : CardFacts
@@ -520,6 +521,7 @@ public sealed record CardDefinitionPreview : CardFacts
         Text = text;
         LocalKeywords = facts.LocalKeywords;
         CostWithoutGlobalEffects = facts.CostWithoutGlobalEffects;
+        IsSlyThisTurn = facts.IsSlyThisTurn;
     }
 
     public string? Text { get; }

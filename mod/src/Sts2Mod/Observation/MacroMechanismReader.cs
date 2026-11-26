@@ -14,7 +14,11 @@ internal static class MacroMechanismReader
     public const string ActDoubleBossId = "MACRO.ACT_DOUBLE_BOSS";
     public const string XCostRuleId = "MACRO.X_COST";
     public const string OstyRoutingId = "MACRO.OSTY_DAMAGE_ROUTING";
+    public const string OstySummonId = "MACRO.OSTY_SUMMON";
     public const string OrbQueueRuleId = "MACRO.ORB_QUEUE";
+    public const string RegentStarsRuleId = "MACRO.REGENT_STARS";
+    public const string ForgeSovereignBladeRuleId = "MACRO.FORGE_SOVEREIGN_BLADE";
+    public const string SlyRuleId = "MACRO.SLY";
     public const string FoolArrowsRuleId = "MACRO.FOOL_ARROWS";
     public const string FoolMelodiesRuleId = "MACRO.FOOL_MELODIES";
 
@@ -101,13 +105,36 @@ internal static class MacroMechanismReader
     }
 
     public static string XCostRule()
-        => "X-cost cards spend all current Energy on manual play (base X = Energy spent, 0 at 0 Energy); replays reuse the original captured X; auto-plays spend 0 Energy and capture current Energy as base X unless the triggering effect preserves X; X-value modifiers still adjust the resolved X effect.";
+        => "X-cost cards spend all current Energy (for Energy X-cost) or all current Stars (for Star X-cost) on manual play (base X = amount spent, 0 at 0); replays reuse the original captured X; auto-plays spend 0 Energy/Stars and capture current Energy/Stars as base X unless the triggering effect preserves X; X-value modifiers adjust the resolved X for both Energy and Star X-cost cards.";
 
     public static string OstyDamageRoutingRule()
         => $"While {NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} is alive, unblocked powered attack damage targeting the player (after the player's Block is applied) is redirected to {NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty))} first (excess damage overflows to the player); post-Osty HP-loss effects apply after redirection.";
 
+    public static string OstySummonRule()
+    {
+        var osty = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty));
+        var dieForYou = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.DieForYouPower));
+        return $"Summon {osty}: if {osty} is missing or dead, Summon N creates or revives {osty} with N HP and N Max HP and applies {dieForYou} (reviving a dead {osty} also triggers {osty} revival effects); if {osty} is already alive, Summon N increases its Max HP and heals it by N. While {osty} is missing or dead, most {osty}-attack and {osty}-gated cards still report playable=true and non-zero native damage previews and still spend Energy if played, but deal no {osty} attack damage.";
+    }
+
     public static string OrbQueueRule()
-        => "Orb queue: channeling into a full queue automatically evokes the front (oldest) orb first; Focus modifies only Focus-scaled orb values (not Plasma).";
+    {
+        var focus = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Powers.FocusPower));
+        var plasma = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Orbs.PlasmaOrb));
+        return $"Orb queue: slots are ordered front-to-back (slots[0] is front / oldest / next-to-evoke; slots[-1] is back / newest / last). Channeling into a full queue automatically evokes slots[0] first; {focus} modifies only {focus}-scaled orb values (not {plasma}).";
+    }
+
+    public static string RegentStarsRule()
+        => "Stars: combat resource starting at 0 each combat (unless granted by relics or effects) that persists across turns without resetting at turn end; spent on Star-cost cards and Star-consuming effects.";
+
+    public static string ForgeSovereignBladeRule()
+    {
+        var blade = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Cards.SovereignBlade));
+        return $"Forge: if the player has no non-dupe {blade} outside the exhaust pile, creates 1 {blade} (base 10 damage, Retain) in hand (overflows to discard if hand is full); then increases the base damage of every non-dupe {blade} across all combat piles (including the newly created copy and exhausted copies) by the Forge amount and triggers on-Forge effects.";
+    }
+
+    public static string SlyRule()
+        => "Sly: is_sly_this_turn=true marks any card with Sly active this turn (either permanently via the Sly keyword or temporarily via single-turn Sly, which does not add sly to keywords and expires at end of turn). When such a card is discarded from hand by a card/effect during your turn, it moves to the discard pile (and any accompanying draw from that discard-and-draw effect finishes) and then auto-plays for free (random legal target if targeted; blocked by Unplayable or play-prevention effects). End-of-turn hand flush does not trigger Sly.";
 
     public static string FoolArrowsRule()
     {

@@ -200,6 +200,14 @@ internal sealed partial class NativeRuleText
         return null;
     }
 
+    private string? RelicIntSlot(Field field)
+        => field.Member.FieldType == typeof(int)
+            && field.Receiver is Input { Name: "this" }
+            && typeof(RelicModel).IsAssignableFrom(field.Member.DeclaringType)
+            && IsGameplayField(field.Member)
+            ? HumanizeLower(field.Member.Name.TrimStart('_'))
+            : null;
+
     private static string UpperFirst(string name)
         => name.Length == 0 ? name : char.ToUpperInvariant(name[0]) + name[1..];
 
@@ -228,11 +236,13 @@ internal sealed partial class NativeRuleText
                 _ => null,
             };
         }
+        if (RelicIntSlot(assignment.Target) is { } intSlotName && ValueText(assignment.Assigned) is { } intSlotVal)
+            return new Effect($"{intSlotName} = {intSlotVal}", ChangesGuard: true);
         return null;
     }
 
     private bool IsTrackedSlot(Field field)
-        => CardSlot(field) is not null || PowerBoolSlot(field) is not null;
+        => CardSlot(field) is not null || PowerBoolSlot(field) is not null || RelicIntSlot(field) is not null;
 
     private static bool IsUnchangedAssignment(EffectStep step)
         => step.Action is Assignment { Assigned: Input { Name: "cardSource" } source } assignment

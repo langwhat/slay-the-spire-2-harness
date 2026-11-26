@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
 using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Commands.Builders;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rooms;
@@ -23,7 +24,81 @@ internal static class ItemMechanismReader
     private static readonly ConcurrentDictionary<Type, Type[]> PotionPowerCache = new();
     private static readonly ConcurrentDictionary<Type, bool> CardArrowShootCache = new();
     private static readonly ConcurrentDictionary<Type, bool> CardMelodyCache = new();
+    private static readonly ConcurrentDictionary<Type, bool> ModelStarsCache = new();
+    private static readonly ConcurrentDictionary<Type, bool> ModelForgeCache = new();
+    private static readonly ConcurrentDictionary<Type, bool> ModelOstyCache = new();
+    private static readonly ConcurrentDictionary<Type, bool> CardSlyGrantCache = new();
     private static readonly ConcurrentDictionary<string, byte> LoggedGaps = new(StringComparer.Ordinal);
+
+    private static bool ScanModelTypeCalls(Type modelType, ConcurrentDictionary<Type, bool> cache, Func<MethodBase, bool> predicate)
+    {
+        if (cache.TryGetValue(modelType, out var cached))
+            return cached;
+
+        var found = false;
+        try
+        {
+            var scanTypes = modelType.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic).Prepend(modelType);
+            foreach (var scanType in scanTypes)
+            {
+                foreach (var method in scanType.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                {
+                    if (method.IsAbstract || method.ContainsGenericParameters || method.GetMethodBody() is null)
+                        continue;
+                    foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(method))
+                    {
+                        if (inst.operand is MethodBase called && predicate(called))
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found)
+                        break;
+                }
+                if (found)
+                    break;
+            }
+        }
+        catch
+        {
+            found = false;
+        }
+
+        cache[modelType] = found;
+        return found;
+    }
+
+    public static bool UsesStars(AbstractModel model) =>
+        ScanModelTypeCalls(
+            model.GetType(),
+            ModelStarsCache,
+            called => called.DeclaringType == typeof(PlayerCmd)
+                && called.Name is nameof(PlayerCmd.GainStars) or nameof(PlayerCmd.LoseStars));
+
+    public static bool UsesForge(AbstractModel model) =>
+        ScanModelTypeCalls(
+            model.GetType(),
+            ModelForgeCache,
+            called => called.DeclaringType == typeof(ForgeCmd) && called.Name == nameof(ForgeCmd.Forge));
+
+    public static bool UsesOsty(AbstractModel model) =>
+        ScanModelTypeCalls(
+            model.GetType(),
+            ModelOstyCache,
+            called => (called.DeclaringType == typeof(OstyCmd) && called.Name == nameof(OstyCmd.Summon))
+                || (called.DeclaringType == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty)
+                    && called.Name == nameof(MegaCrit.Sts2.Core.Models.Monsters.Osty.CheckMissingWithAnim))
+                || (called.DeclaringType == typeof(AttackCommand) && called.Name == nameof(AttackCommand.FromOsty)));
+
+    public static bool UsesSly(CardModel card) =>
+        card.IsSlyThisTurn
+        || card.Keywords.Contains(CardKeyword.Sly)
+        || ScanModelTypeCalls(
+            card.GetType(),
+            CardSlyGrantCache,
+            called => (called.DeclaringType == typeof(CardCmd) && called.Name == nameof(CardCmd.ApplySingleTurnSly))
+                || (called.DeclaringType == typeof(CardModel) && called.Name == nameof(CardModel.GiveSingleTurnSly)));
 
     public static bool UsesArrowShooting(CardModel card)
     {
@@ -59,48 +134,12 @@ internal static class ItemMechanismReader
         return uses;
     }
 
-    public static bool UsesMelodies(CardModel card)
-    {
-        if (card.Tags.Any(t => t is CardTag.Wah or CardTag.Cho or CardTag.Ki))
-            return true;
-
-        var cardType = card.GetType();
-        if (CardMelodyCache.TryGetValue(cardType, out var cached))
-            return cached;
-
-        var uses = false;
-        try
-        {
-            var scanTypes = cardType.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic).Prepend(cardType);
-            foreach (var scanType in scanTypes)
-            {
-                foreach (var method in scanType.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-                {
-                    if (method.IsAbstract || method.ContainsGenericParameters)
-                        continue;
-                    foreach (var inst in HarmonyLib.PatchProcessor.GetOriginalInstructions(method))
-                    {
-                        if (inst.operand is MethodBase called && called.DeclaringType == typeof(MelodyCmd))
-                        {
-                            uses = true;
-                            break;
-                        }
-                    }
-                    if (uses)
-                        break;
-                }
-                if (uses)
-                    break;
-            }
-        }
-        catch
-        {
-            uses = false;
-        }
-
-        CardMelodyCache[cardType] = uses;
-        return uses;
-    }
+    public static bool UsesMelodies(CardModel card) =>
+        card.Tags.Any(t => t is CardTag.Wah or CardTag.Cho or CardTag.Ki)
+        || ScanModelTypeCalls(
+            card.GetType(),
+            CardMelodyCache,
+            called => called.DeclaringType == typeof(MelodyCmd));
 
     public static Type[] ReferencedPowers(CardModel card)
         => ReferencedPowersFromMethod(card.GetType(), "OnPlay", CardPowerCache);
@@ -245,10 +284,19 @@ internal static class ItemMechanismReader
 
                 if (DescribeCardArrowRules(body) is { } arrowRule)
                     notes.Add(arrowRule);
+
+                if (DescribeCardOstyRules(cardType, body, out var ostyGap) is { } ostyRule)
+                    notes.Add(ostyRule);
+                else if (ostyGap is not null)
+                    gap = ostyGap;
             }
             else if (DescribeCardArrowLoopRules(onPlay, out gap) is { } arrowLoopRule)
             {
                 notes.Add(arrowLoopRule);
+            }
+            else if (gap is null && CallsOstyMissingOrAttack(cardType))
+            {
+                gap = "incomplete OnPlay body with Osty check or attack";
             }
         }
 
@@ -1069,6 +1117,133 @@ internal static class ItemMechanismReader
         if (hasPlayerArrowsCheck)
             return "Checks for at least 1 retrieved arrow (away/impaled arrows do not count).";
 
+        return null;
+    }
+
+    private static bool IsOstyFollowUpCall(MethodBase method) =>
+        IsGameplayFollowUpCall(method)
+        || (method.DeclaringType == typeof(CreatureCmd) && method.Name == nameof(CreatureCmd.Kill))
+        || (method.DeclaringType == typeof(CardSelectCmd) && method.Name == nameof(CardSelectCmd.FromHand))
+        || (method.DeclaringType == typeof(CardCmd) && method.Name == nameof(CardCmd.ApplyKeyword));
+
+    private static bool TryReadIsPlayableOstyCheck(Type cardType, out bool requiresAliveOsty)
+    {
+        requiresAliveOsty = false;
+        if (cardType.GetMethod("get_IsPlayable", DeclaredInstance) is not { } isPlayable)
+            return true;
+
+        var body = NativeRuleBody.Read(isPlayable);
+        if (body.Incomplete || body.Returns.Count == 0)
+            return false;
+
+        if (body.Returns is [{ Conditions.Length: 0, Value: Operation { Operator: "ceq", Left: var lhs, Right: Constant { Data: 0 or false } } }]
+            && ContainsMethodName(lhs, "get_IsOstyMissing"))
+        {
+            requiresAliveOsty = true;
+            return true;
+        }
+
+        // Fail closed if IsPlayable has a different custom predicate.
+        return false;
+    }
+
+    private static readonly ConcurrentDictionary<Type, bool> CardOstyGateCache = new();
+
+    private static bool CallsOstyMissingOrAttack(Type cardType) =>
+        ScanModelTypeCalls(
+            cardType,
+            CardOstyGateCache,
+            called => (called.DeclaringType == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty)
+                    && called.Name == nameof(MegaCrit.Sts2.Core.Models.Monsters.Osty.CheckMissingWithAnim))
+                || (called.DeclaringType == typeof(AttackCommand) && called.Name == nameof(AttackCommand.FromOsty)));
+
+    private static string? DescribeCardOstyRules(Type cardType, NativeRuleBody body, out string? gap)
+    {
+        gap = null;
+        var checkMissingName = nameof(MegaCrit.Sts2.Core.Models.Monsters.Osty.CheckMissingWithAnim);
+        var hasCheckMissing = body.Calls.Any(s =>
+            s.Call.Method.DeclaringType == typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty)
+            && s.Call.Method.Name == checkMissingName);
+        var hasFromOsty = body.Calls.Any(s =>
+            s.Call.Method.DeclaringType == typeof(AttackCommand)
+            && s.Call.Method.Name == nameof(AttackCommand.FromOsty));
+        if (!hasCheckMissing && !hasFromOsty)
+            return null;
+
+        if (!TryReadIsPlayableOstyCheck(cardType, out var blocksWhenOstyMissing))
+        {
+            gap = "unmodeled IsPlayable predicate on Osty card";
+            return null;
+        }
+
+        var osty = NativeRuleText.ModelLabel(typeof(MegaCrit.Sts2.Core.Models.Monsters.Osty));
+        if (blocksWhenOstyMissing)
+            return $"Requires {osty} to be alive to play (unplayable while missing or dead).";
+
+        // Fail closed when FromOsty appears without an explicit CheckMissingWithAnim guard.
+        if (!hasCheckMissing)
+        {
+            gap = "FromOsty attack without CheckMissingWithAnim guard";
+            return null;
+        }
+
+        bool HasCheckMissingCond(Step step) =>
+            step.Conditions.Any(c => ContainsMethodName(c.Value, checkMissingName));
+        bool IsGatedOnOstyPresent(Step step) =>
+            step.Conditions.Any(c => !c.Expected && ContainsMethodName(c.Value, checkMissingName));
+        bool IsGatedOnOstyMissing(Step step) =>
+            step.Conditions.Any(c => c.Expected && ContainsMethodName(c.Value, checkMissingName));
+        bool IsGroupUngated(IGrouping<(int Epoch, int Index), Step> group) =>
+            group.All(s => !HasCheckMissingCond(s))
+            || (group.Any(IsGatedOnOstyPresent) && group.Any(IsGatedOnOstyMissing));
+
+        var groups = body.Calls.GroupBy(s => (s.Epoch, s.Index)).ToArray();
+        var ostyAttackGroups = groups
+            .Where(g => g.Any(s =>
+                s.Call.Method.DeclaringType == typeof(AttackCommand)
+                && s.Call.Method.Name == nameof(AttackCommand.Execute)
+                && ContainsMethodName(s.Call.Receiver, nameof(AttackCommand.FromOsty))))
+            .ToArray();
+        var followUpGroups = groups
+            .Where(g => g.Any(s => IsOstyFollowUpCall(s.Call.Method)))
+            .ToArray();
+
+        // Fail closed if any follow-up runs only when Osty is missing or an Osty attack is not gated.
+        if (ostyAttackGroups.Any(g => !g.All(IsGatedOnOstyPresent))
+            || followUpGroups.Any(g => g.All(IsGatedOnOstyMissing)))
+        {
+            gap = "unmodeled CheckMissingWithAnim gating on Osty attack or follow-up";
+            return null;
+        }
+
+        var hasGatedAttack = ostyAttackGroups.Length > 0;
+        var hasGatedFollowUp = followUpGroups.Any(g => g.All(IsGatedOnOstyPresent));
+        var hasUngatedFollowUp = followUpGroups.Any(IsGroupUngated);
+
+        if (hasGatedAttack)
+        {
+            if (hasUngatedFollowUp && !hasGatedFollowUp)
+            {
+                return $"{osty} attack requires {osty} to be alive; if {osty} is missing or dead, playing this card still spends Energy and deals no {osty} attack damage (native playable and damage previews ignore this check), though its non-attack effect still resolves.";
+            }
+            if (hasGatedFollowUp && !hasUngatedFollowUp)
+            {
+                return $"Requires {osty} to be alive; if {osty} is missing or dead, playing this card still spends Energy but deals no {osty} attack damage and skips its follow-up effects (native playable and damage previews ignore this check).";
+            }
+            if (!hasGatedFollowUp && !hasUngatedFollowUp)
+            {
+                return $"Requires {osty} to be alive; if {osty} is missing or dead, playing this card still spends Energy but deals no {osty} attack damage (native playable and damage previews ignore this check).";
+            }
+            gap = "mixed gated and ungated follow-ups on Osty attack card";
+            return null;
+        }
+
+        if (hasGatedFollowUp && !hasUngatedFollowUp)
+        {
+            return $"Requires {osty} to be alive; if {osty} is missing or dead, playing this card still spends Energy but does nothing (native playable ignores this check).";
+        }
+
+        gap = "unrecognized CheckMissingWithAnim card structure";
         return null;
     }
 
