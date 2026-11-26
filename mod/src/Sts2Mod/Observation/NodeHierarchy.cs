@@ -1,6 +1,7 @@
 using Godot;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
+using Sts2Mod.Core.Execution;
 
 namespace Sts2Mod.Observation;
 
@@ -29,18 +30,25 @@ internal static class NodeHierarchy
             ? button
             : null;
 
-    public static NClickableControl? FindRewardSkipButton(NCardRewardSelectionScreen screen)
+    public static NClickableControl? FindRewardDeclineButton(NCardRewardSelectionScreen screen)
     {
         var alternatives = RunSurfaceLifecycle.GetCardRewardAlternatives(screen);
         var buttons = screen.GetNode<Control>("UI/RewardAlternatives").GetChildren()
             .OfType<NCardRewardAlternativeButton>()
             .Where(button => !button.IsQueuedForDeletion())
             .ToArray();
-        for (var index = 0; index < Math.Min(alternatives.Count, buttons.Length); index++)
+        var count = Math.Min(alternatives.Count, buttons.Length);
+        if (count == 0)
+            return null;
+        var candidates = new CardRewardAlternativeAvailability[count];
+        for (var index = 0; index < count; index++)
         {
-            if (string.Equals(alternatives[index].OptionId, "SKIP", StringComparison.OrdinalIgnoreCase))
-                return buttons[index];
+            var button = buttons[index];
+            candidates[index] = new CardRewardAlternativeAvailability(
+                alternatives[index].OptionId,
+                GodotObject.IsInstanceValid(button) && button.IsVisibleInTree() && button.IsEnabled);
         }
-        return null;
+        var selected = StepRules.SelectCardRewardDeclineIndex(candidates);
+        return selected >= 0 ? buttons[selected] : null;
     }
 }

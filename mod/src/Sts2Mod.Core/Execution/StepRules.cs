@@ -5,8 +5,27 @@ namespace Sts2Mod.Core.Execution;
 
 public sealed record StepTargetBinding(string? Ref, InvalidStepTarget? Error);
 
+public readonly record struct CardRewardAlternativeAvailability(string? OptionId, bool Usable);
+
 public static class StepRules
 {
+    public static int SelectCardRewardDeclineIndex(
+        IReadOnlyList<CardRewardAlternativeAvailability> alternatives)
+    {
+        var skipIndex = -1;
+        for (var index = 0; index < alternatives.Count; index++)
+        {
+            var alternative = alternatives[index];
+            if (!alternative.Usable || string.IsNullOrWhiteSpace(alternative.OptionId))
+                continue;
+            if (string.Equals(alternative.OptionId, "SACRIFICE", StringComparison.OrdinalIgnoreCase))
+                return index;
+            if (skipIndex < 0 && string.Equals(alternative.OptionId, "SKIP", StringComparison.OrdinalIgnoreCase))
+                skipIndex = index;
+        }
+        return skipIndex;
+    }
+
     public static StepTargetBinding BindTarget(
         string? requested,
         bool required,

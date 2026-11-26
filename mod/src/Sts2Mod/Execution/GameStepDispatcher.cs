@@ -485,7 +485,7 @@ internal sealed class GameStepDispatcher
 
         TrackInteractionAcceptance(request, button);
         if (NOverlayStack.Instance?.Peek() is NCardRewardSelectionScreen rewardChoice
-            && (ReferenceEquals(button, NodeHierarchy.FindRewardSkipButton(rewardChoice))
+            && (ReferenceEquals(button, NodeHierarchy.FindRewardDeclineButton(rewardChoice))
                 || button is NCardRewardAlternativeButton))
         {
             return PresentOverlayButton(request, rewardChoice, button, trackGatewayTask: false);
@@ -631,7 +631,7 @@ internal sealed class GameStepDispatcher
             {
                 var skip = screen is NChooseACardSelectionScreen
                     ? screen.GetNodeOrNull<NClickableControl>("SkipButton")
-                    : NodeHierarchy.FindRewardSkipButton((NCardRewardSelectionScreen)screen);
+                    : NodeHierarchy.FindRewardDeclineButton((NCardRewardSelectionScreen)screen);
                 if (skip is null || !IsControlUsable(skip))
                     return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native skip control is unavailable.");
                 return PresentOverlayButton(request, screen, skip, trackGatewayTask: true);

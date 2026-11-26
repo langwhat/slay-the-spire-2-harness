@@ -494,4 +494,30 @@ public sealed class StepGatewayAndRulesTests
             throw new InvalidOperationException("The external input owner must prevent dispatch."));
         Assert.Equal(StepErrorCode.NativeBusy, Assert.IsType<RejectedStep>(gateway.Status().Receipt).Error.Code);
     }
+
+    [Fact]
+    public void SelectCardRewardDeclineIndex_PrefersUsableSacrificeOverSkip()
+    {
+        Assert.Equal(1, StepRules.SelectCardRewardDeclineIndex([
+            new("Skip", true),
+            new("SACRIFICE", true),
+        ]));
+        Assert.Equal(0, StepRules.SelectCardRewardDeclineIndex([
+            new("sacrifice", true),
+            new("SKIP", true),
+        ]));
+        Assert.Equal(0, StepRules.SelectCardRewardDeclineIndex([
+            new("SKIP", true),
+            new("SACRIFICE", false),
+        ]));
+        Assert.Equal(0, StepRules.SelectCardRewardDeclineIndex([
+            new("SKIP", true),
+            new("REROLL", true),
+        ]));
+        Assert.Equal(-1, StepRules.SelectCardRewardDeclineIndex([
+            new("REROLL", true),
+            new("SKIP", false),
+            new(null, true),
+        ]));
+    }
 }
