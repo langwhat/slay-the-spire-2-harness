@@ -1596,8 +1596,7 @@ internal sealed class GameObserver(
         if (!RunSurfaceLifecycle.TryGetRewardChoice(screen, out var choice))
             throw new InvalidOperationException("Native reward choice was not registered before publication.");
 
-        var canSkip = NodeHierarchy.FindRewardSkipButton(screen) is { IsEnabled: true } skip
-                      && skip.IsVisibleInTree();
+        var canSkip = NodeHierarchy.FindRewardDeclineButton(screen) is not null;
 
         return new SelectionView(
             new LocString("gameplay_ui", "CHOOSE_CARD_HEADER").GetFormattedText(),

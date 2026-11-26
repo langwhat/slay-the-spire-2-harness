@@ -710,4 +710,30 @@ public sealed class StepGatewayAndRulesTests
         Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: false, canSkip: true, preflightAlternatives: [safeSkip]));
         Assert.False(RewardPreviewPolicy.CanAutoPreview(2, isStandardCardReward: true, canSkip: false, preflightAlternatives: [safeSkip]));
     }
+
+    [Fact]
+    public void SelectCardRewardDeclineIndex_PrefersUsableSacrificeOverSkip()
+    {
+        Assert.Equal(1, StepRules.SelectCardRewardDeclineIndex([
+            new("Skip", true),
+            new("SACRIFICE", true),
+        ]));
+        Assert.Equal(0, StepRules.SelectCardRewardDeclineIndex([
+            new("sacrifice", true),
+            new("SKIP", true),
+        ]));
+        Assert.Equal(0, StepRules.SelectCardRewardDeclineIndex([
+            new("SKIP", true),
+            new("SACRIFICE", false),
+        ]));
+        Assert.Equal(0, StepRules.SelectCardRewardDeclineIndex([
+            new("SKIP", true),
+            new("REROLL", true),
+        ]));
+        Assert.Equal(-1, StepRules.SelectCardRewardDeclineIndex([
+            new("REROLL", true),
+            new("SKIP", false),
+            new(null, true),
+        ]));
+    }
 }
