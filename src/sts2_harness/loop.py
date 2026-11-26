@@ -257,7 +257,7 @@ class DefaultFlow:
                     case Executed():
                         if isinstance(outcome.outcome, CardRewardBatchResult):
                             for group in outcome.outcome.completed_groups:
-                                if group.offer_ref is not None:
+                                if group.offer_ref is not None and not group.rerolled:
                                     self._rewards.mark_resolved(group.offer_ref)
                         if outcome.ended is not None:
                             return outcome.ended

@@ -15,6 +15,7 @@ public enum NativeStepKind
     DiscardPotion,
     EndTurn,
     Select,
+    RerollCardReward,
 }
 
 public enum StepOutcome
@@ -93,6 +94,8 @@ public sealed record DiscardPotionStep(string Potion) : NativeStep(NativeStepKin
 public sealed record EndTurnStep() : NativeStep(NativeStepKind.EndTurn);
 
 public sealed record SelectStep(ImmutableArray<string> Refs) : NativeStep(NativeStepKind.Select);
+
+public sealed record RerollCardRewardStep() : NativeStep(NativeStepKind.RerollCardReward);
 
 public sealed record StepRequest(string OperationId, StepRoute ExpectedRoute, NativeStep Step);
 

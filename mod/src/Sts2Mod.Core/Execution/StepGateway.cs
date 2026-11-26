@@ -352,7 +352,8 @@ public sealed class StepGateway(
             {
                 // Watch the selector itself. After it closes, native effects still own input until they settle.
                 if (selectionIdentity is not null
-                    && (request.Step is SelectStep || readiness is NativeInputReadiness.Busy or NativeInputReadiness.Unavailable))
+                    && (request.Step is SelectStep or RerollCardRewardStep
+                        || readiness is NativeInputReadiness.Busy or NativeInputReadiness.Unavailable))
                 {
                     if (!ReferenceEquals(_settlingSelection, selectionIdentity))
                     {
@@ -441,7 +442,8 @@ public sealed class StepGateway(
             {
                 _receipt = Reject(request, StepErrorCode.NativeBusy, "Native input is not ready.");
             }
-            else if (readiness == NativeInputReadiness.Selection && request.Step.Kind != NativeStepKind.Select)
+            else if (readiness == NativeInputReadiness.Selection
+                     && request.Step.Kind is not (NativeStepKind.Select or NativeStepKind.RerollCardReward))
             {
                 _receipt = Reject(request, StepErrorCode.SelectionRequired, "Complete the current native selection first.");
             }
@@ -462,7 +464,7 @@ public sealed class StepGateway(
                 {
                     _presentation = null;
                     _dispatchedSequence = sequence;
-                    _settlingSelection = request.Step is SelectStep ? selectionIdentity : null;
+                    _settlingSelection = request.Step is SelectStep or RerollCardRewardStep ? selectionIdentity : null;
                     _selectionWaitStarted = _clock.GetTimestamp();
                     return;
                 }
@@ -632,6 +634,7 @@ public sealed class StepGateway(
             "discard_potion" => NativeStepKind.DiscardPotion,
             "end_turn" => NativeStepKind.EndTurn,
             "select" => NativeStepKind.Select,
+            "reroll_card_reward" => NativeStepKind.RerollCardReward,
             _ => throw new JsonException(),
         };
 
@@ -673,6 +676,7 @@ public sealed class StepGateway(
             NativeStepKind.DiscardPotion => new DiscardPotionStep(subjectRef!),
             NativeStepKind.EndTurn => new EndTurnStep(),
             NativeStepKind.Select => new SelectStep(refs),
+            NativeStepKind.RerollCardReward => new RerollCardRewardStep(),
             _ => throw new JsonException(),
         };
 

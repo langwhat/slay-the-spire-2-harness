@@ -163,6 +163,7 @@ class MinimalRunActInput(RunActInput):
 class DeckChoice(StrEnum):
     TAKE = "take"
     SKIP = "skip"
+    REROLL = "reroll"
 
 
 class TakeCard(native.WireModel):
@@ -182,8 +183,14 @@ class SkipCard(native.WireModel):
     reason: native.Nonempty
 
 
+class RerollCard(native.WireModel):
+    offer: native.Nonempty | MISSING = MISSING
+    choice: Literal[DeckChoice.REROLL]
+    reason: native.Nonempty
+
+
 class RunDeckChoice(native.WireModel):
-    choices: Annotated[tuple[TakeCard | SkipCard, ...], Field(min_length=1)]
+    choices: Annotated[tuple[TakeCard | SkipCard | RerollCard, ...], Field(min_length=1)]
 
     @model_validator(mode="after")
     def check_reasons(self) -> Self:

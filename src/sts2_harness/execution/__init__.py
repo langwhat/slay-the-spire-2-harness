@@ -18,6 +18,7 @@ from sts2_harness.decisions import (
     CardRewardPlan,
     DecisionSource,
     DecisionTask,
+    RerollCardRewardStep,
     ReviewTask,
     RewardDecision,
     SelectStep,
@@ -332,7 +333,9 @@ class Execution:
             )
             current = result.observation
             outcome = result.outcome
-            reports.append(CardRewardResult(offer_ref, before, current, outcome))
+            reports.append(
+                CardRewardResult(offer_ref, before, current, outcome, rerolled=choice.reroll)
+            )
             if isinstance(outcome, ActionCompleted):
                 if ended is not None or index + 1 == len(plan.choices):
                     completed = RewardBatchCompleted(completed_groups=index + 1)
@@ -417,7 +420,9 @@ class Execution:
             outcome: ActionOutcome = ActionCompleted(completed_steps=len(steps))
             for index, step in enumerate(steps):
                 uncertain_step = index + 1
-                if reward is not None and isinstance(step, native.Select):
+                if reward is not None and isinstance(
+                    step, (native.Select, native.RerollCardReward)
+                ):
                     plan, group = reward
                     admitted = await self.admit()
                     ready = (
@@ -425,7 +430,12 @@ class Execution:
                         if isinstance(admitted, native.Observation)
                         else None
                     )
-                    if ready != (SelectStep(step.refs),):
+                    expected_step: SelectStep | RerollCardRewardStep = (
+                        SelectStep(step.refs)
+                        if isinstance(step, native.Select)
+                        else RerollCardRewardStep()
+                    )
+                    if ready != (expected_step,):
                         outcome = reward_stopped(index)
                         reason = outcome.reason.code
                         status = BatchStatus.STOPPED
@@ -583,9 +593,11 @@ def _reason_code(code: native.ErrorCode) -> ReasonCode:
     return ReasonCode.ILLEGAL_ACTION
 
 
-def _native_step(step: ActionStep | SelectStep) -> native.NativeStep:
+def _native_step(step: ActionStep | SelectStep | RerollCardRewardStep) -> native.NativeStep:
     if isinstance(step, SelectStep):
         return native.Select(kind=native.StepKind.SELECT, refs=step.refs)
+    if isinstance(step, RerollCardRewardStep):
+        return native.RerollCardReward(kind=native.StepKind.REROLL_CARD_REWARD)
     if step.kind is ActionKind.END_TURN:
         return native.EndTurn(
             kind=native.StepKind.END_TURN,

@@ -1654,3 +1654,256 @@ def test_deck_agent_defers_client_creation_until_entry_materials_succeed() -> No
 
     asyncio.run(scenario())
     assert created == 0
+
+
+def test_deck_choice_reroll_replaces_cards_and_keeps_offer_open(tmp_path: Path) -> None:
+    from sts2_harness.deck import CardChoiceKind
+    from sts2_harness.deck_role import validate_deck_choice
+    from sts2_harness.llm.messages import ToolCall
+
+    base = native.Observation.model_validate_json(RUN)
+    assert isinstance(base.state, native.RunState)
+    card = native.CardEntry.model_validate_json(CARD)
+    objects = {
+        "owned": card.model_copy(update={"definition_id": "CARD.OWNED", "name": "Owned"}),
+        "old-card": card.model_copy(update={"definition_id": "CARD.OLD", "name": "Old"}),
+        "new-card": card.model_copy(update={"definition_id": "CARD.NEW", "name": "New"}),
+    }
+    offer_before = native.Offer(
+        ref="offer:drift",
+        kind=native.OfferKind.CARD,
+        contents=("old-card",),
+        actions=("open-drift",),
+        requires_selection=True,
+        can_reroll=True,
+    )
+    closed_state = base.model_copy(
+        update={
+            "objects": objects,
+            "state": base.state.model_copy(
+                update={
+                    "screen": native.RunScreen.REWARDS,
+                    "deck": ("owned",),
+                    "offers": (offer_before,),
+                    "actions": (
+                        native.Action(
+                            ref="open-drift", label="Card", enabled=True, subject="offer:drift"
+                        ),
+                        native.Action(
+                            ref="proceed",
+                            label="Continue",
+                            enabled=True,
+                            operation=native.ActionOperation.PROCEED,
+                        ),
+                    ),
+                }
+            ),
+            "map": native.PublicMap(bosses=(), nodes=(), legal_destinations=None),
+        }
+    )
+
+    # Validation rejects reroll when can_reroll is absent or mixed with other choices.
+    route = native.RouteKey.model_validate(closed_state.location.model_dump())
+    no_reroll = closed_state.model_copy(
+        update={
+            "state": closed_state.state.model_copy(
+                update={"offers": (offer_before.model_copy(update={"can_reroll": MISSING}),)}
+            )
+        }
+    )
+    bad = validate_deck_choice(
+        ToolCall(
+            "c0",
+            ToolName.RUN_DECK_CHOICE,
+            json.dumps(
+                {"choices": [{"offer": "offer:drift", "choice": "reroll", "reason": "Try again."}]}
+            ),
+        ),
+        ActTask(route),
+        no_reroll,
+        no_reroll,
+    )
+    from sts2_harness.results import Rejected
+
+    assert not isinstance(bad, tuple)
+    assert isinstance(bad.outcome, Rejected)
+    assert bad.outcome.reason.code is ReasonCode.INVALID_ARGUMENTS
+
+    current = closed_state
+    steps: list[native.NativeStep] = []
+    deck_inputs: list[dict[str, JsonValue]] = []
+
+    def mod(request: httpx.Request) -> httpx.Response:
+        nonlocal current
+        if request.url.path == "/status":
+            return httpx.Response(
+                200,
+                json={
+                    "location": current.location.model_dump(mode="json"),
+                    "presentation": None,
+                    "control_intent": "running",
+                    "input_readiness": current.input_readiness.value,
+                    "receipt": None,
+                },
+            )
+        if request.url.path == "/state":
+            return httpx.Response(
+                200,
+                content=native.StateCompleted(
+                    status=native.ResultStatus.COMPLETED, observation=current
+                ).to_json(),
+            )
+        assert request.url.path == "/action"
+        submitted = native.StepRequest.model_validate_json(request.content)
+        steps.append(submitted.step)
+        assert isinstance(current.state, native.RunState)
+        if isinstance(submitted.step, native.Interact) and submitted.step.action == "open-drift":
+            current = current.model_copy(
+                update={
+                    "input_readiness": native.InputReadiness.SELECTION,
+                    "state": current.state.model_copy(
+                        update={
+                            "selection": native.Selection(
+                                prompt="Choose",
+                                source=None,
+                                min=0,
+                                max=1,
+                                candidates=("old-card",),
+                                selected=(),
+                                offer_ref="offer:drift",
+                            )
+                        }
+                    ),
+                }
+            )
+            boundary = "selection"
+        elif isinstance(submitted.step, native.RerollCardReward):
+            refreshed_offer = native.Offer(
+                ref="offer:drift",
+                kind=native.OfferKind.CARD,
+                contents=("new-card",),
+                actions=("open-drift",),
+                requires_selection=True,
+            )
+            current = current.model_copy(
+                update={
+                    "input_readiness": native.InputReadiness.SELECTION,
+                    "state": current.state.model_copy(
+                        update={
+                            "offers": (refreshed_offer,),
+                            "selection": native.Selection(
+                                prompt="Choose",
+                                source=None,
+                                min=0,
+                                max=1,
+                                candidates=("new-card",),
+                                selected=(),
+                                offer_ref="offer:drift",
+                            ),
+                        }
+                    ),
+                }
+            )
+            boundary = "selection"
+        elif isinstance(submitted.step, native.Select):
+            assert submitted.step.refs == ("new-card",)
+            current = terminal(current)
+            boundary = "terminal"
+        else:
+            raise AssertionError(submitted.step)
+        return httpx.Response(
+            200,
+            json={
+                "operation_id": submitted.operation_id,
+                "status": "completed",
+                "boundary": boundary,
+            },
+        )
+
+    replies = iter(
+        [
+            reply(
+                (
+                    "reroll-call",
+                    ToolName.RUN_DECK_CHOICE,
+                    json.dumps(
+                        {
+                            "choices": [
+                                {
+                                    "offer": "offer:drift",
+                                    "choice": "reroll",
+                                    "reason": "Reroll weak cards with Driftwood.",
+                                }
+                            ]
+                        }
+                    ),
+                )
+            ),
+            reply(
+                (
+                    "take-call",
+                    ToolName.RUN_DECK_CHOICE,
+                    json.dumps(
+                        {
+                            "choices": [
+                                {
+                                    "offer": "offer:drift",
+                                    "choice": "take",
+                                    "card": "new-card",
+                                    "reason": "Take the rerolled card.",
+                                }
+                            ]
+                        }
+                    ),
+                )
+            ),
+        ]
+    )
+
+    def model(request: httpx.Request) -> httpx.Response:
+        deck_inputs.append(json.loads(request.content))
+        return httpx.Response(
+            200, content=next(replies), headers={"Content-Type": "text/event-stream"}
+        )
+
+    async def scenario() -> None:
+        async with live_session(
+            ModClient("http://mod", transport=httpx.MockTransport(mod)),
+            Manifest(
+                materials=SessionMaterials(
+                    entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+                ),
+                recording_id="driftwood",
+                minimal=True,
+                core_version="test",
+                game_instance_id="game",
+                run_id="run",
+                initial_notes="",
+            ),
+            tmp_path / "archive.sqlite",
+            model=Llm(configuration(tmp_path), transport=httpx.MockTransport(model)),
+        ) as session:
+            result = await session.run()
+            assert result.reason is RunEndReason.TERMINAL
+        with closing(Journal.open(tmp_path / "archive.sqlite")) as archive:
+            choices = archive.card_choices()
+            assert [item.choice for item in choices] == [
+                CardChoiceKind.REROLL,
+                CardChoiceKind.TAKE,
+            ]
+            assert choices[0].card_ref is None
+            assert choices[1].card_ref == "new-card"
+
+    asyncio.run(scenario())
+    assert steps == [
+        native.Interact(kind=native.StepKind.INTERACT, action="open-drift"),
+        native.RerollCardReward(kind=native.StepKind.REROLL_CARD_REWARD),
+        native.Select(kind=native.StepKind.SELECT, refs=("new-card",)),
+    ]
+    first_items = deck_inputs[0]["input"]
+    second_items = deck_inputs[1]["input"]
+    assert isinstance(first_items, list) and isinstance(second_items, list)
+    first_prompt = json.dumps(first_items[-1])
+    second_prompt = json.dumps(second_items[-1])
+    assert "can_reroll" in first_prompt and "CARD.OLD" in first_prompt
+    assert "can_reroll" not in second_prompt and "CARD.NEW" in second_prompt

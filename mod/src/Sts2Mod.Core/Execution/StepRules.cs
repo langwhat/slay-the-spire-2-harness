@@ -26,6 +26,21 @@ public static class StepRules
         return skipIndex;
     }
 
+    public static int SelectCardRewardRerollIndex(
+        IReadOnlyList<CardRewardAlternativeAvailability> alternatives)
+    {
+        for (var index = 0; index < alternatives.Count; index++)
+        {
+            var alternative = alternatives[index];
+            if (alternative.Usable
+                && string.Equals(alternative.OptionId, "REROLL", StringComparison.OrdinalIgnoreCase))
+            {
+                return index;
+            }
+        }
+        return -1;
+    }
+
     public static StepTargetBinding BindTarget(
         string? requested,
         bool required,

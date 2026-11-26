@@ -50,14 +50,14 @@ from sts2_harness.results import (
 from sts2_harness.route_plan import RoutePlan, reconcile_plan
 from sts2_harness.run import enrich_run_context
 from sts2_harness.tools import ToolCatalog, ToolName, unique_fields
-from sts2_harness.tools.inputs import RunDeckChoice, SkipCard, TakeCard
+from sts2_harness.tools.inputs import RerollCard, RunDeckChoice, SkipCard, TakeCard
 from sts2_harness.user_input_values import UserInputSource
 
 
 @dataclass(frozen=True, slots=True)
 class PendingCardChoice:
     call: ToolCall
-    choices: tuple[TakeCard | SkipCard, ...]
+    choices: tuple[TakeCard | SkipCard | RerollCard, ...]
     resolved: frozenset[str]
 
 
@@ -135,7 +135,7 @@ def validate_deck_choice(
     offer_ref: str | None = None,
     filter_view: bool = True,
     route_plan: RoutePlan | None = None,
-) -> tuple[CardRewardPlan, tuple[TakeCard | SkipCard, ...]] | QueryToolResult:
+) -> tuple[CardRewardPlan, tuple[TakeCard | SkipCard | RerollCard, ...]] | QueryToolResult:
     resolved = task.resolved_card_rewards if isinstance(task, ActTask) else _EMPTY_RESOLVED
     if raw is None:
         return _deck_rejected(ReasonCode.QUERY_FAILED, "The current rewards are unavailable.", None)
@@ -194,6 +194,46 @@ def validate_deck_choice(
     offers = {offer.ref: offer for offer in deck_offers(raw, resolved, offer_ref=offer_ref)}
     _, active = card_rewards(raw)
     selection = adding_selection(raw)
+    if any(isinstance(item, RerollCard) for item in query.choices):
+        if selection is not None or len(query.choices) != 1:
+            return _deck_rejected(
+                ReasonCode.INVALID_ARGUMENTS,
+                "Submit a single reroll choice for one rerollable card reward group.",
+                current,
+            )
+        reroll_item = query.choices[0]
+        assert isinstance(reroll_item, RerollCard)
+        if reroll_item.offer is MISSING or reroll_item.offer not in offers:
+            return _deck_rejected(
+                ReasonCode.INVALID_ARGUMENTS,
+                "Specify a current card reward offer to reroll.",
+                current,
+            )
+        if state.selection is not None and (active is None or reroll_item.offer != active.ref):
+            return _deck_rejected(
+                ReasonCode.PENDING_CHOICE, "Decide the open card reward first.", current
+            )
+        offer = offers[reroll_item.offer]
+        if offer.can_reroll is not True:
+            return _deck_rejected(
+                ReasonCode.INVALID_ARGUMENTS,
+                "This card reward group cannot be rerolled.",
+                current,
+            )
+        if offer.requires_selection is MISSING:
+            return _deck_rejected(
+                ReasonCode.QUERY_FAILED,
+                "The Mod must publish the reward selection mode.",
+                current,
+            )
+        return (
+            CardRewardPlan(
+                choices=(CardRewardChoice(offer, (), reroll_item.reason, reroll=True),),
+                before=raw,
+                resolved=resolved,
+            ),
+            query.choices,
+        )
     if selection is None and (
         set(item.offer for item in query.choices) != set(offers)
         or len(query.choices) != len(offers)
@@ -387,10 +427,22 @@ class DeckAgent(Agent):
         return await self._tools.dispatch(call)
 
     def _record(
-        self, call: ToolCall, index: int, query: TakeCard | SkipCard, result: CardRewardResult
+        self,
+        call: ToolCall,
+        index: int,
+        query: TakeCard | SkipCard | RerollCard,
+        result: CardRewardResult,
     ) -> None:
         offer = None if query.offer is MISSING else query.offer
         taken = isinstance(query, TakeCard)
+        rerolled = isinstance(query, RerollCard)
+        choice_kind = (
+            CardChoiceKind.TAKE
+            if taken
+            else CardChoiceKind.REROLL
+            if rerolled
+            else CardChoiceKind.SKIP
+        )
         if self._completion is not None:
             self._completion(
                 CardChoiceCompletion(
@@ -398,7 +450,7 @@ class DeckAgent(Agent):
                     call_id=call.id,
                     batch_index=index,
                     offer_ref=offer,
-                    choice=CardChoiceKind.TAKE if taken else CardChoiceKind.SKIP,
+                    choice=choice_kind,
                     card_ref=query.card if isinstance(query, TakeCard) else None,
                     before=result.before,
                     after=result.after,
@@ -407,7 +459,7 @@ class DeckAgent(Agent):
                 )
             )
         completed = isinstance(result.outcome, ActionCompleted)
-        if completed and self._tools.deck_stats is not None:
+        if completed and not rerolled and self._tools.deck_stats is not None:
             self._tools.deck_stats.record_choice(
                 result.before,
                 taken=taken,
@@ -419,9 +471,10 @@ class DeckAgent(Agent):
                 entry = result.before.objects.get(ref)
                 if isinstance(entry, native.CardEntry):
                     names.append(entry.definition_id)
+        label = ", ".join(names) if taken else "Reroll" if rerolled else "Skip"
         self._resolutions.append(
             CardResolution(
-                AutomaticProgress(label=", ".join(names) if taken else "Skip", reason=query.reason),
+                AutomaticProgress(label=label, reason=query.reason),
                 ActionToolResult(result.outcome, result.after),
             )
         )
@@ -435,7 +488,9 @@ class DeckAgent(Agent):
         for index, result in enumerate(outcome.groups, 1):
             self._record(pending.call, index, pending.choices[index - 1], result)
         resolved = pending.resolved | frozenset(
-            group.offer_ref for group in outcome.completed_groups if group.offer_ref is not None
+            group.offer_ref
+            for group in outcome.completed_groups
+            if group.offer_ref is not None and not group.rerolled
         )
         if outcome.observation is not None:
             filtered = self._reward_view(outcome.observation, resolved)

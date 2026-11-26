@@ -150,6 +150,7 @@ internal sealed class GameStepDispatcher
             Dispatch,
             RunManager.Instance.DebugOnlyGetState()?.AscensionLevel,
             selectionIdentity: currentChoice is CardSelectionInterceptor.PendingCardSelection
+                or RunSurfaceLifecycle.NativeRewardChoice
                 or NCardGridSelectionScreen or NChooseACardSelectionScreen
                 or NChooseABundleSelectionScreen or NCardRewardSelectionScreen
                     ? currentChoice
@@ -200,19 +201,29 @@ internal sealed class GameStepDispatcher
         return (_gateway.AbsentLocation, outsideRunReadiness, -1);
     }
 
-    private static object? CurrentChoice() =>
-        (object?)CardSelectionInterceptor.GetPending() ?? NOverlayStack.Instance?.Peek();
+    private static object? CurrentChoice()
+    {
+        if (CardSelectionInterceptor.GetPending() is { } pending)
+            return pending;
+        var overlay = NOverlayStack.Instance?.Peek();
+        if (overlay is NCardRewardSelectionScreen rewardScreen
+            && RunSurfaceLifecycle.TryGetRewardChoice(rewardScreen, out var rewardChoice))
+        {
+            return rewardChoice;
+        }
+        return overlay;
+    }
 
     private StepReceipt? Dispatch(StepRequest request)
     {
-        if (request.Step is not SelectStep)
+        if (request.Step is not (SelectStep or RerollCardRewardStep))
             ClearAutoSelection();
 
         var result = DispatchNative(request);
-        if (request.Step is SelectStep || result is not null)
+        if (request.Step is SelectStep or RerollCardRewardStep || result is not null)
             ClearAutoSelection();
 
-        if (request.Step is SelectStep && result is null)
+        if (request.Step is SelectStep or RerollCardRewardStep && result is null)
             _selectionRequest = request;
         if (result is not null)
         {
@@ -333,6 +344,9 @@ internal sealed class GameStepDispatcher
 
                 case SelectStep selection:
                     return DispatchSelect(request, selection, registry);
+
+                case RerollCardRewardStep:
+                    return DispatchRerollCardReward(request);
 
                 default:
                     throw new InvalidOperationException("Unsupported step kind.");
@@ -747,6 +761,19 @@ internal sealed class GameStepDispatcher
                 && ReadAncientDialogueLine(ancientLayout) != ancientLine)
             || (!mapWasOpen && NMapScreen.Instance?.IsOpen == true)
             || (merchant is not null && GodotObject.IsInstanceValid(merchant) && merchant.IsOpen != shopWasOpen));
+    }
+
+    private StepReceipt? DispatchRerollCardReward(StepRequest request)
+    {
+        if (NOverlayStack.Instance?.Peek() is not NCardRewardSelectionScreen screen)
+            return StepGateway.Reject(request, StepErrorCode.SelectionUnavailable, "No card reward screen is open.");
+
+        var reroll = NodeHierarchy.FindRewardRerollButton(screen);
+        if (reroll is null || !IsControlUsable(reroll))
+            return StepGateway.Reject(request, StepErrorCode.ActionUnavailable, "The native reroll control is unavailable.");
+
+        _submittedChoice = CurrentChoice();
+        return PresentOverlayButton(request, screen, reroll, trackGatewayTask: true);
     }
 
     private static int? ReadAncientDialogueLine(NAncientEventLayout? layout) =>

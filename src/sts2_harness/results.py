@@ -213,6 +213,7 @@ class CardRewardResult:
     after: native.Observation | None
     outcome: ActionOutcome
     local_decline: bool = False
+    rerolled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
