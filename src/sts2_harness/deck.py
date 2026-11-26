@@ -12,7 +12,14 @@ from sts2_harness.context.view import ACT_MECHANISM_OWNER_PREFIX
 from sts2_harness.knowledge import DocumentView, GuidanceContent
 from sts2_harness.llm.messages import TextMessage, TextRole
 from sts2_harness.material_text import MaterialParts, MaterialText
-from sts2_harness.prompts import PromptReader, deck_act_prompt
+from sts2_harness.prompts import (
+    PromptReader,
+    deck_act_prompt,
+    deck_prompt,
+    deck_tasks_prompt,
+    run_report_reader_prompt,
+    state_format_prompt,
+)
 from sts2_harness.results import Outcome
 from sts2_harness.route_plan import RoutePlan
 
@@ -45,13 +52,13 @@ def deck_context(
     viewer_input: bool = False,
 ) -> Context:
     blocks: tuple[str | MaterialText, ...] = (
-        prompts.read("deck-tasks"),
+        deck_tasks_prompt(prompts, minimal=minimal),
         "\n",
-        prompts.read("run-report-reader"),
+        run_report_reader_prompt(prompts, minimal=minimal),
         "\n",
-        prompts.read("state-format"),
+        state_format_prompt(prompts, deck_fields=True, minimal=minimal),
         "\n",
-        prompts.read("deck"),
+        deck_prompt(prompts, minimal=minimal),
         "\n",
         prompts.read(deck_act_prompt(observation.state.progress)),
         "\n",

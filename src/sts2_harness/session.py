@@ -109,6 +109,7 @@ class RunSession:
             recovery=self.recovery,
             diagnostics=self._diagnostics,
             display=self._dependencies.display,
+            deck_stats=self.deck_stats,
         )
         run = self._new_run()
         self._flow = (

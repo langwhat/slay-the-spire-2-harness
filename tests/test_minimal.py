@@ -103,11 +103,22 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 if isinstance(tool, dict) and isinstance(tool["name"], str)
             }
             assert names in (
-                {"run_act", "run_plan", "run_next"},
-                {"combat_act"},
+                {"run_act", "run_plan", "run_next", "run_knowledge"},
+                {"combat_act", "combat_knowledge"},
             )
             messages = request["input"]
             assert isinstance(messages, list)
+            system_parts: list[str] = []
+            for message in messages:
+                if isinstance(message, dict) and message.get("role") == "system":
+                    part = message.get("content")
+                    if isinstance(part, str):
+                        system_parts.append(part)
+            system_text = "\n".join(system_parts)
+            assert "handoff" not in system_text
+            assert "strategy notes" not in system_text
+            assert "Combat review" not in system_text
+            assert "`notes` shows the strategy notes." not in system_text
             latest = messages[-1]
             assert isinstance(latest, dict) and latest.get("role") == "user"
             content = latest["content"]
@@ -159,5 +170,122 @@ def test_minimal_session_plays_with_current_state_and_replays_its_requests(
                 assert result == Reached(
                     anchor, record.confirmed_operation_cursor, record.semantic_digest
                 )
+
+    asyncio.run(scenario())
+
+
+def test_minimal_knowledge_tools_use_native_catalog_without_private_supplements(
+    tmp_path: Path,
+) -> None:
+    from test_mod_client import COMBAT, RUN
+
+    from sts2_harness.client import models as native
+    from sts2_harness.knowledge import KnowledgeLookup, SubjectId
+    from sts2_harness.llm.messages import ToolCall
+    from sts2_harness.notes import Notes
+    from sts2_harness.results import ReadCompleted
+    from sts2_harness.tools import ToolCatalog
+
+    supplement_file = tmp_path / "private_card.md"
+    supplement_file.write_text("Private curated advice that must stay hidden in minimal mode.")
+    documents = FileDocuments(
+        (
+            DocumentSource(
+                id="private-card",
+                name="Private Card",
+                description="Private supplement",
+                path=supplement_file,
+                subjects=(
+                    SubjectId(category=native.NativeCategory.CARD, definition_id="CARD.ONE"),
+                ),
+            ),
+        )
+    )
+
+    async def scenario() -> None:
+        run_obs = native.Observation.model_validate_json(RUN)
+        combat_obs = native.Observation.model_validate_json(COMBAT)
+        card = combat_obs.objects["c1"]
+        assert isinstance(card, native.CardEntry)
+        native_lookup = native.CatalogCompleted(
+            status=native.ResultStatus.COMPLETED,
+            data=native.LookupData(
+                entries=(
+                    native.CardDefinition(
+                        category=native.NativeCategory.CARD,
+                        definition_id="CARD.ONE",
+                        name="牌",
+                        native=native.CardDefinitionPreview(
+                            definition_id=card.definition_id,
+                            name=card.name,
+                            upgrades=card.upgrades,
+                            card_type=card.card_type,
+                            card_pool=card.card_pool,
+                            rarity=card.rarity,
+                            is_upgradable=card.is_upgradable,
+                            is_removable=card.is_removable,
+                            keywords=card.keywords,
+                            should_retain_this_turn=card.should_retain_this_turn,
+                            exhaust_on_next_play=card.exhaust_on_next_play,
+                            has_turn_end_in_hand_effect=card.has_turn_end_in_hand_effect,
+                            enchantment=card.enchantment,
+                            affliction=card.affliction,
+                            cost=card.cost,
+                            text="Deal 6 damage.",
+                        ),
+                        upgrade=native.UpgradeNotUpgradable(
+                            status=native.UpgradeStatus.NOT_UPGRADABLE
+                        ),
+                    ),
+                ),
+                missing_ids=(),
+            ),
+        )
+
+        async def observe_run() -> native.Observation:
+            return run_obs
+
+        async def observe_combat() -> native.Observation:
+            return combat_obs
+
+        async def inspect_unused(_: native.InspectQuery) -> native.InspectCompleted:
+            raise AssertionError("inspect must not be called")
+
+        async def catalog(_: native.CatalogRequest) -> native.CatalogCompleted:
+            return native_lookup
+
+        for role, observe, tool_name, expected_names in (
+            (
+                native.DecisionOwner.RUN,
+                observe_run,
+                "run_knowledge",
+                {"run_act", "run_plan", "run_next", "run_knowledge"},
+            ),
+            (
+                native.DecisionOwner.COMBAT,
+                observe_combat,
+                "combat_knowledge",
+                {"combat_act", "combat_knowledge"},
+            ),
+        ):
+            tools = ToolCatalog(
+                role,
+                observe=observe,
+                inspect=inspect_unused,
+                catalog=catalog,
+                notes=Notes(NotesState()) if role is native.DecisionOwner.RUN else None,
+                skills=documents,
+                supplements=documents,
+                minimal=True,
+            )
+            assert {tool.name for tool in tools.definitions} == expected_names
+            result = await tools.dispatch(
+                ToolCall("lookup", tool_name, '{"mode":"lookup","ids":["CARD.ONE"]}')
+            )
+            assert isinstance(result.outcome, ReadCompleted)
+            assert isinstance(result.data, KnowledgeLookup)
+            assert len(result.data.entries) == 1
+            assert result.data.entries[0].definition.definition_id == "CARD.ONE"
+            assert result.data.entries[0].supplements == ()
 
     asyncio.run(scenario())

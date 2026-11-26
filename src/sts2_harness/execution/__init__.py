@@ -24,6 +24,7 @@ from sts2_harness.decisions import (
     SelectStep,
     TaskComplete,
 )
+from sts2_harness.deck_stats import DeckStatistics
 from sts2_harness.diagnostics import BatchSettled, BatchStatus, BatchSubmitted, Diagnostics
 from sts2_harness.execution.recovery import DecisionInterrupted, Interrupted, ToolRecoveryBudget
 from sts2_harness.execution.rewards import reward_batch_stopped, reward_steps, reward_stopped
@@ -100,6 +101,7 @@ class Execution:
         recovery: ToolRecoveryBudget | None = None,
         diagnostics: Diagnostics | None = None,
         display: Callable[[str], Awaitable[DisplayResult]] | None = None,
+        deck_stats: DeckStatistics | None = None,
     ) -> None:
         self._diagnostics = diagnostics
         self._game = game
@@ -109,6 +111,7 @@ class Execution:
         self._display = display
         self._last_displayed_reason: str | None = None
         self.fights = FightHistory()
+        self._deck_stats = deck_stats
         self._observed: Callable[[native.Observation], None] | None = None
 
     async def display_reason(self, reason: str | None, *, repeat: bool = False) -> None:
@@ -165,8 +168,13 @@ class Execution:
         if self._recovery is not None:
             self._recovery.reset()
 
-    def _record_observation(self, observation: native.Observation) -> None:
+    def _observe_telemetry(self, observation: native.Observation) -> None:
         self.fights.observe(observation)
+        if self._deck_stats is not None:
+            self._deck_stats.observe(observation)
+
+    def _record_observation(self, observation: native.Observation) -> None:
+        self._observe_telemetry(observation)
         if self._observed is not None:
             self._observed(observation)
 
@@ -490,7 +498,7 @@ class Execution:
                     await self.display_reason(proposal.reason, repeat=reward is not None)
                 settlement = await self._game.settle(route, step)
                 for observation in settlement.observations:
-                    self.fights.observe(observation)
+                    self._observe_telemetry(observation)
                 settled = unwrap(settlement)
                 receipt = settled.receipt
                 if isinstance(receipt, native.ReceiptCompleted):

@@ -47,7 +47,7 @@ internal static class NativeHookDispatch
             {
                 // The generator is only used for instruction labels, including in open generic methods.
                 var labels = new DynamicMethod("NativeHookLabels", typeof(void), Type.EmptyTypes).GetILGenerator();
-                foreach (var instruction in PatchProcessor.GetOriginalInstructions(method, labels))
+                foreach (var instruction in NativeRuleBody.ReadOriginalInstructions(method, labels))
                 {
                     if (instruction.opcode == OpCodes.Callvirt && instruction.operand is MethodInfo { IsVirtual: true } call
                         && typeof(AbstractModel).IsAssignableFrom(call.DeclaringType))

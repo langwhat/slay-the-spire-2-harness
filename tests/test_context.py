@@ -1401,3 +1401,274 @@ def test_mechanisms_dedup_preserves_incomplete_null_renamed_and_unreferenced_ent
     assert [(row["kind"], row["definition_id"], row["text"]) for row in second["mechanisms"]] == [
         ("potion", "POTION.BLOCK_POTION", "获得12点格挡。")
     ]
+
+
+def test_generated_deduplicates_copies_delivers_incrementally_and_survives_compaction() -> None:
+    from sts2_harness.client.models import GeneratedCard
+
+    base = Observation.model_validate_json(COMBAT)
+    assert isinstance(base.state, CombatState)
+    c1 = base.objects["c1"]
+    assert isinstance(c1, CardEntry)
+    preview = base.generated["c1"][0]
+
+    # Two copies of CARD.ONE with different instance costs share one generated catalog entry.
+    obs1 = base.model_copy(
+        update={
+            "objects": {
+                **base.objects,
+                "c1": c1.model_copy(update={"cost": ResourceCosts(energy=1), "playable": True}),
+                "c2": c1.model_copy(update={"cost": ResourceCosts(energy=0), "playable": False}),
+            },
+            "generated": {"c1": (preview,), "c2": (preview,)},
+        }
+    )
+    ctx = Context(DecisionOwner.COMBAT)
+    ctx.append_task(CombatActInput(), obs1)
+    first = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert len(first["generated"]) == 1
+    assert first["generated"][0]["source"] == {"id": "CARD.ONE", "name": "牌"}
+    assert "ref" not in first["generated"][0]["source"]
+    assert "cost" not in first["generated"][0]["source"]
+    assert "playable" not in first["generated"][0]["source"]
+
+    # Changing mutable instance cost or removing generated does not re-emit or emit empty [].
+    obs2 = obs1.model_copy(
+        update={
+            "state": obs1.state.model_copy(update={"turn": 2}),
+            "objects": {
+                **obs1.objects,
+                "c1": c1.model_copy(update={"cost": ResourceCosts(energy=2), "playable": False}),
+            },
+        }
+    )
+    ctx.append_task(CombatActInput(), obs2)
+    second = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert "generated" not in second
+
+    # Absent generated on group start, then reappearing inside the retained group.
+    absent = obs2.model_copy(
+        update={
+            "state": obs2.state.model_copy(update={"turn": 3}),
+            "generated": {},
+        }
+    )
+    ctx.append_task(CombatActInput(), absent)
+    third = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert "generated" not in third
+
+    ctx.begin_group(absent, NotesView())
+    reappeared = obs2.model_copy(update={"state": obs2.state.model_copy(update={"turn": 4})})
+    ctx.append_task(CombatActInput(), reappeared)
+    fourth = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert "generated" not in fourth
+    ctx.finish_group()
+
+    candidate = ctx.compaction_candidate()
+    ctx.validate_compaction(candidate)
+    ctx.install_compaction(candidate)
+    baseline = json.loads(ctx.model_input()[0].text)["context_baseline"]["observation"]
+    assert baseline["generated"] == first["generated"]
+
+    # Already-delivered entry is still suppressed after compaction; an upgraded source is delivered.
+    upgraded_card = c1.model_copy(update={"upgrades": 1, "name": "牌+"})
+    upgraded_preview = GeneratedCard(
+        source=preview.source.model_copy(update={"name": "来源+"}),
+        card=preview.card.model_copy(update={"upgrades": 1, "text": "造成5点伤害。"}),
+    )
+    obs5 = reappeared.model_copy(
+        update={
+            "state": reappeared.state.model_copy(update={"turn": 5}),
+            "objects": {**reappeared.objects, "c3": upgraded_card},
+            "generated": {
+                "c1": (preview,),
+                "c3": (upgraded_preview,),
+            },
+        }
+    )
+    ctx.append_task(CombatActInput(), obs5)
+    fifth = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert len(fifth["generated"]) == 1
+    assert fifth["generated"][0]["source"] == {"id": "CARD.ONE+1", "name": "牌+"}
+
+    # Compaction also succeeds when a retained generated source is no longer in active sections.
+    assert isinstance(obs5.state, CombatState)
+    no_c3 = obs5.model_copy(
+        update={
+            "state": obs5.state.model_copy(
+                update={
+                    "turn": 6,
+                    "piles": obs5.state.piles.model_copy(update={"hand": ("c1",)}),
+                }
+            ),
+            "objects": {**obs5.objects, "c3": upgraded_card},
+            "generated": {"c3": (upgraded_preview,)},
+        }
+    )
+    ctx.begin_group(no_c3, NotesView())
+    ctx.append_task(CombatActInput(), no_c3)
+    ctx.finish_group()
+    candidate2 = ctx.compaction_candidate()
+    ctx.validate_compaction(candidate2)
+    ctx.install_compaction(candidate2)
+    baseline2 = json.loads(ctx.model_input()[0].text)["context_baseline"]["observation"]
+    assert [row["source"] for row in baseline2["generated"]] == [
+        {"id": "CARD.ONE", "name": "牌"},
+        {"id": "CARD.ONE+1", "name": "牌+"},
+    ]
+
+
+def test_combat_projects_turn_activity_preserving_zero_counts_and_hides_battle_cards_played() -> (
+    None
+):
+    from sts2_harness.client.models import NamedDefinition, TurnActivity
+
+    combat_base = Observation.model_validate_json(COMBAT)
+    assert isinstance(combat_base.state, CombatState)
+
+    # Absent turn_activity stays omitted.
+    ctx = Context(DecisionOwner.COMBAT)
+    ctx.append_task(CombatActInput(), combat_base)
+    initial = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert "turn_activity" not in initial
+
+    # Zero counts must not be stripped by _slim.
+    with_zeros = combat_base.model_copy(
+        update={
+            "state": combat_base.state.model_copy(
+                update={
+                    "turn_activity": TurnActivity(
+                        cards_played=0,
+                        attacks_played=0,
+                        skills_played=0,
+                        powers_played=0,
+                        cards_exhausted=0,
+                    )
+                }
+            )
+        }
+    )
+    ctx.append_task(CombatActInput(), with_zeros)
+    zeros_obs = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert zeros_obs["turn_activity"] == {
+        "cards_played": 0,
+        "attacks_played": 0,
+        "skills_played": 0,
+        "powers_played": 0,
+        "cards_exhausted": 0,
+    }
+
+    with_activity = combat_base.model_copy(
+        update={
+            "state": combat_base.state.model_copy(
+                update={
+                    "turn_activity": TurnActivity(
+                        cards_played=3,
+                        attacks_played=1,
+                        skills_played=2,
+                        powers_played=0,
+                        cards_exhausted=1,
+                        cards_discarded=2,
+                    )
+                }
+            )
+        }
+    )
+    ctx.append_task(CombatActInput(), with_activity)
+    updated_obs = json.loads(ctx.model_input()[-1].text)["observation"]
+    assert updated_obs["turn_activity"] == {
+        "cards_played": 3,
+        "attacks_played": 1,
+        "skills_played": 2,
+        "powers_played": 0,
+        "cards_exhausted": 1,
+        "cards_discarded": 2,
+    }
+
+    # RunState.battle_cards_played is internal telemetry and never emitted in model-facing sections.
+    run_base = Observation.model_validate_json(RUN)
+    assert isinstance(run_base.state, RunState)
+    with_played = run_base.model_copy(
+        update={
+            "state": run_base.state.model_copy(
+                update={
+                    "battle_cards_played": (
+                        NamedDefinition(name="Strike", definition_id="CARD.STRIKE"),
+                    )
+                }
+            )
+        }
+    )
+    run_ctx = Context(DecisionOwner.RUN)
+    run_ctx.append_task(RunActInput(), with_played)
+    run_obs = json.loads(run_ctx.model_input()[-1].text)["observation"]
+    assert "battle_cards_played" not in run_obs
+
+
+def test_deck_receives_elites_fought_and_reachable_ahead_when_route_plan_is_absent() -> None:
+    from sts2_harness.client.models import PublicMap
+    from sts2_harness.deck import deck_context, deck_observation
+    from sts2_harness.fights import FightEncounter
+    from sts2_harness.prompts import PackagedPrompts
+    from sts2_harness.route_plan import Edge, RoutePlan
+
+    base = Observation.model_validate_json(RUN)
+    assert isinstance(base.state, RunState)
+    public_map = PublicMap.model_validate_json(
+        '{"bosses":[{"name":"首领","definition_id":"ENCOUNTER.BOSS"}],'
+        '"elite_pool":[{"name":"精英甲","definition_id":"ENCOUNTER.ELITE_A"},'
+        '{"name":"精英乙","definition_id":"ENCOUNTER.ELITE_B"}],'
+        '"nodes":['
+        '{"position":"map:0:0","room_type":"monster","children":["map:1:0","map:1:1"]},'
+        '{"position":"map:1:0","room_type":"elite","children":["map:2:0"]},'
+        '{"position":"map:1:1","room_type":"shop","children":["map:2:0"]},'
+        '{"position":"map:2:0","room_type":"boss","children":[]}],'
+        '"legal_destinations":null}'
+    )
+    obs = base.model_copy(
+        update={
+            "map": public_map,
+            "state": base.state.model_copy(
+                update={
+                    "progress": base.state.progress.model_copy(
+                        update={"position": "map:0:0", "room_type": "monster"}
+                    )
+                }
+            ),
+        }
+    )
+    deck_view = deck_observation(obs, ())
+
+    # Without route_plan: reachable_ahead is emitted; known empty elites_fought emits [].
+    ctx_no_plan = deck_context(PackagedPrompts(), (), deck_view, minimal=False)
+    ctx_no_plan.set_elites_fought(())
+    ctx_no_plan.append_task(RunActInput(), deck_view)
+    progress_no_plan = json.loads(ctx_no_plan.model_input()[-1].text)["observation"]["progress"]
+    assert progress_no_plan["elites_fought"] == []
+    assert progress_no_plan["reachable_ahead"] == {
+        "next_rooms": ["E", "$"],
+        "counts": {"E": 1, "$": 1, "B": 1},
+    }
+    assert "route" not in progress_no_plan
+
+    # With a fought elite and active route plan: elites_fought lists it; reachable_ahead is omitted.
+    fought = (FightEncounter(definition_id="ENCOUNTER.ELITE_A", name="精英甲"),)
+    plan = RoutePlan(
+        "map:0:0", "fight elite", (Edge("map:0:0", "map:1:0"), Edge("map:1:0", "map:2:0"))
+    )
+    ctx_with_plan = deck_context(PackagedPrompts(), (), deck_view, minimal=False)
+    ctx_with_plan.set_route_plan(plan)
+    ctx_with_plan.set_elites_fought(fought)
+    ctx_with_plan.append_task(RunActInput(), deck_view)
+    progress_with_plan = json.loads(ctx_with_plan.model_input()[-1].text)["observation"]["progress"]
+    assert progress_with_plan["route"] == ["E", "B"]
+    assert progress_with_plan["elites_fought"] == [
+        {"definition_id": "ENCOUNTER.ELITE_A", "name": "精英甲"}
+    ]
+    assert "reachable_ahead" not in progress_with_plan
+
+    # Unknown elites_fought (None) stays omitted.
+    ctx_unknown = deck_context(PackagedPrompts(), (), deck_view, minimal=False)
+    ctx_unknown.append_task(RunActInput(), deck_view)
+    progress_unknown = json.loads(ctx_unknown.model_input()[-1].text)["observation"]["progress"]
+    assert "elites_fought" not in progress_unknown

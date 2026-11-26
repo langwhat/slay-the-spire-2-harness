@@ -1,11 +1,13 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
+using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Ascension;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.Factories;
 using MegaCrit.Sts2.Core.Helpers;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
@@ -299,27 +301,41 @@ internal static class EventMechanismReader
         EventOption? option,
         MethodInfo method,
         int depth = 0,
-        IReadOnlyDictionary<string, Value>? bindings = null)
+        IReadOnlyDictionary<string, Value>? bindings = null,
+        bool inheritedSelection = false)
     {
         var body = ReadBody(method);
         if (body.Incomplete)
             return (null, "incomplete");
 
         var steps = new List<string>();
-        var hasSelection = false;
+        var hasSelection = inheritedSelection;
         var usesRandom = false;
+        var hasUpgradedCardReward = false;
+        var sawNonSelfLoopSetEventState = false;
 
         foreach (var group in body.Calls.GroupBy(s => (s.Epoch, s.Index))
             .OrderBy(g => (g.Key.Epoch, g.Max(s => s.Order), g.Key.Index)))
         {
             var distinctCalls = group.Select(s => s.Call).DistinctBy(NativeRuleText.CallKey).ToArray();
             if (distinctCalls.Length != 1)
+            {
+                if (distinctCalls.All(c => IsBenignEventHelperCall(c, activeEvent.GetType())))
+                    continue;
+                if (distinctCalls.All(c => typeof(EventModel).IsAssignableFrom(c.Method.DeclaringType) && c.Method.Name == "SetEventState"))
+                {
+                    if (!IsSelfLoopOrExitStateTransition(body, method, activeEvent.GetType()))
+                        sawNonSelfLoopSetEventState = true;
+                    continue;
+                }
                 return (null, "ambiguous-call-group");
+            }
 
             var call = distinctCalls[0];
             var declaring = call.Method.DeclaringType;
             var name = call.Method.Name;
             var generic = call.Method.IsGenericMethod ? call.Method.GetGenericArguments()[0] : null;
+            var enclosingLoop = body.Loops.FirstOrDefault(l => group.Key.Index >= l.Start && group.Key.Index < l.End);
 
             if (IsBenignEventHelperCall(call, activeEvent.GetType()))
                 continue;
@@ -332,10 +348,11 @@ internal static class EventMechanismReader
             if (typeof(EventModel).IsAssignableFrom(declaring) && name == "SetEventState")
             {
                 // Multi-stage state transitions that introduce new follow-up options (e.g. ColossalFlower.ReachDeeper)
-                // cannot be summarized accurately from the immediate step alone. Only allow SetEventState when it
-                // re-offers the current option and/or pure exit/proceed options.
+                // cannot be summarized accurately from the immediate step alone. Allow SetEventState immediately when
+                // it only re-offers the current option, a chained self-loop, or pure exit options; otherwise defer so
+                // pure zero-side-effect staging pages can still complete cleanly.
                 if (!IsSelfLoopOrExitStateTransition(body, method, activeEvent.GetType()))
-                    return (null, "multi-stage-event-state");
+                    sawNonSelfLoopSetEventState = true;
                 continue;
             }
 
@@ -354,6 +371,14 @@ internal static class EventMechanismReader
                 }
             }
 
+            if (declaring == activeEvent.GetType() && call.Method is MethodInfo voidHelper && voidHelper != method
+                && voidHelper.ReturnType == typeof(void)
+                && !voidHelper.ContainsGenericParameters && !voidHelper.IsGenericMethod
+                && IsPresentationOnlyVoidHelper(voidHelper, activeEvent.GetType()))
+            {
+                continue;
+            }
+
             if (CallUsesRng(call) || group.Any(s => s.Conditions.Any(c => ValueUsesRng(c.Value))))
                 usesRandom = true;
 
@@ -367,7 +392,7 @@ internal static class EventMechanismReader
 
             if (declaring == activeEvent.GetType() && call.Method is MethodInfo helper && helper != method)
             {
-                if (helper.ContainsGenericParameters || helper.IsGenericMethod || helper.ReturnType != typeof(Task) || depth >= 1)
+                if (helper.ContainsGenericParameters || helper.ReturnType != typeof(Task) || depth >= 2)
                     return (null, $"unresolved-helper:{helper.Name}");
                 var helperParams = helper.GetParameters();
                 Dictionary<string, Value>? childBindings = null;
@@ -384,7 +409,7 @@ internal static class EventMechanismReader
                         }
                     }
                 }
-                var (nested, nestedGap) = DescribeOptionMethod(activeEvent, option, helper, depth + 1, childBindings);
+                var (nested, nestedGap) = DescribeOptionMethod(activeEvent, option, helper, depth + 1, childBindings, inheritedSelection: hasSelection);
                 if (nestedGap is not null)
                     return (null, nestedGap);
                 if (nested is not null)
@@ -489,7 +514,9 @@ internal static class EventMechanismReader
                 var hasFilter = HasSelectionFilterPredicate(call);
                 var hasNonNullFilter = false;
                 var redundantEnchantFilter = false;
-                var filterDesc = hasFilter ? DescribeGenericDeckFilter(call, name == nameof(CardSelectCmd.FromDeckForEnchantment), out hasNonNullFilter, out redundantEnchantFilter) : null;
+                var filterDesc = hasFilter
+                    ? DescribeGenericDeckFilter(call, body, bindings, name == nameof(CardSelectCmd.FromDeckForEnchantment), out hasNonNullFilter, out redundantEnchantFilter)
+                    : null;
                 if (filterDesc is null && hasNonNullFilter && !redundantEnchantFilter)
                     return (null, "unresolved-selection-filter");
 
@@ -527,7 +554,7 @@ internal static class EventMechanismReader
                 }
                 if (name == nameof(CardSelectCmd.FromDeckForEnchantment))
                 {
-                    steps.Add(DescribeEnchantSelection(activeEvent, call, countText, filterDesc));
+                    steps.Add(DescribeEnchantSelection(activeEvent, call, countText, filterDesc, bindings));
                     continue;
                 }
                 steps.Add($"select {countText} {cardNoun}");
@@ -551,11 +578,21 @@ internal static class EventMechanismReader
                 }
                 if (name == nameof(CardPileCmd.AddCursesToDeck))
                 {
-                    var curseType = ExtractSingleCardType(call.Arguments.FirstOrDefault()) ?? FindCardModelInBody(body);
+                    var curseArg = call.Arguments.FirstOrDefault();
+                    string? countPrefix = null;
+                    Type? curseType = null;
+                    if (curseArg is Call { Method.Name: nameof(Enumerable.Repeat), Arguments: [var repeatedCard, var repeatCount] } repeatCall
+                        && repeatCall.Method.DeclaringType == typeof(Enumerable))
+                    {
+                        curseType = ExtractSingleCardType(repeatedCard);
+                        if (ResolveEventAmount(activeEvent, repeatCount, bindings) is { } repeatText)
+                            countPrefix = $"{repeatText} ";
+                    }
+                    curseType ??= ExtractSingleCardType(curseArg) ?? FindCardModelInBody(body);
                     var curseLabel = curseType is not null ? NativeRuleText.ModelLabel(curseType) : "curse card(s)";
                     var unconditional = hasSelection && !conditionalOnSelection;
                     var suffix = unconditional ? " unconditionally (even if 0 cards were eligible for selection)" : "";
-                    steps.Add($"add {curseLabel} to deck{suffix}");
+                    steps.Add($"add {countPrefix}{curseLabel} to deck{suffix}");
                     continue;
                 }
                 if (name == nameof(CardPileCmd.Add))
@@ -568,11 +605,19 @@ internal static class EventMechanismReader
                     {
                         var addedArg = call.Arguments.FirstOrDefault();
                         if (MentionsCloneCard(addedArg))
-                            steps.Add("duplicate deck card(s) directly into deck");
+                        {
+                            steps.Add(IsDeckCardsCount(enclosingLoop?.Count)
+                                ? "duplicate all deck cards directly into deck"
+                                : "duplicate deck card(s) directly into deck");
+                        }
                         else if (ExtractSingleCardType(addedArg) is { } cardType)
+                        {
                             steps.Add($"add {NativeRuleText.ModelLabel(cardType)} directly to deck");
+                        }
                         else
+                        {
                             steps.Add("add card(s) directly to deck");
+                        }
                     }
                     continue;
                 }
@@ -584,12 +629,34 @@ internal static class EventMechanismReader
                 if (name == nameof(CardCmd.Upgrade))
                 {
                     if (!hasSelection)
-                        steps.Add(usesRandom ? "upgrade random upgradable card(s) in deck" : "upgrade card(s) in deck");
+                    {
+                        var isRandom = usesRandom || CallUsesRng(call);
+                        if (enclosingLoop?.Count is Constant { Data: int upgradeBound } && upgradeBound > 0)
+                        {
+                            steps.Add(isRandom
+                                ? $"upgrade up to {upgradeBound} random upgradable card(s) in deck"
+                                : $"upgrade up to {upgradeBound} upgradable card(s) in deck");
+                        }
+                        else
+                        {
+                            steps.Add(isRandom ? "upgrade random upgradable card(s) in deck" : "upgrade card(s) in deck");
+                        }
+                    }
                     continue;
                 }
                 if (name == nameof(CardCmd.Downgrade))
                 {
-                    steps.Add(usesRandom ? "downgrade random upgraded card(s) in deck" : "downgrade card(s) in deck");
+                    var isRandom = usesRandom || CallUsesRng(call);
+                    if (enclosingLoop?.Count is Constant { Data: int downgradeBound } && downgradeBound > 0)
+                    {
+                        steps.Add(isRandom
+                            ? $"downgrade up to {downgradeBound} random upgraded card(s) in deck"
+                            : $"downgrade up to {downgradeBound} upgraded card(s) in deck");
+                    }
+                    else
+                    {
+                        steps.Add(isRandom ? "downgrade random upgraded card(s) in deck" : "downgrade card(s) in deck");
+                    }
                     continue;
                 }
                 if (name == nameof(CardCmd.TransformToRandom))
@@ -630,6 +697,8 @@ internal static class EventMechanismReader
                 {
                     if (generic is not null && typeof(RelicModel).IsAssignableFrom(generic))
                         steps.Add($"obtain {NativeRuleText.ModelLabel(generic)} directly");
+                    else if (MentionsRelicFactoryPull(call.Arguments.FirstOrDefault()))
+                        steps.Add("obtain a random relic directly");
                     else
                         steps.Add("obtain a relic directly");
                     continue;
@@ -642,9 +711,19 @@ internal static class EventMechanismReader
                 return (null, $"unresolved-cmd:RelicCmd.{name}");
             }
 
+            if (declaring?.Name == "CardReward" && name == "add_AfterGenerated")
+            {
+                if (IsUpgradeCardRewardSubscription(call, activeEvent.GetType()))
+                {
+                    hasUpgradedCardReward = true;
+                    continue;
+                }
+                return (null, "unresolved-call:CardReward.add_AfterGenerated");
+            }
+
             if (declaring == typeof(RewardsCmd) && name == nameof(RewardsCmd.OfferCustom))
             {
-                var rewardDesc = DescribeCustomRewards(body);
+                var rewardDesc = DescribeCustomRewards(body, hasUpgradedCardReward);
                 steps.Add(rewardDesc is not null
                     ? $"open an optional reward screen ({rewardDesc})"
                     : "open an optional reward screen");
@@ -677,6 +756,17 @@ internal static class EventMechanismReader
             return (null, $"unresolved-call:{declaring?.Name}.{name}");
         }
 
+        if (sawNonSelfLoopSetEventState)
+        {
+            if (depth > 0 || steps.Count > 0 || usesRandom
+                || body.Writes.Count > 0 || body.FieldSteps.Count > 0
+                || HasEventStateMutation(body, activeEvent.GetType()))
+            {
+                return (null, "multi-stage-event-state");
+            }
+            return (null, null);
+        }
+
         if (steps.Count == 0)
             return (null, null);
 
@@ -706,6 +796,22 @@ internal static class EventMechanismReader
             || call.Method is ConstructorInfo
             || name.StartsWith("get_", StringComparison.Ordinal)
             || name.StartsWith("op_", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (declaring == typeof(RelicFactory)
+            && name is "PullNextRelicFromFront" or "PullNextRelicFromBack" or "PullNextRelicForRewardFromFront")
+        {
+            return true;
+        }
+
+        if (declaring == typeof(CardSelectorPrefs) && name.StartsWith("set_", StringComparison.Ordinal))
+            return true;
+
+        if (declaring is not null && typeof(CardModel).IsAssignableFrom(declaring)
+            && name.StartsWith("set_", StringComparison.Ordinal)
+            && call.Receiver is Call { Method.Name: "CreateCard" })
         {
             return true;
         }
@@ -772,9 +878,13 @@ internal static class EventMechanismReader
         return cond.Value switch
         {
             Call { Method.Name: nameof(Enumerable.Any) or nameof(Enumerable.Count) or "get_Count" } => true,
-            Operation { Operator: "ceq" or "cgt" or "cgt.un" or "clt" or "clt.un" or "beq" or "bne.un",
+            Operation { Operator: "ceq" or "cgt" or "cgt.un" or "clt" or "clt.un" or "beq" or "bne.un" or "ble" or "bge" or "blt" or "bgt",
                 Left: Call { Method.Name: "get_Count" or nameof(Enumerable.Count) or nameof(Enumerable.Any) },
                 Right: Constant { Data: 0 } } => true,
+            Call { Method.Name: "get_Card", Method.DeclaringType.Name: "CardCreationResult" } => true,
+            Operation { Operator: "ceq" or "beq" or "bne.un",
+                Left: Call { Method.Name: "get_Card", Method.DeclaringType.Name: "CardCreationResult" },
+                Right: Constant { Data: null } } => true,
             Call { Method.Name: "NextItem" or "FirstOrDefault" or "CreateCard" or "ToMutable" } => true,
             Operation { Operator: "ceq" or "beq" or "bne.un",
                 Left: Call { Method.Name: "NextItem" or "FirstOrDefault" or "CreateCard" or "ToMutable" },
@@ -782,6 +892,110 @@ internal static class EventMechanismReader
             _ => false,
         };
     }
+
+    private static bool MentionsRelicFactoryPull(Value? value) => value switch
+    {
+        null => false,
+        Call { Method.DeclaringType: var dt, Method.Name: "PullNextRelicFromFront" or "PullNextRelicFromBack" or "PullNextRelicForRewardFromFront" }
+            when dt == typeof(RelicFactory) => true,
+        Call call => MentionsRelicFactoryPull(call.Receiver) || call.Arguments.Any(MentionsRelicFactoryPull),
+        Operation op => MentionsRelicFactoryPull(op.Left) || MentionsRelicFactoryPull(op.Right),
+        _ => false,
+    };
+
+    private static bool IsDeckCardsCount(Value? value)
+        => value is Call
+        {
+            Method.Name: "get_Count",
+            Receiver: Call
+            {
+                Method.Name: "get_Cards",
+                Receiver: Call { Method.Name: "get_Deck" }
+            }
+        };
+
+    private static bool HasEventStateMutation(NativeRuleBody body, Type eventType)
+        => body.Calls.Any(s =>
+            (s.Call.Method.DeclaringType == eventType && s.Call.Method.Name.StartsWith("set_", StringComparison.Ordinal))
+            || (s.Call.Method.DeclaringType?.Name is "DynamicVar" or "DamageVar" or "HealVar" or "MaxHpVar" or "GoldVar" or "StringVar" or "IntVar"
+                && s.Call.Method.Name is "set_BaseValue" or "set_StringValue" or "set_IntValue"));
+
+    private static bool IsPresentationOnlyVoidHelper(MethodInfo helper, Type eventType)
+    {
+        var body = ReadBody(helper);
+        if (body.Incomplete || body.Writes.Count > 0 || body.FieldSteps.Count > 0)
+            return false;
+
+        foreach (var step in body.Calls)
+        {
+            var m = step.Call.Method;
+            var dt = m.DeclaringType;
+            var name = m.Name;
+            if (NativeRuleText.IsPresentationCall(m)
+                || dt?.Namespace is "System.Runtime.CompilerServices" or "System.Threading.Tasks"
+                || dt == typeof(LocString)
+                || (dt == typeof(string) && name is "Concat" or "Format" or "Join")
+                || m is ConstructorInfo
+                || name.StartsWith("get_", StringComparison.Ordinal)
+                || name.StartsWith("op_", StringComparison.Ordinal)
+                || name is "L10NLookup" or "GetFormattedText" or "ToStringAndClear")
+            {
+                continue;
+            }
+            if (dt == eventType && m is MethodInfo nested && nested != helper
+                && nested.ReturnType != typeof(Task) && nested.ReturnType != typeof(void)
+                && !nested.ContainsGenericParameters && !nested.IsGenericMethod)
+            {
+                var nestedBody = ReadBody(nested);
+                if (!nestedBody.Incomplete && nestedBody.Writes.Count == 0 && nestedBody.FieldSteps.Count == 0
+                    && !nestedBody.Calls.Any(s => IsGameplaySideEffectCall(s.Call)))
+                {
+                    continue;
+                }
+            }
+            return false;
+        }
+        return true;
+    }
+
+    private static bool IsUpgradeCardRewardSubscription(Call call, Type eventType)
+    {
+        if (call.Arguments is not [Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo handlerMethod }] }])
+            return false;
+
+        var handlerBody = ReadBody(handlerMethod);
+        if (handlerBody.Incomplete || handlerBody.Writes.Count > 0 || handlerBody.FieldSteps.Count > 0)
+            return false;
+
+        var sawUpgrade = false;
+        foreach (var step in handlerBody.Calls)
+        {
+            if (step.Conditions.Any(cond => !IsBenignEventGuard(cond)))
+                return false;
+
+            var m = step.Call.Method;
+            if (m.DeclaringType == typeof(CardCmd) && m.Name == nameof(CardCmd.Upgrade))
+            {
+                if (!MentionsCardRewardElement(step.Call.Arguments.FirstOrDefault()))
+                    return false;
+                sawUpgrade = true;
+                continue;
+            }
+            if (IsBenignEventHelperCall(step.Call, eventType))
+                continue;
+            return false;
+        }
+        return sawUpgrade;
+    }
+
+    private static bool MentionsCardRewardElement(Value? value) => value switch
+    {
+        null => false,
+        Call { Method.Name: "get_Cards", Method.DeclaringType.Name: "CardReward" } => true,
+        Call call => MentionsCardRewardElement(call.Receiver) || call.Arguments.Any(MentionsCardRewardElement),
+        Operation op => MentionsCardRewardElement(op.Left) || MentionsCardRewardElement(op.Right),
+        _ => false,
+    };
 
     private static bool MentionsCloneCard(Value? value) => value switch
     {
@@ -813,14 +1027,18 @@ internal static class EventMechanismReader
         return null;
     }
 
-    private static string? DescribeCustomRewards(NativeRuleBody body)
+    private static string? DescribeCustomRewards(NativeRuleBody body, bool hasUpgradedCardReward = false)
     {
         var kinds = new List<string>();
         foreach (var step in body.Calls)
         {
             var dt = step.Call.Method.DeclaringType?.Name;
-            if (dt == "CardReward" && !kinds.Contains("card reward"))
-                kinds.Add("card reward");
+            if (dt == "CardReward")
+            {
+                var cardLabel = hasUpgradedCardReward ? "upgraded card reward" : "card reward";
+                if (!kinds.Contains(cardLabel))
+                    kinds.Add(cardLabel);
+            }
             else if (dt == "RelicReward" && !kinds.Contains("relic reward"))
                 kinds.Add("relic reward");
             else if (dt == "GoldReward" && !kinds.Contains("Gold reward"))
@@ -839,7 +1057,7 @@ internal static class EventMechanismReader
         return kinds.Count > 0 ? string.Join(", ", kinds) : null;
     }
 
-    private static bool IsSelfLoopOrExitStateTransition(NativeRuleBody body, MethodInfo currentMethod, Type eventType)
+    private static bool IsSelfLoopOrExitStateTransition(NativeRuleBody body, MethodInfo currentMethod, Type eventType, int depth = 0)
     {
         var optionCtors = body.Calls
             .Where(s => s.Call.Method is ConstructorInfo { DeclaringType: var dt } && dt == typeof(EventOption))
@@ -859,9 +1077,58 @@ internal static class EventMechanismReader
             // Allow follow-up options that are pure exit/finish (e.g. ExitBaths) or whose handler is the current method.
             if (targetMethod.DeclaringType == eventType && IsPureFinishEventMethod(targetMethod))
                 continue;
+            // Allow a single-hop continuation into a self-looping option with the same effect pattern (e.g. Immerse -> Linger).
+            if (depth == 0 && targetMethod.DeclaringType == eventType && targetMethod.ReturnType == typeof(Task))
+            {
+                var targetBody = ReadBody(targetMethod);
+                if (!targetBody.Incomplete
+                    && IsSelfLoopOrExitStateTransition(targetBody, targetMethod, eventType, depth + 1)
+                    && SharesEffectPattern(body, targetBody, eventType))
+                {
+                    continue;
+                }
+            }
             return false;
         }
         return true;
+    }
+
+    private static bool SharesEffectPattern(NativeRuleBody sourceBody, NativeRuleBody targetBody, Type eventType)
+    {
+        static HashSet<MethodBase> EffectMethods(NativeRuleBody body, Type eventType)
+        {
+            var set = new HashSet<MethodBase>();
+            foreach (var step in body.Calls)
+            {
+                var call = step.Call;
+                var declaring = call.Method.DeclaringType;
+                var name = call.Method.Name;
+                if (IsBenignEventHelperCall(call, eventType))
+                    continue;
+                if (typeof(EventModel).IsAssignableFrom(declaring)
+                    && name is "SetEventState" or "SetEventFinished" or "Done")
+                {
+                    continue;
+                }
+                if (declaring == eventType && call.Method is MethodInfo pureHelper
+                    && pureHelper.ReturnType != typeof(Task) && pureHelper.ReturnType != typeof(void)
+                    && !pureHelper.ContainsGenericParameters && !pureHelper.IsGenericMethod)
+                {
+                    var pureBody = ReadBody(pureHelper);
+                    if (!pureBody.Incomplete && pureBody.Writes.Count == 0 && pureBody.FieldSteps.Count == 0
+                        && !pureBody.Calls.Any(s => IsGameplaySideEffectCall(s.Call)))
+                    {
+                        continue;
+                    }
+                }
+                set.Add(call.Method);
+            }
+            return set;
+        }
+
+        var sourceEffects = EffectMethods(sourceBody, eventType);
+        var targetEffects = EffectMethods(targetBody, eventType);
+        return sourceEffects.Count > 0 && sourceEffects.SetEquals(targetEffects);
     }
 
     private static bool IsPureFinishEventMethod(MethodInfo method)
@@ -875,7 +1142,12 @@ internal static class EventMechanismReader
                 && s.Call.Method.Name is "SetEventFinished" or "Done"));
     }
 
-    private static string DescribeEnchantSelection(EventModel activeEvent, Call call, string countText, string? filterDesc)
+    private static string DescribeEnchantSelection(
+        EventModel activeEvent,
+        Call call,
+        string countText,
+        string? filterDesc,
+        IReadOnlyDictionary<string, Value>? bindings = null)
     {
         var enchantArg = call.Arguments.ElementAtOrDefault(1);
         var enchantType = enchantArg switch
@@ -886,7 +1158,7 @@ internal static class EventMechanismReader
         var label = enchantType is not null ? NativeRuleText.ModelLabel(enchantType) : "the offered enchantment";
         var amountParam = call.Method.GetParameters().FirstOrDefault(p => p.Name == "amount");
         var amountText = amountParam is not null && amountParam.Position < call.Arguments.Length
-            ? ResolveEventAmount(activeEvent, call.Arguments[amountParam.Position])
+            ? ResolveEventAmount(activeEvent, call.Arguments[amountParam.Position], bindings)
             : null;
         var showAmount = enchantType is not null
             && ModelDb.GetByIdOrNull<EnchantmentModel>(ModelDb.GetId(enchantType)) is { ShowAmount: true };
@@ -987,6 +1259,8 @@ internal static class EventMechanismReader
 
     private static string? DescribeGenericDeckFilter(
         Call call,
+        NativeRuleBody callerBody,
+        IReadOnlyDictionary<string, Value>? bindings,
         bool isEnchantmentSelection,
         out bool hasNonNullFilter,
         out bool redundantEnchantFilter)
@@ -999,7 +1273,7 @@ internal static class EventMechanismReader
         if (call.Arguments[filterParam.Position] is Constant { Data: null })
             return null;
         hasNonNullFilter = true;
-        if (call.Arguments[filterParam.Position] is not Call { Method: ConstructorInfo, Arguments: [_, Constant { Data: MethodInfo predMethod }] })
+        if (call.Arguments[filterParam.Position] is not Call { Method: ConstructorInfo, Arguments: [var closureReceiver, Constant { Data: MethodInfo predMethod }] })
             return null;
 
         if (isEnchantmentSelection && IsRedundantEnchantmentCanEnchantFilter(call, predMethod))
@@ -1008,8 +1282,57 @@ internal static class EventMechanismReader
             return null;
         }
 
-        return DescribeCardFilterPredicate(predMethod, boundTag: null, depth: 0);
+        var closureFields = ExtractClosureFields(callerBody, closureReceiver, predMethod.DeclaringType, bindings);
+        return DescribeCardFilterPredicate(predMethod, boundTag: null, depth: 0, closureFields);
     }
+
+    private static IReadOnlyDictionary<FieldInfo, Value>? ExtractClosureFields(
+        NativeRuleBody callerBody,
+        Value closureReceiver,
+        Type? closureType,
+        IReadOnlyDictionary<string, Value>? bindings)
+    {
+        if (closureType is null || callerBody.FieldSteps.Count == 0)
+            return null;
+        var receiverKey = NativeRuleText.ValueKey(closureReceiver);
+        Dictionary<FieldInfo, Value>? fields = null;
+        HashSet<FieldInfo>? ambiguous = null;
+        foreach (var fs in callerBody.FieldSteps)
+        {
+            var targetField = fs.Assignment.Target.Member;
+            if (targetField.DeclaringType != closureType || fs.Assignment.Target.Receiver is null)
+                continue;
+            if (NativeRuleText.ValueKey(fs.Assignment.Target.Receiver) != receiverKey)
+                continue;
+            var assigned = SubstituteBinding(fs.Assignment.Assigned, bindings);
+            fields ??= [];
+            if (fields.TryGetValue(targetField, out var existing))
+            {
+                if (NativeRuleText.ValueKey(existing) != NativeRuleText.ValueKey(assigned))
+                {
+                    ambiguous ??= [];
+                    ambiguous.Add(targetField);
+                }
+            }
+            else
+            {
+                fields[targetField] = assigned;
+            }
+        }
+        if (fields is not null && ambiguous is not null)
+        {
+            foreach (var f in ambiguous)
+                fields.Remove(f);
+        }
+        return fields is { Count: > 0 } ? fields : null;
+    }
+
+    private static Value ResolveClosureField(Value value, IReadOnlyDictionary<FieldInfo, Value>? closureFields)
+        => value is Field { Member: var field, Receiver: Input { Name: "this" } }
+            && closureFields is not null
+            && closureFields.TryGetValue(field, out var bound)
+            ? bound
+            : value;
 
     private static bool IsRedundantEnchantmentCanEnchantFilter(Call selectCall, MethodInfo predMethod)
     {
@@ -1039,7 +1362,11 @@ internal static class EventMechanismReader
         _ => null,
     };
 
-    private static string? DescribeCardFilterPredicate(MethodInfo predMethod, CardTag? boundTag, int depth)
+    private static string? DescribeCardFilterPredicate(
+        MethodInfo predMethod,
+        CardTag? boundTag,
+        int depth,
+        IReadOnlyDictionary<FieldInfo, Value>? closureFields = null)
     {
         if (depth > 1)
             return null;
@@ -1058,7 +1385,7 @@ internal static class EventMechanismReader
                 if (arg is Constant { Data: int rawTag } && Enum.IsDefined(typeof(CardTag), rawTag))
                     passedTag = (CardTag)rawTag;
             }
-            return DescribeCardFilterPredicate(helper, passedTag, depth + 1);
+            return DescribeCardFilterPredicate(helper, passedTag, depth + 1, closureFields);
         }
 
         var positiveReturns = body.Returns.Where(r => r.Value is not Constant { Data: 0 or false }).ToArray();
@@ -1067,6 +1394,7 @@ internal static class EventMechanismReader
 
         var qualifiers = new List<string>();
         var rarities = new List<CardRarity>();
+        var cardTypes = new List<CardType>();
         var tags = new List<CardTag>();
         var requiresTransformable = false;
         var requiresRemovable = false;
@@ -1115,6 +1443,19 @@ internal static class EventMechanismReader
                     if (!rarities.Contains((CardRarity)rawRarity))
                         rarities.Add((CardRarity)rawRarity);
                 }
+                else if (expr is Operation { Operator: "ceq" or "beq" or "bne.un", Left: var typeLeft, Right: var typeRight } typeOp
+                    && (IsCardModelTypeGetter(typeLeft) || IsCardModelTypeGetter(typeRight)))
+                {
+                    var rawVal = IsCardModelTypeGetter(typeLeft) ? typeRight : typeLeft;
+                    var resolved = rawVal is not null ? ResolveClosureField(rawVal, closureFields) : null;
+                    if (resolved is not Constant { Data: int rawCardType } || !Enum.IsDefined(typeof(CardType), rawCardType))
+                        return null;
+                    var isEquality = typeOp.Operator == "bne.un" ? !expected : expected;
+                    if (!isEquality)
+                        return null;
+                    if (!cardTypes.Contains((CardType)rawCardType))
+                        cardTypes.Add((CardType)rawCardType);
+                }
                 else if (expr is Call { Method.Name: "Contains", Arguments: [var tagArg] } containsCall
                     && (containsCall.Receiver is Call { Method.Name: "get_Tags" }
                         || containsCall.Arguments.Any(a => a is Call { Method.Name: "get_Tags" })))
@@ -1161,11 +1502,16 @@ internal static class EventMechanismReader
             qualifiers.Add("upgradable");
         if (rarities.Count > 0)
             qualifiers.Add(string.Join("/", rarities));
+        if (cardTypes.Count > 0)
+            qualifiers.Add(string.Join("/", cardTypes));
         if (tags.Count > 0)
             qualifiers.Add(string.Join("/", tags));
 
         return qualifiers.Count > 0 ? string.Join(" ", qualifiers) : null;
     }
+
+    private static bool IsCardModelTypeGetter(Value? value)
+        => value is Call { Method.Name: "get_Type", Method.DeclaringType: var dt } && dt == typeof(CardModel);
 
     private static Type? ExtractSingleCardType(Value? value) => value switch
     {

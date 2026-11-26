@@ -31,7 +31,12 @@ from sts2_harness.context.models import (
 )
 from sts2_harness.context.rendering import render
 from sts2_harness.context.run_models import RunObservation
-from sts2_harness.context.run_projection import RunDelivery, definition_references, mechanism_key
+from sts2_harness.context.run_projection import (
+    RunDelivery,
+    definition_references,
+    generated_key,
+    mechanism_key,
+)
 from sts2_harness.context.view import visible_observation
 from sts2_harness.decisions import CombatHandoff
 from sts2_harness.fights import Fight, FightEncounter
@@ -265,6 +270,15 @@ class Context:
                 if key in self._delivery.definitions:
                     definitions.setdefault(key, self._delivery.definitions[key])
         observation["defs"] = list(definitions.values())
+        # A currently visible generated preview may have last appeared before the retained baseline.
+        generated_rows = observation.get("generated", [])
+        assert isinstance(generated_rows, list)
+        generated_catalog: dict[str, JsonValue] = {}
+        for entry in (*generated_rows, *self._delivery.generated_entries):
+            assert isinstance(entry, dict)
+            generated_catalog[generated_key(entry)] = entry
+        if generated_catalog:
+            observation["generated"] = list(generated_catalog.values())
         # A currently visible rule may have last appeared before the retained baseline.
         rules = observation.get("mechanisms", [])
         assert isinstance(rules, list)
@@ -353,12 +367,19 @@ class Context:
         RunObservation.model_validate_json(json.dumps(initial, ensure_ascii=False))
         definitions: dict[str, dict[str, JsonValue]] = {}
         sections: dict[str, JsonValue] = {}
+        generated: set[str] = set()
         mechanisms: set[tuple[str, str, str | None, str | None]] = set()
 
         def apply(observation: dict[str, JsonValue]) -> None:
             if observation.get("baseline") is True:
                 sections.clear()
+                generated.clear()
                 mechanisms.clear()
+            generated_entries = observation.get("generated", [])
+            assert isinstance(generated_entries, list)
+            for entry in generated_entries:
+                assert isinstance(entry, dict)
+                generated.add(generated_key(entry))
             rules = observation.get("mechanisms", [])
             assert isinstance(rules, list)
             for rule in rules:
@@ -370,7 +391,7 @@ class Context:
                 assert isinstance(entry, dict) and isinstance(entry["id"], str)
                 definitions[entry["id"]] = entry
             for name, value in observation.items():
-                if name not in ("baseline", "defs", "mechanisms"):
+                if name not in ("baseline", "defs", "generated", "mechanisms"):
                     if value is None:
                         sections.pop(name, None)
                     else:
@@ -409,6 +430,7 @@ class Context:
             return
         self._delivery.definitions = definitions
         self._delivery.delivered_defs = set(definitions)
+        self._delivery.delivered_generated = generated
         self._delivery.delivered_mechanisms = mechanisms
         self._delivery.sections = self._delivery.sections if has_retained_observation else sections
         self._history = list(candidate)

@@ -148,6 +148,8 @@ internal sealed class NativeRuleBody
     private static readonly Input Missing = new("?");
     private static readonly Input StateMachine = new("async_state");
     internal static readonly Input Self = new("this");
+    // Harmony's MonoMod ILGeneratorProxy initialization is not thread-safe under concurrent first-time IL reads.
+    private static readonly object IlReadGate = new();
 
     public List<Step> Calls { get; } = [];
     public List<FieldStep> FieldSteps { get; } = [];
@@ -159,6 +161,16 @@ internal sealed class NativeRuleBody
     public HashSet<ForeachLoop> ForeachRanges { get; } = [];
     public bool Incomplete { get; private set; }
     public bool ReadsParameters { get; private set; }
+
+    internal static List<CodeInstruction> ReadOriginalInstructions(MethodBase method, ILGenerator? generator = null)
+    {
+        lock (IlReadGate)
+        {
+            return generator is null
+                ? PatchProcessor.GetOriginalInstructions(method)
+                : PatchProcessor.GetOriginalInstructions(method, generator);
+        }
+    }
 
     public static NativeRuleBody Read(MethodBase method)
     {
@@ -175,6 +187,21 @@ internal sealed class NativeRuleBody
             return;
         }
         var stateMachine = original.GetCustomAttribute<AsyncStateMachineAttribute>()?.StateMachineType;
+        if (stateMachine is { IsGenericTypeDefinition: true })
+        {
+            var typeArgs = (original.DeclaringType?.IsGenericType == true
+                    ? original.DeclaringType.GetGenericArguments()
+                    : Type.EmptyTypes)
+                .Concat(original.IsGenericMethod ? original.GetGenericArguments() : Type.EmptyTypes)
+                .ToArray();
+            if (typeArgs.Length != stateMachine.GetGenericArguments().Length
+                || typeArgs.Any(t => t.ContainsGenericParameters))
+            {
+                Incomplete = true;
+                return;
+            }
+            stateMachine = stateMachine.MakeGenericType(typeArgs);
+        }
         MethodBase? method = stateMachine is null ? original : AccessTools.Method(stateMachine, "MoveNext");
         if (method?.GetMethodBody() is null)
         {
@@ -182,7 +209,7 @@ internal sealed class NativeRuleBody
             return;
         }
 
-        var instructions = PatchProcessor.GetOriginalInstructions(method);
+        var instructions = ReadOriginalInstructions(method);
         var labels = new Dictionary<Label, int>();
         for (var index = 0; index < instructions.Count; index++)
         {
@@ -434,6 +461,26 @@ internal sealed class NativeRuleBody
                             Incomplete = true;
                             break;
                         }
+                        // Compound counted loop: counter exit guard (`i >= constBound`) followed by `list.Count > 0` back-edge.
+                        if (expected && counter is { Operator: "bgt" or "bne.un", Left: Call { Method.Name: "get_Count" }, Right: Constant { Data: 0 } }
+                            && TryMatchCompoundCountedLoop(instructions, labels, destination, index, path, out var compoundBound, out var counterValue))
+                        {
+                            var currentCounter = (counterValue as Constant ?? Fold(counterValue)) is { Data: int cv } ? cv : (int?)null;
+                            if (visits == 0 && currentCounter == 0
+                                && !LoopBodyDependsOnIteration(method, instructions, destination, index, path))
+                            {
+                                Loops.Add(new Loop(destination, index, new Constant(compoundBound)));
+                                path.Index = destination;
+                                continue;
+                            }
+                            if (visits == 1 && currentCounter == 1
+                                && counterValue is Operation { Operator: "add", Right: Constant { Data: 1 } }
+                                && Loops.Any(loop => loop.Start == destination && loop.End == index))
+                            {
+                                InvalidateLoopCounter(path, instructions, destination, index);
+                                continue;
+                            }
+                        }
                         // A counter loop also runs one representative iteration and records its count.
                         if (visits == 0 && expected && counter is { Operator: "blt" or "ble" }
                             && (counter.Left as Constant ?? Fold(counter.Left)) is { Data: int start })
@@ -456,7 +503,13 @@ internal sealed class NativeRuleBody
                             }
                             else if ((start == 0 || (alreadyIncremented && start == 1)) && counter.Operator == "blt"
                                 && limit is not null && IsCountedLoopBound(limit)
-                                && !LoopBodyDependsOnIteration(method, instructions, destination, index, path))
+                                && !LoopBodyDependsOnIteration(
+                                    method,
+                                    instructions,
+                                    destination,
+                                    index,
+                                    path,
+                                    allowReadOnlyIndexLoad: IsCollectionCountBound(limit)))
                             {
                                 Loops.Add(new Loop(destination, index, limit));
                                 if (!alreadyIncremented)
@@ -826,7 +879,13 @@ internal sealed class NativeRuleBody
         return false;
     }
 
-    private static bool LoopBodyDependsOnIteration(MethodBase method, List<CodeInstruction> instructions, int start, int end, Path path)
+    private static bool LoopBodyDependsOnIteration(
+        MethodBase method,
+        List<CodeInstruction> instructions,
+        int start,
+        int end,
+        Path path,
+        bool allowReadOnlyIndexLoad = false)
     {
         var (counterField, counterSlot, incLoadCursor) = FindLoopCounter(instructions, start, end);
         if (incLoadCursor < 0)
@@ -834,32 +893,46 @@ internal sealed class NativeRuleBody
 
         var localVars = method.GetMethodBody()?.LocalVariables;
         var seenLocalWrite = new HashSet<int>();
+        var unconditionalLocalWrite = new HashSet<int>();
         var readLocals = new HashSet<int>();
         var readBeforeWriteLocals = new HashSet<int>();
         var writtenLocals = new HashSet<int>();
         var seenFieldWrite = new HashSet<FieldInfo>();
+        var unconditionalFieldWrite = new HashSet<FieldInfo>();
         var readFields = new HashSet<FieldInfo>();
         var readBeforeWriteFields = new HashSet<FieldInfo>();
         var writtenFields = new HashSet<FieldInfo>();
+        var sawControlFlow = false;
 
         for (var cursor = start; cursor < incLoadCursor; cursor++)
         {
+            if (cursor > start && instructions[cursor].labels.Count > 0)
+                sawControlFlow = true;
             var code = instructions[cursor].opcode;
             var operand = instructions[cursor].operand;
             // Reject any read or address-of on the loop counter inside the loop body,
-            // except when it only indexes a write-only output array (`array[i] = ...`) with no reads from arrays.
+            // except when it only indexes a write-only output array (`array[i] = ...`) with no reads from arrays,
+            // or a read-only indexed collection (`list[i]`) in a `0..list.Count` loop.
             if (counterField is not null && (code == OpCodes.Ldfld || code == OpCodes.Ldflda)
                 && Equals(operand, counterField))
             {
-                if (code == OpCodes.Ldflda || !IsWriteOnlyArrayIndexLoad(instructions, start, cursor, incLoadCursor))
+                if (code == OpCodes.Ldflda
+                    || (!IsWriteOnlyArrayIndexLoad(instructions, start, cursor, incLoadCursor)
+                        && !(allowReadOnlyIndexLoad && IsReadOnlyListIndexLoad(instructions, cursor, incLoadCursor))))
+                {
                     return true;
+                }
                 continue;
             }
             if (counterSlot is not null && code.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
                 && Slot(code.Name, operand) == counterSlot.Value)
             {
-                if (code.Name.StartsWith("ldloca", StringComparison.Ordinal) || !IsWriteOnlyArrayIndexLoad(instructions, start, cursor, incLoadCursor))
+                if (code.Name.StartsWith("ldloca", StringComparison.Ordinal)
+                    || (!IsWriteOnlyArrayIndexLoad(instructions, start, cursor, incLoadCursor)
+                        && !(allowReadOnlyIndexLoad && IsReadOnlyListIndexLoad(instructions, cursor, incLoadCursor))))
+                {
                     return true;
+                }
                 continue;
             }
 
@@ -872,6 +945,8 @@ internal sealed class NativeRuleBody
                     if (code.Name.StartsWith("ldloca", StringComparison.Ordinal)
                         && cursor + 1 < incLoadCursor && instructions[cursor + 1].opcode == OpCodes.Initobj)
                     {
+                        if (!sawControlFlow && !readBeforeWriteLocals.Contains(slot))
+                            unconditionalLocalWrite.Add(slot);
                         seenLocalWrite.Add(slot);
                         writtenLocals.Add(slot);
                     }
@@ -896,6 +971,8 @@ internal sealed class NativeRuleBody
                 var slot = Slot(code.Name, operand);
                 if (slot != counterSlot && !IsCompilerPlumbingLocal(localVars, slot))
                 {
+                    if (!sawControlFlow && !readBeforeWriteLocals.Contains(slot))
+                        unconditionalLocalWrite.Add(slot);
                     seenLocalWrite.Add(slot);
                     writtenLocals.Add(slot);
                 }
@@ -918,22 +995,33 @@ internal sealed class NativeRuleBody
             else if (code == OpCodes.Stfld && operand is FieldInfo sf
                 && sf != counterField && IsUserStateField(sf))
             {
+                if (!sawControlFlow && !readBeforeWriteFields.Contains(sf))
+                    unconditionalFieldWrite.Add(sf);
                 seenFieldWrite.Add(sf);
                 writtenFields.Add(sf);
             }
+
+            if (code.FlowControl is FlowControl.Branch or FlowControl.Cond_Branch)
+                sawControlFlow = true;
         }
 
         // Any local or lifted state-machine field written in the loop body that is also read before its first
-        // write (or initialized before the loop and read in the body) can vary across iterations.
+        // write (or initialized before the loop and not unconditionally overwritten before read) can vary across iterations.
         foreach (var slot in writtenLocals)
         {
-            if (readBeforeWriteLocals.Contains(slot) || (readLocals.Contains(slot) && path.Locals.ContainsKey(slot)))
+            if (readBeforeWriteLocals.Contains(slot)
+                || (readLocals.Contains(slot) && path.Locals.ContainsKey(slot) && !unconditionalLocalWrite.Contains(slot)))
+            {
                 return true;
+            }
         }
         foreach (var field in writtenFields)
         {
-            if (readBeforeWriteFields.Contains(field) || (readFields.Contains(field) && path.StateFields.ContainsKey(field)))
+            if (readBeforeWriteFields.Contains(field)
+                || (readFields.Contains(field) && path.StateFields.ContainsKey(field) && !unconditionalFieldWrite.Contains(field)))
+            {
                 return true;
+            }
         }
         return false;
     }
@@ -1066,6 +1154,90 @@ internal sealed class NativeRuleBody
             }
         }
         return true;
+    }
+
+    private static bool TryMatchCompoundCountedLoop(
+        List<CodeInstruction> instructions,
+        Dictionary<Label, int> labels,
+        int start,
+        int end,
+        Path path,
+        out int constBound,
+        out Value counterValue)
+    {
+        constBound = 0;
+        counterValue = Missing;
+        var (counterField, counterSlot, incLoadCursor) = FindLoopCounter(instructions, start, end);
+        if (incLoadCursor < 0)
+            return false;
+
+        counterValue = counterField is not null
+            ? path.StateFields.GetValueOrDefault(counterField, Missing)
+            : counterSlot is { } slot
+                ? path.Locals.GetValueOrDefault(slot, Missing)
+                : Missing;
+
+        // Look between the increment and the back-edge for `ldfld/ldloc counter; ldc.i4 <bound>; bge(.s) -> end + 1`.
+        for (var cursor = incLoadCursor + 1; cursor < end; cursor++)
+        {
+            var code = instructions[cursor].opcode;
+            if ((code != OpCodes.Bge && code != OpCodes.Bge_S)
+                || instructions[cursor].operand is not Label exitLabel
+                || !labels.TryGetValue(exitLabel, out var exitTarget)
+                || exitTarget != end + 1
+                || cursor < 2)
+            {
+                continue;
+            }
+
+            var boundInstr = instructions[cursor - 1];
+            var boundName = boundInstr.opcode.Name;
+            if (boundName is null || !boundName.StartsWith("ldc.i4", StringComparison.Ordinal))
+                continue;
+            var bound = boundInstr.opcode == OpCodes.Ldc_I4_M1 ? -1 : Slot(boundName, boundInstr.operand);
+            if (bound <= 0)
+                continue;
+
+            var loadInstr = instructions[cursor - 2];
+            var loadsCounter =
+                (counterField is not null && loadInstr.opcode == OpCodes.Ldfld && Equals(loadInstr.operand, counterField))
+                || (counterSlot is not null && loadInstr.opcode.Name?.StartsWith("ldloc", StringComparison.Ordinal) == true
+                    && !loadInstr.opcode.Name.StartsWith("ldloca", StringComparison.Ordinal)
+                    && Slot(loadInstr.opcode.Name, loadInstr.operand) == counterSlot.Value);
+            if (!loadsCounter)
+                continue;
+
+            constBound = bound;
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsCollectionCountBound(Value limit)
+        => limit is Call { Method.Name: "get_Count", Method.DeclaringType: { } dt }
+            && (dt == typeof(System.Collections.ICollection)
+                || (dt.IsGenericType && dt.GetGenericTypeDefinition() is var gtd
+                    && (gtd == typeof(IReadOnlyCollection<>)
+                        || gtd == typeof(ICollection<>)
+                        || gtd == typeof(IReadOnlyList<>)
+                        || gtd == typeof(IList<>)
+                        || gtd == typeof(List<>))));
+
+    private static bool IsReadOnlyListIndexLoad(List<CodeInstruction> instructions, int loadCursor, int end)
+    {
+        if (loadCursor + 1 >= end)
+            return false;
+        var next = instructions[loadCursor + 1];
+        if ((next.opcode != OpCodes.Call && next.opcode != OpCodes.Callvirt)
+            || next.operand is not MethodInfo { Name: "get_Item" } getter
+            || getter.GetParameters() is not [{ ParameterType: var indexType }]
+            || indexType != typeof(int)
+            || getter.DeclaringType is not { IsGenericType: true } dt)
+        {
+            return false;
+        }
+        var gtd = dt.GetGenericTypeDefinition();
+        return gtd == typeof(IReadOnlyList<>) || gtd == typeof(IList<>) || gtd == typeof(List<>);
     }
 
     private static bool IsCountedLoopBound(Value? limit) => limit switch

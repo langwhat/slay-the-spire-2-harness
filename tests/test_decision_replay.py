@@ -312,13 +312,21 @@ def test_focused_reward_exposes_only_its_tools_and_mode_notes(
             for message in rebuilt.prepared.input
             if isinstance(message, TextMessage) and message.role is TextRole.SYSTEM
         )
-        assert system == tuple(
+        system_text = "\n".join(system)
+        other_system = "\n".join(
             message.text
             for message in other_mode.prepared.input
             if isinstance(message, TextMessage) and message.role is TextRole.SYSTEM
         )
-        assert PackagedPrompts().read("run-notes").body not in "\n".join(system)
-        assert PackagedPrompts().read("state-format").body in "\n".join(system)
+        assert PackagedPrompts().read("run-notes").body not in system_text
+        assert ("`notes` shows the strategy notes." in system_text) is (not minimal)
+        assert ("`notes` shows the strategy notes." in other_system) is minimal
+        if not minimal:
+            assert PackagedPrompts().read("state-format").body in system_text
+        else:
+            assert "handoff" not in system_text
+            assert "Combat review" not in system_text
+            assert "strategy notes" not in system_text
         task = next(
             message
             for message in reversed(rebuilt.prepared.input)

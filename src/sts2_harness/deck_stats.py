@@ -12,6 +12,8 @@ class _CardType(StrEnum):
     ATTACK = "attack"
     SKILL = "skill"
     POWER = "power"
+    CURSE = "curse"
+    STATUS = "status"
 
 
 class _CardRarity(StrEnum):
@@ -39,13 +41,25 @@ class DeckStatistics:
         self._choices.clear()
         self._session = session
 
+    def _record_battle(
+        self, observation: native.Observation, cards: tuple[native.NamedDefinition, ...]
+    ) -> None:
+        self._enter(observation)
+        self._battles[observation.location.node_id] = cards
+        if len(self._battles) > 5:
+            del self._battles[next(iter(self._battles))]
+
     def capture(self, observation: native.Observation, history: native.HistoryData) -> None:
         if not isinstance(observation.state, native.CombatState):
             return
-        self._enter(observation)
-        self._battles[observation.location.node_id] = history.cards_played_this_combat
-        if len(self._battles) > 5:
-            del self._battles[next(iter(self._battles))]
+        self._record_battle(observation, history.cards_played_this_combat)
+
+    def observe(self, observation: native.Observation) -> None:
+        if (
+            isinstance(observation.state, native.RunState)
+            and observation.state.battle_cards_played is not MISSING
+        ):
+            self._record_battle(observation, observation.state.battle_cards_played)
 
     def record_choice(
         self, observation: native.Observation, taken: bool, *, count: int = 1
@@ -64,23 +78,27 @@ class DeckStatistics:
             if not isinstance(card, native.CardEntry):
                 raise ValueError("A permanent deck reference must identify a card.")
             cards.append(card)
-        kinds = Counter(card.card_type for card in cards)
+        card_types = [
+            card.card_type.casefold() if card.card_type is not None else None for card in cards
+        ]
+        kinds = Counter(card_types)
         keywords = [set(keyword.casefold() for keyword in card.keywords) for card in cards]
         choices = self._choices.get(state.progress.act, Counter())
         circulating = [
-            (card, words)
-            for card, words in zip(cards, keywords, strict=True)
-            if card.card_type != _CardType.POWER
+            (card, card_type, words)
+            for card, card_type, words in zip(cards, card_types, keywords, strict=True)
+            if card_type != _CardType.POWER
             and _Keyword.EXHAUST not in words
             and not {_Keyword.UNPLAYABLE, _Keyword.ETHEREAL}.issubset(words)
         ]
         fixed_costs = [
             cost
-            for card, words in circulating
+            for card, _, words in circulating
             if _Keyword.UNPLAYABLE not in words
             and card.playable is not False
             and isinstance(cost := card.cost.energy, int)
         ]
+        curses_and_statuses = kinds[_CardType.CURSE] + kinds[_CardType.STATUS]
         stats: dict[str, JsonValue] = {
             "cards": len(cards),
             "attacks": kinds[_CardType.ATTACK],
@@ -90,11 +108,19 @@ class DeckStatistics:
                 card.rarity is not None and card.rarity.casefold() == _CardRarity.BASIC
                 for card in cards
             ),
+            "curses_and_statuses": curses_and_statuses,
             "unplayable": sum(_Keyword.UNPLAYABLE in words for words in keywords),
             "circulating": len(circulating),
             "added": choices[True],
             "skipped": choices[False],
         }
+        if circulating:
+            junk_circulating = sum(
+                (card.rarity is not None and card.rarity.casefold() == _CardRarity.BASIC)
+                or card_type in (_CardType.CURSE, _CardType.STATUS)
+                for card, card_type, _ in circulating
+            )
+            stats["basic_and_curse_pct"] = round(100 * junk_circulating / len(circulating), 1)
         if fixed_costs:
             stats["circulating_avg_energy"] = round(sum(fixed_costs) / len(fixed_costs), 2)
         draw, energy = state.player.base_draw, state.player.base_energy

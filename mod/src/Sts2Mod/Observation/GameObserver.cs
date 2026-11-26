@@ -5,6 +5,7 @@ using Godot;
 using MegaCrit.Sts2.addons.mega_text;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Combat.History;
 using MegaCrit.Sts2.Core.Combat.History.Entries;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Context;
@@ -160,12 +161,72 @@ internal static class CombatInputProbe
 }
 
 /// <summary>
+/// Latches cards played in the active combat keyed by run instance and node so post-combat run observations
+/// retain the full battle play list even after <see cref="CombatHistory.Clear"/> runs inside combat teardown.
+/// </summary>
+internal sealed class BattleHistoryTracker
+{
+    private long _runInstanceId;
+    private string? _nodeId;
+    private ImmutableArray<NamedDefinition> _cardsPlayed;
+    private bool _hasSnapshot;
+
+    public void Reset()
+    {
+        _runInstanceId = 0;
+        _nodeId = null;
+        _cardsPlayed = default;
+        _hasSnapshot = false;
+    }
+
+    public void BeginCombat(long runInstanceId, string? nodeId)
+    {
+        if (string.IsNullOrEmpty(nodeId))
+        {
+            Reset();
+            return;
+        }
+
+        _runInstanceId = runInstanceId;
+        _nodeId = nodeId;
+        _cardsPlayed = ImmutableArray<NamedDefinition>.Empty;
+        _hasSnapshot = true;
+    }
+
+    public void Record(long runInstanceId, string? nodeId, ImmutableArray<NamedDefinition> cardsPlayed)
+    {
+        if (string.IsNullOrEmpty(nodeId))
+            return;
+
+        _runInstanceId = runInstanceId;
+        _nodeId = nodeId;
+        _cardsPlayed = cardsPlayed.IsDefault ? ImmutableArray<NamedDefinition>.Empty : cardsPlayed;
+        _hasSnapshot = true;
+    }
+
+    public ImmutableArray<NamedDefinition>? ReadForCompletedBattle(
+        long runInstanceId,
+        string? nodeId,
+        int? battleTurns)
+    {
+        if (battleTurns is not > 0 || !_hasSnapshot || string.IsNullOrEmpty(nodeId))
+            return null;
+
+        if (_runInstanceId != runInstanceId || !string.Equals(_nodeId, nodeId, StringComparison.Ordinal))
+            return null;
+
+        return _cardsPlayed;
+    }
+}
+
+/// <summary>
 /// Publishes immutable per-frame observations on the game thread for concurrent lock-free HTTP reads.
 /// </summary>
 internal static class ObservationHub
 {
     private static readonly string GameId = Guid.NewGuid().ToString("N");
     private static readonly RunInstanceSequencer RunSequencer = new();
+    private static readonly BattleHistoryTracker BattleHistory = new();
     private static long _sequence;
     private static NativeReadPublication _current = Failure(NativeReadError.NoRun, "No run is active.");
     private static NativeReadPublication? _lastTrusted;
@@ -197,7 +258,12 @@ internal static class ObservationHub
                 identities.RegisterCard(card);
         };
         RunManager.Instance.RoomEntered += identities.EnterNode;
-        CombatManager.Instance.CombatSetUp += _ => identities.RegisterCurrent();
+        CombatManager.Instance.CombatSetUp += _ =>
+        {
+            identities.RegisterCurrent();
+            OnCombatSetUp();
+        };
+        CombatManager.Instance.History.Changed += OnCombatHistoryChanged;
     }
 
     public static void OnRunStarted()
@@ -205,6 +271,7 @@ internal static class ObservationHub
         _terminal = false;
         _identityFailureReported = false;
         _lastTrusted = null;
+        BattleHistory.Reset();
         RunSequencer.BeginRun();
         Volatile.Write(
             ref _current,
@@ -214,6 +281,7 @@ internal static class ObservationHub
 
     public static void OnRunCleanUp()
     {
+        BattleHistory.Reset();
         RunSequencer.MarkRunEnded();
         if (!_terminal)
             Volatile.Write(ref _current, Failure(NativeReadError.NoRun, "No run is active."));
@@ -259,13 +327,17 @@ internal static class ObservationHub
             var deck = player.Deck.Cards.Select(registry.GetRef).ToImmutableArray();
             var sequence = Interlocked.Increment(ref _sequence);
 
+            var combatHistory = combat is not null ? CaptureCombatHistory(player, combat) : null;
+            if (combatHistory is not null)
+                BattleHistory.Record(runInstanceId, registry.NodeId, combatHistory.CardsPlayedThisCombat);
+
             var observation = combat is not null
                 ? observer.CaptureCombat(GameId, sequence, deck)
-                : observer.CaptureRun(GameId, sequence, deck);
+                : observer.CaptureRun(GameId, sequence, deck, BattleHistory);
 
             var publication = new NativeReadPublication(
                 new CompletedStateRead(observation),
-                combat is not null ? CaptureCombatHistory(player, combat) : null,
+                combatHistory,
                 deck)
             {
                 InspectionUpgrades = observer.InspectionUpgrades,
@@ -314,13 +386,48 @@ internal static class ObservationHub
             TerminalObservation.Create(previous, isVictory ? RunResult.Victory : RunResult.Defeat, stamp));
     }
 
-    private static HistoryInspectionData CaptureCombatHistory(Player player, CombatState combat)
+    private static void OnCombatSetUp()
     {
-        var history = CombatManager.Instance.History;
-        var playedCombat = history.CardPlaysFinished
+        if (!RunSequencer.IsActive)
+            return;
+        BattleHistory.BeginCombat(RunSequencer.Current, Identities?.Registry.NodeId);
+    }
+
+    private static void OnCombatHistoryChanged()
+    {
+        try
+        {
+            if (!RunSequencer.IsActive)
+                return;
+
+            var history = CombatManager.Instance.History;
+            // CombatHistory.Clear() invokes Changed after emptying entries; preserve the latched battle snapshot.
+            if (!history.Entries.Any())
+                return;
+
+            var run = RunManager.Instance.DebugOnlyGetState();
+            var nodeId = Identities?.Registry.NodeId;
+            if (run is null || run.Players.Count != 1 || string.IsNullOrEmpty(nodeId))
+                return;
+
+            BattleHistory.Record(RunSequencer.Current, nodeId, CaptureCardsPlayed(history, run.Players[0]));
+        }
+        catch (Exception error)
+        {
+            GD.PrintErr($"[sts2agent] Combat history latch failed: {error}");
+        }
+    }
+
+    internal static ImmutableArray<NamedDefinition> CaptureCardsPlayed(CombatHistory history, Player player) =>
+        history.CardPlaysFinished
             .Where(entry => ReferenceEquals(entry.Actor?.Player, player))
             .Select(entry => new NamedDefinition(entry.CardPlay.Card.Title, entry.CardPlay.Card.Id.ToString()))
             .ToImmutableArray();
+
+    private static HistoryInspectionData CaptureCombatHistory(Player player, CombatState combat)
+    {
+        var history = CombatManager.Instance.History;
+        var playedCombat = CaptureCardsPlayed(history, player);
 
         var playedTurn = history.CardPlaysFinished
             .Where(entry => ReferenceEquals(entry.Actor?.Player, player) && entry.HappenedThisTurn(combat))
@@ -466,6 +573,7 @@ internal sealed class GameObserver(
             Orbs = ObserveOrbs(pcs.OrbQueue.Capacity, pcs.OrbQueue.Orbs, actor),
             ArrowSlots = ObserveArrowSlots(pcs.Arrows, combat, actor),
             Melodies = ObserveMelodies(player, actor),
+            TurnActivity = CaptureTurnActivity(player, combat),
         };
 
         FlushPowerMechanisms();
@@ -491,7 +599,69 @@ internal sealed class GameObserver(
         };
     }
 
-    public NativeObservation CaptureRun(string gameId, long sequence, ImmutableArray<string> deck)
+    internal static TurnActivity CaptureTurnActivity(Player player, CombatState combat) =>
+        BuildTurnActivity(CombatManager.Instance.History, player, combat);
+
+    internal static TurnActivity BuildTurnActivity(CombatHistory history, Player player, ICombatState combat)
+    {
+        var playedThisTurn = history.CardPlaysFinished
+            .Where(entry => ReferenceEquals(entry.Actor?.Player, player) && entry.HappenedThisTurn(combat))
+            .Select(entry => entry.CardPlay.Card.Type);
+
+        var exhaustedThisTurn = history.Entries
+            .OfType<CardExhaustedEntry>()
+            .Count(entry => ReferenceEquals(entry.Actor?.Player, player) && entry.HappenedThisTurn(combat));
+
+        var discardedThisTurn = history.Entries
+            .OfType<CardDiscardedEntry>()
+            .Count(entry => ReferenceEquals(entry.Actor?.Player, player) && entry.HappenedThisTurn(combat));
+
+        return CountTurnActivity(playedThisTurn, exhaustedThisTurn, discardedThisTurn);
+    }
+
+    internal static TurnActivity CountTurnActivity(
+        IEnumerable<CardType> playedCardTypesThisTurn,
+        int cardsExhaustedThisTurn,
+        int? cardsDiscardedThisTurn)
+    {
+        var cardsPlayed = 0;
+        var attacksPlayed = 0;
+        var skillsPlayed = 0;
+        var powersPlayed = 0;
+
+        foreach (var cardType in playedCardTypesThisTurn)
+        {
+            cardsPlayed++;
+            switch (cardType)
+            {
+                case CardType.Attack:
+                    attacksPlayed++;
+                    break;
+                case CardType.Skill:
+                    skillsPlayed++;
+                    break;
+                case CardType.Power:
+                    powersPlayed++;
+                    break;
+            }
+        }
+
+        return new TurnActivity(
+            cardsPlayed,
+            attacksPlayed,
+            skillsPlayed,
+            powersPlayed,
+            cardsExhaustedThisTurn)
+        {
+            CardsDiscarded = cardsDiscardedThisTurn,
+        };
+    }
+
+    public NativeObservation CaptureRun(
+        string gameId,
+        long sequence,
+        ImmutableArray<string> deck,
+        BattleHistoryTracker? battleHistory = null)
     {
         var player = run.Players.Single();
         var selection = ObserveRunSelection();
@@ -578,6 +748,11 @@ internal sealed class GameObserver(
 
         var battleTurns = run.CurrentMapPointHistoryEntry?.Rooms.LastOrDefault(room =>
             room.RoomType is RoomType.Monster or RoomType.Elite or RoomType.Boss)?.TurnsTaken;
+        var resolvedBattleTurns = battleTurns is > 0 ? battleTurns : null;
+        var battleCardsPlayed = battleHistory?.ReadForCompletedBattle(
+            runInstanceId,
+            registry.NodeId,
+            resolvedBattleTurns);
 
         var state = new RunStateView(
             readiness == NativeInputReadiness.Busy ? PublicInputControl.Busy : PublicInputControl.Ready,
@@ -604,7 +779,8 @@ internal sealed class GameObserver(
         {
             Event = currentEvent,
             CardRarityOffset = player.PlayerOdds.CardRarity.CurrentValue,
-            BattleTurns = battleTurns is > 0 ? battleTurns : null,
+            BattleTurns = resolvedBattleTurns,
+            BattleCardsPlayed = battleCardsPlayed,
         };
 
         var mapView = MapObserver.Observe(run);

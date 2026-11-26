@@ -380,6 +380,17 @@ public sealed record RunStateView(
     public EventView? Event { get; init; }
     public required float CardRarityOffset { get; init; }
     public int? BattleTurns { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<NamedDefinition>? BattleCardsPlayed { get; init; }
+}
+
+public sealed record TurnActivity(
+    int CardsPlayed,
+    int AttacksPlayed,
+    int SkillsPlayed,
+    int PowersPlayed,
+    int CardsExhausted)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? CardsDiscarded { get; init; }
 }
 
 public sealed record CombatStateView(
@@ -402,6 +413,7 @@ public sealed record CombatStateView(
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<ArrowSlotView>? ArrowSlots { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<MelodyTag>? Melodies { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<AllyView>? Allies { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public TurnActivity? TurnActivity { get; init; }
 }
 
 public sealed record CardModifier(string DefinitionId, string Name, int? Amount)

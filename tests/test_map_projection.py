@@ -5,7 +5,12 @@ from test_mod_client import COMBAT
 
 from sts2_harness.client.models import CombatState, DecisionOwner, Observation, Progress, PublicMap
 from sts2_harness.context import CombatActInput, Context
-from sts2_harness.context.map_projection import planned_route, project_map
+from sts2_harness.context.map_projection import (
+    ReachableSummary,
+    planned_route,
+    project_map,
+    reachable_room_summary,
+)
 from sts2_harness.route_plan import Edge, RoutePlan
 
 
@@ -113,3 +118,28 @@ def test_combat_progress_receives_remaining_stretch_rooms_and_native_boss_count(
     rendered = json.loads(context.model_input()[-1].text)["observation"]["progress"]
     assert rendered["route"] == ["RB"] and rendered["bosses_left"] == 2
     assert planned_route(public_map, progress, None) is MISSING
+
+
+def test_reachable_room_summary_counts_ahead_rooms_and_handles_post_boss() -> None:
+    public_map = PublicMap.model_validate_json(
+        '{"bosses":[{"name":"Boss","definition_id":"ENCOUNTER.BOSS"}],"nodes":['
+        '{"position":"map:0:0","room_type":"monster","children":["map:1:0","map:1:1","map:1:2"]},'
+        '{"position":"map:1:0","room_type":"elite","children":["map:2:0"]},'
+        '{"position":"map:1:1","room_type":"elite","children":["map:2:0"]},'
+        '{"position":"map:1:2","room_type":"shop","children":["map:2:1"]},'
+        '{"position":"map:2:0","room_type":"restsite","children":["map:3:0"]},'
+        '{"position":"map:2:1","room_type":"unknown","children":["map:3:0"]},'
+        '{"position":"map:3:0","room_type":"boss","children":[]}],'
+        '"legal_destinations":null}'
+    )
+    progress = Progress(acts=3, act=1, floor=1, position="map:0:0", room_type="monster")
+    assert reachable_room_summary(public_map, progress) == ReachableSummary(
+        next_rooms=("E", "$"),
+        counts={"E": 2, "R": 1, "$": 1, "?": 1, "B": 1},
+    )
+
+    post_boss = Progress(
+        acts=3, act=1, floor=16, position="map:3:0", room_type="boss", bosses_left=0
+    )
+    assert reachable_room_summary(public_map, post_boss) is MISSING
+    assert reachable_room_summary(MISSING, progress) is MISSING

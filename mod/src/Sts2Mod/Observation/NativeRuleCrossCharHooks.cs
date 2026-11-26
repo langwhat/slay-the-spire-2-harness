@@ -728,7 +728,7 @@ internal sealed partial class NativeRuleText
         var target = UnwrapAsyncMoveNext(method);
         if (target.GetMethodBody() is null)
             return false;
-        return PatchProcessor.GetOriginalInstructions(target)
+        return NativeRuleBody.ReadOriginalInstructions(target)
             .Any(inst => inst.operand is MethodBase mb && predicate(mb));
     }
 
@@ -926,7 +926,7 @@ internal sealed partial class NativeRuleText
         if (targetMethod.GetMethodBody() is null || targetMethod.ContainsGenericParameters)
             return null;
 
-        var instructions = PatchProcessor.GetOriginalInstructions(targetMethod);
+        var instructions = NativeRuleBody.ReadOriginalInstructions(targetMethod);
         var setMaxHpIdx = -1;
         var hasTeammateCheck = false;
         var hasEvenParityCheck = false;
