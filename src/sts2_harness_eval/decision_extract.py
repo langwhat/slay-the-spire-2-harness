@@ -22,7 +22,12 @@ from sts2_harness.context.models import (
     TaskMessage,
 )
 from sts2_harness.context.run_models import RunObservation
-from sts2_harness.decisions import CardRewardChoice, CardRewardPlan, SelectStep
+from sts2_harness.decisions import (
+    CardRewardChoice,
+    CardRewardPlan,
+    RerollCardRewardStep,
+    SelectStep,
+)
 from sts2_harness.deck import CardChoiceKind, card_rewards, deck_observation
 from sts2_harness.execution.rewards import reward_steps
 from sts2_harness.fights import Fight, FightHistory
@@ -123,7 +128,9 @@ class _SourceSession(RunSession):
         return self.run_role
 
 
-type SingleDecisionInput = tool_inputs.RunAct | tool_inputs.TakeCard | tool_inputs.SkipCard
+type SingleDecisionInput = (
+    tool_inputs.RunAct | tool_inputs.TakeCard | tool_inputs.SkipCard | tool_inputs.RerollCard
+)
 type DecisionInput = SingleDecisionInput | tool_inputs.RunDeckChoice
 
 
@@ -303,6 +310,8 @@ def choices_for(decision: DecisionInput, observation: native.Observation) -> tup
             )
         case tool_inputs.SkipCard():
             return ("skip",)
+        case tool_inputs.RerollCard():
+            return ("reroll",)
         case tool_inputs.TakeCard():
             refs.extend(decision.cards)
         case tool_inputs.RunAct():
@@ -733,7 +742,11 @@ def _recorded_reward_batch(
         if item.offer is not MISSING and offer is None:
             raise ExtractionError("The source frame does not contain the recorded reward group.")
         refs = item.cards if isinstance(item, tool_inputs.TakeCard) else ()
-        choices.append(CardRewardChoice(offer, refs, item.reason))
+        choices.append(
+            CardRewardChoice(
+                offer, refs, item.reason, reroll=isinstance(item, tool_inputs.RerollCard)
+            )
+        )
     plan = CardRewardPlan(
         choices=tuple(choices), before=observation, resolved=frozenset(task.declined_offers)
     )
@@ -797,6 +810,8 @@ def _recorded_reward_batch(
             expected: native.NativeStep
             if isinstance(step, SelectStep):
                 expected = native.Select(kind=native.StepKind.SELECT, refs=step.refs)
+            elif isinstance(step, RerollCardRewardStep):
+                expected = native.RerollCardReward(kind=native.StepKind.REROLL_CARD_REWARD)
             else:
                 assert step.ref is not None
                 expected = native.Interact(kind=native.StepKind.INTERACT, action=step.ref)

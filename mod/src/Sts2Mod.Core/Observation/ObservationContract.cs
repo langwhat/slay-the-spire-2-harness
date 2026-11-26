@@ -352,6 +352,7 @@ public sealed record OfferView(
 {
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ParentOfferRef { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? RequiresSelection { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? CanReroll { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Price { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? Stocked { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? OnSale { get; init; }

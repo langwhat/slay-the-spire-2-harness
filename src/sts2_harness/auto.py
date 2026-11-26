@@ -198,11 +198,28 @@ def _post_boss_epilogue_action(
     return action
 
 
+def _has_relic(observation: native.Observation, definition_id: str) -> bool:
+    state = observation.state
+    if not isinstance(state, native.RunState):
+        return False
+    return any(
+        isinstance(relic := observation.objects.get(ref), native.RelicEntry)
+        and relic.definition_id == definition_id
+        for ref in state.relics
+    )
+
+
+def _auto_potion_blocked(observation: native.Observation) -> bool:
+    # Belt Buckle grants Dexterity only with zero potions; Sozu blocks obtaining potions.
+    return _has_relic(observation, "RELIC.BELT_BUCKLE") or _has_relic(observation, "RELIC.SOZU")
+
+
 def _event_potion_action(
-    state: native.RunState, enabled: tuple[native.Action, ...]
+    observation: native.Observation, state: native.RunState, enabled: tuple[native.Action, ...]
 ) -> native.Action | None:
     if (
         not event_reward_surface(state)
+        or _auto_potion_blocked(observation)
         or not 0 < len(state.offers) <= state.player.empty_potion_slot_count
     ):
         return None
@@ -235,7 +252,9 @@ def _candidate(
         return None
     enabled = tuple(action for action in state.actions if action.enabled)
     if state.offers:
-        potion_claim = _event_potion_action(state, enabled) if allow_event_potion else None
+        potion_claim = (
+            _event_potion_action(observation, state, enabled) if allow_event_potion else None
+        )
         if potion_claim is None:
             return None
         contents = state.offers[0].contents
@@ -393,8 +412,13 @@ def battle_reward(observation: native.Observation) -> native.Action | None:
         return None
     enabled = {action.ref: action for action in state.actions if action.enabled}
     potion_offers = tuple(offer for offer in state.offers if offer.kind is native.OfferKind.POTION)
-    kinds: tuple[native.OfferKind, ...] = (native.OfferKind.RELIC, native.OfferKind.GOLD)
-    if 0 < len(potion_offers) <= state.player.empty_potion_slot_count:
+    kinds: tuple[native.OfferKind, ...] = (native.OfferKind.RELIC,)
+    if not _has_relic(observation, "RELIC.ECTOPLASM"):
+        kinds = (*kinds, native.OfferKind.GOLD)
+    if (
+        not _auto_potion_blocked(observation)
+        and 0 < len(potion_offers) <= state.player.empty_potion_slot_count
+    ):
         kinds = (*kinds, native.OfferKind.POTION)
     for kind in kinds:
         for offer in state.offers:

@@ -1273,7 +1273,7 @@ def test_live_game_language_resolves_reason_placeholder_across_roles_and_protoco
             wire_tools = _extract_wire_tools(protocol, body)
             for name in names:
                 descriptions = _reason_descriptions(wire_tools[name])
-                assert len(descriptions) == (2 if name == "run_deck_choice" else 1)
+                assert len(descriptions) == (3 if name == "run_deck_choice" else 1)
                 for text in descriptions:
                     assert expected_phrase in text
                     assert "CARD.*" in text
@@ -1367,7 +1367,7 @@ def test_mid_run_language_switch_and_journal_replay_reproducibility(tmp_path: Pa
             assert len(first_deck.tools) == 1
             recorded_params = first_deck.tools[0].parameters
             recorded_reasons = _reason_descriptions(recorded_params)
-            assert len(recorded_reasons) == 2
+            assert len(recorded_reasons) == 3
             assert all(
                 "Japanese" in text
                 and "conversational" not in text

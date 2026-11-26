@@ -470,6 +470,7 @@ class Offer(WireModel):
     on_sale: bool | None | MISSING = MISSING
     amount: Number | None | MISSING = MISSING
     requires_selection: bool | MISSING = MISSING
+    can_reroll: bool | MISSING = MISSING
 
 
 class EventState(WireModel):
@@ -1571,6 +1572,7 @@ class StepKind(StrEnum):
     END_TURN = "end_turn"
     INTERACT = "interact"
     SELECT = "select"
+    REROLL_CARD_REWARD = "reroll_card_reward"
 
 
 class PlayCard(WireModel):
@@ -1604,8 +1606,13 @@ class Select(WireModel):
     refs: Annotated[tuple[Nonempty, ...], AfterValidator(_distinct)]
 
 
+class RerollCardReward(WireModel):
+    kind: Literal[StepKind.REROLL_CARD_REWARD]
+
+
 type NativeStep = Annotated[
-    PlayCard | UsePotion | DiscardPotion | EndTurn | Interact | Select, Field(discriminator="kind")
+    PlayCard | UsePotion | DiscardPotion | EndTurn | Interact | Select | RerollCardReward,
+    Field(discriminator="kind"),
 ]
 
 

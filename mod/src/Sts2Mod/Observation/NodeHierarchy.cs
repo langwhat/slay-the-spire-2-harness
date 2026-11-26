@@ -30,7 +30,15 @@ internal static class NodeHierarchy
             ? button
             : null;
 
-    public static NClickableControl? FindRewardDeclineButton(NCardRewardSelectionScreen screen)
+    public static NClickableControl? FindRewardDeclineButton(NCardRewardSelectionScreen screen) =>
+        FindRewardAlternativeButton(screen, StepRules.SelectCardRewardDeclineIndex);
+
+    public static NClickableControl? FindRewardRerollButton(NCardRewardSelectionScreen screen) =>
+        FindRewardAlternativeButton(screen, StepRules.SelectCardRewardRerollIndex);
+
+    private static NClickableControl? FindRewardAlternativeButton(
+        NCardRewardSelectionScreen screen,
+        Func<IReadOnlyList<CardRewardAlternativeAvailability>, int> selector)
     {
         var alternatives = RunSurfaceLifecycle.GetCardRewardAlternatives(screen);
         var buttons = screen.GetNode<Control>("UI/RewardAlternatives").GetChildren()
@@ -48,7 +56,7 @@ internal static class NodeHierarchy
                 alternatives[index].OptionId,
                 GodotObject.IsInstanceValid(button) && button.IsVisibleInTree() && button.IsEnabled);
         }
-        var selected = StepRules.SelectCardRewardDeclineIndex(candidates);
+        var selected = selector(candidates);
         return selected >= 0 ? buttons[selected] : null;
     }
 }

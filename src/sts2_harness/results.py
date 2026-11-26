@@ -214,6 +214,7 @@ class CardRewardResult:
     outcome: ActionOutcome
     local_decline: bool = False
     display_reason: str | None = None
+    rerolled: bool = False
 
 
 @dataclass(frozen=True, slots=True)

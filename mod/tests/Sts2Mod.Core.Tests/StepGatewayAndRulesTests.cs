@@ -736,4 +736,52 @@ public sealed class StepGatewayAndRulesTests
             new(null, true),
         ]));
     }
+
+    [Fact]
+    public void SelectCardRewardRerollIndex_AndGatewayRerollAtSelectionBoundary()
+    {
+        Assert.Equal(1, StepRules.SelectCardRewardRerollIndex([
+            new("Skip", true),
+            new("REROLL", true),
+        ]));
+        Assert.Equal(-1, StepRules.SelectCardRewardRerollIndex([
+            new("Skip", true),
+            new("REROLL", false),
+        ]));
+        Assert.Equal(-1, StepRules.SelectCardRewardRerollIndex([
+            new("Skip", true),
+            new("SACRIFICE", true),
+        ]));
+
+        var clock = new ManualClock();
+        var control = new AgentControlState();
+        control.SetMode(AgentControlMode.Running);
+        var gateway = new StepGateway(control, "game-1", timeProvider: clock);
+        var initialPresentation = new object();
+        var refreshedPresentation = new object();
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 1, _ => null, selectionIdentity: initialPresentation);
+
+        var submit = gateway.Submit(ActionJson("reroll-1", RunRoute, "{\"kind\":\"reroll_card_reward\"}"));
+        Assert.Equal(200, submit.StatusCode);
+
+        var cue = new TaskCompletionSource();
+        StepRequest? dispatched = null;
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 1, request =>
+        {
+            dispatched = request;
+            gateway.TrackNativeTask(request, cue.Task);
+            return null;
+        }, selectionIdentity: initialPresentation);
+        Assert.IsType<RerollCardRewardStep>(Assert.IsType<StepRequest>(dispatched).Step);
+
+        clock.Seconds = 1;
+        gateway.Advance(RunLocation, NativeInputReadiness.Busy, sequence: 2, _ => null, selectionIdentity: initialPresentation);
+        Assert.IsType<PendingStep>(gateway.Status().Receipt);
+
+        cue.SetResult();
+        gateway.Advance(RunLocation, NativeInputReadiness.Selection, sequence: 3, _ => null, selectionIdentity: refreshedPresentation);
+        var receipt = Assert.IsType<CompletedStep>(gateway.Status().Receipt);
+        Assert.Equal("reroll-1", receipt.OperationId);
+        Assert.Equal(StepBoundary.Selection, receipt.Boundary);
+    }
 }

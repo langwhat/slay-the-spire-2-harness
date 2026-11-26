@@ -20,6 +20,7 @@ from sts2_harness.route_plan import RoutePlan
 class CardChoiceKind(StrEnum):
     TAKE = "take"
     SKIP = "skip"
+    REROLL = "reroll"
 
 
 class CardChoiceCompletion(native.WireModel):

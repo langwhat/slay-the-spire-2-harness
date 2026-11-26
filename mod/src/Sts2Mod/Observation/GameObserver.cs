@@ -1525,6 +1525,7 @@ internal sealed class GameObserver(
                     : reward is CardRemovalReward or CardUpgradeReward
                         ? true
                         : null,
+                CanReroll = reward is CardReward { CanReroll: true } ? true : null,
             });
         }
 
@@ -1578,6 +1579,7 @@ internal sealed class GameObserver(
         {
             ParentOfferRef = parentOfferRef,
             RequiresSelection = true,
+            CanReroll = NodeHierarchy.FindRewardRerollButton(screen) is not null ? true : null,
         });
 
         foreach (var parent in parentScreens)

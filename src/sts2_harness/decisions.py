@@ -30,7 +30,12 @@ class SelectStep:
     refs: tuple[str, ...]
 
 
-type Step = ActionStep | SelectStep
+@dataclass(frozen=True, slots=True)
+class RerollCardRewardStep:
+    pass
+
+
+type Step = ActionStep | SelectStep | RerollCardRewardStep
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +50,7 @@ class CardRewardChoice:
     offer: native.Offer | None
     refs: tuple[str, ...]
     reason: str
+    reroll: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -490,6 +490,12 @@ def check_control(
             usable = isinstance(selection, native.Selection) and set(refs) <= set(
                 selection.candidates
             )
+        case native.RerollCardReward():
+            usable = (
+                isinstance(state, native.RunState)
+                and state.selection is not None
+                and any(offer.can_reroll is True for offer in state.offers)
+            )
         case native.PlayCard(card=ref):
             card = objects.get(ref)
             usable = (

@@ -1030,3 +1030,127 @@ def test_glory_epilogue_auto_stops_on_phase_change_to_combat(tmp_path: Path) -> 
         assert isinstance(http.actions[1].step, native.EndTurn)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("relic_id", ["RELIC.BELT_BUCKLE", "RELIC.SOZU"])
+def test_auto_potion_claim_skips_belt_buckle_and_sozu(relic_id: str) -> None:
+    from sts2_harness.auto import battle_reward, choose_auto
+
+    base = native.Observation.model_validate_json(RUN)
+    assert isinstance(base.state, native.RunState)
+    potion_entry = native.PotionEntry(
+        kind=native.ObjectKind.POTION,
+        definition_id="POTION.FIRE_POTION",
+        name="火焰药水",
+        usable=False,
+        needs_target=True,
+        target_type="anyenemy",
+        usage=None,
+    )
+    relic_entry = native.RelicEntry(
+        kind=native.ObjectKind.RELIC,
+        definition_id=relic_id,
+        name="Relic",
+        status=native.RelicStatus.NORMAL,
+        is_used_up=False,
+        is_melted=False,
+        stack_count=1,
+    )
+    offer = native.Offer(
+        ref="offer:pot",
+        kind=native.OfferKind.POTION,
+        contents=("pot:1",),
+        actions=("claim-pot",),
+        requires_selection=False,
+    )
+    actions = (
+        native.Action(ref="claim-pot", label="火焰药水", enabled=True, subject="offer:pot"),
+        native.Action(
+            ref="proceed",
+            label="继续",
+            enabled=True,
+            operation=native.ActionOperation.PROCEED,
+        ),
+    )
+    monster_plain = base.model_copy(
+        update={
+            "objects": {"pot:1": potion_entry},
+            "state": base.state.model_copy(
+                update={
+                    "screen": native.RunScreen.REWARDS,
+                    "progress": base.state.progress.model_copy(update={"room_type": "monster"}),
+                    "player": base.state.player.model_copy(update={"empty_potion_slot_count": 2}),
+                    "relics": (),
+                    "offers": (offer,),
+                    "actions": actions,
+                }
+            ),
+        }
+    )
+    assert battle_reward(monster_plain) == actions[0]
+
+    monster_blocked = monster_plain.model_copy(
+        update={
+            "objects": {"pot:1": potion_entry, "rel:1": relic_entry},
+            "state": monster_plain.state.model_copy(update={"relics": ("rel:1",)}),
+        }
+    )
+    assert battle_reward(monster_blocked) is None
+
+    event_plain = monster_plain.model_copy(
+        update={
+            "state": monster_plain.state.model_copy(
+                update={"progress": base.state.progress.model_copy(update={"room_type": "event"})}
+            )
+        }
+    )
+    assert choose_auto(event_plain, shop_strategy=False) is not None
+
+    event_blocked = event_plain.model_copy(
+        update={
+            "objects": {"pot:1": potion_entry, "rel:1": relic_entry},
+            "state": event_plain.state.model_copy(update={"relics": ("rel:1",)}),
+        }
+    )
+    assert choose_auto(event_blocked, shop_strategy=False) is None
+
+
+def test_battle_reward_skips_gold_when_ectoplasm_owned() -> None:
+    from sts2_harness.auto import battle_reward
+
+    base = native.Observation.model_validate_json(RUN)
+    assert isinstance(base.state, native.RunState)
+    ectoplasm = native.RelicEntry(
+        kind=native.ObjectKind.RELIC,
+        definition_id="RELIC.ECTOPLASM",
+        name="灵液",
+        status=native.RelicStatus.NORMAL,
+        is_used_up=False,
+        is_melted=False,
+        stack_count=1,
+    )
+    gold_offer = native.Offer(
+        ref="offer:gold",
+        kind=native.OfferKind.GOLD,
+        contents=(),
+        actions=("claim-gold",),
+        amount=25,
+    )
+    claim_gold = native.Action(
+        ref="claim-gold", label="25 金币", enabled=True, subject="offer:gold"
+    )
+    obs = base.model_copy(
+        update={
+            "objects": {"rel:ecto": ectoplasm},
+            "state": base.state.model_copy(
+                update={
+                    "screen": native.RunScreen.REWARDS,
+                    "progress": base.state.progress.model_copy(update={"room_type": "monster"}),
+                    "relics": ("rel:ecto",),
+                    "offers": (gold_offer,),
+                    "actions": (claim_gold,),
+                }
+            ),
+        }
+    )
+    assert battle_reward(obs) is None
