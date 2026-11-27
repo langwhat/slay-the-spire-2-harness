@@ -17,7 +17,7 @@ Run `uv run sts2 check-config` to validate settings offline. It prints only safe
 | --- | --- |
 | `STS2_DRIVER` | `builtin`. `external` runs the [external tool service](running.md#external-gameplay-tools) and needs no model settings. |
 | `STS2_USER_INPUT` | `false`. `true` enables [live user input](running.md#live-user-input). |
-| `STS2_MINIMAL` | `false`. `true` enables [minimal mode](#minimal-mode). |
+| `STS2_MINIMAL` | `true` for builtin driving (`false` for `external`). Set `false` to switch from [minimal mode](#minimal-mode) to full mode. |
 | `LLM_PROTOCOL` | `responses`. Also `chat-completions` or `messages`. |
 | `LLM_MODEL` | Required for builtin driving. |
 | `LLM_BASE_URL` | `https://api.openai.com/v1`; `https://api.anthropic.com` for Messages. |
@@ -44,9 +44,9 @@ Some Responses endpoints reject an oversized request with HTTP 400 and the code 
 
 ## Minimal mode
 
-Minimal mode is a cheaper way to play. Turn it on with `--minimal` on `start` or `headless`, or with `STS2_MINIMAL=true`. `--minimal` beats every other source; use `--set STS2_MINIMAL=false` to turn off an environment default. `check-config` shows the resolved mode.
+Minimal mode is the default for builtin driving (`STS2_MINIMAL=true`). It skips post-battle reviews, separate Run handoff turns, and cross-node strategy notes so decisions settle faster with fewer pauses between moves. Switch to full mode with `STS2_MINIMAL=false` in `.env` or `--set STS2_MINIMAL=false`. `--minimal` on `start` or `headless` still forces minimal mode on and beats every other source. `check-config` shows the resolved mode.
 
-Both modes use the same gameplay and state-reading rules. Ordinary mode adds deck-building and battle-review instructions, strategy notes, and query tools. Minimal mode gives the roles only action and route-planning tools. It skips battle reviews and handoff processing, and has no notes. Automatic knowledge injection, deck statistics, and automatic progression still run.
+Both modes share the same core gameplay, state-reading, and Deck drafting rules, plus automatic progression, deck cycle statistics, native mechanism extraction, native catalog queries (`run_knowledge` / `combat_knowledge`), and automatic knowledge injection. Full mode adds post-battle combat reviews, cross-node strategy notes, `run_notes` / `*_inspect` / `*_skill` tools, and external document supplements on knowledge lookups—which may improve win rate at the cost of extra model calls and slower pacing.
 
 Fewer input tokens do not always mean lower cost when cached input is discounted, so compare total usage cost. The archive records the mode, so offline replay uses the same behavior.
 

@@ -35,6 +35,7 @@ def test_precedence_and_snapshot(tmp_path: Path) -> None:
     defaults.write_text("STS2_DRIVER=external\n")
     environment["LLM_REQUEST_TIMEOUT_S"] = "90"
     assert config.driver is Driver.BUILTIN
+    assert config.minimal is True
     assert config.model is not None
     assert config.model.model == "local"
     assert config.model.authentication.secret == "local-key"
@@ -69,6 +70,11 @@ def test_external_without_credentials(tmp_path: Path) -> None:
 
 def test_minimal_environment_precedence_and_cli_override(tmp_path: Path) -> None:
     defaults = tmp_path / ".env"
+    defaults.write_text("LLM_MODEL=fake\nLLM_AUTH=none\n")
+    assert load_configuration(defaults, {}, {}).minimal
+    defaults.write_text("STS2_MINIMAL=false\nLLM_MODEL=fake\nLLM_AUTH=none\n")
+    assert not load_configuration(defaults, {}, {}).minimal
+    assert load_configuration(defaults, {"STS2_MINIMAL": "true"}, {}).minimal
     defaults.write_text("STS2_MINIMAL=true\nLLM_MODEL=fake\nLLM_AUTH=none\n")
     assert load_configuration(defaults, {}, {}).minimal
     assert not load_configuration(defaults, {"STS2_MINIMAL": "false"}, {}).minimal
@@ -82,6 +88,20 @@ def test_minimal_environment_precedence_and_cli_override(tmp_path: Path) -> None
     disabled = cli(tmp_path, "check-config", "--set", "STS2_MINIMAL=false")
     assert disabled.returncode == 0, disabled.stderr
     assert json.loads(disabled.stdout.splitlines()[0])["minimal"] is False
+    external_default = cli(
+        tmp_path,
+        "check-config",
+        "--env-file",
+        str(tmp_path / "missing.env"),
+        "--set",
+        "STS2_DRIVER=external",
+    )
+    assert external_default.returncode == 0, external_default.stderr
+    assert json.loads(external_default.stdout) == {
+        "driver": "external",
+        "model_configured": False,
+        "minimal": False,
+    }
     forced = cli(
         tmp_path,
         "start",

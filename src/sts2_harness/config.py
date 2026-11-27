@@ -147,13 +147,13 @@ def load_configuration(
     raw_minimal = values.get("STS2_MINIMAL", "")
     if raw_minimal not in ("", "true", "false"):
         raise ConfigurationError("Invalid STS2_MINIMAL; choose true or false.")
-    minimal = raw_minimal == "true"
     if driver is Driver.EXTERNAL:
         if user_input:
             raise ConfigurationError("User input requires builtin driving.")
-        if minimal:
+        if raw_minimal == "true":
             raise ConfigurationError("Minimal mode requires builtin driving.")
-        return Configuration(driver, None)
+        return Configuration(driver, None, minimal=False)
+    minimal = raw_minimal != "false"
     try:
         protocol = Protocol(get("PROTOCOL", Protocol.RESPONSES))
         auth_kind = AuthKind(
