@@ -6,7 +6,7 @@
 
 ## Highlights
 
-- **Reads real game rules straight from game code.** The `sts2agent` C# Mod statically inspects the loaded game assembly's IL bytecode and state machines to extract enemy move graphs and cooldown/repeat constraints, upcoming act Boss and Elite rosters, event option outcomes, and card, relic, potion, power, enchantment, and 60+ combat hooks. It also computes per-target live card previews, hypothetical upgrade previews, and unknown-room probabilities with zero side effects—handling new patches and characters with **no external guide library**.
+- **Clear game state and mechanics instead of opaque descriptions.** The `sts2agent` Mod reads structured public state and real mechanics straight from the running game—enemy patterns, upcoming Boss/Elite rosters, event choices, per-target live card and upgrade previews, and unknown-room odds—so the model understands how cards and fights actually work without relying on screenshots or an external guide database.
 - **Strict player-level fairness.** Draw, discard, and exhaust piles are sorted by reference so draw order stays hidden; `Hidden` and `Unknown` enemy intents are masked as `unknown`; invisible powers are excluded; RNG is never advanced; runs play straight through without save/load; and developer checkpoint endpoints are physically disabled in normal gameplay.
 - **Native in-game viewing and live interaction.** The top-bar character portrait doubles as a one-click Start/Pause toggle so you can hand off or take back control at any time. Planned routes are drawn directly onto the game map with the native quill pen and smooth auto-centering, card rewards open natively while the model deliberates, grid selections auto-scroll and highlight, and short localized decision reasons float in the top-left margin (auto-hiding over shops and modals). Enable `STS2_USER_INPUT=true` to send live suggestions or chat messages mid-run via a local HTTP queue so the agent can react in upcoming turns.
 - **Cache-friendly, framework-free three-role architecture.** Built directly on the official OpenAI and Anthropic SDKs (Responses, Chat Completions, and Messages, preserving native reasoning and thinking blocks end to end). Decisions split by lifetime across **Run** (act-scoped routing, shops, events, rest sites), **Deck** (joint multi-group card drafting with rerolls and deck cycle metrics), and **Combat** (batched card plays and anticipated selections). Deterministic zero-branch steps auto-advance with relic-aware guards and zero model calls; append-only contexts and zero-LLM deterministic compaction achieve **86% prefix cache hit rates** on long runs.
@@ -80,7 +80,7 @@ To switch to full mode, set `STS2_MINIMAL=false` in `.env` or override at startu
 uv run sts2 start --set STS2_MINIMAL=false
 ```
 
-All environment variables, authentication modes, precedence, and context-window compaction rules are documented in [docs/configuration.md](docs/configuration.md).
+All environment variables, multi-protocol `.env` templates, authentication modes, and context-window compaction rules are documented in [docs/configuration.md](docs/configuration.md); common setup issues (game branch, local proxy bypassing `127.0.0.1`, ports) are covered in [docs/running.md](docs/running.md#troubleshooting).
 
 ## Write your own strategy guides
 

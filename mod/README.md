@@ -31,9 +31,21 @@ executable and the template manifest with `sts2 headless --game` and `--template
 
 ## Install for Local Gameplay
 
-Build `mod/src/Sts2Mod/Sts2Mod.csproj` in `Release` and copy the two output artifacts into `<SlayTheSpire2>/mods/sts2agent/`:
+Build `mod/src/Sts2Mod/Sts2Mod.csproj` in `Release`:
+
+```sh
+dotnet build mod/src/Sts2Mod/Sts2Mod.csproj -c Release
+```
+
+If Steam is installed in a non-default location, set `STS2_GAME_DIR` (or pass `-p:GameDir=/path/to/Slay the Spire 2`). Then copy the two output files into `<SlayTheSpire2>/mods/sts2agent/`:
 
 - `mod/src/Sts2Mod/bin/Release/net9.0/sts2agent.dll`
 - `mod/src/Sts2Mod/bin/Release/net9.0/mod_manifest.json`
+
+Typical `<SlayTheSpire2>` game directories:
+
+- **Windows:** `C:\Program Files (x86)\Steam\steamapps\common\Slay the Spire 2`
+- **macOS:** `~/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/MacOS` (place `mods/sts2agent/` next to the game executable or inside the game directory's `mods/` folder)
+- **Linux:** `~/.local/share/Steam/steamapps/common/Slay the Spire 2`
 
 By default the Mod listens on `http://127.0.0.1:17877` (override with `STS2AGENT_PORT`). Developer checkpoint and laboratory endpoints are enabled only when running under Godot headless display mode with `STS2_ALLOW_CHECKPOINTS=true`.

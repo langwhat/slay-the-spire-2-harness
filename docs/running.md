@@ -114,3 +114,11 @@ The paused observation before Start is kept separately from the first gameplay o
 ### Stopping
 
 The launcher exits when the run ends. Ctrl-C, SIGTERM, or an unexpected game exit stops at the next unit boundary; an unexpected exit is reported as a failure. Cleanup terminates only the game it launched and removes only that game's user-data alias. Logs, the archive, and native autosaves stay in the instance directory, and the shared installation and template are untouched.
+
+## Troubleshooting
+
+- **Mod fails to load or build.** Confirm Steam is switched to the `public-beta` branch and the installed game version is **v0.114.0** (`Properties -> Game Versions & Betas`). Verify both `sts2agent.dll` and `mod_manifest.json` sit inside `<SlayTheSpire2>/mods/sts2agent/` (see [mod/README.md](../mod/README.md) for default Windows, macOS, and Linux paths).
+- **Backend cannot reach `http://127.0.0.1:17877` while the game is running.** First check the game log for `[sts2agent] Listening on http://127.0.0.1:17877/`. If you use a system HTTP/SOCKS proxy (Clash, Clash Verge, Surge, etc.), make sure `127.0.0.1` and `localhost` are in your proxy bypass list (`NO_PROXY=127.0.0.1,localhost`), otherwise local Mod traffic may be hijacked by the proxy.
+- **Port `17877` is already in use.** Set `STS2AGENT_PORT=<port>` in the game's environment and pass `--mod-url http://127.0.0.1:<port>` to `uv run sts2 start`.
+- **`check-config` rejects `.env` with `Unknown setting name`.** Any `LLM_*` or `STS2_*` key in `.env` must be a supported variable from [configuration.md](configuration.md); remove typos or retired keys. Also remember `LLM_AUTH` defaults to `api-key` for `messages` and `bearer` for `responses` / `chat-completions`.
+- **`external` driver fails with `Minimal mode requires builtin driving.`** Make sure `STS2_MINIMAL=true` is not explicitly set in `.env` or the shell environment, and do not pass `--minimal` alongside `STS2_DRIVER=external`.

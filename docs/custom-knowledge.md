@@ -45,7 +45,13 @@ Each role context tracks what has already been sent, so unchanged documents are 
 
 ## Minimal working example
 
-Create a folder of Markdown files alongside a small launcher script that wraps `sts2_harness.cli.main` using the built-in `FileDocuments` provider:
+A runnable copy of this example lives in [`examples/custom-knowledge/`](../examples/custom-knowledge/) and is covered by the test suite. You can run it directly with:
+
+```console
+uv run python examples/custom-knowledge/play_with_guides.py start
+```
+
+Its layout pairs a folder of Markdown files with a small launcher script that wraps `sts2_harness.cli.main` using the built-in `FileDocuments` provider:
 
 ```text
 my-guides/

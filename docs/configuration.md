@@ -36,6 +36,35 @@ Run `uv run sts2 check-config` to validate settings offline. It prints only safe
 
 Base URLs must not contain userinfo, query strings, or fragments. Path prefixes are kept; the client appends `/responses`, `/chat/completions`, or `/v1/messages`.
 
+Common `.env` templates:
+
+```dotenv
+# OpenAI Responses
+LLM_PROTOCOL=responses
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_MODEL=your-model-id
+LLM_AUTH=bearer
+LLM_API_KEY=replace-locally
+```
+
+```dotenv
+# OpenAI-compatible Chat Completions (third-party endpoints / proxies)
+LLM_PROTOCOL=chat-completions
+LLM_BASE_URL=https://your-provider.example/v1
+LLM_MODEL=your-model-id
+LLM_AUTH=bearer
+LLM_API_KEY=replace-locally
+```
+
+```dotenv
+# Anthropic Messages
+LLM_PROTOCOL=messages
+LLM_BASE_URL=https://api.anthropic.com
+LLM_MODEL=your-model-id
+LLM_AUTH=api-key
+LLM_API_KEY=replace-locally
+```
+
 Headers are built in this order: SDK defaults, then configured authentication, then custom headers (case-insensitive). Credentials from SDK environment variables are never used. `LLM_AUTH=none` sends no credentials at all. Custom header lines are LF-separated, with ASCII values and optional tabs. Bearer and named-header credentials must be valid header values without surrounding whitespace. Basic passwords may contain Unicode.
 
 ### Context-too-large signal
