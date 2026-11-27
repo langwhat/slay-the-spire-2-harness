@@ -1,7 +1,7 @@
 ## Stage threshold: middle acts
 
-Hands already hold chosen cards, normal fights hit hard early, and the deck needs coherent growth and mitigation for Elites and a high-HP Act Boss.
+Hands already hold chosen cards, normal fights hit hard early, and the deck needs fast core arrival plus coherent growth and mitigation for Elites and the Act Boss.
 
-- Once a real core and basic survival roles are in place, default toward skipping: merely beating a basic starter or adding a minor side-synergy is not enough when each circulating card stretches `cycle_turns` and delays your core and upgrades in every remaining fight.
-- Take a card when it directly improves your real core's arrival or Boss ceiling (fast-kill burst or sustained mitigation), adds true net draw, unconditional fetch, or reliable energy, or covers multi-enemy waves and peak hits your current mitigation and draw cannot handle.
-- Check `circulating`, `cycle_turns`, `basic_cards`, `basic_and_curse_pct`, hand cost, and growing downsides before taking slow setup, a second unrelated engine, marginal transition or filler cards (which compound dilution when basic cards and curses have not been removed yet), or additional 2+ cost cards without energy support.
+- Default toward skipping once a core and basic survival roles are in place: check `deck_stats.first_pass_turns`, `cycle_turns`, `non_circulating`, `run_added`, and cards at `observed_plays: 0` before expanding the draw pool further.
+- Take a card when it clearly strengthens your real core's arrival or Boss ceiling, adds true net draw, unconditional fetch, or reliable energy, or fixes an actual opening or multi-enemy gap that current mitigation and draw miss.
+- Lean strongly toward skipping slow side-engines, paid zero-net-draw filters, and extra 2+ cost cards when `high_cost_circulating` is already elevated.

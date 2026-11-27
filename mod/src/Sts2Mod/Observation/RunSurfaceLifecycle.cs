@@ -409,9 +409,9 @@ internal static class RunSurfaceLifecycle
         }
     }
 
-    private static object MerchantSubject(MerchantEntry entry) => entry switch
+    internal static object MerchantSubject(MerchantEntry entry) => entry switch
     {
-        MerchantCardEntry card when card.CreationResult?.Card is { } model => model,
+        MerchantCardEntry card when card.CreationResult is { } creation => creation,
         MerchantRelicEntry relic when relic.Model is { } model => model,
         MerchantPotionEntry potion when potion.Model is { } model => model,
         _ => entry,
@@ -525,6 +525,26 @@ internal static class RunEventRegistrationPatch
 {
     private static void Postfix(EventModel __0) =>
         RunSurfaceLifecycle.RegisterEvent(__0);
+}
+
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer), nameof(MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer.BeginEvent))]
+internal static class RunEventBeginRegistrationPatch
+{
+    private static void Postfix(MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer __instance)
+    {
+        if (__instance.Events.Count > 0)
+            RunSurfaceLifecycle.RegisterEvent(__instance.GetLocalEvent());
+    }
+}
+
+[HarmonyPatch(typeof(MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer), nameof(MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer.ResumeEvents))]
+internal static class RunEventResumeRegistrationPatch
+{
+    private static void Postfix(MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer __instance)
+    {
+        if (__instance.Events.Count > 0)
+            RunSurfaceLifecycle.RegisterEvent(__instance.GetLocalEvent());
+    }
 }
 
 [HarmonyPatch(typeof(NEventLayout), nameof(NEventLayout.AddOptions))]

@@ -64,6 +64,9 @@ class HarnessState(native.WireModel):
     notes: dict[str, JsonValue] = {}
     added: int = 0
     skipped: int = 0
+    run_added: int | None = None
+    run_skipped: int | None = None
+    battles_observed: int | None = None
     observed_plays: dict[str, int] = {}
     route: RouteState | None = None
     fights: tuple[Fight, ...] = ()

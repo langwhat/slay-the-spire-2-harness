@@ -586,6 +586,7 @@ class CardEntry(WireModel):
     cost_without_global_effects: ResourceCosts | MISSING = MISSING
     is_sly_this_turn: bool | None | MISSING = MISSING
     playable: bool | None | MISSING = MISSING
+    needs_target: bool | None | MISSING = MISSING
     previews: tuple[TargetPreview, ...] | MISSING = MISSING
 
 

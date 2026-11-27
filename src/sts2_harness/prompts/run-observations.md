@@ -75,7 +75,7 @@ Upgrade the card whose upgrade most changes the fights ahead; where owned cards 
 
 # Shops
 
-Compare the affordable combinations of cards, relics, removal, and potions with keeping the gold for a reachable later use. A bought card pays twice—gold and a draw slot—so hold shop cards to a higher bar than free rewards: do not buy discounted or secondary-synergy cards that would be marginal additions. Removing a curse, a basic starter, or an obsolete transition card once a core works permanently raises the draw rate of every core, mitigation, and upgraded card in every remaining fight at zero energy and upgrade cost; when carrying curses or when `deck_stats.basic_and_curse_pct`, `deck_stats.basic_cards`, or `deck_stats.cycle_turns` is high, removing a curse or basic starter should usually beat buying marginal or secondary cards even when a relic or discount makes extra cards tempting, competing alongside key relics and decisive potions. Spending all gold is not a goal, and an empty slot is not a reason to buy a potion.
+Compare the affordable combinations of relics, card removal, potions, and cards against keeping gold for a reachable later shop. A shop card pays twice—gold and a permanent draw slot (stretching `first_pass_turns` and `cycle_turns`)—so hold shop cards to a strictly higher bar than free rewards: a shop card should beat both removing an active curse or basic starter and saving gold, even when on sale. Removing an active harmful curse or basic starter permanently improves every remaining hand at zero energy and upgrade cost; when carrying curses or when `deck_stats.basic_cards`, `deck_stats.first_pass_turns`, or `deck_stats.cycle_turns` is elevated, prioritize card removal alongside key relics and decisive potions over buying non-essential or secondary cards. Leaving a shop with unspent gold is normal when nothing clearly raises the deck's ceiling, and an empty slot is not a reason to buy a potion.
 
 - Which affordable combination best answers the current gap? Does a relic offered fix it more lastingly than cards that work around it?
 - After this purchase, what is lost at the next reachable shop, and can saved gold become strength before the next unavoidable fight?
@@ -85,7 +85,7 @@ Compare the affordable combinations of cards, relics, removal, and potions with 
 
 Alternative rewards, such as a choice of relics: HP restored between fights arrives after the damage is taken and does not shorten a fight or lower the damage inside it. Prefer what acts inside fights (energy, draw, damage, block, prevention), which lowers the HP lost in every fight left, unless current HP cannot survive the next fight without the healing. Charge a drawback the same way, in every fight left: a turn played without your choice takes that turn's damage unblocked.
 
-Events: charge a burden such as a curse, lost HP, or a lost card at its cost until a reachable remedy, and check that the next unavoidable fight stays survivable if a gamble fails.
+Events: charge a burden such as a curse, lost HP, or a lost card at its cost until a reachable remedy, and check that the next unavoidable fight stays survivable if a gamble fails. Accepting a curse assuming a later shop will remove it costs both that removal's gold and that shop's removal slot (displacing a basic-starter removal or relic).
 
 - Which fights and resources will the burden affect before its remedy, and could income, a curse, or a route change remove that remedy?
 - After a failed random attempt, is another attempt still worth its cost?

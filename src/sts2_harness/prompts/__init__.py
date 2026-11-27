@@ -47,9 +47,12 @@ def state_format_prompt(prompts: PromptReader, *, deck_fields: bool, minimal: bo
     body = block.body
     if not deck_fields:
         before, separator, _ = body.partition(DECK_STATE_FORMAT_SECTION)
-        if separator:
-            body = before
-    if minimal:
+        if not separator:
+            raise ValueError(
+                f"Expected section {DECK_STATE_FORMAT_SECTION!r} in state-format prompt."
+            )
+        body = before
+    elif minimal:
         body = _replace_once(body, _STATE_FORMAT_NOTES_SENTENCE, "")
     return _rewrite(block, body)
 

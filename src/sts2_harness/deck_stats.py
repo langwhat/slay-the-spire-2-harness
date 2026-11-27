@@ -26,6 +26,12 @@ class _Keyword(StrEnum):
     ETHEREAL = "ethereal"
 
 
+def is_playable_deck_card(card: native.CardEntry) -> bool:
+    return card.playable is not False and _Keyword.UNPLAYABLE not in {
+        keyword.casefold() for keyword in card.keywords
+    }
+
+
 class DeckStatistics:
     def __init__(self) -> None:
         self._session: tuple[str, str | None] | None = None
@@ -99,6 +105,8 @@ class DeckStatistics:
             and isinstance(cost := card.cost.energy, int)
         ]
         curses_and_statuses = kinds[_CardType.CURSE] + kinds[_CardType.STATUS]
+        run_added = sum(act_choices[True] for act_choices in self._choices.values())
+        run_skipped = sum(act_choices[False] for act_choices in self._choices.values())
         stats: dict[str, JsonValue] = {
             "cards": len(cards),
             "attacks": kinds[_CardType.ATTACK],
@@ -111,8 +119,13 @@ class DeckStatistics:
             "curses_and_statuses": curses_and_statuses,
             "unplayable": sum(_Keyword.UNPLAYABLE in words for words in keywords),
             "circulating": len(circulating),
+            "non_circulating": len(cards) - len(circulating),
+            "high_cost_circulating": sum(1 for cost in fixed_costs if cost >= 2),
             "added": choices[True],
             "skipped": choices[False],
+            "run_added": run_added,
+            "run_skipped": run_skipped,
+            "battles_observed": len(self._battles),
         }
         if circulating:
             junk_circulating = sum(
@@ -127,6 +140,7 @@ class DeckStatistics:
         if draw is not MISSING:
             stats["base_draw"] = draw
             if draw > 0:
+                stats["first_pass_turns"] = round(len(cards) / draw, 1)
                 stats["cycle_turns"] = round(len(circulating) / draw, 1)
         if energy is not MISSING:
             stats["base_energy"] = energy
@@ -136,4 +150,9 @@ class DeckStatistics:
             for card in plays
             if card.definition_id is not MISSING
         )
-        return stats, dict(counts)
+        use_counts: dict[str, int] = dict(counts)
+        if self._battles:
+            for card in cards:
+                if is_playable_deck_card(card):
+                    use_counts.setdefault(card.definition_id, 0)
+        return stats, use_counts

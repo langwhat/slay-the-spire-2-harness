@@ -270,9 +270,10 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         if (power && MutableDynamicKeys(type) is { Count: > 0 } mutableKeys
             && TryGetCanonicalPower(type) is { } canonicalPower)
         {
+            var displayedKey = DisplayedDynamicKey(type);
             var nonZeroDefaults = mutableKeys.Order(StringComparer.Ordinal)
                 .Where(k => k != "DisplayAmount" && canonicalPower.DynamicVars.TryGetValue(k, out var v) && v.BaseValue != 0m)
-                .Select(k => $"counter {HumanizeLower(k)} starts at {Number(canonicalPower.DynamicVars[k].BaseValue)}")
+                .Select(k => $"counter {HumanizeLower(k)} starts at {Number(canonicalPower.DynamicVars[k].BaseValue)}{(string.Equals(k, displayedKey, StringComparison.Ordinal) ? " (shown as display_amount)" : "")}")
                 .ToArray();
             if (nonZeroDefaults.Length > 0)
                 targetLines.Add($"{powerPrefix}Initial state: {string.Join("; ", nonZeroDefaults)}");
@@ -2439,6 +2440,32 @@ internal sealed partial class NativeRuleText(MonsterModel? monster = null)
         if (TryGetCanonicalRelic(type) is { } r)
             return r.DynamicVars;
         return null;
+    }
+
+    private static string? DisplayedDynamicKey(Type type)
+    {
+        var getter = type.GetProperty(
+            nameof(PowerModel.DisplayAmount),
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)?.GetMethod;
+        if (getter is null)
+            return null;
+        var body = NativeRuleBody.Read(getter);
+        if (body.Incomplete || body.Returns is not [{ Conditions.Length: 0, Value: var returned }])
+            return null;
+        return returned switch
+        {
+            Call
+            {
+                Method.Name: "get_IntValue",
+                Receiver: Call
+                {
+                    Method.Name: "get_Item",
+                    Receiver: Call { Method.Name: "get_DynamicVars" },
+                    Arguments: [Constant { Data: string key }],
+                },
+            } => key,
+            _ => null,
+        };
     }
 
     private static PowerModel? TryGetCanonicalPower(Type type)

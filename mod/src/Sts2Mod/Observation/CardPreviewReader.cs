@@ -30,7 +30,8 @@ internal static class CardPreviewReader
         CardModel card,
         PileType pile,
         bool? playable = null,
-        ImmutableArray<TargetTextPreview>? previews = null) =>
+        ImmutableArray<TargetTextPreview>? previews = null,
+        bool? needsTarget = null) =>
         ReadCore(
             card,
             pile,
@@ -39,7 +40,8 @@ internal static class CardPreviewReader
             target: null,
             definition: false,
             playable: playable,
-            previews: previews);
+            previews: previews,
+            needsTarget: needsTarget);
 
     public static string ReadTargetText(CardModel card, PileType pile, Creature target) =>
         ReadCore(
@@ -88,7 +90,8 @@ internal static class CardPreviewReader
         Creature? target,
         bool definition,
         bool? playable = null,
-        ImmutableArray<TargetTextPreview>? previews = null)
+        ImmutableArray<TargetTextPreview>? previews = null,
+        bool? needsTarget = null)
     {
         var originalVars = card.DynamicVars;
         var enchantment = card.Enchantment;
@@ -187,6 +190,7 @@ internal static class CardPreviewReader
                 CostWithoutGlobalEffects = costWithoutGlobalEffects,
                 IsSlyThisTurn = card.IsSlyThisTurn ? true : null,
                 Playable = playable,
+                NeedsTarget = needsTarget,
                 Previews = previews,
             };
 

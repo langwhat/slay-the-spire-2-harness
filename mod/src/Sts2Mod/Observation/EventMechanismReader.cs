@@ -158,7 +158,7 @@ internal static class EventMechanismReader
             if (isFakeMerchant && DescribeFakeMerchant(activeEvent.GetType()) is { } merchantLine)
                 lines.Add(merchantLine);
 
-            if (!activeEvent.IsFinished)
+            if (!activeEvent.IsFinished && activeEvent is not MegaCrit.Sts2.Core.Models.Events.TheArchitect)
             {
                 foreach (var (title, option) in visibleOptions)
                 {

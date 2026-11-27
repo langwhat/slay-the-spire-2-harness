@@ -375,6 +375,8 @@ def _state_from_observation(
     originals: tuple[native.Observation, ...],
 ) -> HarnessState:
     notes, added, skipped = previous.notes, previous.added, previous.skipped
+    run_added, run_skipped = previous.run_added, previous.run_skipped
+    battles_observed = previous.battles_observed
     plays, route = previous.observed_plays, previous.route
     if observation.notes is not MISSING:
         notes = TypeAdapter(dict[str, JsonValue]).validate_json(observation.notes.model_dump_json())
@@ -386,6 +388,15 @@ def _state_from_observation(
         count = stats.get("skipped")
         if isinstance(count, int):
             skipped = count
+        count = stats.get("run_added")
+        if isinstance(count, int):
+            run_added = count
+        count = stats.get("run_skipped")
+        if isinstance(count, int):
+            run_skipped = count
+        count = stats.get("battles_observed")
+        if isinstance(count, int):
+            battles_observed = count
     if observation.deck is not MISSING:
         plays = {}
         for card in observation.deck:
@@ -472,6 +483,9 @@ def _state_from_observation(
         notes=notes,
         added=added,
         skipped=skipped,
+        run_added=run_added,
+        run_skipped=run_skipped,
+        battles_observed=battles_observed,
         observed_plays=plays,
         route=route,
         fights=fights,

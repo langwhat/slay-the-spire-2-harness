@@ -227,7 +227,12 @@ class RunDelivery:
             return row
 
         def object_row(
-            ref: str, *, actionable: bool = True, text: bool = False, candidate: bool = False
+            ref: str,
+            *,
+            actionable: bool = True,
+            text: bool = False,
+            candidate: bool = False,
+            show_cost: bool = False,
         ) -> dict[str, JsonValue]:
             obj = observation.objects.get(ref)
             row = identity(ref)
@@ -277,10 +282,12 @@ class RunDelivery:
                         row[field_name] = value
             # Current cost and playability can change without changing the definition.
             if actionable:
-                if text or known.get("cost") != _json(obj.cost):
+                if text or show_cost or known.get("cost") != _json(obj.cost):
                     row["cost"] = _json(obj.cost)
             if obj.playable is not MISSING and actionable:
                 row["playable"] = obj.playable
+            if obj.needs_target is True and actionable:
+                row["needs_target"] = True
             for field_name in (
                 "local_keywords",
                 "cost_without_global_effects",
@@ -474,6 +481,7 @@ class RunDelivery:
                         ref,
                         text=self.role is native.DecisionOwner.RUN,
                         candidate=state.screen in (native.RunScreen.REWARDS, native.RunScreen.SHOP),
+                        show_cost=isinstance(state, native.CombatState),
                     )
                     for ref in state.selection.candidates
                 ]
@@ -546,9 +554,32 @@ class RunDelivery:
             body for key, body in generated.items() if key not in self.delivered_generated
         ]
         self.delivered_generated.update(generated)
+        covered_power_ids: set[str] = {
+            identity
+            for kind, identity, text, completeness in self.delivered_mechanisms
+            if kind == native.MechanismKind.OTHER
+            and identity.startswith("POWER.")
+            and text is not None
+            and completeness in (None, native.MechanismCompleteness.COMPLETE)
+        }
+        for mechanism in observation.mechanisms:
+            if (
+                mechanism.kind is native.MechanismKind.OTHER
+                and mechanism.definition_id is not None
+                and mechanism.definition_id.startswith("POWER.")
+                and mechanism.text is not None
+                and mechanism.completeness in (MISSING, native.MechanismCompleteness.COMPLETE)
+            ):
+                covered_power_ids.add(mechanism.definition_id)
         mechanisms: dict[tuple[str, str, str | None, str | None], dict[str, JsonValue]] = {}
         for mechanism in observation.mechanisms:
             if _duplicates_definition(mechanism, self.definitions, referenced):
+                continue
+            if (
+                mechanism.kind is native.MechanismKind.POWER
+                and mechanism.definition_id is not None
+                and mechanism.definition_id in covered_power_ids
+            ):
                 continue
             body: dict[str, JsonValue] = {
                 name: value
@@ -576,12 +607,26 @@ class RunDelivery:
             and current_turn is not None
             and current_turn != previous_turn
         )
+        previous_choice = self.sections.get("choice")
+        previous_screen = (
+            previous_choice.get("screen") if isinstance(previous_choice, dict) else None
+        )
         changed = {
             name: content
             for name, content in sections.items()
             if baseline or self.sections.get(name, MISSING) != content
         }
         changed.update({name: None for name in self.sections if name not in sections})
+        if (
+            not baseline
+            and self.role is native.DecisionOwner.RUN
+            and isinstance(state, native.RunState)
+            and state.screen is native.RunScreen.SHOP
+            and previous_screen != native.RunScreen.SHOP
+            and "deck_stats" not in changed
+            and "deck_stats" in sections
+        ):
+            changed["deck_stats"] = sections["deck_stats"]
         if (
             turn_changed
             and "active_relics" not in changed

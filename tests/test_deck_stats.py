@@ -55,21 +55,27 @@ def test_current_deck_counts_are_independent_of_battle_history() -> None:
         "curses_and_statuses": 0,
         "unplayable": 0,
         "circulating": 4,
+        "non_circulating": 0,
+        "high_cost_circulating": 1,
         "basic_and_curse_pct": 0.0,
         "circulating_avg_energy": 1.33,
         "base_draw": 2,
+        "first_pass_turns": 2.0,
         "cycle_turns": 2.0,
         "base_energy": 3,
         "added": 0,
         "skipped": 0,
+        "run_added": 0,
+        "run_skipped": 0,
+        "battles_observed": 0,
     }
     assert uses == {}
     battle = native.Observation.model_validate_json(COMBAT)
     statistics.capture(battle, history("CARD.0", "CARD.0", "CARD.1"))
     statistics.capture(battle, history("CARD.0", "CARD.0", "CARD.1"))
     after, uses = statistics.view(current)
-    assert after == stats
-    assert uses == {"CARD.0": 2, "CARD.1": 1}
+    assert after == {**stats, "battles_observed": 1}
+    assert uses == {"CARD.0": 2, "CARD.1": 1, "CARD.2": 0, "CARD.3": 0}
     assert DeckStatistics().view(current)[0] == stats
 
 
@@ -121,8 +127,11 @@ def test_circulating_excludes_each_one_shot_card_once_and_choices_reset_each_act
     statistics.record_choice(current, False)
     stats, _ = statistics.view(current)
     assert stats["circulating"] == 1
+    assert stats["non_circulating"] == 3
+    assert stats["first_pass_turns"] == 1.0
     assert stats["unplayable"] == 1
     assert (stats["added"], stats["skipped"]) == (1, 1)
+    assert (stats["run_added"], stats["run_skipped"]) == (1, 1)
     next_act = current.model_copy(
         update={
             "state": current.state.model_copy(
@@ -134,6 +143,7 @@ def test_circulating_excludes_each_one_shot_card_once_and_choices_reset_each_act
     )
     next_stats, _ = statistics.view(next_act)
     assert (next_stats["added"], next_stats["skipped"]) == (0, 0)
+    assert (next_stats["run_added"], next_stats["run_skipped"]) == (1, 1)
 
 
 def test_basic_cards_and_cycle_turns_reflect_rarity_and_base_draw() -> None:
@@ -315,7 +325,7 @@ def test_observe_records_post_battle_cards_played_including_one_turn_kills_and_f
         )
         statistics.observe(extra)
     _, uses = statistics.view(shop)
-    assert uses == {"CARD.FINISHER": 1, "CARD.EXTRA": 4}
+    assert uses == {"CARD.0": 0, "CARD.1": 0, "CARD.FINISHER": 1, "CARD.EXTRA": 4}
 
 
 def test_execution_observes_post_battle_cards_played_automatically() -> None:
@@ -368,6 +378,6 @@ def test_execution_observes_post_battle_cards_played_automatically() -> None:
             )
             observed = await execution.observe()
             _, uses = stats.view(observed)
-            assert uses == {"CARD.STRIKE": 1, "CARD.BASH": 1}
+            assert uses == {"CARD.0": 0, "CARD.STRIKE": 1, "CARD.BASH": 1}
 
     asyncio.run(scenario())

@@ -78,6 +78,11 @@ def test_minimal_assembled_system_prompts_have_no_dead_references_or_broken_seam
     assert "Submit no game action during battle or while control is not ready." in run_text
     assert "before and after values" not in combat_text
     assert "last_observed_turn" not in combat_text
+    assert "deck_stats" not in combat_text
+    assert "card_rarity_offset" not in combat_text
+    assert "first_pass_turns" in run_text
+    assert "first_pass_turns" in deck_text
+    assert "needs_target" in combat_text
     assert "not complete fights" not in run_text
     assert "not complete fights" not in deck_text
     assert "not complete fights" not in combat_text
@@ -129,6 +134,8 @@ def test_minimal_prompt_helpers_fail_loudly_when_target_sentence_is_missing() ->
     stub = MissingSentencePrompts()
     with pytest.raises(ValueError, match="Expected exactly 1 occurrence"):
         state_format_prompt(stub, deck_fields=True, minimal=True)
+    with pytest.raises(ValueError, match="Expected section"):
+        state_format_prompt(stub, deck_fields=False, minimal=True)
     with pytest.raises(ValueError, match="Expected exactly 1 occurrence"):
         run_observations_prompt(stub, minimal=True)
     with pytest.raises(ValueError, match="Expected exactly 1 occurrence"):

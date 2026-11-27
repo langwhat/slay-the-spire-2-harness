@@ -698,8 +698,15 @@ internal sealed class GameObserver(
         }
         else if (overlay is NRewardsScreen rewards)
         {
-            ObserveRewards(rewards, active: true);
-            screen = RunScreen.Rewards;
+            if (IsRewardsScreenProceeding(rewards))
+            {
+                screen = RunScreen.Transition;
+            }
+            else
+            {
+                ObserveRewards(rewards, active: true);
+                screen = RunScreen.Rewards;
+            }
         }
         else if (hasActiveEvent)
         {
@@ -939,6 +946,7 @@ internal sealed class GameObserver(
         var reference = registry.GetRef(card);
         var pile = card.Pile?.Type ?? PileType.None;
         bool? playable = null;
+        bool? needsTarget = null;
         ImmutableArray<TargetTextPreview>? previews = null;
 
         if (combat is not null)
@@ -951,6 +959,8 @@ internal sealed class GameObserver(
                 playable = combatReady
                            && card.CanPlay()
                            && (!requiresTarget || legalTargets.Any(card.CanPlayTargeting));
+                if (requiresTarget)
+                    needsTarget = true;
             }
 
             if (requiresTarget)
@@ -963,7 +973,7 @@ internal sealed class GameObserver(
             }
         }
 
-        var rendered = CardPreviewReader.ReadLiveCard(card, pile, playable, previews);
+        var rendered = CardPreviewReader.ReadLiveCard(card, pile, playable, previews, needsTarget);
         _objects.Add(reference, rendered.Entry);
         _descriptions.Add(reference, rendered.Text);
         _modifiers.Add(reference, rendered.ModifierDescriptions);
@@ -1456,11 +1466,14 @@ internal sealed class GameObserver(
                 AfflictionModel => MechanismKind.Affliction,
                 RelicModel => MechanismKind.Relic,
                 PotionModel => MechanismKind.Potion,
+                _ when text.Id is { } tipId && tipId.StartsWith("POWER.", StringComparison.Ordinal) => MechanismKind.Power,
                 _ => MechanismKind.Keyword,
             };
+            var definitionId = text.CanonicalModel?.Id.ToString()
+                ?? (mechanismKind == MechanismKind.Power ? text.Id : null);
             _mechanisms.Add(new MechanismView(
                 mechanismKind,
-                text.CanonicalModel?.Id.ToString(),
+                definitionId,
                 text.Title,
                 text.Description,
                 owner));
@@ -1476,6 +1489,7 @@ internal sealed class GameObserver(
     private void FlushPowerMechanisms()
     {
         var includeMultiplayer = run.Players.Count > 1;
+        var coveredPowerIds = new HashSet<string>(_inlineEnemyPowerIds, StringComparer.Ordinal);
         foreach (var (owner, powerType, fallbackName) in _pendingPowerRules)
         {
             string powerId;
@@ -1492,6 +1506,7 @@ internal sealed class GameObserver(
             if (PowerMechanismReader.Read(powerType, gameLanguage, includeMultiplayer) is not { } ruleText)
                 continue;
 
+            coveredPowerIds.Add(powerId);
             string canonicalTitle;
             try
             {
@@ -1509,10 +1524,29 @@ internal sealed class GameObserver(
                 ruleText,
                 owner));
         }
+
+        if (coveredPowerIds.Count > 0)
+            RemoveCoveredPowerHoverTips(_mechanisms, coveredPowerIds);
     }
 
+    internal static void RemoveCoveredPowerHoverTips(List<MechanismView> mechanisms, IReadOnlySet<string> coveredPowerIds)
+    {
+        mechanisms.RemoveAll(m =>
+            m.Kind == MechanismKind.Power
+            && m.DefinitionId is { } id
+            && coveredPowerIds.Contains(id));
+    }
+
+    private static readonly FieldInfo? RewardsDisableProceedForeverField =
+        typeof(NRewardsScreen).GetField("_disableProceedForever", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    internal static bool IsRewardsScreenProceeding(NRewardsScreen screen) =>
+        screen.IsComplete
+        || (RewardsDisableProceedForeverField?.GetValue(screen) is true);
+
     private bool IsEventSurfaceActive() =>
-        run.CurrentRoom?.RoomType is RoomType.Event
+        !RunManager.Instance.IsChangingRooms
+        && run.CurrentRoom?.RoomType is RoomType.Event
         && NEventRoom.Instance is { } eventRoom
         && GodotObject.IsInstanceValid(eventRoom)
         && eventRoom.IsInsideTree()

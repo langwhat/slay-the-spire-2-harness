@@ -133,6 +133,26 @@ internal static class PowerMechanismReader
         if (reader.Gaps.Count > 0)
             return (null, reader.Gaps);
 
+        if (cleaned.Count > 0)
+        {
+            try
+            {
+                var canonical = ModelDb.GetByIdOrNull<PowerModel>(ModelDb.GetId(powerType));
+                if (canonical is { AllowNegative: false }
+                    && canonical.Type is MegaCrit.Sts2.Core.Entities.Powers.PowerType.Buff or MegaCrit.Sts2.Core.Entities.Powers.PowerType.Debuff
+                    && powerType.GetProperty(
+                        nameof(PowerModel.TypeForCurrentAmount),
+                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly) is null)
+                {
+                    cleaned.Insert(0, $"Type: {canonical.Type}");
+                }
+            }
+            catch
+            {
+                // Omit polarity line if canonical metadata cannot be resolved.
+            }
+        }
+
         return (cleaned.Count > 0 ? string.Join("\n", cleaned) : null, reader.Gaps);
     }
 }

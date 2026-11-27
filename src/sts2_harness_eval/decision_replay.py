@@ -28,7 +28,7 @@ from sts2_harness.decisions import (
 )
 from sts2_harness.deck import adding_selection, card_rewards, deck_context, deck_observation
 from sts2_harness.deck_role import deck_offered, validate_deck_choice
-from sts2_harness.deck_stats import DeckStatistics
+from sts2_harness.deck_stats import DeckStatistics, is_playable_deck_card
 from sts2_harness.entry_materials import EntryMaterials, MaterialContext, entry_materials
 from sts2_harness.execution import Execution
 from sts2_harness.execution.recovery import DecisionInterrupted, ToolRecoveryBudget
@@ -192,6 +192,16 @@ class CaseStatistics(DeckStatistics):
     def __init__(self, state: HarnessState, observation: native.Observation) -> None:
         super().__init__()
         self.observed_plays = state.observed_plays
+        self.run_added = state.run_added
+        self.run_skipped = state.run_skipped
+        if state.battles_observed is not None:
+            self.battles_observed = state.battles_observed
+        elif state.fights:
+            self.battles_observed = min(len(state.fights), 5)
+        elif state.observed_plays:
+            self.battles_observed = 1
+        else:
+            self.battles_observed = 0
         for _ in range(state.added):
             self.record_choice(observation, taken=True)
         for _ in range(state.skipped):
@@ -199,7 +209,22 @@ class CaseStatistics(DeckStatistics):
 
     def view(self, observation: native.Observation) -> tuple[dict[str, JsonValue], dict[str, int]]:
         stats, _ = super().view(observation)
-        return stats, self.observed_plays
+        stats["battles_observed"] = self.battles_observed
+        if self.run_added is not None:
+            act_added = stats.get("added")
+            stats["run_added"] = max(self.run_added, act_added if isinstance(act_added, int) else 0)
+        if self.run_skipped is not None:
+            act_skipped = stats.get("skipped")
+            stats["run_skipped"] = max(
+                self.run_skipped, act_skipped if isinstance(act_skipped, int) else 0
+            )
+        plays = dict(self.observed_plays)
+        if self.battles_observed > 0 and isinstance(observation.state, native.RunState):
+            for ref in observation.state.deck:
+                card = observation.objects.get(ref)
+                if isinstance(card, native.CardEntry) and is_playable_deck_card(card):
+                    plays.setdefault(card.definition_id, 0)
+        return stats, plays
 
 
 class _ChoiceMade(Exception):

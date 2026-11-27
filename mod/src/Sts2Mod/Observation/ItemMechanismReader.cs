@@ -719,6 +719,8 @@ internal static class ItemMechanismReader
                     && ExtractPileType(s.Call.Arguments.ElementAtOrDefault(1)) == PileType.Discard));
                 if (selectsDiscard && setsFreeThisTurn)
                     notes.Add("Selects from discard pile, sets local Energy and Star costs to 0 until played or until the turn ends (whichever comes first; global cost modifiers still apply, and Energy/Star X-cost cards ignore cost modifiers and still spend all remaining Energy/Stars when paying resources), and moves into hand (overflows to discard pile if hand is full).");
+                else if (DescribeCardCostLifetime(body) is { } costNote)
+                    notes.Add(costNote);
             }
             else if (CallsOnlyRandomPotionFill(onUse))
             {

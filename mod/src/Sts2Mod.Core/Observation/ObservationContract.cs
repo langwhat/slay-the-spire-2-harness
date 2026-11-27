@@ -508,6 +508,7 @@ public sealed record CardEntry : CardFacts
     }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? Playable { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public bool? NeedsTarget { get; init; }
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ImmutableArray<TargetTextPreview>? Previews { get; init; }
 }
 
