@@ -161,7 +161,7 @@ metadata is unavailable or the archive uses schema 21. The `sts2 journal` JSON
 includes both fields in its manifest.
 
 To continue a recorded headless run in a live game, see verified cases and
-takeover in [gameplay-retrospectives.md](gameplay-retrospectives.md#4-select-the-appropriate-evaluation).
+takeover in [gameplay-retrospectives.md](gameplay-retrospectives.md#5-validate-cheaply-and-prevent-regressions).
 
 ## Single-run sessions
 
