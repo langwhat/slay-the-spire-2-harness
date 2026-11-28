@@ -3055,3 +3055,193 @@ def test_unconfirmed_preview_open_and_close_reconcile_in_single_decision_live_an
             assert "reference_expired" in seen_u[1]
 
     asyncio.run(scenario())
+
+
+def test_cancelling_in_flight_prefetched_reward_open_completes_native_and_journal(
+    tmp_path: Path,
+) -> None:
+    from sts2_harness.game import GameReply
+    from sts2_harness.journal import OpenCardReward, RecordedGame
+
+    async def scenario() -> None:
+        obs = _multi_group_reward_observation()
+        route = native.RouteKey.model_validate(obs.location.model_dump())
+        open_started = asyncio.Event()
+        consumer_entered = asyncio.Event()
+        release_open = asyncio.Event()
+        open_completed = False
+
+        class SignalingRecordedGame(RecordedGame):
+            async def open_card_reward(
+                self, route: native.RouteKey, offer: str
+            ) -> GameReply[CardRewardOpened]:
+                consumer_entered.set()
+                return await super().open_card_reward(route, offer)
+
+        async def slow_mod(request: httpx.Request) -> httpx.Response:
+            nonlocal open_completed
+            if request.url.path == "/rewards/open":
+                open_started.set()
+                await release_open.wait()
+                open_completed = True
+                return httpx.Response(200, json={"status": "opened"})
+            if request.url.path == "/state":
+                return httpx.Response(
+                    200,
+                    content=native.StateCompleted(
+                        status=native.ResultStatus.COMPLETED, observation=obs
+                    ).to_json(),
+                )
+            raise AssertionError(f"Unexpected path: {request.url.path}")
+
+        def model_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=reply(
+                    (
+                        "c-cancel",
+                        "run_deck_choice",
+                        json.dumps(
+                            {
+                                "choices": [
+                                    {
+                                        "offer": "reward-a",
+                                        "choice": "skip",
+                                        "reason": "Skip reward A.",
+                                    },
+                                    {
+                                        "offer": "reward-b",
+                                        "choice": "skip",
+                                        "reason": "Skip reward B.",
+                                    },
+                                ]
+                            }
+                        ),
+                    )
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        journal_path = tmp_path / "cancel-open.sqlite"
+        manifest = Manifest(
+            materials=SessionMaterials(
+                entry_documents_enabled=False, act_guidance={}, battle_guidance=()
+            ),
+            recording_id="cancel-open",
+            core_version="test",
+            game_instance_id=obs.location.game_instance_id,
+            run_id=obs.location.run_id or "run",
+            initial_notes=NotesState(),
+            minimal=True,
+        )
+        journal = Journal.create(journal_path, manifest)
+        try:
+            async with (
+                ModClient("http://mod", transport=httpx.MockTransport(slow_mod)) as client,
+                Llm(configuration(tmp_path), transport=httpx.MockTransport(model_handler)) as model,
+            ):
+                live = LiveGame(
+                    client,
+                    namespace="cancel-test",
+                    game_instance_id=obs.location.game_instance_id,
+                    run_id=obs.location.run_id or "run",
+                    present_card_rewards=True,
+                )
+                recorded = SignalingRecordedGame(live, journal)
+                execution = Execution(
+                    recorded,
+                    game_instance_id=obs.location.game_instance_id,
+                    run_id=obs.location.run_id or "run",
+                )
+                tools = ToolCatalog(
+                    native.DecisionOwner.RUN,
+                    observe=execution.observe,
+                    inspect=execution.inspect,
+                    catalog=execution.catalog,
+                    notes=Notes(""),
+                    focused_deck=True,
+                )
+                agent = DeckAgent(
+                    lambda: model,
+                    tools,
+                    ToolRecoveryBudget(),
+                    reward_preview=execution,
+                )
+                decide_task = asyncio.create_task(agent.decide(ActTask(route), obs))
+                await asyncio.wait_for(open_started.wait(), 2)
+                # Wait deterministically until the consumer starts awaiting /rewards/open.
+                await asyncio.wait_for(consumer_entered.wait(), 2)
+                await asyncio.sleep(0)
+                decide_task.cancel()
+                await asyncio.sleep(0)
+                assert not decide_task.done(), "Cleanup must wait for dispatched /rewards/open."
+                release_open.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(decide_task, 2)
+                assert open_completed is True
+                assert live.pending_card_reward_open() is None
+        finally:
+            journal.close()
+
+        reopened = Journal.open(journal_path)
+        try:
+            open_records = [
+                record
+                for record in reopened.operations()
+                if isinstance(record.request, OpenCardReward)
+            ]
+            assert len(open_records) == 1
+            assert open_records[0].reply is not None
+        finally:
+            reopened.close()
+
+        # Direct LiveGame cancellation retains ownership for cancel_open_card_reward(),
+        # and cancelling while draining a mismatched prefetch never dispatches the second open.
+        open_started_direct = asyncio.Event()
+        release_direct = asyncio.Event()
+        direct_offers: list[str] = []
+
+        async def direct_mod(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/rewards/open"
+            body = json.loads(request.content)
+            direct_offers.append(body["offer"])
+            open_started_direct.set()
+            await release_direct.wait()
+            return httpx.Response(200, json={"status": "opened"})
+
+        async with ModClient("http://mod", transport=httpx.MockTransport(direct_mod)) as client:
+            live_direct = LiveGame(
+                client,
+                namespace="direct-cancel",
+                game_instance_id=obs.location.game_instance_id,
+                run_id=obs.location.run_id or "run",
+                present_card_rewards=True,
+            )
+            live_direct.start_open_card_reward(route, "reward-a")
+            await asyncio.wait_for(open_started_direct.wait(), 2)
+            consumer = asyncio.create_task(live_direct.open_card_reward(route, "reward-a"))
+            await asyncio.sleep(0)
+            consumer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await consumer
+            assert live_direct.pending_card_reward_open() == (route, "reward-a")
+            # Mismatched open cancelled while draining must finish reward-a and NOT open reward-b.
+            mismatched = asyncio.create_task(live_direct.open_card_reward(route, "reward-b"))
+            await asyncio.sleep(0)
+            mismatched.cancel()
+            await asyncio.sleep(0)
+            assert not mismatched.done()
+            release_direct.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(mismatched, 2)
+            assert direct_offers == ["reward-a"]
+            assert live_direct.pending_card_reward_open() is None
+
+            # Replacing an unstarted mismatched prefetch opens the requested offer normally.
+            live_direct.start_open_card_reward(route, "reward-a")
+            opened_b = await live_direct.open_card_reward(route, "reward-b")
+            assert isinstance(opened_b.outcome, CardRewardOpened)
+            assert direct_offers == ["reward-a", "reward-b"]
+            assert live_direct.pending_card_reward_open() is None
+
+    asyncio.run(scenario())

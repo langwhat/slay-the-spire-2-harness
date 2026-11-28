@@ -297,3 +297,169 @@ def test_combined_action_refusal_returns_the_newly_observed_state(unavailable: b
                 assert json.loads(notes.content)["data"]["notes"]["other"] == ""
 
     asyncio.run(run())
+
+
+def test_external_run_act_exposes_and_executes_reroll_card_reward() -> None:
+    from sts2_harness.decisions import (
+        ActionDecision,
+        ActionProposal,
+        ActTask,
+        DecisionTask,
+        RerollCardRewardStep,
+    )
+    from sts2_harness.execution import Execution
+    from sts2_harness.execution import Rejected as UnitRejected
+    from sts2_harness.game import LiveGame
+    from sts2_harness.llm.messages import ToolCall
+    from sts2_harness.notes import Notes
+    from sts2_harness.results import ExecutionResult, ReasonCode, Rejected
+    from sts2_harness.tools import QueryView, ToolCatalog
+
+    class RerollMod(FakeMod):
+        def __init__(self) -> None:
+            super().__init__()
+            assert isinstance(self.observation.state, native.RunState)
+            self.observation = self.observation.model_copy(
+                update={
+                    "input_readiness": native.InputReadiness.SELECTION,
+                    "state": self.observation.state.model_copy(
+                        update={
+                            "screen": native.RunScreen.REWARDS,
+                            "selection": native.Selection(
+                                prompt="Choose a card",
+                                source=None,
+                                min=0,
+                                max=1,
+                                candidates=("c1",),
+                                selected=(),
+                                offer_ref="offer-card-1",
+                            ),
+                        }
+                    ),
+                }
+            )
+
+        async def respond(self, request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/action":
+                step = native.StepRequest.model_validate_json(request.content)
+                self.actions.append(step)
+                boundary = (
+                    "selection"
+                    if isinstance(step.step, (native.Interact, native.RerollCardReward))
+                    else "ready"
+                )
+                return httpx.Response(
+                    200,
+                    json={
+                        "operation_id": step.operation_id,
+                        "status": "completed",
+                        "boundary": boundary,
+                    },
+                )
+            return await super().respond(request)
+
+    async def run() -> None:
+        mod = RerollMod()
+        async with ExternalBackend(mod.client()) as backend:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=create_app(backend)), base_url="http://tools"
+            ) as caller:
+                discovery = json.loads((await caller.get("/tools")).content)
+                run_act_def = next(
+                    item for item in discovery["roles"]["run"] if item["name"] == "run_act"
+                )
+                step_kinds = {
+                    option["properties"]["kind"]["const"]
+                    for option in run_act_def["input_schema"]["properties"]["steps"]["items"][
+                        "oneOf"
+                    ]
+                }
+                assert "reroll_card_reward" in step_kinds
+
+                await caller.post("/tools/run_inspect", json={"area": "state"})
+                mod.control = native.ControlIntent.RUNNING
+                rerolled = await caller.post(
+                    "/tools/run_act",
+                    json={"steps": [{"kind": "reroll_card_reward"}]},
+                )
+                assert json.loads(rerolled.content)["outcome"] == {
+                    "status": "completed",
+                    "completed_steps": 1,
+                }
+                assert len(mod.actions) == 1
+                assert isinstance(mod.actions[0].step, native.RerollCardReward)
+
+                batched = await caller.post(
+                    "/tools/run_act",
+                    json={
+                        "steps": [
+                            {"kind": "interact", "action": "open-reward"},
+                            {"kind": "reroll_card_reward"},
+                        ]
+                    },
+                )
+                assert json.loads(batched.content)["outcome"] == {
+                    "status": "completed",
+                    "completed_steps": 2,
+                }
+                assert isinstance(mod.actions[1].step, native.Interact)
+                assert isinstance(mod.actions[2].step, native.RerollCardReward)
+
+        # Built-in role catalog still rejects reroll_card_reward on run_act; Combat rejects step.
+        async def unused_observe() -> native.Observation:
+            return mod.observation
+
+        async def unused_inspect(query: native.InspectQuery) -> native.InspectReply:
+            raise AssertionError(query)
+
+        async def unused_catalog(request: native.CatalogRequest) -> native.CatalogReply:
+            raise AssertionError(request)
+
+        role_tools = ToolCatalog(
+            native.DecisionOwner.RUN,
+            observe=unused_observe,
+            inspect=unused_inspect,
+            catalog=unused_catalog,
+            notes=Notes(""),
+            query_view=QueryView.ROLE,
+        )
+        route = native.RouteKey.model_validate(mod.observation.location.model_dump())
+        rejected = await role_tools.dispatch_action(
+            ToolCall("c1", "run_act", '{"steps":[{"kind":"reroll_card_reward"}]}'),
+            ActTask(route),
+            mod.observation,
+        )
+        assert not isinstance(rejected, ActionProposal)
+        assert isinstance(rejected.outcome, Rejected)
+        assert rejected.outcome.reason.code is ReasonCode.INVALID_ARGUMENTS
+
+        combat_mod = FakeMod()
+        combat_mod.observation = native.Observation.model_validate_json(COMBAT)
+        combat_mod.control = native.ControlIntent.RUNNING
+        combat_route = native.RouteKey.model_validate(combat_mod.observation.location.model_dump())
+
+        class RerollSource:
+            async def decide(
+                self, task: DecisionTask, observation: native.Observation
+            ) -> ActionDecision:
+                return ActionDecision(ActionProposal((RerollCardRewardStep(),)))
+
+            async def accept(self, outcome: ExecutionResult) -> None:
+                return None
+
+        async with combat_mod.client() as client:
+            execution = Execution(
+                LiveGame(
+                    client,
+                    namespace="combat-reroll",
+                    game_instance_id=combat_route.game_instance_id,
+                    run_id=combat_route.run_id,
+                ),
+                game_instance_id=combat_route.game_instance_id,
+                run_id=combat_route.run_id,
+            )
+            unit = await execution.run_unit(RerollSource(), ActTask(combat_route))
+        assert isinstance(unit, UnitRejected)
+        assert unit.reason.code is ReasonCode.WRONG_ROLE
+
+    asyncio.run(run())

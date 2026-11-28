@@ -1,6 +1,7 @@
 """Current deck counts, native base resources, and observed card use."""
 
 from collections import Counter
+from dataclasses import dataclass
 from enum import StrEnum
 
 from pydantic import MISSING, JsonValue
@@ -32,10 +33,28 @@ def is_playable_deck_card(card: native.CardEntry) -> bool:
     }
 
 
+def _playable_deck_ids(observation: native.Observation) -> frozenset[str]:
+    state = observation.state
+    if not isinstance(state, (native.RunState, native.CombatState)):
+        return frozenset()
+    return frozenset(
+        card.definition_id
+        for reference in state.deck
+        if isinstance(card := observation.objects.get(reference), native.CardEntry)
+        and is_playable_deck_card(card)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BattleSample:
+    played: tuple[native.NamedDefinition, ...]
+    owned: frozenset[str]
+
+
 class DeckStatistics:
     def __init__(self) -> None:
         self._session: tuple[str, str | None] | None = None
-        self._battles: dict[str | None, tuple[native.NamedDefinition, ...]] = {}
+        self._battles: dict[str | None, _BattleSample] = {}
         self._choices: dict[int | None, Counter[bool]] = {}
 
     def _enter(self, observation: native.Observation) -> None:
@@ -51,7 +70,10 @@ class DeckStatistics:
         self, observation: native.Observation, cards: tuple[native.NamedDefinition, ...]
     ) -> None:
         self._enter(observation)
-        self._battles[observation.location.node_id] = cards
+        node_id = observation.location.node_id
+        existing = self._battles.get(node_id)
+        owned = existing.owned if existing is not None else _playable_deck_ids(observation)
+        self._battles[node_id] = _BattleSample(played=cards, owned=owned)
         if len(self._battles) > 5:
             del self._battles[next(iter(self._battles))]
 
@@ -146,13 +168,16 @@ class DeckStatistics:
             stats["base_energy"] = energy
         counts = Counter(
             card.definition_id
-            for plays in self._battles.values()
-            for card in plays
+            for sample in self._battles.values()
+            for card in sample.played
             if card.definition_id is not MISSING
         )
         use_counts: dict[str, int] = dict(counts)
         if self._battles:
+            observed_owned = {
+                card_id for sample in self._battles.values() for card_id in sample.owned
+            }
             for card in cards:
-                if is_playable_deck_card(card):
+                if is_playable_deck_card(card) and card.definition_id in observed_owned:
                     use_counts.setdefault(card.definition_id, 0)
         return stats, use_counts

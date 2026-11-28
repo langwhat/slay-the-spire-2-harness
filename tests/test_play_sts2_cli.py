@@ -848,3 +848,266 @@ def test_cmd_tools_raw_flag_outputs_raw_json(
         assert requests_log == [("/tools", {}), ("/tools", {}), ("/tools", {})]
     finally:
         server.shutdown()
+
+
+def test_render_combat_melodies_turn_activity_sly_and_needs_target_deltas() -> None:
+    from test_mod_client import COMBAT
+
+    from sts2_harness.client import models as native
+    from sts2_harness.raw import render
+    from sts2_harness.results import QueryToolResult, ReadCompleted
+
+    base = native.Observation.model_validate_json(COMBAT)
+    assert isinstance(base.state, native.CombatState)
+    c1 = base.objects["c1"]
+    assert isinstance(c1, native.CardEntry)
+    c2 = c1.model_copy(
+        update={
+            "definition_id": "CARD.DISCARD_SLY",
+            "name": "Prepared Shot",
+            "cost": native.ResourceCosts(energy=1),
+            "enchantment": None,
+            "is_sly_this_turn": True,
+        }
+    )
+
+    # Turn 1: melodies active, turn_activity populated, hand card needs_target & is_sly_this_turn,
+    # discard pile card has temporary Sly.
+    turn1 = base.model_copy(
+        update={
+            "state": base.state.model_copy(
+                update={
+                    "turn": 1,
+                    "melodies": (native.MelodyTag.WAH, native.MelodyTag.CHO),
+                    "turn_activity": native.TurnActivity(
+                        cards_played=2,
+                        attacks_played=1,
+                        skills_played=1,
+                        powers_played=0,
+                        cards_exhausted=0,
+                        cards_discarded=1,
+                    ),
+                    "piles": base.state.piles.model_copy(
+                        update={
+                            "hand": ("c1",),
+                            "discard": ("c2",),
+                        }
+                    ),
+                }
+            ),
+            "objects": {
+                **base.objects,
+                "c1": c1.model_copy(update={"needs_target": True, "is_sly_this_turn": True}),
+                "c2": c2,
+            },
+            "descriptions": {**base.descriptions, "c2": "Deal 4 damage."},
+        }
+    )
+    payload1 = cast(JsonObj, json.loads(render(QueryToolResult(ReadCompleted(), turn1)).to_json()))
+    cache: JsonObj = {}
+    out1 = _render_reply(payload1, cache, full=True)
+    assert "MELODIES: [wah, cho]" in out1
+    assert (
+        "TURN_ACTIVITY: cards_played=2 attacks_played=1 skills_played=1 "
+        "powers_played=0 cards_exhausted=0 cards_discarded=1" in out1
+    )
+    assert "SLY_THIS_TURN" in out1
+    assert "NEEDS_TARGET" in out1
+    assert "PILE.DISCARD (1): Prepared Shot(energy=1)[SLY_THIS_TURN][c2]" in out1
+
+    # Same turn with updated counts & new melody: incremental render reflects changes.
+    turn1b = turn1.model_copy(
+        update={
+            "state": turn1.state.model_copy(
+                update={
+                    "melodies": (native.MelodyTag.WAH, native.MelodyTag.CHO, native.MelodyTag.KI),
+                    "turn_activity": native.TurnActivity(
+                        cards_played=3,
+                        attacks_played=2,
+                        skills_played=1,
+                        powers_played=0,
+                        cards_exhausted=1,
+                        cards_discarded=1,
+                    ),
+                }
+            ),
+        }
+    )
+    payload1b = cast(
+        JsonObj, json.loads(render(QueryToolResult(ReadCompleted(), turn1b)).to_json())
+    )
+    out1b = _render_reply(payload1b, cache, full=False)
+    assert "MELODIES: [wah, cho, ki]" in out1b
+    assert "cards_played=3 attacks_played=2" in out1b
+    assert "cards_exhausted=1" in out1b
+    assert "PILE.DISCARD: unchanged (1)" in out1b
+
+    # Next turn: melodies cleared to empty, turn_activity reset to 0, discard card loses Sly.
+    turn2 = turn1b.model_copy(
+        update={
+            "state": turn1b.state.model_copy(
+                update={
+                    "turn": 2,
+                    "melodies": (),
+                    "turn_activity": native.TurnActivity(
+                        cards_played=0,
+                        attacks_played=0,
+                        skills_played=0,
+                        powers_played=0,
+                        cards_exhausted=0,
+                    ),
+                }
+            ),
+            "objects": {
+                **turn1b.objects,
+                "c1": c1.model_copy(update={"needs_target": False, "is_sly_this_turn": False}),
+                "c2": c2.model_copy(update={"is_sly_this_turn": False}),
+            },
+        }
+    )
+    payload2 = cast(JsonObj, json.loads(render(QueryToolResult(ReadCompleted(), turn2)).to_json()))
+    out2 = _render_reply(payload2, cache, full=False)
+    assert "MELODIES: none" in out2
+    assert (
+        "TURN_ACTIVITY: cards_played=0 attacks_played=0 skills_played=0 "
+        "powers_played=0 cards_exhausted=0" in out2
+    )
+    assert "SLY_THIS_TURN" not in out2
+    assert "NEEDS_TARGET" not in out2
+    # Losing is_sly_this_turn in discard pile MUST invalidate pile unchanged cache.
+    assert "PILE.DISCARD (1): Prepared Shot(energy=1)[c2]" in out2
+
+    # If melodies/turn_activity disappear after being shown, CLI explicitly emits clearing lines.
+    turn3_shown = _render_reply(payload1, cache, full=False)
+    assert "MELODIES: [wah, cho]" in turn3_shown
+    payload_absent = cast(
+        JsonObj, json.loads(render(QueryToolResult(ReadCompleted(), base)).to_json())
+    )
+    out_cleared = _render_reply(payload_absent, cache, full=False)
+    assert "MELODIES: none" in out_cleared
+    assert "TURN_ACTIVITY: none" in out_cleared
+
+
+def test_render_offer_can_reroll_tag() -> None:
+    payload = _base_run_payload(
+        offers=[
+            {
+                "ref": "offer-card-1",
+                "kind": "card",
+                "contents": [],
+                "actions": ["a1"],
+                "requires_selection": True,
+                "can_reroll": True,
+            }
+        ],
+        actions=[{"ref": "a1", "label": "Choose a card", "enabled": True}],
+    )
+    out = _render_reply(payload, {}, full=True)
+    assert "CAN_REROLL" in out
+
+
+@pytest.mark.parametrize(
+    ("room_type", "offer_kind", "relic_id", "expected_auto"),
+    [
+        ("monster", "potion", None, True),
+        ("monster", "potion", "RELIC.BELT_BUCKLE", False),
+        ("event", "potion", "RELIC.BELT_BUCKLE", False),
+        ("event", "potion", None, True),
+        ("monster", "potion", "RELIC.SOZU", False),
+        ("event", "potion", "RELIC.SOZU", False),
+        ("monster", "gold", None, True),
+        ("monster", "gold", "RELIC.ECTOPLASM", False),
+    ],
+)
+def test_cli_auto_rewards_match_builtin_auto_relic_guards(
+    room_type: str,
+    offer_kind: str,
+    relic_id: str | None,
+    expected_auto: bool,
+) -> None:
+    from test_mod_client import RUN
+
+    from sts2_harness.auto import battle_reward, choose_auto
+    from sts2_harness.client import models as native
+    from sts2_harness.raw import render
+    from sts2_harness.results import QueryToolResult, ReadCompleted
+
+    base = native.Observation.model_validate_json(RUN)
+    assert isinstance(base.state, native.RunState)
+    objects: dict[str, native.ObjectEntry] = dict(base.objects)
+    relics: tuple[str, ...] = ()
+    if relic_id is not None:
+        objects["r-guard"] = native.RelicEntry(
+            kind=native.ObjectKind.RELIC,
+            definition_id=relic_id,
+            name=relic_id,
+        )
+        relics = ("r-guard",)
+    contents: tuple[str, ...] = ()
+    if offer_kind == "potion":
+        objects["p-reward"] = native.PotionEntry(
+            kind=native.ObjectKind.POTION,
+            definition_id="POTION.FIRE_POTION",
+            name="Fire Potion",
+            usable=False,
+            needs_target=True,
+            target_type="any_enemy",
+            usage="combat_only",
+        )
+        contents = ("p-reward",)
+    obs = base.model_copy(
+        update={
+            "state": base.state.model_copy(
+                update={
+                    "screen": native.RunScreen.REWARDS,
+                    "progress": base.state.progress.model_copy(update={"room_type": room_type}),
+                    "player": base.state.player.model_copy(update={"empty_potion_slot_count": 2}),
+                    "relics": relics,
+                    "offers": (
+                        native.Offer(
+                            ref="offer-1",
+                            kind=native.OfferKind(offer_kind),
+                            contents=contents,
+                            actions=("act-claim",),
+                            requires_selection=False,
+                        ),
+                    ),
+                    "actions": (
+                        native.Action(
+                            ref="act-claim",
+                            label="Claim",
+                            enabled=True,
+                            subject="offer-1",
+                        ),
+                        native.Action(
+                            ref="act-proceed",
+                            label="Proceed",
+                            enabled=True,
+                            operation=native.ActionOperation.PROCEED,
+                        ),
+                    ),
+                }
+            ),
+            "objects": objects,
+        }
+    )
+
+    if room_type == "event":
+        builtin = choose_auto(obs, shop_strategy=False, allow_event_potion=True)
+        builtin_claims = builtin is not None
+    else:
+        builtin_action = battle_reward(obs)
+        builtin_claims = builtin_action is not None
+
+    payload = cast(JsonObj, json.loads(render(QueryToolResult(ReadCompleted(), obs)).to_json()))
+    cli_step = _next_auto(
+        payload,
+        opened_shops=set(),
+        opened_card_offers=set(),
+        allow_stateful_auto=True,
+        skip_card_open=False,
+    )
+    cli_claims = cli_step is not None
+
+    assert builtin_claims is expected_auto
+    assert cli_claims is expected_auto

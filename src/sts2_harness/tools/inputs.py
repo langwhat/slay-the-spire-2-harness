@@ -159,12 +159,32 @@ class RunAct(native.WireModel):
     notes: NotesPatch | MISSING = MISSING
 
 
+class ExternalRunAct(native.WireModel):
+    steps: Annotated[
+        tuple[
+            native.Interact
+            | native.UsePotion
+            | native.DiscardPotion
+            | native.Select
+            | native.RerollCardReward,
+            ...,
+        ],
+        Field(min_length=1),
+    ]
+    reason: str | MISSING = MISSING
+    notes: NotesPatch | MISSING = MISSING
+
+
 class RunActInput(RootModel[RunAct]):
     @classmethod
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
         return dict(tool_schema("run_act"))
+
+
+class ExternalRunActInput(RootModel[ExternalRunAct]):
+    pass
 
 
 class MinimalRunActInput(RunActInput):

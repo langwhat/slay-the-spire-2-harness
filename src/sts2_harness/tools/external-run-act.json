@@ -1,6 +1,6 @@
 {
   "name": "run_act",
-  "description": "Submit ordered steps for non-combat decisions: interact with a listed map, reward, shop, event, rest-site, or special-interface operation; select with refs; or use_potion and discard_potion. Potion actions are not duplicated as interact choices. The tool executes these operations; it does not delegate the run. Prefer combining planned actions, anticipated selections, and follow-ups when public information supports them. Use the current operation and object references, not positions or invented IDs. Earlier steps can change resources, eligibility, options, prices, and effects.\n\nEach step is checked against the native state when reached, so an earlier step can make a later one legal. Submit through a reveal and decide again if its unknown result would change your choice; do not queue an operation whose required reference is not yet known. Event or reward screens can close automatically after the last reward, so do not queue a skip or close unless the screen will remain open. A selection submits the complete final set of distinct candidates; follow the displayed min and max. A card ref can be reused by a later action only if that actual card is still present and legal. For targeted actions, omit target only if the action requires a target and exactly one legal target exists at execution; an explicit invalid target is not redirected. Omit it when the action does not use one.\n\nThe result reports outcome and the current role observation when trustworthy. If execution is unknown, submit no game actions until a fresh state reports control=ready; read-only queries remain available. Plan from that fresh state without replaying an uncertain submission. A role transition can stop the unexecuted tail. An optional reason briefly explains the batch using names rather than temporary references; do not provide a step-by-step reasoning transcript. This tool does not echo the reason.",
+  "description": "Submit ordered steps for non-combat decisions: interact with a listed map, reward, shop, event, rest-site, or special-interface operation; select with refs; reroll_card_reward when an active card-reward selection supports rerolling; or use_potion and discard_potion. Potion actions are not duplicated as interact choices. The tool executes these operations; it does not delegate the run. Prefer combining planned actions, anticipated selections, and follow-ups when public information supports them. Use the current operation and object references, not positions or invented IDs. Earlier steps can change resources, eligibility, options, prices, and effects.\n\nEach step is checked against the native state when reached, so an earlier step can make a later one legal. Submit through a reveal and decide again if its unknown result would change your choice; do not queue an operation whose required reference is not yet known. Event or reward screens can close automatically after the last reward, so do not queue a skip or close unless the screen will remain open. A selection submits the complete final set of distinct candidates; follow the displayed min and max. A card ref can be reused by a later action only if that actual card is still present and legal. For targeted actions, omit target only if the action requires a target and exactly one legal target exists at execution; an explicit invalid target is not redirected. Omit it when the action does not use one.\n\nThe result reports outcome and the current role observation when trustworthy. If execution is unknown, submit no game actions until a fresh state reports control=ready; read-only queries remain available. Plan from that fresh state without replaying an uncertain submission. A role transition can stop the unexecuted tail. An optional reason briefly explains the batch using names rather than temporary references; do not provide a step-by-step reasoning transcript. This tool does not echo the reason.",
   "input_schema": {
     "type": "object",
     "properties": {
@@ -87,6 +87,18 @@
               "required": [
                 "kind",
                 "refs"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "const": "reroll_card_reward"
+                }
+              },
+              "required": [
+                "kind"
               ],
               "additionalProperties": false
             }

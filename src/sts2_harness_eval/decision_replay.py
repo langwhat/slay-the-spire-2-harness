@@ -194,6 +194,9 @@ class CaseStatistics(DeckStatistics):
         self.observed_plays = state.observed_plays
         self.run_added = state.run_added
         self.run_skipped = state.run_skipped
+        self._legacy_zero_backfill = (
+            state.battles_observed is None and 0 not in state.observed_plays.values()
+        )
         if state.battles_observed is not None:
             self.battles_observed = state.battles_observed
         elif state.fights:
@@ -219,7 +222,11 @@ class CaseStatistics(DeckStatistics):
                 self.run_skipped, act_skipped if isinstance(act_skipped, int) else 0
             )
         plays = dict(self.observed_plays)
-        if self.battles_observed > 0 and isinstance(observation.state, native.RunState):
+        if (
+            self._legacy_zero_backfill
+            and self.battles_observed > 0
+            and isinstance(observation.state, native.RunState)
+        ):
             for ref in observation.state.deck:
                 card = observation.objects.get(ref)
                 if isinstance(card, native.CardEntry) and is_playable_deck_card(card):

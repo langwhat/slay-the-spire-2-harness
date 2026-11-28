@@ -244,6 +244,8 @@ def _card_key(entry: JsonObj, desc: object = None) -> str:
     cost_s = _fmt_cost(entry.get("cost"))
     if cost_s:
         key += f"|C:{cost_s}"
+    if entry.get("is_sly_this_turn") is True:
+        key += "|SLY"
     txt = _one_line(desc)
     if txt:
         key += f"|T:{_hash(txt)[:8]}"
@@ -326,6 +328,10 @@ def _fmt_card_line(
         meta.append("EXHAUST_NEXT")
     if entry.get("has_turn_end_in_hand_effect"):
         meta.append("TURN_END_EFFECT")
+    if entry.get("is_sly_this_turn") is True:
+        meta.append("SLY_THIS_TURN")
+    if entry.get("needs_target") is True:
+        meta.append("NEEDS_TARGET")
     if entry.get("is_upgradable") is False and show_upgrade:
         meta.append("not_upgradable")
     if entry.get("is_removable") is False:
@@ -657,6 +663,19 @@ def _sole_claim_action(of: JsonObj, enabled_by_ref: dict[str, JsonObj]) -> JsonO
     return act
 
 
+def _has_relic(state: JsonObj, objects: JsonObj, definition_id: str) -> bool:
+    return any(
+        _as_dict(objects.get(_str(rref))).get("definition_id") == definition_id
+        for rref in _as_list(state.get("relics"))
+    )
+
+
+def _auto_potion_blocked(state: JsonObj, objects: JsonObj) -> bool:
+    return _has_relic(state, objects, "RELIC.BELT_BUCKLE") or _has_relic(
+        state, objects, "RELIC.SOZU"
+    )
+
+
 def _next_auto_step(
     payload: JsonObj,
     *,
@@ -692,8 +711,10 @@ def _next_auto_step(
     # or open the sole card offer once those rewards are settled.
     if screen == "rewards" and room_type in ("monster", "elite", "boss") and offers:
         potion_offers = [of for of in offers if of.get("kind") == "potion"]
-        claim_kinds = ["relic", "gold"]
-        if 0 < len(potion_offers) <= empty_potions:
+        claim_kinds = ["relic"]
+        if not _has_relic(state, objects, "RELIC.ECTOPLASM"):
+            claim_kinds.append("gold")
+        if not _auto_potion_blocked(state, objects) and 0 < len(potion_offers) <= empty_potions:
             claim_kinds.append("potion")
         for kind in claim_kinds:
             for of in offers:
@@ -727,7 +748,12 @@ def _next_auto_step(
         return None
 
     # 2. Event reward potions when all offered potions fit into empty slots.
-    if screen == "rewards" and room_type == "event" and offers:
+    if (
+        screen == "rewards"
+        and room_type == "event"
+        and offers
+        and not _auto_potion_blocked(state, objects)
+    ):
         if 0 < len(offers) <= empty_potions:
             claims = {_str(a.get("ref")): a for a in enabled if a.get("operation") != "proceed"}
             if len(claims) == len(offers) and all(
@@ -762,11 +788,7 @@ def _next_auto_step(
     if allow_stateful_auto and nkey not in opened_shops and is_shop_entrance:
         opening = next((a for a in enabled if a.get("operation") == "open_shop"), None)
         if opening is not None:
-            has_ectoplasm = any(
-                _as_dict(objects.get(_str(rref))).get("definition_id") == "RELIC.ECTOPLASM"
-                for rref in _as_list(state.get("relics"))
-            )
-            if not has_ectoplasm:
+            if not _has_relic(state, objects, "RELIC.ECTOPLASM"):
                 for pref_raw in _as_list(state.get("potions")):
                     pref = _str(pref_raw)
                     pot = _as_dict(objects.get(pref))
@@ -1031,6 +1053,8 @@ def render_reply(
         last_piles_node = ""
         last_deck_counts: JsonObj = {}
         last_map_topo_hash = ""
+        last_melodies_shown = False
+        last_turn_activity_shown = False
     else:
         seen_defs = dict(_as_dict(cache.get("defs")))
         seen_mechs = set(_str(x) for x in _as_list(cache.get("mechs")))
@@ -1041,9 +1065,13 @@ def render_reply(
         last_piles_node = _str(cache.get("piles_node"))
         last_deck_counts = dict(_as_dict(cache.get("deck_counts")))
         last_map_topo_hash = _str(cache.get("map_topo_hash"))
+        last_melodies_shown = bool(cache.get("melodies_shown"))
+        last_turn_activity_shown = bool(cache.get("turn_activity_shown"))
 
     if last_piles_node != nkey:
         last_piles_hash = {}
+        last_melodies_shown = False
+        last_turn_activity_shown = False
 
     phase = _str(state.get("phase"))
     control = _str(state.get("control"))
@@ -1216,6 +1244,37 @@ def render_reply(
                 imp = ad.get("impaled_target_ref")
                 as_s.append(f"{st}({imp})" if imp else st)
             lines.append("ARROWS: [" + ", ".join(as_s) + "]")
+        raw_melodies = state.get("melodies")
+        if isinstance(raw_melodies, list):
+            melodies = [_str(m) for m in _as_list(cast(object, raw_melodies))]
+            if melodies:
+                lines.append("MELODIES: [" + ", ".join(melodies) + "]")
+                last_melodies_shown = True
+            else:
+                lines.append("MELODIES: none")
+                last_melodies_shown = False
+        elif not full and last_melodies_shown:
+            lines.append("MELODIES: none")
+            last_melodies_shown = False
+        turn_activity = _as_dict(state.get("turn_activity"))
+        if turn_activity:
+            ta_order = (
+                "cards_played",
+                "attacks_played",
+                "skills_played",
+                "powers_played",
+                "cards_exhausted",
+                "cards_discarded",
+            )
+            ta_keys = [k for k in ta_order if k in turn_activity] + sorted(
+                k for k in turn_activity if k not in ta_order
+            )
+            ta_bits = [f"{k}={turn_activity[k]}" for k in ta_keys if turn_activity[k] is not None]
+            lines.append("TURN_ACTIVITY: " + (" ".join(ta_bits) if ta_bits else "none"))
+            last_turn_activity_shown = bool(ta_bits)
+        elif not full and last_turn_activity_shown:
+            lines.append("TURN_ACTIVITY: none")
+            last_turn_activity_shown = False
         allies = _as_list(state.get("allies"))
         if allies:
             lines.append("ALLIES:")
@@ -1285,6 +1344,8 @@ def render_reply(
                 pkws = _as_list(ce.get("keywords"))
                 if pkws:
                     tags.append("kw(" + ",".join(_str(k) for k in pkws) + ")")
+                if ce.get("is_sly_this_turn") is True:
+                    tags.append("SLY_THIS_TURN")
                 if tags:
                     label += "[" + " ".join(tags) + "]"
                 grouped.setdefault(label, []).append(ref)
@@ -1349,6 +1410,8 @@ def render_reply(
                     bits.append(f"amount={of.get('amount')}")
                 if of.get("requires_selection"):
                     bits.append("requires_selection")
+                if of.get("can_reroll") is True:
+                    bits.append("CAN_REROLL")
                 oacts = _as_list(of.get("actions"))
                 if oacts:
                     bits.append("actions=" + ",".join(_str(a) for a in oacts))
@@ -1652,6 +1715,8 @@ def render_reply(
     cache["piles_node"] = last_piles_node
     cache["deck_counts"] = last_deck_counts
     cache["map_topo_hash"] = last_map_topo_hash
+    cache["melodies_shown"] = last_melodies_shown
+    cache["turn_activity_shown"] = last_turn_activity_shown
     return "\n".join(lines)
 
 

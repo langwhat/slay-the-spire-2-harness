@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Literal, Protocol
@@ -392,27 +391,46 @@ class LiveGame:
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         self._prefetched_reward_open = (route, offer, started, task)
 
-    async def cancel_open_card_reward(self) -> None:
+    async def _drain_prefetched_reward_open(self) -> bool:
         prefetched = self._prefetched_reward_open
-        self._prefetched_reward_open = None
         if prefetched is None:
-            return
+            return False
         _, _, started, task = prefetched
-        if not started[0] and not task.done():
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-            return
-        # Once HTTP dispatch began, wait for it to finish rather than leaving an orphan mutation.
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except ClientUnavailable:
-                return
-        with suppress(asyncio.CancelledError, ClientUnavailable):
-            await task
+        current = asyncio.current_task()
+        cancels_before = current.cancelling() if current is not None else 0
+        cancelled = False
+        try:
+            if not started[0] and not task.done():
+                task.cancel()
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        if not task.done() or (
+                            current is not None and current.cancelling() > cancels_before
+                        ):
+                            cancelled = True
+                    except ClientUnavailable:
+                        break
+                return cancelled
+            # Once HTTP dispatch began, wait for it to finish rather than leaving an orphan
+            # mutation.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except ClientUnavailable:
+                    break
+            if not task.cancelled():
+                task.exception()
+            return cancelled
+        finally:
+            if task.done() and self._prefetched_reward_open is prefetched:
+                self._prefetched_reward_open = None
+
+    async def cancel_open_card_reward(self) -> None:
+        await self._drain_prefetched_reward_open()
 
     async def admit(self) -> GameReply[Admitted]:
         return await self._run(self._admission_result)
@@ -483,18 +501,27 @@ class LiveGame:
         self, route: native.RouteKey, offer: str
     ) -> CardRewardOpened:
         prefetched = self._prefetched_reward_open
-        self._prefetched_reward_open = None
         if prefetched is not None and prefetched[0] == route and prefetched[1] == offer:
-            pending: Awaitable[RewardOpenResult] = prefetched[3]
+            active = prefetched
         else:
-            if prefetched is not None:
-                if not prefetched[2][0] and not prefetched[3].done():
-                    prefetched[3].cancel()
-                with suppress(asyncio.CancelledError, ClientUnavailable):
-                    await prefetched[3]
-            pending = self._client.open_card_reward(route, offer)
-        result = await self._attempt(Endpoint.OPEN_CARD_REWARD, pending)
-        return CardRewardOpened(result=result)
+            if prefetched is not None and await self._drain_prefetched_reward_open():
+                raise asyncio.CancelledError
+            started = [False]
+
+            async def dispatch() -> RewardOpenResult:
+                started[0] = True
+                return await self._client.open_card_reward(route, offer)
+
+            task: asyncio.Task[RewardOpenResult] = asyncio.create_task(dispatch())
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+            active = (route, offer, started, task)
+            self._prefetched_reward_open = active
+        try:
+            result = await self._attempt(Endpoint.OPEN_CARD_REWARD, asyncio.shield(active[3]))
+            return CardRewardOpened(result=result)
+        finally:
+            if active[3].done() and self._prefetched_reward_open is active:
+                self._prefetched_reward_open = None
 
     async def _close_card_reward_result(
         self, route: native.RouteKey, offer: str

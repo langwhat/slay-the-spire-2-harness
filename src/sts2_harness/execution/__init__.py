@@ -795,6 +795,11 @@ def _proposal_problem(proposal: ActionProposal, owner: native.DecisionOwner) -> 
     if not proposal.steps:
         return Reason(code=ReasonCode.INVALID_ARGUMENTS, message="An action proposal needs steps.")
     for step in proposal.steps:
+        if isinstance(step, RerollCardRewardStep) and owner is not native.DecisionOwner.RUN:
+            return Reason(
+                code=ReasonCode.WRONG_ROLE,
+                message="Card reward rerolls are only available to Run.",
+            )
         if isinstance(step, ActionStep):
             if owner is native.DecisionOwner.RUN and step.kind in (
                 ActionKind.PLAY_CARD,

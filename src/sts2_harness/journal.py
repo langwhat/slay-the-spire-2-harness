@@ -2231,10 +2231,23 @@ class RecordedGame:
     async def open_card_reward(
         self, route: native.RouteKey, offer: str
     ) -> GameReply[CardRewardOpened]:
-        return await self._record(
-            OpenCardReward(route=route, offer=offer),
-            lambda: self._live.open_card_reward(route, offer),
+        recording = asyncio.create_task(
+            self._record(
+                OpenCardReward(route=route, offer=offer),
+                lambda: self._live.open_card_reward(route, offer),
+            )
         )
+        cancelled = False
+        while not recording.done():
+            try:
+                await asyncio.shield(recording)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            if not recording.cancelled():
+                recording.exception()
+            raise asyncio.CancelledError
+        return await recording
 
     async def close_card_reward(
         self, route: native.RouteKey, offer: str

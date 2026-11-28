@@ -71,6 +71,13 @@ def test_current_deck_counts_are_independent_of_battle_history() -> None:
     }
     assert uses == {}
     battle = native.Observation.model_validate_json(COMBAT)
+    assert isinstance(battle.state, native.CombatState)
+    battle = battle.model_copy(
+        update={
+            "state": battle.state.model_copy(update={"deck": current.state.deck}),
+            "objects": {**battle.objects, **current.objects},
+        }
+    )
     statistics.capture(battle, history("CARD.0", "CARD.0", "CARD.1"))
     statistics.capture(battle, history("CARD.0", "CARD.0", "CARD.1"))
     after, uses = statistics.view(current)
@@ -381,3 +388,82 @@ def test_execution_observes_post_battle_cards_played_automatically() -> None:
             assert uses == {"CARD.0": 0, "CARD.STRIKE": 1, "CARD.BASH": 1}
 
     asyncio.run(scenario())
+
+
+def test_newly_added_cards_do_not_receive_zero_observed_plays_until_fought() -> None:
+    statistics = DeckStatistics()
+    battle_one = observation(1, 1)
+    assert isinstance(battle_one.state, native.RunState)
+    battle_one = battle_one.model_copy(
+        update={
+            "location": battle_one.location.model_copy(update={"node_id": "battle-1"}),
+            "state": battle_one.state.model_copy(
+                update={
+                    "battle_cards_played": (
+                        native.NamedDefinition(name="Card 0", definition_id="CARD.0"),
+                    )
+                }
+            ),
+        }
+    )
+    statistics.observe(battle_one)
+    _, uses_before_pick = statistics.view(battle_one)
+    assert uses_before_pick == {"CARD.0": 1, "CARD.1": 0}
+
+    # Draft CARD.NEW on the same rewards node while battle_cards_played is still present.
+    card_template = battle_one.objects["c0"]
+    assert isinstance(card_template, native.CardEntry)
+    after_pick = battle_one.model_copy(
+        update={
+            "state": battle_one.state.model_copy(
+                update={"deck": (*battle_one.state.deck, "c_new")}
+            ),
+            "objects": {
+                **battle_one.objects,
+                "c_new": card_template.model_copy(update={"definition_id": "CARD.NEW"}),
+            },
+        }
+    )
+    statistics.observe(after_pick)
+    stats_after_pick, uses_after_pick = statistics.view(after_pick)
+    assert stats_after_pick["battles_observed"] == 1
+    assert uses_after_pick == {"CARD.0": 1, "CARD.1": 0}
+
+    # Once a subsequent battle completes with CARD.NEW owned and unplayed, it gets 0.
+    battle_two = after_pick.model_copy(
+        update={
+            "location": after_pick.location.model_copy(update={"node_id": "battle-2"}),
+            "state": after_pick.state.model_copy(
+                update={
+                    "battle_cards_played": (
+                        native.NamedDefinition(name="Card 0", definition_id="CARD.0"),
+                    )
+                }
+            ),
+        }
+    )
+    statistics.observe(battle_two)
+    stats_after_two, uses_after_two = statistics.view(battle_two)
+    assert stats_after_two["battles_observed"] == 2
+    assert uses_after_two == {"CARD.0": 2, "CARD.1": 0, "CARD.NEW": 0}
+
+
+def test_case_statistics_preserves_omitted_new_cards_when_battles_observed_recorded() -> None:
+    from sts2_harness_eval.decision_cases import HarnessState
+    from sts2_harness_eval.decision_replay import CaseStatistics
+
+    obs = observation(1, 1, 1)
+    # Recorded modern state: CARD.0 played once, CARD.1 fought unplayed (0), CARD.2 newly added.
+    modern_state = HarnessState(
+        observed_plays={"CARD.0": 1, "CARD.1": 0},
+        battles_observed=2,
+    )
+    modern_stats, modern_uses = CaseStatistics(modern_state, obs).view(obs)
+    assert modern_stats["battles_observed"] == 2
+    assert modern_uses == {"CARD.0": 1, "CARD.1": 0}
+
+    # Legacy state without battles_observed still backfills 0 for playable cards when plays exist.
+    legacy_state = HarnessState(observed_plays={"CARD.0": 1})
+    legacy_stats, legacy_uses = CaseStatistics(legacy_state, obs).view(obs)
+    assert legacy_stats["battles_observed"] == 1
+    assert legacy_uses == {"CARD.0": 1, "CARD.1": 0, "CARD.2": 0}

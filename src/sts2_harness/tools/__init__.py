@@ -17,6 +17,7 @@ from sts2_harness.decisions import (
     ActionStep,
     ActTask,
     DecisionTask,
+    RerollCardRewardStep,
     SelectStep,
 )
 from sts2_harness.deck_stats import DeckStatistics
@@ -55,6 +56,8 @@ from sts2_harness.tools.inputs import (
     DEFINITIONS,
     CombatActInput,
     CombatInspectInput,
+    ExternalRunAct,
+    ExternalRunActInput,
     KnowledgeInput,
     MinimalRunActInput,
     MinimalRunNext,
@@ -280,9 +283,15 @@ class ToolCatalog:
             query = (
                 CombatActInput.model_validate_json(call.arguments, strict=True).root
                 if self._role is native.DecisionOwner.COMBAT
+                else ExternalRunActInput.model_validate_json(call.arguments, strict=True).root
+                if self._query_view is QueryView.PUBLIC
                 else RunActInput.model_validate_json(call.arguments, strict=True).root
             )
-            if self.minimal and isinstance(query, RunAct) and query.notes is not MISSING:
+            if (
+                self.minimal
+                and isinstance(query, (RunAct, ExternalRunAct))
+                and query.notes is not MISSING
+            ):
                 raise ValueError("Strategy notes are unavailable in minimal mode.")
         except (ValueError, ValidationError):
             return QueryToolResult(
@@ -291,7 +300,7 @@ class ToolCatalog:
                 ),
                 observation,
             )
-        if isinstance(query, RunAct) and query.notes is not MISSING:
+        if isinstance(query, (RunAct, ExternalRunAct)) and query.notes is not MISSING:
             current = await self._current()
             if current is not None and current.location != native.Location.model_validate(
                 task.expected_route.model_dump()
@@ -302,10 +311,12 @@ class ToolCatalog:
             written = await self.write_notes(query.notes, current)
             if not isinstance(written.outcome, ReadCompleted):
                 return written
-        steps: list[ActionStep | SelectStep] = []
+        steps: list[ActionStep | SelectStep | RerollCardRewardStep] = []
         for step in query.steps:
             if isinstance(step, native.Select):
                 steps.append(SelectStep(step.refs))
+            elif isinstance(step, native.RerollCardReward):
+                steps.append(RerollCardRewardStep())
             elif isinstance(step, native.PlayCard):
                 steps.append(
                     ActionStep(
