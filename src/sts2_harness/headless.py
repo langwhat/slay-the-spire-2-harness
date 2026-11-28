@@ -40,7 +40,7 @@ from sts2_harness.journal import (
 from sts2_harness.live_session import live_session
 from sts2_harness.llm.client import Llm
 from sts2_harness.llm.messages import ModelUnavailable
-from sts2_harness.native_template import NativeTemplate, TemplateError, digest
+from sts2_harness.native_template import NativeTemplate, TemplateError, TemplateEvidence, digest
 from sts2_harness.session import RunSession
 from sts2_harness.user_input_values import UserInputSource
 
@@ -113,6 +113,16 @@ class HeadlessLaunchMode(StrEnum):
 
 
 class OwnedHeadlessInstance:
+    game_version: str
+    mod_version: str
+    mod_sha256: str
+    directory: Path
+    user_directory: Path
+    template: TemplateEvidence
+    environment: dict[str, str]
+    alias: Path
+    port: int
+
     def __init__(
         self,
         options: HeadlessOptions,

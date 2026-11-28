@@ -2,7 +2,7 @@
 
 [中文](README.zh-CN.md)
 
-**A native AI gameplay engine and evaluation harness for Slay the Spire 2** — no screenshots or OCR, no external guide database required, and no save/load. Connect a model API, click your character portrait in-game, and watch the model plan routes, draft cards, and play full runs across all characters, Standard Ascension levels, and Dread mode—with instant manual takeover, live user suggestions, and full offline replay.
+**A native AI gameplay engine and evaluation harness for Slay the Spire 2** — no screenshots or OCR, no external guide database required, and no save/load. Connect a model API, click your character portrait in-game, and watch the model plan routes, draft cards, and play full runs across all characters, Standard Ascension levels, and Dread mode—with one-click pause and manual takeover between actions, live user suggestions, and full offline replay.
 
 ## Highlights
 

@@ -95,7 +95,7 @@ See [ADR 0004](adr/0004-role-agent-and-context-lifetimes.md) for why the lifetim
 
 **Automatic progression** (`auto.py`) takes agreed mechanical Run actions without a model call, such as travelling when only one destination exists. Each automatic action is its own execution unit, and the result is still recorded in Run's context. The reasons it shows in game come from fixed text in the current game language. If the language is not supported, automatic progression steps aside and the Run role decides.
 
-**Minimal mode** gives the roles only action and route tools. It skips battle reviews and handoff processing, and has no notes. See [configuration.md](configuration.md#minimal-mode).
+**Minimal mode** is the default for built-in driving. It gives the roles action, route, and native catalog lookup tools (`run_act`, `run_plan`, `run_next`, `run_deck_choice`, `run_knowledge`, `combat_act`, `combat_knowledge`), while skipping battle reviews, separate handoff turns, strategy notes, and inspect/skill tools. See [configuration.md](configuration.md#minimal-mode).
 
 ### Replacing a role
 
